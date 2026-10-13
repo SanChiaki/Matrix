@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Network</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<aside class="rail">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.6"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="7" cy="12" r="2"/><path d="M5.8 4.3 10 4.8M5 5.7 6.4 10.1M11 6.8 8.3 10.5"/></svg></span>
+    Agent Network
+  </div>
+  <nav aria-label="视图">
+    <button type="button" class="tab" data-view="network" aria-pressed="true">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="3.5" r="2"/><circle cx="12.5" cy="12.5" r="2"/><path d="M5.3 7.1 10.7 4.4M5.3 8.9l5.4 2.7"/></svg>网络</button>
+    <button type="button" class="tab" data-view="agents" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="4" width="11" height="9" rx="2.5"/><path d="M8 4V1.8M5.8 8.2h.01M10.2 8.2h.01"/></svg>Agent</button>
+    <button type="button" class="tab" data-view="groups" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><path d="M1.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5"/><path d="M10.5 3.8a2.3 2.3 0 0 1 0 4.4M12.2 10.3c1.1.5 1.9 1.6 2.3 3.2"/></svg>群组</button>
+  </nav>
+  <section class="rail-convs" aria-labelledby="rail-convs-title">
+    <div class="rail-convs-head">
+      <h2 id="rail-convs-title">对话</h2>
+      <button type="button" id="conv-new" class="ghost icon" aria-label="新建对话" title="新建对话">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+    </div>
+    <ul id="conv-list" aria-label="对话列表"></ul>
+  </section>
+  <div class="rail-foot">
+    <span id="live" class="status-line" aria-live="polite"></span>
+    <span id="runtime"></span>
+  </div>
+</aside>
+
+<main>
+  <section id="view-network" class="view" aria-label="网络图">
+    <div class="pane">
+      <div class="view-head"><div><h1>网络</h1><p>长期委托关系为底，正在进行的委托实时叠加。</p></div></div>
+      <div class="graph-wrap">
+        <svg id="graph" role="img" aria-label="Agent 网络图：节点为人与 Agent，连线为长期关系与活跃委托"></svg>
+        <ul class="legend" aria-label="图例">
+          <li><i class="dot human"></i>人</li>
+          <li><i class="dot agent"></i>Agent</li>
+          <li><i class="line conv"></i>可对话</li>
+          <li><i class="line rel"></i>委托（粗细 = 次数）</li>
+          <li><i class="line running"></i>进行中</li>
+          <li><i class="ring"></i>群组</li>
+        </ul>
+      </div>
+    </div>
+    <aside id="net-detail" class="side" aria-live="polite"></aside>
+  </section>
+
+  <section id="view-agents" class="view" hidden aria-label="Agent 管理">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>Agent</h1><p>每个 Agent 的能力描述与自身权限上限。委托只能在这个上限之内继续收窄。</p></div>
+        <button type="button" id="agent-new">新建 Agent</button>
+      </div>
+      <ul id="agent-list" class="cards"></ul>
+    </div>
+    <aside id="agent-editor" class="side"></aside>
+  </section>
+
+  <section id="view-groups" class="view" hidden aria-label="群组管理">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>群组</h1><p>群组只是成员集合。在群组里对话时，Agent 只能把任务委托给本群成员，网络不会自动加人。</p></div>
+        <button type="button" id="group-new">新建群组</button>
+      </div>
+      <ul id="group-list" class="cards"></ul>
+    </div>
+    <aside id="group-editor" class="side"></aside>
+  </section>
+
+  <section id="view-chats" class="view chats" hidden aria-label="对话管理">
+    <div class="thread-col">
+      <div id="conv-start" class="conv-start" hidden>
+        <form id="conv-form" aria-labelledby="conv-start-title">
+          <h1 id="conv-start-title">新对话</h1>
+          <p class="muted">选一个 Agent 和它所在的群组。在群组里，它可以把子任务委托给同组成员。</p>
+          <div class="conv-start-fields">
+            <div class="field"><label for="conv-agent">对话对象</label><select id="conv-agent" required></select></div>
+            <div class="field"><label for="conv-group">所在群组</label><select id="conv-group"></select></div>
+          </div>
+          <p id="conv-group-hint" class="hint"></p>
+          <button type="submit">开始对话</button>
+        </form>
+      </div>
+      <div id="thread-head"></div>
+      <ol id="thread" aria-live="polite"></ol>
+      <div class="composer">
+        <form id="msg-form" aria-label="发送消息" hidden>
+          <label for="msg" class="sr-only">消息</label>
+          <textarea id="msg" rows="3" placeholder="和 Agent 说点什么，例如：我要研究一个新的 AI 产品机会，结论写到 report.md" required></textarea>
+          <div class="bar"><span class="hint"><kbd>⌘</kbd> <kbd>Enter</kbd> 发送</span><button type="submit">发送</button></div>
+        </form>
+      </div>
+    </div>
+    <aside id="task-detail" class="side" aria-live="polite"></aside>
+  </section>
+</main>
+<script src="/static/app.js" type="module"></script>
+</body>
+</html>
