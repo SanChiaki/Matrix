@@ -1,0 +1,30 @@
+# 唯一对外入口。站点是裸 IP 时 Caddy 用自己的内部 CA 签证书（浏览器会提示不受信任）；
+# 换成域名（MATRIX_SITE=matrix.example.com）后自动申请正式证书。
+{
+	# 裸 IP 拿不到公开证书：用内部 CA，不去 ACME
+	local_certs
+}
+
+{$MATRIX_SITE} {
+	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth
+	basic_auth {
+		{$MATRIX_BASIC_USER} {$MATRIX_BASIC_HASH}
+	}
+
+	# /internal/* 只给容器里的 dsh / MCP 回调用（走 127.0.0.1），不对外
+	@internal path /internal/*
+	respond @internal 404
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy matrix:8765 {
+		# SSE（/api/events）不缓冲
+		flush_interval -1
+	}
+}

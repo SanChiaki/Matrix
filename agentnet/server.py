@@ -527,11 +527,13 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--data", default=os.environ.get("AGENTNET_DATA", ".agentnet"))
     p.add_argument("--dsh-bin", default="dsh")
+    # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
+    p.add_argument("--host", default=os.environ.get("AGENTNET_HOST", "127.0.0.1"))
     args = p.parse_args()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
-    config = uvicorn.Config(create_app(network), host="127.0.0.1", port=args.port, log_level="warning",
+    config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
     AgentNetServer(config, network).run()
 

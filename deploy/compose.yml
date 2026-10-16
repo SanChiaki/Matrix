@@ -1,0 +1,51 @@
+# Matrix 部署：matrix（应用，只在内部网络里监听）+ caddy（唯一对外入口：HTTPS + basic auth）。
+# 用法见 deploy/README.md。机密（basic auth 哈希、模型凭据）都在 deploy/.env 或卷里，不进仓库。
+name: matrix
+
+services:
+  matrix:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - matrix-data:/data            # Matrix 状态（state.json、对话、任务、Agent 私有目录、群组档案）
+      - dsh-home:/home/matrix/.dsh   # dsh 的配置、会话与模型凭据
+    env_file:
+      - path: .env
+        required: false
+    expose:
+      - "8765"                       # 不发布到宿主机：只有 caddy 能访问
+    # dsh 在 Linux 上用 bwrap 沙箱（没有可用沙箱时 fail closed，命令不执行）。bwrap 在容器里要建 user/pid 命名空间、
+    # 挂 /proc：默认 seccomp 和被遮住的 /proc 路径会拦。放开这两项会削弱容器自身的隔离，换来 Agent 命令的文件级限制。
+    security_opt:
+      - seccomp=unconfined
+      - systempaths=unconfined
+    cap_drop: [ALL]
+    networks: [internal]
+
+  caddy:
+    image: caddy:2.10
+    restart: unless-stopped
+    depends_on: [matrix]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      MATRIX_SITE: ${MATRIX_SITE:-47.88.79.27}
+      MATRIX_BASIC_USER: ${MATRIX_BASIC_USER:-matrix}
+      MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:?在 deploy/.env 里设置 MATRIX_BASIC_HASH（caddy hash-password 生成）}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [internal]
+
+volumes:
+  matrix-data:
+  dsh-home:
+  caddy-data:
+  caddy-config:
+
+networks:
+  internal:
