@@ -31,7 +31,7 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 
 ## 证书
 
-`MATRIX_SITE` 默认是服务器 IP。裸 IP 拿不到公开证书，Caddy 会用自己的内部 CA 签发，浏览器会提示证书不受信任，属于正常现象。改成域名（`MATRIX_SITE=matrix.example.com`，并把 DNS 指向服务器）之后，Caddy 会自动申请正式证书，这时要去掉 `Caddyfile` 里的 `local_certs`。
+`MATRIX_SITE` 默认是服务器 IP。裸 IP 拿不到公开证书，Caddy 会用自己的内部 CA 签发，浏览器会提示证书不受信任，属于正常现象。改成域名（`MATRIX_SITE=matrix.example.com`，并把 DNS 指向服务器）之后，Caddy 会自动申请正式证书，这时要去掉 `Caddyfile` 里的 `local_certs` 和 `tls internal`。
 
 ## 沙箱
 

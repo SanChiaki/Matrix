@@ -1,5 +1,5 @@
 # 唯一对外入口。站点是裸 IP 时 Caddy 用自己的内部 CA 签证书（浏览器会提示不受信任）；
-# 换成域名（MATRIX_SITE=matrix.example.com）后自动申请正式证书。
+# 换成域名（MATRIX_SITE=matrix.example.com）、删掉 local_certs 和 tls internal 后自动申请正式证书。
 {
 	# 裸 IP 拿不到公开证书：用内部 CA，不去 ACME
 	local_certs
@@ -8,6 +8,9 @@
 }
 
 {$MATRIX_SITE} {
+	# 显式写 tls internal：default_sni 才会生成“空 SNI 也用这张证书”的连接策略（换成域名时删掉这行和 local_certs）
+	tls internal
+
 	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth
 	basic_auth {
 		{$MATRIX_BASIC_USER} {$MATRIX_BASIC_HASH}
