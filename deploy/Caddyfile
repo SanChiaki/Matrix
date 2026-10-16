@@ -33,3 +33,9 @@
 		flush_interval -1
 	}
 }
+
+# 其它 Host（例如 127.0.0.1、别的域名）：不转给 Matrix
+:443 {
+	tls internal
+	respond 404
+}
