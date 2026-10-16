@@ -10,7 +10,7 @@
 ```bash
 git clone https://github.com/SanChiaki/Matrix.git /opt/matrix && cd /opt/matrix/deploy
 docker run --rm caddy:2.10 caddy hash-password --plaintext '<basic auth 密码>'   # 生成哈希
-cp env.example .env && chmod 600 .env   # 填 MATRIX_BASIC_HASH；需要时改 MATRIX_SITE / MATRIX_BASIC_USER
+cp env.example .env && chmod 600 .env   # 填 MATRIX_BASIC_HASH（每个 $ 写成 $$）；需要时改 MATRIX_SITE / MATRIX_BASIC_USER
 docker compose up -d --build
 ```
 

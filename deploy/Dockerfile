@@ -16,7 +16,8 @@ RUN apt-get update \
  && apt-get purge -y gnupg && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* /root/.npm
 
 # 非 root 运行：dsh 的会话、凭据都在这个用户的 ~/.dsh（挂卷持久化）
-RUN useradd --create-home --uid 1000 matrix
+RUN useradd --create-home --uid 1000 matrix \
+ && mkdir -p /app /data /home/matrix/.dsh && chown matrix:matrix /app /data /home/matrix/.dsh
 WORKDIR /app
 COPY --chown=matrix:matrix pyproject.toml uv.lock ./
 COPY --chown=matrix:matrix agentnet ./agentnet
