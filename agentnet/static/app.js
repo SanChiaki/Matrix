@@ -82,7 +82,6 @@ async function submitOnboard(e) {
   const body = {
     name: $("#ob-name").value.trim(), description: $("#ob-desc").value.trim(), capabilities: [],
     authority: [...document.querySelectorAll('#ob-auth [name="authority"]:checked')].map((c) => c.value),
-    visibility: $('#onboard-form [name="ob-vis"]:checked').value,
   };
   try {
     const a = await api("/api/agents", { method: "POST", body });
@@ -130,6 +129,7 @@ async function start() {
   $("#group-quick").addEventListener("click", () => { S.groupSel = null; S.newGroup = true; location.hash = "groups"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
   $("#tab-task").addEventListener("click", () => sideTab("task"));
+  $("#tab-archive").addEventListener("click", () => sideTab("archive"));
   bindComposer();
   $("#msg-form").addEventListener("submit", sendMsg);
   window.addEventListener("resize", () => S.view === "network" && renderGraph());
@@ -185,7 +185,9 @@ function render() {
   if (!S.linkLost) $("#live").textContent = busy ? `${busy} 个 Agent 运行中` : "全部空闲";
   $("#live").classList.toggle("busy", busy > 0);
   renderConvList();
-  const todo = (S.snap.approvals || []).length + (S.snap.proposals || []).filter((p) => p.status === "pending").length;
+  const todo = (S.snap.approvals || []).length + (S.snap.proposals || []).filter((p) => p.status === "pending").length
+    + (S.snap.invitations || []).length
+    + S.snap.groups.filter(isHost).reduce((n, g) => n + (g.suggestions || []).filter((x) => x.status === "pending").length, 0);
   $("#todo-count").hidden = !todo;
   $("#todo-count").textContent = todo;
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
@@ -193,12 +195,15 @@ function render() {
 }
 
 // ---------- 看板（参照 Raft task board） ----------
+// 看板只有人交代的、有交付目标的事（Agent 认定后登记）；Agent 之间的委托只在任务详情里展示。
 const BOARD_COLS = [
-  { key: "running", title: "执行中", match: (t) => t.status === "running" },
-  { key: "in_review", title: "待验收", match: (t) => t.status === "in_review" },
-  { key: "completed", title: "已完成", match: (t) => t.status === "completed" },
-  { key: "failed", title: "失败 / 已拒绝", match: (t) => t.status === "failed" || t.status === "rejected" },
+  { key: "running", title: "进行中", match: (r) => r.status === "in_progress" },
+  { key: "in_review", title: "待验收", match: (r) => r.status === "in_review" },
+  { key: "completed", title: "已完成", match: (r) => r.status === "completed" },
+  { key: "failed", title: "已取消", match: (r) => r.status === "cancelled" },
 ];
+const REQ_CN = { in_progress: "进行中", in_review: "待验收", completed: "已完成", cancelled: "已取消" };
+const reqPill = (st) => `<span class="pill status ${st === "in_progress" ? "running" : st === "cancelled" ? "rejected" : esc(st)}">${REQ_CN[st] || esc(st)}</span>`;
 
 async function loadBoard() {
   try { S.board = await api("/api/board"); } catch { return; }
@@ -208,12 +213,12 @@ async function loadBoard() {
 function renderBoard() {
   const b = S.board;
   if (!b || S.view !== "board") return;
-  // 筛选：委托方或执行方是这个 Agent
-  const ids = [...new Set(b.tasks.flatMap((t) => [t.delegator_id, t.delegatee_id]).filter(Boolean))];
+  // 筛选：接任务的 Agent
+  const ids = [...new Set(b.requests.map((r) => r.agent_id))];
   const sel = $("#board-agent"), want = S.boardAgent || "";
   sel.innerHTML = `<option value="">全部 Agent</option>` + ids.map((id) => `<option value="${esc(id)}">${esc(aname(id))}</option>`).join("");
   sel.value = ids.includes(want) ? want : "";
-  const tasks = b.tasks.filter((t) => !sel.value || t.delegator_id === sel.value || t.delegatee_id === sel.value);
+  const reqs = b.requests.filter((r) => !sel.value || r.agent_id === sel.value);
 
   // 待我处理：工作区外溢申请（我是 Agent 所有者）+ 我对话里的 Agent 提议
   const todo = [
@@ -227,9 +232,22 @@ function renderBoard() {
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
+    ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
+      <span><b>${esc(iv.host)}</b> 邀请你加入联合群组「${esc(iv.name)}」${iv.description ? `<span class="muted"> · ${esc(iv.description)}</span>` : ""}</span>
+      <span class="actions"><button type="button" class="sm" data-inv="${esc(iv.group_id)}" data-ok="1">接受</button>
+        <button type="button" class="ghost sm" data-inv="${esc(iv.group_id)}" data-ok="0">拒绝</button></span></li>`),
+    ...(b.suggestions || []).map((x) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
+      <span><b>${esc(x.by_agent ? aname(x.by_agent) : "参与者")}</b> 建议修改「${esc(x.group_name)}」的 brief</span>
+      <a class="button sm" href="#g-${esc(x.group_id)}">去看看</a></li>`),
   ];
   $("#todo").hidden = !todo.length;
   $("#todo-list").innerHTML = todo.join("");
+  $("#todo-list").querySelectorAll("[data-inv]").forEach((btn) => btn.addEventListener("click", async () => {
+    btn.parentElement.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+    try { await api(`/api/groups/${btn.dataset.inv}/invitation`, { method: "POST", body: { accept: btn.dataset.ok === "1" } }); }
+    catch (err) { alert(err.message); }
+    await loadBoard(); await reload();
+  }));
   $("#todo-list").querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
     btn.closest(".actions").querySelectorAll("button").forEach((x) => { x.disabled = true; });
     try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1" } }); }
@@ -237,28 +255,73 @@ function renderBoard() {
     await loadBoard(); await reload();
   }));
 
-  const card = (t) => `<li><button type="button" class="task-card ${S.taskSel === t.id ? "selected" : ""}" data-id="${esc(t.id)}">
-      <span class="route"><span class="name">${esc(t.delegator_name)}</span><span aria-hidden="true">→</span><span class="name">${esc(t.delegatee_name)}</span></span>
-      <span class="mission">${esc(t.delegation.mission)}</span>
-      <span class="meta"><span>${esc(t.conversation_title)}</span><span>${time(t.created_at)}</span>
-        ${t.revisions ? `<span>退回 ${t.revisions}</span>` : ""}${t.retries ? `<span>续接 ${t.retries}</span>` : ""}</span>
+  const card = (r) => `<li><button type="button" class="task-card ${S.reqSel === r.id ? "selected" : ""}" data-id="${esc(r.id)}">
+      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span></span>
+      <span class="mission">${esc(r.title)}</span>
+      <span class="meta"><span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span>
+        ${r.requester_id && r.requester_id !== S.me?.id ? `<span>${esc(r.requester)} 下发</span>` : ""}
+        ${r.delegations ? `<span>委托 ${r.delegations}</span>` : ""}${r.revisions ? `<span>退回 ${r.revisions}</span>` : ""}</span>
     </button></li>`;
   $("#board-cols").innerHTML = BOARD_COLS.map((col) => {
-    const xs = tasks.filter(col.match);
+    const xs = reqs.filter(col.match);
     return `<section class="board-col ${col.key}" aria-label="${col.title}">
       <h3>${col.title}<span class="count">${xs.length}</span></h3>
       <ul>${xs.map(card).join("") || '<li class="empty">无</li>'}</ul></section>`;
   }).join("");
   $("#board-cols").querySelectorAll(".task-card").forEach((btn) => btn.addEventListener("click", () => {
-    S.taskSel = btn.dataset.id; renderBoard(); renderTask($("#board-detail"));
+    S.reqSel = btn.dataset.id; S.taskSel = null; renderBoard();
   }));
 
   const busy = Object.entries(b.ledger || {});
   $("#busy").hidden = !busy.length;
   $("#busy-list").innerHTML = busy.map(([aid, items]) => `<li>${avatar(aname(aid), "sm")}<b>${esc(aname(aid))}</b>
     <span class="muted">同时在做 ${items.length} 件：</span>${items.map((it) => `<span class="tag">${esc(it.kind === "task" ? `委托：${it.what}` : it.what)}${it.user ? ` · ${esc(it.user)}` : ""}</span>`).join("")}</li>`).join("");
-  if (S.taskSel && tasks.some((t) => t.id === S.taskSel)) renderTask($("#board-detail"));
-  else $("#board-detail").innerHTML = placeholder("点一张任务卡片，查看授权、约束、过程与结果。");
+  if (S.reqSel && reqs.some((r) => r.id === S.reqSel)) renderRequest($("#board-detail"));
+  else $("#board-detail").innerHTML = placeholder("点一张任务卡片，查看交付、验收，以及 Agent 为它发起的委托。");
+}
+
+// 用户任务详情：交代了什么、交付了什么、验收；为它发起的委托点开看（复用委托详情）
+async function renderRequest(box = $("#board-detail")) {
+  const id = S.reqSel;
+  if (!id) return;
+  if (box.contains(document.activeElement) && document.activeElement.matches("textarea")) return;  // 正在写退回意见
+  const r = await api(`/api/requests/${id}`).catch(() => null);
+  if (!r || S.reqSel !== id) return;
+  const mine = !r.requester_id || r.requester_id === S.me?.id;
+  box.innerHTML = `<h2 class="panel-title">${esc(r.title)} ${reqPill(r.status)}</h2>
+    <p class="muted">${esc(r.agent_name)} 接下 · ${esc(r.conversation_kind === "dm" ? "私聊" : `群聊「${r.conversation_title}」`)} · ${time(r.created_at)}
+      ${r.requester_id && !mine ? ` · ${esc(r.requester)} 下发` : ""}</p>
+    <dl><dt>交代的原话</dt><dd>${esc(r.message)}</dd><dt>交付要求</dt><dd>${esc(r.expected_outcome)}</dd>
+      ${r.summary ? `<dt>交付说明</dt><dd class="md">${renderMarkdown(r.summary)}</dd>` : ""}
+      ${r.revisions ? `<dt>返工</dt><dd>退回 ${r.revisions} 次${r.feedback ? ` · 最近意见：${esc(r.feedback)}` : ""}</dd>` : ""}</dl>
+    ${r.status === "in_review" && mine ? `<form id="req-review" class="stack">
+      <div class="actions"><button type="button" id="req-accept">验收通过</button></div>
+      <label for="req-feedback" class="sr-only">要改什么</label>
+      <textarea id="req-feedback" rows="3" placeholder="不满意：写明要改什么，${esc(r.agent_name)} 会在原会话里修改后重新交付"></textarea>
+      <div class="actions"><button type="submit" class="ghost">退回修改</button></div></form>`
+      : r.status === "in_review" ? `<p class="hint">等 ${esc(r.requester)} 验收。</p>` : ""}
+    ${(r.status === "in_progress" || r.status === "in_review") && mine ? '<p><button type="button" class="link" id="req-cancel">取消这个任务</button></p>' : ""}
+    <div class="actions"><a class="button ghost sm" href="#${esc(r.conversation_id)}">打开对话</a></div>
+    ${r.tasks.length ? `<h3>为它发起的委托 · ${r.tasks.length}</h3><div class="delegs">${r.tasks.map((t) => delegBtn(t, !!t.parent_task_id)).join("")}</div>
+      <div id="req-task"></div>` : ""}
+    <p class="error" role="alert"></p>`;
+  const err = (e) => { $(".error", box).textContent = e.message; };
+  const review = async (accept) => {
+    try { await api(`/api/requests/${id}/review`, { method: "POST", body: { accept, feedback: accept ? "" : $("#req-feedback").value } }); await loadBoard(); }
+    catch (e) { err(e); }
+  };
+  $("#req-accept", box)?.addEventListener("click", () => review(true));
+  $("#req-review", box)?.addEventListener("submit", (e) => { e.preventDefault(); review(false); });
+  $("#req-cancel", box)?.addEventListener("click", async () => {
+    if (!confirm("取消这个任务？Agent 已经在做的委托不会被打断。")) return;
+    try { await api(`/api/requests/${id}/cancel`, { method: "POST", body: {} }); await loadBoard(); } catch (e) { err(e); }
+  });
+  box.querySelectorAll(".deleg").forEach((b) => b.addEventListener("click", () => {
+    S.taskSel = b.dataset.id;
+    box.querySelectorAll(".deleg").forEach((x) => x.classList.toggle("selected", x === b));
+    renderTask($("#req-task"));
+  }));
+  if (S.taskSel && r.tasks.some((t) => t.id === S.taskSel)) renderTask($("#req-task"));
 }
 
 // 刷新节流：结构变化（Agent、群组、对话、委托状态）重拉整个快照；
@@ -287,7 +350,16 @@ function onEvent(ev) {
     if (d.context === "task" && d.context_id === S.taskSel) scheduleTask();
     return;
   }
+  if (ev.type === "request.updated") {
+    if (S.view === "board") loadBoard();
+    if (S.view === "chats" && d.conversation_id === S.convId) scheduleConv();
+    return;
+  }
   if (ev.type === "tool.call" || ev.type === "runtime.invoke") return;  // 已由 run.progress 覆盖
+  if (ev.type === "group.invited" && S.view === "board") loadBoard();
+  if (ev.type === "group.left" && d.user_id === S.me?.id && S.conv?.group_id === d.group_id) {
+    S.convId = null; S.conv = null; location.hash = "groups";  // 自己退出 / 被移出：离开这个群聊
+  }
   schedule();
   if (S.taskSel && ev.type === "task.updated" && d.task.id === S.taskSel) scheduleTask();
 }
@@ -453,16 +525,17 @@ const chatBtn = (hash, label) => `<a class="button sm chat-btn" href="#${esc(has
 
 function renderAgents() {
   // 卡片主体选中编辑；底部“对话”按钮直接打开私聊。按钮不能嵌套，所以“对话”是卡片里的另一个按钮。
-  $("#agent-list").innerHTML = S.snap.agents.map((a) => `
+  // 自己的在前；别人的只出现在和你同在的联合群组里，只能看名片
+  const list = [...S.snap.agents].sort((a, b) => (b.mine ? 1 : 0) - (a.mine ? 1 : 0));
+  $("#agent-list").innerHTML = list.map((a) => `
     <li class="${S.agentSel === a.id ? "selected" : ""}"><div class="card">
       <button type="button" class="card-main" data-id="${esc(a.id)}" aria-label="编辑 ${esc(a.name)}">
         <div class="card-head">${avatar(a.name)}<span class="name">${esc(a.name)}</span>${pill(a.status)}</div>
         <p class="card-desc">${esc(a.description)}</p>
         <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}</div>
       </button>
-      <div class="card-foot"><span>${a.mine ? `<span class="vis-tag ${esc(a.visibility)}">${VIS_CN[a.visibility]}</span>`
-          : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
-        ${a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
+      <div class="card-foot"><span>${a.mine ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
+        ${!a.mine ? '<span class="muted">联合群组里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
     </div></li>`).join("") || '<li class="empty">还没有 Agent。点“新建 Agent”创建一个。</li>';
   $("#agent-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { S.agentSel = b.dataset.id; renderAgents(); renderAgentEditor(); }));
@@ -485,36 +558,20 @@ const modelTag = (a) => {
   return m ? `<span class="tag model" title="${a.model ? "单独配置" : "运行时默认"}">${esc(m.model)}${a.model ? "" : " · 默认"}</span>` : "";
 };
 
-const VIS_CN = { private: "只有我", public: "所有人", shared: "指定的人" };
-
-function visibilityFields(x) {
-  const users = S.users || [];
-  return `<fieldset class="vis"><legend>谁能用它</legend>
-    <div class="seg">${Object.entries(VIS_CN).map(([k, v]) =>
-      `<label><input type="radio" name="visibility" value="${k}" ${x.visibility === k ? "checked" : ""}> ${v}</label>`).join("")}</div>
-    <div class="share-with" ${x.visibility === "shared" ? "" : "hidden"}>
-      ${users.length ? users.map((u) => `<label class="switch"><input type="checkbox" name="shared_with" value="${esc(u.id)}"
-        ${(x.shared_with || []).includes(u.id) ? "checked" : ""}> ${esc(u.email)}</label>`).join("") : '<p class="hint">还没有其他用户。</p>'}
-    </div>
-    <p class="hint">能用它的人可以私聊它、把它拉进自己的群；只有你能修改它、审批它在工作目录以外的操作。</p></fieldset>`;
-}
-
 function renderAgentReadonly(box, a) {
-  box.innerHTML = `<h2 class="panel-title">${avatar(a.name)} ${esc(a.name)} ${pill(a.status)}</h2>
-    <p class="muted">${esc(a.owner_email || "")} 的 Agent · ${VIS_CN[a.visibility] || ""}可用</p>
+  box.innerHTML = `<h2 class="panel-title">${avatar(a.name)} ${esc(a.name)}</h2>
+    <p class="muted">${esc(a.owner_email || "")} 的 Agent</p>
     <dl><dt>描述</dt><dd>${esc(a.description)}</dd><dt>能力</dt><dd>${tags(a.capabilities)}</dd>
-    <dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${esc(modelLabel(effectiveModel(a)) || "运行时默认")}</dd></dl>
-    <div class="actions">${a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
-    <p class="hint">只有所有者能修改它。</p>`;
+    <dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd>
+    <dt>所在的联合群组</dt><dd>${tags(S.snap.groups.filter((g) => g.member_ids.includes(a.id)).map((g) => g.name))}</dd></dl>
+    <p class="hint">它只为它的所有者工作：你可以在联合群组里 @ 它、委托它，它以所有者的名义、用所有者的资源执行。不能私聊，也不能拉进你自己的群组。</p>`;
 }
 
 function renderAgentEditor(isNew = false) {
   const box = $("#agent-editor"), a = agent(S.agentSel);
   if (!a && !isNew) { box.innerHTML = placeholder("选择一个 Agent 编辑，或新建。"); return; }
   if (a && !a.mine) { renderAgentReadonly(box, a); return; }
-  if (!S.users) api("/api/users").then((u) => { S.users = u; renderAgentEditor(isNew); }).catch(() => {});
-  const x = a || { name: "", description: "", capabilities: [], authority: ["web.research"], chat_enabled: true,
-    visibility: "private", shared_with: [] };
+  const x = a || { name: "", description: "", capabilities: [], authority: ["web.research"], chat_enabled: true };
   box.innerHTML = `<h2 class="panel-title">${a ? esc(a.name) : "新建 Agent"}</h2>
     <p class="muted">${a ? "修改后点击保存生效。" : "定义它能做什么，以及最多能被授予哪些权限。"}</p>
     <form class="editor" id="agent-form">
@@ -533,16 +590,13 @@ function renderAgentEditor(isNew = false) {
         </div>
         <p class="hint">留空则使用运行时默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。provider 必须是运行时里已配置的。</p>
       </fieldset>
-      ${visibilityFields(x)}
-      <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许人和它私聊（群聊里随时可以 @ 它）</label>
+      <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
+      <p class="hint">它只为你工作。要和别人协作，把它带进联合群组：别人可以在那里 @ 它，但它仍然以你的名义、用你的资源运行，工作区外的操作由你审批。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${a ? "保存" : "创建"}</button>
         ${a ? `${a.chat_enabled ? '<button type="button" class="ghost" id="af-chat">私聊</button>' : ""}<button type="button" class="danger" id="af-del">删除</button>` : ""}</div>
     </form>`;
   const f = $("#agent-form");
-  f.querySelectorAll('[name="visibility"]').forEach((r) => r.addEventListener("change", () => {
-    $(".share-with", f).hidden = f.querySelector('[name="visibility"]:checked').value !== "shared";
-  }));
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = {
@@ -551,8 +605,6 @@ function renderAgentEditor(isNew = false) {
       authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
       chat_enabled: f.chat_enabled.checked,
       model: readModel(f),
-      visibility: f.querySelector('[name="visibility"]:checked').value,
-      shared_with: [...f.querySelectorAll('[name="shared_with"]:checked')].map((c) => c.value),
     };
     if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
       $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
@@ -577,15 +629,19 @@ function renderGroupsView() {
   if (S.newGroup) { S.newGroup = false; $("#gf-name")?.focus(); }
 }
 
+const KIND_CN = { internal: "内部", joint: "联合" };
+const kindTag = (g) => `<span class="vis-tag ${g.kind === "joint" ? "shared" : "private"}">${KIND_CN[g.kind] || ""}</span>`;
+const isHost = (g) => !!g && (!g.owner_id || g.owner_id === S.me?.id);
+
 function renderGroups() {
   $("#group-list").innerHTML = S.snap.groups.map((g) => `
     <li class="${S.groupSel === g.id ? "selected" : ""}"><div class="card">
-      <button type="button" class="card-main" data-id="${esc(g.id)}" aria-label="编辑 ${esc(g.name)}">
-        <div class="card-head"><span class="swatch" style="background:${gcolor(g.id)}"></span><span class="name">${esc(g.name)}</span><span class="pill">${g.member_ids.length} 名成员</span></div>
+      <button type="button" class="card-main" data-id="${esc(g.id)}" aria-label="${isHost(g) ? "编辑" : "查看"} ${esc(g.name)}">
+        <div class="card-head"><span class="swatch" style="background:${gcolor(g.id)}"></span><span class="name">${esc(g.name)}</span>${kindTag(g)}<span class="pill">${g.member_ids.length} 名成员</span></div>
         <p class="card-desc">${esc(g.description || "没有描述")}</p>
         <div class="card-meta">${tags(g.member_ids.map(aname))}</div>
       </button>
-      <div class="card-foot"><span></span>${chatBtn(`g-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
+      <div class="card-foot"><span>${g.kind === "joint" ? `<span class="muted">${g.participants.length + 1} 人参与</span>` : ""}</span>${chatBtn(`g-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
     </div></li>`).join("") || '<li class="empty">还没有群组。</li>';
   $("#group-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { S.groupSel = b.dataset.id; renderGroups(); renderGroupEditor(); }));
@@ -594,25 +650,36 @@ function renderGroups() {
 function renderGroupEditor(isNew = false) {
   const box = $("#group-editor"), g = group(S.groupSel);
   if (!g && !isNew) { box.innerHTML = placeholder("选择一个群组编辑成员，或新建。"); return; }
-  const x = g || { name: "", description: "", member_ids: [] };
-  box.innerHTML = `<h2 class="panel-title">${g ? `<span class="swatch" style="background:${gcolor(g.id)}"></span>${esc(g.name)}` : "新建群组"}</h2>
+  if (g && !isHost(g)) { renderGroupGuest(box, g); return; }
+  const x = g || { name: "", description: "", member_ids: [], kind: "internal" };
+  // 只能加入自己的 Agent；联合群组里别人的成员由他们自己加减（主持人可以移出）
+  const mine = S.snap.agents.filter((a) => a.mine);
+  const theirs = (x.member_ids || []).filter((id) => !agent(id)?.mine);
+  box.innerHTML = `<h2 class="panel-title">${g ? `<span class="swatch" style="background:${gcolor(g.id)}"></span>${esc(g.name)} ${kindTag(g)}` : "新建群组"}</h2>
     <p class="muted">委托只能在群组成员之间进行。</p>
     <form class="editor" id="group-form">
+      ${g ? "" : `<fieldset class="seg" aria-label="群组类型">
+        <label><input type="radio" name="kind" value="internal" checked> 内部群组</label>
+        <label><input type="radio" name="kind" value="joint"> 联合群组</label></fieldset>
+        <p class="hint">内部群组只有你和你的 Agent。联合群组可以邀请别人，各自带上自己的 Agent；群聊和档案对所有参与者可见，委托只给两端的所有者看。建好后不能转换类型。</p>`}
       <div class="field"><label for="gf-name">名称</label><input id="gf-name" name="name" required value="${esc(x.name)}"></div>
       <div class="field"><label for="gf-desc">描述</label><textarea id="gf-desc" name="description" rows="2">${esc(x.description)}</textarea></div>
-      <fieldset class="checks"><legend>成员</legend>
-        ${S.snap.agents.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${x.member_ids.includes(a.id) ? "checked" : ""}>
-          <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("")}
+      <fieldset class="checks"><legend>你的 Agent</legend>
+        ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${x.member_ids.includes(a.id) ? "checked" : ""}>
+          <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
       </fieldset>
+      ${theirs.length ? `<p class="hint">另有 ${theirs.length} 个别人的 Agent：${theirs.map((id) => esc(aname(id))).join("、")}（在群聊侧栏里移出）。</p>` : ""}
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${g ? "保存" : "创建"}</button>
         ${g ? '<button type="button" class="ghost" id="gf-chat">进入群聊</button><button type="button" class="danger" id="gf-del">删除群组</button>' : ""}</div>
-    </form>`;
+    </form>
+    ${g?.kind === "joint" ? '<div id="gf-people"></div>' : ""}`;
   const f = $("#group-form");
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = { name: f.name.value.trim(), description: f.description.value.trim(),
-      member_ids: [...f.querySelectorAll('[name="member"]:checked')].map((c) => c.value) };
+      member_ids: [...theirs, ...[...f.querySelectorAll('[name="member"]:checked')].map((c) => c.value)] };
+    if (!g) body.kind = f.querySelector('[name="kind"]:checked').value;
     try {
       const r = await api(g ? `/api/groups/${g.id}` : "/api/groups", { method: g ? "PATCH" : "POST", body });
       S.groupSel = r.id; await reload();
@@ -620,8 +687,72 @@ function renderGroupEditor(isNew = false) {
   });
   $("#gf-chat")?.addEventListener("click", () => { location.hash = `g-${g.id}`; });
   $("#gf-del")?.addEventListener("click", async () => {
-    if (!confirm(`删除群组 ${g.name}？已有对话保留，但不再能委托。`)) return;
+    if (!confirm(`删除群组 ${g.name}？群聊归档为只读（只有你看得到），不再能委托。`)) return;
     try { await api(`/api/groups/${g.id}`, { method: "DELETE" }); S.groupSel = null; await reload(); }
+    catch (err) { $(".error", f).textContent = err.message; }
+  });
+  if (g?.kind === "joint") renderPeople($("#gf-people"), g);
+}
+
+// 联合群组的参与者：主持人邀请、撤回、移出
+async function renderPeople(box, g) {
+  const d = await api(`/api/groups/${g.id}`).catch(() => null);
+  if (!d || !box.isConnected) return;
+  const emails = d.participant_emails || {};
+  box.innerHTML = `<h3>参与者</h3>
+    <ul class="member-list">
+      <li>${avatar(d.host, "sm")}<span class="m-body"><span class="n">${esc(d.host)}</span><span class="s">主持人</span></span></li>
+      ${d.participants.map((u) => `<li>${avatar(emails[u], "sm")}<span class="m-body"><span class="n">${esc(emails[u])}</span><span class="s">参与者</span></span>
+        <button type="button" class="ghost sm" data-rm="${esc(u)}">移出</button></li>`).join("")}
+      ${Object.entries(d.invited_emails || {}).map(([u, e]) => `<li>${avatar(e, "sm")}<span class="m-body"><span class="n">${esc(e)}</span><span class="s">已邀请，等对方接受</span></span>
+        <button type="button" class="ghost sm" data-rm="${esc(u)}">撤回</button></li>`).join("")}
+    </ul>
+    <form class="add-member" id="invite-form" aria-label="邀请参与者">
+      <label for="invite-email" class="sr-only">对方的邮箱</label>
+      <input id="invite-email" type="email" required placeholder="对方的邮箱">
+      <button type="submit">邀请</button></form>
+    <p class="error" role="alert"></p>
+    <p class="hint">参与者退出或被移出时，他的 Agent 一并移出，之后看不到群组与群聊；已经接下的委托照常完成。</p>`;
+  const err = (e) => { $(".error", box).textContent = e.message; };
+  $("#invite-form", box).addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/groups/${g.id}/invitations`, { method: "POST", body: { email: $("#invite-email").value } }); await reload(); }
+    catch (e2) { err(e2); }
+  });
+  box.querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("确定？他的 Agent 会一并移出。")) return;
+    try { await api(`/api/groups/${g.id}/participants/${b.dataset.rm}`, { method: "DELETE" }); await reload(); }
+    catch (e2) { err(e2); }
+  }));
+}
+
+// 参与者看联合群组：加减自己的 Agent，退出
+function renderGroupGuest(box, g) {
+  const mine = S.snap.agents.filter((a) => a.mine);
+  box.innerHTML = `<h2 class="panel-title"><span class="swatch" style="background:${gcolor(g.id)}"></span>${esc(g.name)} ${kindTag(g)}</h2>
+    <p class="muted">${esc(g.description || "")}</p>
+    <form class="editor" id="guest-form">
+      <fieldset class="checks"><legend>你带进来的 Agent</legend>
+        ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${g.member_ids.includes(a.id) ? "checked" : ""}>
+          <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
+      </fieldset>
+      <p class="hint">它们只为你工作：别的参与者可以 @、委托它们，但它们以你的名义、用你的资源运行，工作区外的操作由你审批。私有目录默认不挂载，可以在群聊侧栏里按 Agent 打开。</p>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">保存</button><button type="button" class="ghost" id="gg-chat">进入群聊</button>
+        <button type="button" class="danger" id="gg-leave">退出群组</button></div>
+    </form>`;
+  const f = $("#guest-form");
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const want = [...f.querySelectorAll('[name="member"]:checked')].map((c) => c.value);
+    const others = g.member_ids.filter((id) => !agent(id)?.mine);
+    try { await api(`/api/groups/${g.id}`, { method: "PATCH", body: { member_ids: [...others, ...want] } }); await reload(); }
+    catch (err) { $(".error", f).textContent = err.message; }
+  });
+  $("#gg-chat").addEventListener("click", () => { location.hash = `g-${g.id}`; });
+  $("#gg-leave").addEventListener("click", async () => {
+    if (!confirm(`退出 ${g.name}？你的 Agent 会一并移出，之后看不到这个群组和群聊。`)) return;
+    try { await api(`/api/groups/${g.id}/leave`, { method: "POST", body: {} }); S.groupSel = null; location.hash = "groups"; await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });
 }
@@ -723,7 +854,7 @@ function proposalCard(p) {
       <div class="field"><label for="pp-caps-${esc(p.id)}">能力</label><input id="pp-caps-${esc(p.id)}" name="capabilities" value="${esc(p.capabilities.join(", "))}"></div>
       <fieldset class="checks"><legend>权限 · 不能超出提议者的有效权限</legend>${boxes || '<span class="muted">提议者没有可授予的权限</span>'}</fieldset>
       <div class="field"><label for="pp-note-${esc(p.id)}">审核意见（会告诉提议者）</label><input id="pp-note-${esc(p.id)}" name="note"></div>
-      <p class="hint">批准后以你的身份创建，并加入群组「${esc(group(p.group_id)?.name || "")}」。</p>
+      <p class="hint">批准后以你的身份创建（归你所有），并加入群组「${esc(group(p.group_id)?.name || "")}」。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">批准并创建</button><button type="button" class="ghost" data-act="reject">拒绝</button></div>
     </form></div></li>`;
@@ -751,19 +882,112 @@ function bindProposals(root) {
 function sideTab(which) {
   S.sideTab = which;
   $("#tab-members").setAttribute("aria-selected", String(which === "members"));
+  $("#tab-archive").setAttribute("aria-selected", String(which === "archive"));
   $("#tab-task").setAttribute("aria-selected", String(which === "task"));
   $("#members-panel").hidden = which !== "members";
+  $("#archive-panel").hidden = which !== "archive";
   $("#task-detail").hidden = which !== "task";
   if (which === "task") renderTask();
+  if (which === "archive") renderArchive();
+}
+
+// ---------- 群组档案：brief、决定、文件、项目引用 ----------
+// 归群组所有，不放进任何项目仓库。brief 和仍然有效的决定每轮推送给成员；文件只读挂载；项目只是引用。
+const BRIEF_STALE_DAYS = 14;
+
+async function renderArchive() {
+  const box = $("#archive-panel"), c = S.conv;
+  const has = !!c && c.kind === "group" && !!c.group_id && !c.archived;
+  $("#tab-archive").hidden = !has;
+  if (!has && S.sideTab === "archive") { sideTab("members"); return; }
+  if (!has || box.hidden) return;
+  // 正在填表时不重绘（事件驱动的刷新会清掉输入）
+  if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
+  const d = await api(`/api/groups/${c.group_id}`).catch(() => null);
+  if (!d || S.conv?.group_id !== c.group_id) return;
+  const host = d.is_host, joint = d.kind === "joint";
+  const who = (x) => x.by_agent ? aname(x.by_agent) : (d.participant_emails?.[x.by_user] || "");
+  const stale = d.brief && d.brief_updated_at && (Date.now() / 1000 - d.brief_updated_at) > BRIEF_STALE_DAYS * 86400;
+  const active = d.decisions.filter((x) => x.status === "active").reverse();
+  const inactive = d.decisions.filter((x) => x.status !== "active").reverse();
+  const pend = d.suggestions.filter((x) => x.status === "pending");
+  const decision = (x) => `<li class="${x.status}"><div>${esc(x.text)}${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}</div>
+    <div class="meta"><code>${esc(x.id)}</code> · ${esc(who(x))} · ${time(x.created_at)}${x.supersedes ? ` · 取代 <code>${esc(x.supersedes)}</code>` : ""}
+      ${x.status === "active" ? `<button type="button" class="link" data-revoke="${esc(x.id)}">撤销</button>` : ` · ${x.status === "revoked" ? "已撤销" : "已被取代"}`}</div></li>`;
+  box.innerHTML = `${joint ? '<p class="hint warn-box">联合群组：档案对所有参与者可见，写进去等于对所有参与方公开。</p>' : ""}
+    <section class="archive-sec" aria-labelledby="ar-brief"><h3 id="ar-brief">Brief</h3>
+      ${stale ? `<p class="hint warn">超过 ${BRIEF_STALE_DAYS} 天没确认，还准确吗？${host ? '<button type="button" class="link" id="brief-ok">还准确</button>' : ""}</p>` : ""}
+      ${host ? `<form id="brief-form"><label for="brief-text" class="sr-only">Brief</label>
+        <textarea id="brief-text" rows="6" maxlength="4000" placeholder="目标、范围、成功标准、当前阶段。每一轮都会推送给所有成员。">${esc(d.brief)}</textarea>
+        <div class="bar"><span class="hint">${d.brief.length} / 4000</span><button type="submit">保存</button></div></form>`
+        : `<div class="md brief">${d.brief ? renderMarkdown(d.brief) : '<span class="muted">主持人还没写 brief。</span>'}</div>
+        <details><summary>建议修改</summary><form id="suggest-form">
+          <label for="sug-text" class="sr-only">新的 brief</label><textarea id="sug-text" rows="5" maxlength="4000" required>${esc(d.brief)}</textarea>
+          <label for="sug-reason" class="sr-only">理由</label><input id="sug-reason" placeholder="为什么要改">
+          <div class="bar"><span></span><button type="submit">提交给主持人</button></div></form></details>`}
+      ${pend.length && host ? `<ul class="suggestions">${pend.map((x) => `<li><div class="who"><b>${esc(who(x))}</b> 建议修改 brief</div>
+        ${x.reason ? `<p class="muted">${esc(x.reason)}</p>` : ""}<div class="md">${renderMarkdown(x.text)}</div>
+        <div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">采纳</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不采纳</button></div></li>`).join("")}</ul>`
+        : pend.length ? `<p class="hint">${pend.length} 条修改建议等主持人决定。</p>` : ""}
+    </section>
+    <section class="archive-sec" aria-labelledby="ar-dec"><h3 id="ar-dec">决定 · ${active.length}</h3>
+      <ul class="decisions">${active.map(decision).join("") || '<li class="empty">还没有决定</li>'}</ul>
+      <form id="decision-form" class="stack"><label for="dec-text" class="sr-only">新决定</label>
+        <input id="dec-text" required maxlength="2000" placeholder="记录一个决定">
+        <label for="dec-reason" class="sr-only">理由</label><input id="dec-reason" maxlength="2000" placeholder="理由（可选）">
+        <label for="dec-sup" class="sr-only">取代哪一条</label>
+        <select id="dec-sup"><option value="">不取代旧决定</option>${active.map((x) => `<option value="${esc(x.id)}">取代：${esc(x.text.slice(0, 40))}</option>`).join("")}</select>
+        <button type="submit">记录</button></form>
+      ${inactive.length ? `<details><summary>已取代 / 撤销 · ${inactive.length}</summary><ul class="decisions">${inactive.map(decision).join("")}</ul></details>` : ""}
+    </section>
+    <section class="archive-sec" aria-labelledby="ar-files"><h3 id="ar-files">文件 · ${d.files.length}</h3>
+      <ul class="files">${d.files.map((x) => `<li><a href="/api/groups/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
+        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span>${host ? `<button type="button" class="link" data-rmfile="${esc(x.name)}">删除</button>` : ""}</li>`).join("")
+        || '<li class="empty">还没有文件。Agent 可以用 publish_file 发布，你也可以上传文本文件。</li>'}</ul>
+      <label class="button ghost sm file-up">上传文本文件<input type="file" id="file-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
+    </section>
+    <section class="archive-sec" aria-labelledby="ar-proj"><h3 id="ar-proj">项目引用</h3>
+      <ul class="projects">${d.projects.map((x) => `<li><b>${esc(x.name)}</b> <code>${esc(x.location)}</code>${x.note ? `<span class="muted"> · ${esc(x.note)}</span>` : ""}
+        ${host ? `<button type="button" class="link" data-rmproj="${esc(x.id)}">移除</button>` : ""}</li>`).join("") || '<li class="empty">还没有引用项目</li>'}</ul>
+      ${host ? `<form id="project-form" class="stack"><label for="pj-name" class="sr-only">项目名称</label><input id="pj-name" required placeholder="名称">
+        <label for="pj-loc" class="sr-only">位置</label><input id="pj-loc" required placeholder="路径或 URL">
+        <label for="pj-note" class="sr-only">说明</label><input id="pj-note" placeholder="说明（可选）"><button type="submit">添加</button></form>` : ""}
+      <p class="hint">引用只是指针，不授予任何访问权限：Agent 能不能读某个仓库，仍由它自身的权限决定。</p>
+    </section>
+    <p class="error" role="alert"></p>`;
+  const gid = d.id, err = (e) => { $(".error", box).textContent = e.message; };
+  const call = async (path, opts) => { try { await api(path, opts); await reload(); renderArchive(); } catch (e) { err(e); } };
+  $("#brief-form", box)?.addEventListener("submit", (e) => { e.preventDefault(); call(`/api/groups/${gid}/brief`, { method: "PUT", body: { text: $("#brief-text").value } }); });
+  $("#brief-ok", box)?.addEventListener("click", () => call(`/api/groups/${gid}/brief/confirm`, { method: "POST", body: {} }));
+  $("#suggest-form", box)?.addEventListener("submit", (e) => { e.preventDefault(); call(`/api/groups/${gid}/suggestions`, { method: "POST", body: { text: $("#sug-text").value, reason: $("#sug-reason").value } }); });
+  box.querySelectorAll("[data-sug]").forEach((b) => b.addEventListener("click", () =>
+    call(`/api/groups/${gid}/suggestions/${b.dataset.sug}`, { method: "POST", body: { accept: b.dataset.ok === "1" } })));
+  $("#decision-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/groups/${gid}/decisions`, { method: "POST", body: { text: $("#dec-text").value, reason: $("#dec-reason").value, supersedes: $("#dec-sup").value || null } }); });
+  box.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("撤销这个决定？之后不再推送给成员。")) call(`/api/groups/${gid}/decisions/${b.dataset.revoke}`, { method: "DELETE" });
+  }));
+  box.querySelectorAll("[data-rmfile]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm(`删除文件 ${b.dataset.rmfile}？`)) call(`/api/groups/${gid}/files/${encodeURIComponent(b.dataset.rmfile)}`, { method: "DELETE" });
+  }));
+  $("#file-up", box).addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 200_000) { err(new Error("文件太大：最多 200 KB")); return; }
+    call(`/api/groups/${gid}/files`, { method: "POST", body: { name: file.name, content: await file.text() } });
+  });
+  $("#project-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/groups/${gid}/projects`, { method: "POST", body: { name: $("#pj-name").value, location: $("#pj-loc").value, note: $("#pj-note").value } }); });
+  box.querySelectorAll("[data-rmproj]").forEach((b) => b.addEventListener("click", () => call(`/api/groups/${gid}/projects/${b.dataset.rmproj}`, { method: "DELETE" })));
 }
 
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。
 function renderMembers() {
   const box = $("#members-panel"), c = S.conv;
   if (!c || c.missing) { box.innerHTML = ""; return; }
-  const row = (a, extra = "") => `<li>${avatar(a.name, "sm")}<span class="m-body"><span class="n">${esc(a.name)}
+  const row = (a, extra = "", whose = "") => `<li>${avatar(a.name, "sm")}<span class="m-body"><span class="n">${esc(a.name)}
       ${c.live?.[a.id] ? '<span class="dot-live" title="运行中"></span>' : ""}</span>
-      <span class="s">${esc(a.capabilities.join(" · ") || a.description)}</span></span>${extra}</li>`;
+      <span class="s">${whose ? `${esc(whose)} · ` : ""}${esc(a.capabilities.join(" · ") || a.description)}</span></span>${extra}</li>`;
   if (c.kind === "dm") {
     const a = agent(c.agent_id);
     box.innerHTML = a ? `<ul class="member-list">${row(a)}</ul>
@@ -773,19 +997,36 @@ function renderMembers() {
   }
   const g = group(c.group_id);
   if (!g) { box.innerHTML = placeholder("群组已删除。"); return; }
+  const joint = g.kind === "joint", host = isHost(g);
   const members = g.member_ids.map(agent).filter(Boolean);
-  const others = S.snap.agents.filter((a) => !g.member_ids.includes(a.id));
+  const others = S.snap.agents.filter((a) => a.mine && !g.member_ids.includes(a.id));  // 只能加入自己的 Agent
+  const rm = (a) => (a.mine || host) ? `<button type="button" class="ghost icon sm rm" data-id="${esc(a.id)}"
+      aria-label="把 ${esc(a.name)} 移出群组" title="移出群组"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h8"/></svg></button>` : "";
+  // 联合群组：标出属于谁；自己的 Agent 可以打开私有目录挂载（默认不挂载）
+  const extra = (a) => joint && a.mine ? `${`<label class="switch home-mount" title="挂载后它在这个群组里能用自己的私有目录；其他参与方的消息可能诱导它带出里面的内容">
+        <input type="checkbox" data-home="${esc(a.id)}" ${g.home_enabled.includes(a.id) ? "checked" : ""}> 私有目录</label>`}` : "";
   box.innerHTML = `<h3>成员 · ${members.length}</h3>
-    <ul class="member-list">${members.map((a) => row(a, `<button type="button" class="ghost icon sm rm" data-id="${esc(a.id)}"
-      aria-label="把 ${esc(a.name)} 移出群组" title="移出群组"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h8"/></svg></button>`)).join("")
+    <ul class="member-list">${members.map((a) => row(a, extra(a) + rm(a), joint ? (a.mine ? "你的" : `${a.owner_email || ""} 的`) : "")).join("")
       || '<li class="empty">还没有成员</li>'}</ul>
     ${others.length ? `<form class="add-member" aria-label="添加成员">
-      <label for="add-member-sel" class="sr-only">添加成员</label>
+      <label for="add-member-sel" class="sr-only">添加你的 Agent</label>
       <select id="add-member-sel">${others.map((a) => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("")}</select>
-      <button type="submit">添加</button></form>` : '<p class="hint">所有 Agent 都已在群组里。</p>'}
+      <button type="submit">添加</button></form>` : '<p class="hint">你的 Agent 都已在群组里。</p>'}
     <p class="error" role="alert"></p>
+    ${joint ? `<p class="hint">联合群组：主持人 ${esc(g.host_email || "")}。每个 Agent 只代表它的所有者，委托只给两端的所有者看，运行过程只给 Agent 的所有者看。</p>
+      ${host ? "" : '<p><button type="button" class="ghost sm" id="leave-group">退出群组</button></p>'}` : ""}
     <p class="hint">移出群组不会打断它手上已经接下的任务，只是之后不能再被 @、被委托。</p>`;
   const err = (e) => { $(".error", box).textContent = e.message; };
+  box.querySelectorAll("[data-home]").forEach((cb) => cb.addEventListener("change", async () => {
+    if (cb.checked && !confirm("在联合群组里挂载私有目录：它能读到你积累的笔记，其他参与方的消息可能诱导它带出来。确定打开？")) { cb.checked = false; return; }
+    try { await api(`/api/groups/${g.id}/members/${cb.dataset.home}/home`, { method: "PUT", body: { enabled: cb.checked } }); await reload(); }
+    catch (e) { err(e); }
+  }));
+  $("#leave-group", box)?.addEventListener("click", async () => {
+    if (!confirm(`退出 ${g.name}？你的 Agent 会一并移出，之后看不到这个群组和群聊。`)) return;
+    try { await api(`/api/groups/${g.id}/leave`, { method: "POST", body: {} }); location.hash = "groups"; await reload(); }
+    catch (e) { err(e); }
+  });
   box.querySelectorAll(".rm").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/groups/${g.id}/members/${b.dataset.id}`, { method: "DELETE" }); await reload(); } catch (e) { err(e); }
   }));
@@ -811,8 +1052,9 @@ function renderThread() {
         <div class="muted">${c.archived ? "Agent 已删除，只读" : `私聊 · ${esc(peer?.description || "")}`}</div></div>`
     : `<span class="avatar group" aria-hidden="true" style="background:${g ? gcolor(g.id) : "var(--surface-3)"}">#</span>
        <div class="info"><h2 class="panel-title" style="margin:0">${esc(c.title)} ${pill(c.status)}</h2>
-        <div class="muted">${c.archived ? "已归档，只读" : `${c.members.length} 名成员 · @ 谁，谁接任务${g?.description ? ` · ${esc(g.description)}` : ""}`}</div></div>`;
+        <div class="muted">${c.archived ? "已归档，只读" : `${g?.kind === "joint" ? "联合群组 · " : ""}${c.members.length} 名成员 · @ 谁，谁接任务${g?.description ? ` · ${esc(g.description)}` : ""}`}</div></div>`;
   const actions = c.archived ? '<button type="button" class="danger" id="conv-del">删除</button>'
+    : c.is_host === false ? ""  // 联合群组的群聊只有主持人能清空
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
   $("#thread-head").innerHTML = head + actions;
   $("#conv-del")?.addEventListener("click", async () => {
@@ -826,6 +1068,7 @@ function renderThread() {
     catch (err) { alert(err.message); }
   });
   renderMembers();
+  renderArchive();
 
   const byParent = {};
   c.tasks.forEach((t) => (byParent[t.parent_task_id || "root"] ||= []).push(t));
@@ -856,7 +1099,11 @@ function renderThread() {
     if (m.role === "user") {
       const to = !dm && m.mentions.length ? `<span class="to">→ ${m.mentions.map((x) => esc(aname(x))).join("、")}</span>`
         : !dm ? '<span class="to muted">未 @ 任何人</span>' : "";
-      return `<li class="msg user"><div class="content"><div class="who"><b>你</b>${to}${time(m.ts)}</div><div class="body">${mentionHtml(m.text)}</div></div></li>`;
+      const sender = !m.user_id || m.user_id === S.me?.id ? "你" : (c.senders?.[m.user_id] || "参与者");
+      // 被认定为任务的消息：标出任务与状态，点开到看板
+      const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
+        `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPill(r.status)}</a>`).join("");
+      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${to}${time(m.ts)}</div><div class="body">${mentionHtml(m.text)}</div>${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
       <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`;
@@ -897,6 +1144,7 @@ function renderThread() {
     sideTab("task");
   }));
   bindProposals(th);
+  th.querySelectorAll("[data-req]").forEach((a) => a.addEventListener("click", () => { S.reqSel = a.dataset.req; S.taskSel = null; }));
   th.querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
     btn.parentElement.querySelectorAll("button").forEach((x) => { x.disabled = true; });
     try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1" } }); await reload(); }
@@ -922,7 +1170,9 @@ function delegBtn(t, child) {
 
 async function renderTask(target) {
   // 对话侧栏或看板侧栏：看板里点卡片时传入看板的详情框
-  const box = target || (S.view === "board" ? $("#board-detail") : $("#task-detail")), id = S.taskSel;
+  // 看板里委托详情嵌在用户任务详情里（#req-task），不再占用整个看板侧栏
+  const box = target || (S.view === "board" ? $("#req-task") : $("#task-detail")), id = S.taskSel;
+  if (!box) return;
   if (!id) { box.innerHTML = placeholder("点击对话里的委托，查看授权、约束、实时过程与结果。"); return; }
   const t = await api(`/api/tasks/${id}`).catch(() => null);
   if (!t || S.taskSel !== id) return;

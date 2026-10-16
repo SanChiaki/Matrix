@@ -220,8 +220,8 @@ button.icon svg { width: 14px; height: 14px; }
 .side-tabs { display: flex; gap: 4px; padding: 14px 20px 0; border-bottom: 1px solid var(--border); }
 .side-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 10px; color: var(--muted); font-size: 13px; }
 .side-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-#members-panel, #task-detail { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
-#members-panel[hidden], #task-detail[hidden] { display: none; }
+#members-panel, #task-detail, #archive-panel { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
+#members-panel[hidden], #task-detail[hidden], #archive-panel[hidden] { display: none; }
 #members-panel h3 { margin-top: 0; }
 .member-list { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .member-list li { display: flex; align-items: center; gap: 10px; padding: 7px 6px; border-radius: var(--radius-sm); }
@@ -233,7 +233,7 @@ button.icon svg { width: 14px; height: 14px; }
 .member-list li:hover .rm, .member-list .rm:focus-visible { opacity: 1; }
 button.icon.sm { width: 22px; height: 22px; padding: 3px; }
 .add-member { display: flex; gap: 8px; margin-bottom: 10px; }
-.add-member select { flex: 1; min-width: 0; }
+.add-member select, .add-member input { flex: 1; min-width: 0; }
 .msg.event { align-self: center; width: fit-content; max-width: 100%; display: flex; gap: 8px; font-size: 12px; color: var(--muted); padding: 2px 10px;
   border-radius: 999px; background: var(--surface-2); }
 .thread-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
@@ -295,13 +295,8 @@ button.link:hover { background: none; text-decoration: underline; }
   font-size: 11px; font-weight: 600; text-align: center; line-height: 18px; }
 .tab .count[hidden] { display: none; }
 
-/* ---------- 可见性 ---------- */
-fieldset.vis { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-fieldset.vis legend { padding: 0; margin-bottom: 6px; font-size: 12.5px; font-weight: 500; color: var(--text-2); }
-.share-with { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.share-with[hidden] { display: none; }
+/* ---------- 群组类型 / 所属 ---------- */
 .vis-tag { font-size: 11.5px; padding: 1px 7px; border-radius: 5px; background: var(--surface-3); color: var(--text-2); }
-.vis-tag.public { color: var(--completed); background: rgba(76, 195, 138, .08); }
 .vis-tag.shared { color: var(--accent); background: var(--accent-soft); }
 .vis-tag.other { color: var(--human); background: rgba(233, 178, 107, .08); }
 
@@ -513,3 +508,42 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
 }
+
+/* ---------- 联合群组 ---------- */
+.member-list .owner { font-size: 11px; white-space: nowrap; }
+.member-list .home-mount { font-size: 11px; gap: 4px; color: var(--muted); white-space: nowrap; }
+[role="tab"][hidden] { display: none; }
+
+/* ---------- 群组档案 ---------- */
+.archive-sec { margin-bottom: 20px; }
+.archive-sec h3 { margin-bottom: 8px; }
+.archive-sec textarea, .archive-sec input, .archive-sec select { width: 100%; }
+.archive-sec .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.archive-sec form.stack { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.archive-sec form.stack button { align-self: flex-end; }
+.archive-sec .md.brief { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.archive-sec details { margin-top: 8px; }
+.archive-sec details summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }
+.decisions, .files, .projects, .suggestions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.decisions li { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; }
+.decisions li.superseded, .decisions li.revoked { opacity: .6; }
+.decisions li.superseded > div:first-child, .decisions li.revoked > div:first-child { text-decoration: line-through; }
+.decisions .meta { margin-top: 4px; font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.files li, .projects li { font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.suggestions li { padding: 10px 12px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); background: var(--accent-soft); margin-top: 8px; }
+.file-up { margin-top: 8px; display: inline-flex; cursor: pointer; }
+.warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(233, 178, 107, .08); color: var(--human); }
+.hint.warn { color: var(--human); }
+.todo-item .actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* ---------- 用户任务 ---------- */
+.req-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; justify-content: flex-end; }
+.req-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+  background: var(--surface-2); color: var(--text-2); text-decoration: none; border: 1px solid var(--border); }
+.req-tag:hover { border-color: var(--accent-line); color: var(--text); }
+.req-tag .pill { font-size: 10.5px; padding: 0 6px; }
+.task-card .route .avatar { margin-right: 2px; }
+#board-detail form.stack { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+#board-detail form.stack textarea { width: 100%; }
+#req-task { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+#req-task:empty { display: none; }

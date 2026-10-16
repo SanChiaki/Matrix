@@ -15,6 +15,7 @@ import urllib.request
 URL = os.environ.get("AGENTNET_TOOL_URL", "")
 TOKEN = os.environ.get("AGENTNET_TOKEN", "")
 TIMEOUT = float(os.environ.get("AGENTNET_TOOL_TIMEOUT", "1800"))
+ALLOWED = [n for n in os.environ.get("AGENTNET_TOOLS", "").split(",") if n]  # 这次执行能用的工具；空 = 全部
 PROTO = "2025-06-18"
 
 TOOLS = [
@@ -116,6 +117,86 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    # ---- 群组档案：群组成员都能用，不需要 delegate。联合群组里写进去的内容对所有参与方可见 ----
+    {
+        "name": "record_decision",
+        "description": ("把群组里定下来的一件事记进群组档案。群组所有成员此后每一轮都会看到仍然有效的决定。"
+                        "要推翻旧决定，写 supersedes 为旧决定的 id。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "决定的内容：一两句话"},
+                "reason": {"type": "string", "description": "为什么这样定"},
+                "supersedes": {"type": "string", "description": "可选：被取代的旧决定 id"},
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_decisions",
+        "description": "列出群组档案里的决定。默认只列仍然有效的。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"include_inactive": {"type": "string", "description": "写 true 时包含已取代 / 撤销的"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "publish_file",
+        "description": ("把当前工作目录里的一个文件发布进群组档案（同名覆盖）。群组所有成员此后都能在 ./group/ 读到。"
+                        "只发布与群组工作有关、验收过的内容。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "工作目录里的相对路径"},
+                "name": {"type": "string", "description": "可选：在档案里的文件名"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "propose_brief",
+        "description": "建议修改群组 brief（目标、范围、成功标准、当前阶段）。写完整的新 brief；主持人采纳后才生效。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "完整的新 brief"},
+                "reason": {"type": "string", "description": "为什么要改"},
+            },
+            "required": ["text", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    # ---- 人交代的任务（看板）：群聊、私聊的席位都有 ----
+    {
+        "name": "open_request",
+        "description": ("把人这一轮交代给你的事登记为任务，出现在他的看板上。只登记有交付目标的事（报告、结论、文件、改动）；"
+                        "闲聊、问答、澄清直接回复，不要登记。来源消息由网络认定。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "任务标题：一句话说清要做什么"},
+                "expected_outcome": {"type": "string", "description": "交付什么、以什么形式"},
+            },
+            "required": ["title", "expected_outcome"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "deliver_request",
+        "description": "交付一个你登记的任务，由下发的人验收。你为它发起的委托都有结果之后才能交付。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "open_request 返回的任务 id"},
+                "summary": {"type": "string", "description": "交付了什么、在哪里（文件路径、结论）"},
+            },
+            "required": ["request_id", "summary"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -155,7 +236,8 @@ def main() -> None:
                 "serverInfo": {"name": "agentnet", "version": "0.2.0"},
             }})
         elif method == "tools/list":
-            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": TOOLS}})
+            # 只列出这次执行能用的工具；网络端仍会按执行上下文再检查一次
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [t for t in TOOLS if not ALLOWED or t["name"] in ALLOWED]}})
         elif method == "tools/call":
             p = msg.get("params") or {}
             text, is_error = call_network(str(p.get("name")), p.get("arguments") or {})

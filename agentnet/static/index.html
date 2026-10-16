@@ -23,14 +23,10 @@
     </form>
     <form id="onboard-form" aria-labelledby="onboard-title" hidden>
       <h1 id="onboard-title">创建你的第一个 Agent</h1>
-      <p class="muted">它是你在 Matrix 里的代理人：别人有事找你，可以先和它说；你也可以把它拉进群聊、让它委托别的 Agent。</p>
+      <p class="muted">它只为你工作：你可以私聊它、把它拉进群聊、让它委托别的 Agent。要和别人协作，把它带进联合群组。</p>
       <div class="field"><label for="ob-name">名称</label><input id="ob-name" required minlength="2" maxlength="80" placeholder="例如：小林的助理"></div>
       <div class="field"><label for="ob-desc">它做什么</label><textarea id="ob-desc" rows="3" required minlength="2" maxlength="500" placeholder="例如：替我回答关于项目进度的问题，整理会议纪要，需要我拍板的事转给我。"></textarea></div>
       <fieldset class="checks" id="ob-auth"><legend>权限</legend></fieldset>
-      <fieldset class="seg" aria-label="谁能用它">
-        <label><input type="radio" name="ob-vis" value="public" checked> 所有人可用</label>
-        <label><input type="radio" name="ob-vis" value="private"> 只有我</label>
-      </fieldset>
       <p class="error" role="alert" id="ob-error"></p>
       <button type="submit">创建并开始对话</button>
       <p class="hint"><button type="button" class="link" id="ob-skip">先跳过</button></p>
@@ -100,7 +96,7 @@
   <section id="view-board" class="view" hidden aria-label="任务看板">
     <div class="pane">
       <div class="view-head">
-        <div><h1>看板</h1><p>你的群聊里委派出去的全部任务，按状态分列；最上面是等你处理的事。</p></div>
+        <div><h1>看板</h1><p>你交代给 Agent 的任务：有交付目标的事由接手的 Agent 登记，交付后由你验收。闲聊不算任务；Agent 之间的委托在任务详情里看。最上面是等你处理的事。</p></div>
         <div class="board-filter">
           <label for="board-agent" class="sr-only">按 Agent 筛选</label>
           <select id="board-agent"></select>
@@ -133,7 +129,7 @@
   <section id="view-groups" class="view" hidden aria-label="群组管理">
     <div class="pane">
       <div class="view-head">
-        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。它自己做，或者把一部分委托给本群成员；网络不会自动加人。</p></div>
+        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。内部群组只有你和你的 Agent；联合群组邀请别人带着他们的 Agent 一起协作。每个群组有自己的档案：brief、决定、文件、项目引用。</p></div>
         <button type="button" id="group-new">新建群组</button>
       </div>
       <ul id="group-list" class="cards"></ul>
@@ -157,9 +153,11 @@
     <aside class="side chat-side">
       <div class="side-tabs" role="tablist" aria-label="侧栏">
         <button type="button" role="tab" id="tab-members" aria-controls="members-panel" aria-selected="true">成员</button>
+        <button type="button" role="tab" id="tab-archive" aria-controls="archive-panel" aria-selected="false">档案</button>
         <button type="button" role="tab" id="tab-task" aria-controls="task-detail" aria-selected="false">委托详情</button>
       </div>
       <div id="members-panel" role="tabpanel" aria-labelledby="tab-members"></div>
+      <div id="archive-panel" role="tabpanel" aria-labelledby="tab-archive" hidden></div>
       <div id="task-detail" role="tabpanel" aria-labelledby="tab-task" aria-live="polite" hidden></div>
     </aside>
   </section>

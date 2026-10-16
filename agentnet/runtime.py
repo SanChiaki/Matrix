@@ -50,6 +50,7 @@ class ToolBridge:
     token: str          # 执行上下文令牌：网络据此识别调用方与其群组、权限
     handler: ToolHandler
     timeout_s: float = 1800
+    names: list[str] | None = None  # 这次执行能用的网络工具（None = 全部）；MCP 服务只列出这些
 
 
 @dataclass
@@ -158,6 +159,7 @@ def build_patch_yaml(authority: list[str], tools: ToolBridge | None = None,
             f"          AGENTNET_TOOL_URL: {j(tools.url)}",
             f"          AGENTNET_TOKEN: {j(tools.token)}",
             f"          AGENTNET_TOOL_TIMEOUT: {j(str(int(tools.timeout_s)))}",
+            *([f"          AGENTNET_TOOLS: {j(','.join(tools.names))}"] if tools.names is not None else []),
             f"        toolCallTimeoutMs: {int(tools.timeout_s * 1000) + 60_000}",
             "        failOnStartupError: true",
         ]
@@ -323,9 +325,15 @@ class ScriptCall:
         self.authority = list(req.authority)
         self.cwd = req.cwd
         self.turn = turn                 # 同一会话中的第几次调用（从 1 开始）
-        self.tool_names = [MCP_PREFIX + t["name"] for t in NETWORK_TOOLS] if req.tools else []
+        self.tool_names = [MCP_PREFIX + t["name"] for t in NETWORK_TOOLS
+                           if req.tools.names is None or t["name"] in req.tools.names] if req.tools else []
         self._req = req
         self.events: list[dict[str, Any]] = []
+
+    @property
+    def can_delegate(self) -> bool:
+        """挂载了协作工具（delegate 等）；只有群组档案工具时为 False。"""
+        return MCP_PREFIX + "delegate" in self.tool_names
 
     def _emit(self, ev: dict[str, Any]) -> None:
         self.events.append(ev)
@@ -343,7 +351,7 @@ class ScriptCall:
 
     def tool(self, name: str, /, **args: Any) -> str:
         """调用网络工具；返回工具结果文本。无网络工具时抛 RuntimeError（与 DSH 中工具不存在一致）。"""
-        if self._req.tools is None:
+        if self._req.tools is None or MCP_PREFIX + name not in self.tool_names:
             raise RuntimeError(f"tool {name} not available")
         cid = f"call-{len(self.events)}"
         full = MCP_PREFIX + name

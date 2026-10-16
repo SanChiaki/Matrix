@@ -18,17 +18,19 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, AUTHORITIES, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval,
-                     Conversation, Delegation, Group, KnowledgeItem, Message, Proposal, Seat, Task, TaskStatus,
-                     new_id, seat_id)
-from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_delivery, format_failure,
-                       format_failure_notice, format_ledger, format_proposal_notice, format_shared_knowledge,
-                       format_task_result, format_transcript, retry_prompt)
+from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, GROUP_FILE_LIMIT,
+                     GROUP_FILES, GROUP_KINDS, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
+                     Delegation, Group, KnowledgeItem, Message, ProjectRef, Proposal, Seat, Task, TaskStatus,
+                     UserRequest, new_id, seat_id)
+from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
+                       format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
+                       format_proposal_notice, format_request_changes,
+                       format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, ToolBridge
 from .store import Store
 
@@ -60,11 +62,21 @@ class ExecContext:
     started_at: float = field(default_factory=time.time)
     created: list[str] = field(default_factory=list)  # 这一轮发起的委托
     wake: list[str] = field(default_factory=list)     # 这一轮送达的交付（本轮结束仍未处理即视为接受）
+    addressed: list[str] = field(default_factory=list)  # 席位：这一轮送达的、@ 它的人的消息（open_request 的来源）
     lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def in_group(self) -> bool:
+        """在群组里：挂载网络工具（至少有群组档案工具）。"""
+        return self.group_id is not None
 
     @property
     def can_delegate(self) -> bool:
         return self.group_id is not None and "delegate" in self.authority
+
+    @property
+    def tools(self) -> list[str]:
+        return network_tools_for(self.kind, self.in_group, self.can_delegate)
 
     @property
     def share_tag(self) -> str:
@@ -94,20 +106,41 @@ class Network:
 
     # ================= 归属与可见性 =================
     # actor 是发起操作的用户 id；None 表示系统内部或测试，不做归属检查。
-    # 规则：Agent 所有者可编辑；public 对所有用户可见可用；shared 对 shared_with 里的用户可见可用。
-    # 群组、群聊只对所有者可见；私聊属于发起它的用户。委托、提议、看板随对话归属。
+    # 信任域（不变量 16）：Agent 只属于它的所有者，只有所有者能用它（私聊、拉进群组）、改它；它只代表所有者运行。
+    # 跨用户协作只走联合群组：群聊与群组档案对所有参与者可见，委托只给两端 Agent 的所有者看。
     def can_use_agent(self, a: AgentNode, actor: str | None) -> bool:
-        return (actor is None or a.owner_id in (None, actor) or a.visibility == "public"
-                or (a.visibility == "shared" and actor in a.shared_with))
-
-    def can_edit_agent(self, a: AgentNode, actor: str | None) -> bool:
         return actor is None or a.owner_id in (None, actor)
 
+    can_edit_agent = can_use_agent
+
+    def can_see_agent(self, a: AgentNode, actor: str | None) -> bool:
+        """看得到（名称、描述、能力）：自己的，或和自己在同一个联合群组里的。"""
+        return self.can_use_agent(a, actor) or any(
+            a.id in g.member_ids and actor in g.people for g in self.store.groups.values() if g.kind == "joint")
+
     def can_see_group(self, g: Group, actor: str | None) -> bool:
-        return actor is None or g.owner_id in (None, actor)
+        return actor is None or g.owner_id is None or actor in g.people
 
     def can_see_conv(self, c: Conversation, actor: str | None) -> bool:
-        return actor is None or c.owner_id in (None, actor)
+        if actor is None or c.owner_id is None:
+            return True
+        if c.kind == "group" and c.group_id:
+            g = self.store.groups.get(c.group_id)
+            if g is not None:
+                return actor in g.people
+        return c.owner_id == actor
+
+    def can_see_task(self, t: Task, actor: str | None) -> bool:
+        """委托只给两端 Agent 的所有者看（内部群组里两端都是所有者自己）。"""
+        if actor is None:
+            return True
+        conv = self.store.conversations.get(t.conversation_id)
+        if conv is None or conv.owner_id is None:
+            return True
+        return actor in t.owners if t.owners else conv.owner_id == actor
+
+    def can_see_message(self, m: Message, actor: str | None) -> bool:
+        return actor is None or not m.audience or actor in m.audience
 
     def _check(self, ok: bool, what: str) -> None:
         if not ok:
@@ -118,15 +151,18 @@ class Network:
         self._check(self.can_use_agent(a, actor), f"agent {agent_id}")
         return a
 
-    def owned_agent(self, agent_id: str, actor: str | None) -> AgentNode:
-        a = self.visible_agent(agent_id, actor)
-        if not self.can_edit_agent(a, actor):
-            raise NetworkError(f"只有 {a.name} 的所有者能修改它")
-        return a
+    owned_agent = visible_agent
 
     def visible_group(self, group_id: str, actor: str | None) -> Group:
         g = self._group(group_id)
         self._check(self.can_see_group(g, actor), f"group {group_id}")
+        return g
+
+    def hosted_group(self, group_id: str, actor: str | None) -> Group:
+        """只有所有者 / 主持人能做的操作（改名、brief、项目、邀请、删除）。"""
+        g = self.visible_group(group_id, actor)
+        if actor is not None and g.owner_id not in (None, actor):
+            raise NetworkError("只有主持人能这样做")
         return g
 
     def visible_conv(self, conv_id: str, actor: str | None) -> Conversation:
@@ -136,9 +172,7 @@ class Network:
 
     def visible_task(self, task_id: str, actor: str | None) -> Task:
         t = self.store.tasks.get(task_id)
-        conv = self.store.conversations.get(t.conversation_id) if t else None
-        self._check(t is not None and (actor is None or conv is None or self.can_see_conv(conv, actor)),
-                    f"task {task_id}")
+        self._check(t is not None and self.can_see_task(t, actor), f"task {task_id}")
         return t
 
     def _agents_used_by(self, actor: str) -> list[AgentNode]:
@@ -146,35 +180,26 @@ class Network:
 
     # ================= Agent 管理 =================
     def create_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
-                     chat_enabled: bool = True, model: dict[str, str] | None = None, actor: str | None = None,
-                     visibility: str = "private", shared_with: list[str] | None = None) -> AgentNode:
+                     chat_enabled: bool = True, model: dict[str, str] | None = None,
+                     actor: str | None = None) -> AgentNode:
         with self._lock:
-            a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor,
-                                visibility, shared_with)
+            a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor)
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
 
     def _new_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
-                   chat_enabled: bool, model: dict[str, str] | None, created_by: str, owner_id: str | None = None,
-                   visibility: str = "private", shared_with: list[str] | None = None) -> AgentNode:
+                   chat_enabled: bool, model: dict[str, str] | None, created_by: str,
+                   owner_id: str | None = None) -> AgentNode:
         """调用方持有锁。"""
         if self.store.agent_by_name(name):
             raise NetworkError(f"Agent 名称已存在：{name}")
         a = AgentNode(id=new_id("agent"), name=name.strip(), description=description.strip(),
                       capabilities=_clean_caps(capabilities), authority=_clean_auth(authority),
                       chat_enabled=chat_enabled, model=_clean_model(model), created_by=created_by,
-                      owner_id=owner_id, visibility=_clean_visibility(visibility),
-                      shared_with=self._clean_users(shared_with or [], owner_id))
+                      owner_id=owner_id)
         self.store.agents[a.id] = a
         self.store.save()
         return a
-
-    def _clean_users(self, ids: list[str], owner_id: str | None) -> list[str]:
-        """调用方持有锁。"""
-        bad = [u for u in ids if u not in self.store.users]
-        if bad:
-            raise NetworkError(f"未知用户：{', '.join(bad)}")
-        return [u for u in _dedup(ids) if u != owner_id]
 
     def update_agent(self, agent_id: str, actor: str | None = None, **fields: Any) -> AgentNode:
         with self._lock:
@@ -191,10 +216,8 @@ class Network:
                     v = _clean_auth(v)
                 elif k == "capabilities":
                     v = _clean_caps(v)
-                elif k == "visibility":
-                    v = _clean_visibility(v)
-                elif k == "shared_with":
-                    v = self._clean_users(v, a.owner_id)
+                elif k not in UPDATABLE_AGENT_FIELDS:
+                    raise NetworkError(f"不能修改 {k}")
                 setattr(a, k, v)
             self.store.save()
         self.bus.emit("agent.updated", agent=a.to_dict())
@@ -219,16 +242,21 @@ class Network:
 
     # ================= 群组管理 =================
     # 参照 Raft 的频道：群组就是一个群聊。建群组即有群聊，成员随时可以加减；成员变动作为事件出现在群聊里。
-    # 群组只对所有者可见；所有者只能把自己能用的 Agent（自己的、公开的、分享给自己的）加进来。
+    # 内部群组：只有所有者，成员只能是所有者自己的 Agent。
+    # 联合群组（参照 Raft 的 joint channel）：主持人邀请用户，接受后成为参与者；每个人只能加减自己的 Agent，
+    # 主持人可以移出任何 Agent 与参与者。参与者退出 / 被移出时，他的 Agent 一并移出，之后看不到群组与群聊。
     def _check_members(self, member_ids: list[str], actor: str | None) -> list[str]:
         for m in member_ids:
-            self.visible_agent(m, actor)
+            self.visible_agent(m, actor)  # 只能加入自己的 Agent
         return list(dict.fromkeys(member_ids))
 
-    def create_group(self, name: str, description: str, member_ids: list[str], actor: str | None = None) -> Group:
+    def create_group(self, name: str, description: str, member_ids: list[str], actor: str | None = None,
+                     kind: str = "internal") -> Group:
+        if kind not in GROUP_KINDS:
+            raise NetworkError(f"未知群组类型：{kind}（可选 {' / '.join(GROUP_KINDS)}）")
         with self._lock:
             g = Group(id=new_id("group"), name=name.strip(), description=description.strip(),
-                      member_ids=self._check_members(member_ids, actor), owner_id=actor)
+                      member_ids=self._check_members(member_ids, actor), owner_id=actor, kind=kind)
             self.store.groups[g.id] = g
             conv = self._group_chat(g)
             self.store.save()
@@ -238,14 +266,19 @@ class Network:
 
     def update_group(self, group_id: str, name: str | None = None, description: str | None = None,
                      member_ids: list[str] | None = None, actor: str | None = None) -> Group:
+        """改名、描述只有主持人能做；成员列表的增减按 add_member / remove_member 的规则逐个检查。"""
         with self._lock:
             g = self.visible_group(group_id, actor)
+            if (name is not None and name.strip() != g.name) or description is not None:
+                self.hosted_group(group_id, actor)
             if member_ids is not None:
-                # 已在群里的成员即使后来不再对所有者可见，也允许留着；新加的必须可见
                 new = list(dict.fromkeys(member_ids))
-                self._check_members([m for m in new if m not in g.member_ids], actor)
-                self._member_events(g, [m for m in new if m not in g.member_ids],
-                                    [m for m in g.member_ids if m not in new])
+                added = [m for m in new if m not in g.member_ids]
+                removed = [m for m in g.member_ids if m not in new]
+                self._check_members(added, actor)
+                for m in removed:
+                    self._check_removable(g, m, actor)
+                self._member_events(g, added, removed)
                 g.member_ids = new
             if name is not None and name.strip() != g.name:
                 g.name = name.strip()
@@ -256,6 +289,13 @@ class Network:
         self.bus.emit("group.updated", group=g.to_dict())
         self._emit_group_chat(g)
         return g
+
+    def _check_removable(self, g: Group, agent_id: str, actor: str | None) -> None:
+        """调用方持有锁。主持人能移出任何成员；参与者只能移出自己的 Agent。"""
+        a = self.store.agents.get(agent_id)
+        if actor is None or g.owner_id in (None, actor) or (a is not None and a.owner_id == actor):
+            return
+        raise NetworkError(f"{self._name(agent_id)} 不是你的 Agent，只有它的所有者或主持人能把它移出")
 
     def add_member(self, group_id: str, agent_id: str, actor: str | None = None) -> Group:
         with self._lock:
@@ -274,16 +314,28 @@ class Network:
             members = [m for m in g.member_ids if m != agent_id]
         return self.update_group(group_id, member_ids=members, actor=actor)
 
-    def _member_events(self, g: Group, added: list[str], removed: list[str]) -> None:
+    def _member_events(self, g: Group, added: list[str], removed: list[str], why: str = "") -> None:
         """调用方持有锁。成员变动写进群聊：人看得到，之后被 @ 的成员也看得到。
         移出群组不打断它手上已经接下的任务，只是不能再被 @、不能再被委托。"""
         conv = self._group_chat(g)
         for verb, ids in (("加入了群组", added), ("离开了群组", removed)):
             for aid in ids:
                 conv.messages.append(Message(id=new_id("msg"), role="event", agent_id=aid,
-                                             text=f"{self._name(aid)} {verb}"))
+                                             text=f"{self._name(aid)} {verb}{why}"))
         if added or removed:
             conv.updated_at = time.time()
+            if removed:
+                g.home_enabled = [a for a in g.home_enabled if a not in removed]
+
+    def _people_event(self, g: Group, text: str) -> None:
+        """调用方持有锁。参与者变动写进群聊。"""
+        conv = self._group_chat(g)
+        conv.messages.append(Message(id=new_id("msg"), role="event", text=text))
+        conv.updated_at = time.time()
+
+    def _email(self, user_id: str | None) -> str:
+        u = self.store.users.get(user_id or "")
+        return u.email if u else "（未知用户）"
 
     def _emit_group_chat(self, g: Group) -> None:
         conv = self._group_chat_of(g.id)
@@ -292,21 +344,285 @@ class Network:
 
     def delete_group(self, group_id: str, actor: str | None = None) -> None:
         with self._lock:
-            self.visible_group(group_id, actor)
+            self.hosted_group(group_id, actor)
             if any(c.group_id == group_id and c.status != "idle" for c in self.store.conversations.values()):
                 raise NetworkError("群组内有进行中的对话，不能删除")
             del self.store.groups[group_id]
             for c in self.store.conversations.values():
                 if c.group_id == group_id:
-                    c.group_id, c.archived = None, True  # 群聊记录保留，只读
+                    c.group_id, c.archived = None, True  # 群聊记录保留，只读（只有主持人看得到）
             self.store.save()
         self.bus.emit("group.deleted", group_id=group_id)
+
+    # ---- 联合群组的参与者：邀请 → 接受；退出 / 移出 ----
+    def invite(self, group_id: str, email: str, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            if g.kind != "joint":
+                raise NetworkError("内部群组只有你自己；要和别人协作请新建联合群组")
+            user = next((u for u in self.store.users.values() if u.email == email.strip().lower()), None)
+            if user is None:
+                raise NetworkError(f"没有用户 {email.strip()}")
+            if user.id in g.people:
+                raise NetworkError(f"{user.email} 已经是参与者")
+            if user.id in g.invited:
+                raise NetworkError(f"已经邀请过 {user.email}")
+            g.invited.append(user.id)
+            self.store.save()
+        self.bus.emit("group.invited", group_id=g.id, user_id=user.id, invitation=self.invitation_view(g))
+        self.bus.emit("group.updated", group=g.to_dict())
+        return g
+
+    def invitations(self, actor: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self.invitation_view(g) for g in self.store.groups.values() if actor in g.invited]
+
+    def invitation_view(self, g: Group) -> dict[str, Any]:
+        """接受之前只给群组名、描述与主持人，不给群聊和档案。"""
+        return {"group_id": g.id, "name": g.name, "description": g.description, "host": self._email(g.owner_id)}
+
+    def respond_invitation(self, group_id: str, accept: bool, actor: str) -> Group | None:
+        with self._lock:
+            g = self.store.groups.get(group_id)
+            self._check(g is not None and actor in g.invited, f"invitation {group_id}")
+            g.invited.remove(actor)
+            if accept:
+                g.participants.append(actor)
+                self._people_event(g, f"{self._email(actor)} 加入了联合群组")
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        self._emit_group_chat(g)
+        return g if accept else None
+
+    def leave_group(self, group_id: str, actor: str) -> None:
+        """参与者退出：他的 Agent 一并移出（已接下的任务照常完成），之后看不到群组与群聊。主持人不能退出，只能删除。"""
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            if g.owner_id == actor:
+                raise NetworkError("主持人不能退出；不再需要这个群组可以删除它")
+            self._drop_participant(g, actor, f"{self._email(actor)} 退出了联合群组")
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        self.bus.emit("group.left", group_id=g.id, user_id=actor)
+        self._emit_group_chat(g)
+
+    def remove_participant(self, group_id: str, user_id: str, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            if user_id in g.invited:  # 撤回邀请
+                g.invited.remove(user_id)
+            elif user_id in g.participants:
+                self._drop_participant(g, user_id, f"{self._email(user_id)} 被主持人移出了联合群组")
+            else:
+                raise NetworkError("不是这个群组的参与者")
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        self.bus.emit("group.left", group_id=g.id, user_id=user_id)
+        self._emit_group_chat(g)
+        return g
+
+    def _drop_participant(self, g: Group, user_id: str, text: str) -> None:
+        """调用方持有锁。"""
+        theirs = [m for m in g.member_ids if (a := self.store.agents.get(m)) is not None and a.owner_id == user_id]
+        self._member_events(g, [], theirs, "（所有者已退出）")
+        g.member_ids = [m for m in g.member_ids if m not in theirs]
+        g.participants.remove(user_id)
+        self._people_event(g, text)
+
+    # ---- 联合群组里的私有目录：默认不挂载，由 Agent 的所有者按群组打开 ----
+    def set_home_mount(self, group_id: str, agent_id: str, enabled: bool, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            self.visible_agent(agent_id, actor)
+            if agent_id not in g.member_ids:
+                raise NetworkError(f"{self._name(agent_id)} 不在群组里")
+            g.home_enabled = [a for a in g.home_enabled if a != agent_id] + ([agent_id] if enabled else [])
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        return g
+
+    def home_mounted(self, g: Group | None, agent_id: str) -> bool:
+        """内部群组、私聊总是挂载；联合群组只在所有者打开时挂载。"""
+        return g is None or g.kind != "joint" or agent_id in g.home_enabled
+
+    # ================= 群组档案 =================
+    # 群组的工作档案，归群组所有、不放进任何项目仓库：brief（每轮推送）、决定（推送仍然有效的）、
+    # 文件（只读挂载到工作目录的 group/）、项目引用（只是指针）。写入只走人的操作或网络工具，记入 log.jsonl（不变量 17）。
+    # 联合群组的档案对所有参与者可见：写进去就等于对所有参与方公开。
+    def _archive_changed(self, g: Group, action: str, by_user: str | None = None, by_agent: str | None = None,
+                         **detail: Any) -> None:
+        """调用方持有锁。"""
+        import json
+        g.archive_rev += 1
+        entry = {"ts": time.time(), "action": action, "by_user": by_user, "by_agent": by_agent, **detail}
+        log = self.store.group_dir(g.id).parent / "log.jsonl"
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def _archive_saved(self, g: Group, event: str | None = None) -> None:
+        """调用方不持有锁。档案变化的公开事件写进群聊，人和之后被 @ 的成员都看得到。"""
+        with self._lock:
+            if event:
+                self._people_event(g, event)
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        self._emit_group_chat(g)
+
+    def set_brief(self, group_id: str, text: str, actor: str | None = None) -> Group:
+        text = text.strip()
+        if len(text) > BRIEF_LIMIT:
+            raise NetworkError(f"brief 最多 {BRIEF_LIMIT} 字")
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            g.brief, g.brief_updated_at = text, time.time()
+            self._archive_changed(g, "brief.set", by_user=actor, size=len(text))
+        self._archive_saved(g, "主持人更新了 brief")
+        return g
+
+    def confirm_brief(self, group_id: str, actor: str | None = None) -> Group:
+        """brief 还准确：只刷新确认时间。"""
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            g.brief_updated_at = time.time()
+        self._archive_saved(g)
+        return g
+
+    def suggest_brief(self, group_id: str, text: str, reason: str = "", actor: str | None = None,
+                      agent_id: str | None = None) -> Group:
+        text = text.strip()
+        if not text or len(text) > BRIEF_LIMIT:
+            raise NetworkError(f"建议的 brief 不能为空，最多 {BRIEF_LIMIT} 字")
+        from .models import BriefSuggestion
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            g.suggestions.append(BriefSuggestion(id=new_id("sugg"), text=text, reason=reason.strip()[:1000],
+                                                 by_user=actor, by_agent=agent_id))
+        who = self._name(agent_id) if agent_id else self._email(actor)
+        self._archive_saved(g, f"{who} 建议修改 brief，等主持人决定")
+        return g
+
+    def decide_suggestion(self, group_id: str, suggestion_id: str, accept: bool, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            sug = next((x for x in g.suggestions if x.id == suggestion_id and x.status == "pending"), None)
+            self._check(sug is not None, f"suggestion {suggestion_id}")
+            sug.status = "accepted" if accept else "rejected"
+            if accept:
+                g.brief, g.brief_updated_at = sug.text, time.time()
+                self._archive_changed(g, "brief.set", by_user=actor, suggestion=sug.id, size=len(sug.text))
+        self._archive_saved(g, "主持人采纳了 brief 修改建议" if accept else "主持人没有采纳 brief 修改建议")
+        return g
+
+    def record_decision(self, group_id: str, text: str, reason: str = "", supersedes: str | None = None,
+                        actor: str | None = None, agent_id: str | None = None, source: str | None = None) -> Decision:
+        text = text.strip()
+        if not text:
+            raise NetworkError("决定不能为空")
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            old = None
+            if supersedes:
+                old = next((d for d in g.decisions if d.id == supersedes and d.status == "active"), None)
+                if old is None:
+                    raise NetworkError(f"没有仍然有效的决定 {supersedes}")
+                old.status = "superseded"
+            d = Decision(id=new_id("dec"), text=text[:2000], reason=reason.strip()[:2000], supersedes=supersedes,
+                         by_user=actor, by_agent=agent_id, source=source)
+            g.decisions.append(d)
+            self._archive_changed(g, "decision.record", by_user=actor, by_agent=agent_id, decision=d.id,
+                                  supersedes=supersedes)
+        who = self._name(agent_id) if agent_id else self._email(actor)
+        self._archive_saved(g, f"{who} 记录了决定 {d.id}：{_short(d.text, 120)}"
+                               + (f"（取代 {supersedes}）" if supersedes else ""))
+        return d
+
+    def revoke_decision(self, group_id: str, decision_id: str, actor: str | None = None) -> Group:
+        """人可以撤销任何决定（包括 Agent 记录的）。"""
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            d = next((x for x in g.decisions if x.id == decision_id and x.status == "active"), None)
+            self._check(d is not None, f"decision {decision_id}")
+            d.status = "revoked"
+            self._archive_changed(g, "decision.revoke", by_user=actor, decision=d.id)
+        self._archive_saved(g, f"{self._email(actor)} 撤销了决定 {d.id}")
+        return g
+
+    def add_project(self, group_id: str, name: str, location: str, note: str = "",
+                    actor: str | None = None) -> ProjectRef:
+        if not name.strip() or not location.strip():
+            raise NetworkError("项目名称与位置不能为空")
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            ref = ProjectRef(id=new_id("proj"), name=name.strip()[:120], location=location.strip()[:500],
+                             note=note.strip()[:500])
+            g.projects.append(ref)
+            self._archive_changed(g, "project.add", by_user=actor, project=ref.id)
+        self._archive_saved(g, f"主持人引用了项目「{ref.name}」")
+        return ref
+
+    def remove_project(self, group_id: str, project_id: str, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            ref = next((r for r in g.projects if r.id == project_id), None)
+            self._check(ref is not None, f"project {project_id}")
+            g.projects.remove(ref)
+            self._archive_changed(g, "project.remove", by_user=actor, project=ref.id)
+        self._archive_saved(g, f"主持人移除了项目引用「{ref.name}」")
+        return g
+
+    def publish_file(self, group_id: str, name: str, content: bytes, actor: str | None = None,
+                     agent_id: str | None = None, source: str | None = None) -> str:
+        """把一份文件发布进群组档案。同名覆盖（日志里留着谁、什么时候）。返回文件名。"""
+        fname = _safe_filename(name)
+        if len(content) > GROUP_FILE_LIMIT:
+            raise NetworkError(f"文件太大：最多 {GROUP_FILE_LIMIT // 1000} KB")
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            (self.store.group_dir(g.id) / fname).write_bytes(content)
+            self._archive_changed(g, "file.publish", by_user=actor, by_agent=agent_id, file=fname,
+                                  size=len(content), source=source)
+        who = self._name(agent_id) if agent_id else self._email(actor)
+        self._archive_saved(g, f"{who} 发布了文件 {fname}")
+        return fname
+
+    def delete_file(self, group_id: str, name: str, actor: str | None = None) -> Group:
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            path = self.store.group_dir(g.id) / _safe_filename(name)
+            self._check(path.is_file(), f"file {name}")
+            path.unlink()
+            self._archive_changed(g, "file.delete", by_user=actor, file=path.name)
+        self._archive_saved(g, f"主持人删除了文件 {path.name}")
+        return g
+
+    def group_files(self, g: Group) -> list[dict[str, Any]]:
+        d = self.store.group_dir(g.id)
+        return [{"name": p.name, "size": p.stat().st_size, "updated_at": p.stat().st_mtime}
+                for p in sorted(d.iterdir()) if p.is_file()]
+
+    def group_file(self, group_id: str, name: str, actor: str | None = None) -> Path:
+        g = self.visible_group(group_id, actor)
+        path = self.store.group_dir(g.id) / _safe_filename(name)
+        self._check(path.is_file(), f"file {name}")
+        return path
+
+    def group_detail(self, group_id: str, actor: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            g = self.visible_group(group_id, actor)
+            d = g.to_dict()
+            d["files"] = self.group_files(g)
+            d["host"] = self._email(g.owner_id)
+            d["participant_emails"] = {u: self._email(u) for u in g.people}
+            d["invited_emails"] = {u: self._email(u) for u in g.invited} if actor in (None, g.owner_id) else {}
+            if actor not in (None, g.owner_id):
+                d.pop("invited")
+            d["is_host"] = actor is None or g.owner_id in (None, actor)
+            return d
 
     # ================= 对话：群聊与私聊 =================
     # 群聊（kind=group）就是群组本身：每个群组一个，没有“主 Agent”，人在消息里 @ 谁，谁就接这个任务。
     # 被 @ 的成员在群聊里有自己的席位（独立 DSH 会话、收件箱、工作目录），自己做，或在群组里找合适的成员委托。
-    # 私聊（kind=dm）是一个用户和一个 Agent 的会话：每个（用户, Agent）一个，不用 @，不能委托。
-    # 同一个公开 Agent 可以同时和多个用户私聊，各自独立的会话，并行运行。
+    # 私聊（kind=dm）是所有者和自己的一个 Agent 的会话：每个 Agent 一个，不用 @，不能委托。
     def _group_chat_of(self, group_id: str) -> Conversation | None:
         return next((c for c in self.store.conversations.values()
                      if c.kind == "group" and c.group_id == group_id and not c.archived), None)
@@ -357,9 +673,11 @@ class Network:
         raise NetworkError("群聊需要 group_id，私聊需要 agent_id")
 
     def clear_conversation(self, conv_id: str, actor: str | None = None) -> None:
-        """清空聊天记录与所有席位（会话从头开始）。委托、知识不受影响。"""
+        """清空聊天记录与所有席位（会话从头开始）。委托、知识不受影响。群聊只有主持人能清空。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
+            if conv.kind == "group" and conv.group_id:
+                self.hosted_group(conv.group_id, actor)
             if conv.status != "idle":
                 raise NetworkError("对话进行中或还有进行中的委托，不能清空")
             conv.messages, conv.seats = [], {}
@@ -399,7 +717,8 @@ class Network:
 
     def send_message(self, conv_id: str, text: str, mentions: list[str] | None = None,
                      background: bool = True, actor: str | None = None) -> Message:
-        """人发消息。群聊里只唤醒被 @ 的成员；没 @ 任何人的消息留在对话里，之后被 @ 的成员能看到。"""
+        """人发消息。群聊里只唤醒被 @ 的成员；没 @ 任何人的消息留在对话里，之后被 @ 的成员能看到。
+        联合群组里任何参与者都能 @ 任何成员；被 @ 的 Agent 仍以它的所有者的名义、用所有者的资源运行。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
             if conv.archived:
@@ -411,7 +730,7 @@ class Network:
                 if not self.can_use_agent(peer, actor):
                     raise NetworkError(f"{peer.name} 已不再对你开放")
             targets = self.resolve_mentions(conv, text, mentions)
-            msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets)
+            msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets, user_id=actor)
             conv.messages.append(msg)
             for aid in targets:
                 seat = self._seat(conv, aid)
@@ -502,8 +821,10 @@ class Network:
             conv = self.store.conversations[conv_id]
             with self._lock:
                 conv.seats[agent_id].blocked = f"网络内部错误：{e!r}"
+                owner = self.store.agents[agent_id].owner_id if agent_id in self.store.agents else None
             self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent_id,
-                                       text=f"（{self._name(agent_id)}：网络内部错误 {e!r}）"))
+                                       text=f"（{self._name(agent_id)}：网络内部错误 {e!r}）",
+                                       audience=[owner] if owner else []))
         else:
             self._fail_task(self.store.tasks[cid], f"网络内部错误：{e!r}")
 
@@ -575,23 +896,38 @@ class Network:
             fresh = conv.messages[seat.seen:upto]  # 上次运行之后对话里的新消息：公开上下文
             shared = [k for k in self.store.knowledge.values()
                       if sid in k.visible_to and k.key not in seat.known and k.owner_task_id not in self._own_tasks(sid)]
-        transcript = format_transcript(fresh, agent.id, self._name)
+            fresh = [m for m in fresh if not m.audience or agent.owner_id in m.audience]  # 只给别人看的不送
+            ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
+            archive_rev = group.archive_rev if group else -1
+            archive = self._archive_text(group) if group and seat.archive_seen != archive_rev else ""
+        joint = bool(group and group.kind == "joint")
+        transcript = format_transcript(fresh, agent.id, self._name, self._email if joint else None)
         notices, wake = self._render_inbox(items, ctx)
+        with self._lock:
+            open_reqs = [r for r in self.store.requests.values() if r.conversation_id == conv.id
+                         and r.agent_id == agent.id and r.status in ("in_progress", "in_review")]
+        if open_reqs:
+            notices = "\n\n".join(filter(None, [notices, format_open_requests(open_reqs)]))
         if shared:
             notices = "\n\n".join(filter(None, [notices, format_shared_knowledge(shared)]))
         first = seat.dsh_session_id is None
+        mount_home = self.home_mounted(group, agent.id)
         prompt = build_seat_prompt(agent, conv, group, ctx.can_delegate, transcript, notices, first,
-                                   home_writable="file.write" in ctx.authority)
-        res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, self.limits.turn_timeout_s)
+                                   home_writable="file.write" in ctx.authority, archive=archive,
+                                   home=mount_home, joint=joint)
+        res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, self.limits.turn_timeout_s,
+                        mount_home=mount_home)
         steps = self._live.pop(sid, [])
+        owner_only = [agent.owner_id] if agent.owner_id else []
         if res.ok:
             with self._lock:
                 seat.seen = upto
                 seat.known = _dedup(seat.known + [k.key for k in shared])
+                seat.archive_seen = archive_rev
             self._auto_accept(ctx)
             self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id,
                                        text=res.final_text.strip() or "（空回复）", task_ids=ctx.created,
-                                       steps=steps, wake=wake))
+                                       steps=steps, wake=wake, private_to=owner_only))
             return
         self._requeue(seat, items)
         with self._lock:
@@ -603,7 +939,8 @@ class Network:
         text = format_failure(agent.name, res.error or "", res.error_class or "runtime_error", tasks, knowledge,
                               self._name)
         self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, text=text,
-                                   task_ids=ctx.created, steps=steps, wake=wake))
+                                   task_ids=ctx.created, steps=steps, wake=wake, audience=owner_only,
+                                   private_to=owner_only))
 
     def _own_tasks(self, sid: str) -> set[str]:
         """调用方持有锁。这个席位直接发起的任务：它们的结果是委托回报，不算“别人共享的知识”。"""
@@ -631,15 +968,23 @@ class Network:
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
         home_writable = "file.write" in ctx.authority
+        mount_home = self.home_mounted(g, agent.id)
         workdir = self.store.task_dir(task.id)
+        with self._lock:
+            archive_rev = g.archive_rev
+            archive = self._archive_text(g) if task.archive_seen != archive_rev else ""
         if task.dsh_session_id is None:  # 第一次运行（或在拿到会话之前就失败了）：发完整委托
             knowledge = self.visible_knowledge(ctx)
-            task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable)
+            task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
+                                            archive=archive, home=mount_home)
             workdir = self._write_task_files(task, knowledge)
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
-            prompt = build_notice_prompt(inbox)
-        res = self._run(ctx, agent, prompt, workdir, task, self.limits.task_timeout_s)
+            prompt = build_notice_prompt("\n\n".join(filter(None, [inbox, archive])))
+        res = self._run(ctx, agent, prompt, workdir, task, self.limits.task_timeout_s, mount_home=mount_home)
+        if res.ok:
+            with self._lock:
+                task.archive_seen = archive_rev
         self._live.pop(task.id, None)
         violations = _violations(res.tool_calls, ctx.authority)
         with self._lock:
@@ -738,6 +1083,11 @@ class Network:
                 elif kind == "failed" and t.status == TaskStatus.FAILED:
                     blocks.append(format_failure_notice(t, name, self.limits.max_retries))
                     wake.append(f"{name} 的 {t.id} 失败")
+            elif kind == "request_changes":
+                r = self.store.requests.get(it["request_id"])
+                if r is not None and r.status == "in_progress":
+                    blocks.append(format_request_changes(r, self._who(r.requester_id).strip()))
+                    wake.append(f"{self._who(r.requester_id).strip()} 退回了 {r.id}")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
                 if p is None:
@@ -748,12 +1098,13 @@ class Network:
 
     # ================= 运行时调用 =================
     def _run(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, holder: Seat | Task,
-             timeout_s: float) -> RunResult:
+             timeout_s: float, mount_home: bool = True) -> RunResult:
         """跑一轮；可恢复的运行时错误（如工具参数 JSON 损坏）用同一个会话自动续接一次。"""
-        others = self.ledger(agent.id, exclude=ctx.id)
-        if others:  # 工作台账：同时在做的其他工作
-            prompt = f"{prompt}\n\n{format_ledger(others)}"
-        before = self._mount_home(agent, workdir)
+        others, hidden = self._ledger_for(ctx)
+        if others or hidden:  # 工作台账：同时在做的其他工作（联合群组里不列出别处的细节）
+            prompt = f"{prompt}\n\n{format_ledger(others, hidden)}"
+        self._mount_group_files(ctx, workdir)
+        before = self._mount_home(agent, workdir) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
         try:
             res = self._invoke(ctx, agent, prompt, workdir, holder.dsh_session_id, timeout_s, on_session)
@@ -767,10 +1118,31 @@ class Network:
                 res2.tool_calls = res.tool_calls + res2.tool_calls
                 res = res2
         finally:
-            conflicts = self._sync_home(agent, workdir, before, ctx.id)
-            if conflicts:
-                self.bus.emit("home.conflict", agent_id=agent.id, context_id=ctx.id, files=conflicts)
+            shutil.rmtree(workdir / GROUP_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
+            if before is not None:
+                conflicts = self._sync_home(agent, workdir, before, ctx.id)
+                if conflicts:
+                    self.bus.emit("home.conflict", agent_id=agent.id, context_id=ctx.id, files=conflicts)
+            else:
+                shutil.rmtree(workdir / HOME_DIR, ignore_errors=True)
         return res
+
+    def _mount_group_files(self, ctx: ExecContext, workdir: Path) -> None:
+        """群组档案的文件区拷进工作目录的 group/（每轮刷新）。发布只能经 publish_file。"""
+        mount = workdir / GROUP_FILES
+        shutil.rmtree(mount, ignore_errors=True)
+        g = self.store.groups.get(ctx.group_id or "")
+        if g is not None:
+            shutil.copytree(self.store.group_dir(g.id), mount, symlinks=False)
+
+    def _archive_text(self, g: Group) -> str:
+        """调用方持有锁。"""
+        return format_archive(g, self._active_decisions(g), [f["name"] for f in self.group_files(g)],
+                              self._name, self._email)
+
+    @staticmethod
+    def _active_decisions(g: Group) -> list[Decision]:
+        return [d for d in g.decisions if d.status == "active"]
 
     # ================= Agent 私有目录 =================
     # 每个 Agent 一个跨对话、跨任务持久的目录（data/agents/<id>/）。网络不读、不注入，只负责让它在每次运行时出现在
@@ -816,8 +1188,18 @@ class Network:
             return self._home_locks.setdefault(agent_id, threading.Lock())
 
     # ================= 工作台账 =================
-    # 同一个 Agent 可以同时为多个人、多个任务工作（不限并发）。每次运行前告诉它“你同时还在做什么”，
-    # 让它避免改动别的工作的产物、不把别人的结论当成这次的输入。看板与 Agent 详情也展示这份台账。
+    # 同一个 Agent 可以同时做多件事（不限并发）。每次运行前告诉它“你同时还在做什么”，
+    # 让它避免改动别的工作的产物、不把别的结论当成这次的输入。看板与 Agent 详情也展示这份台账。
+    # 信任域（不变量 16）：联合群组里的运行只列出同一群组里的条目，其余只给数量——否则别的参与者 @ 它就能问出
+    # 所有者在别处做什么。
+    def _ledger_for(self, ctx: ExecContext) -> tuple[list[dict[str, Any]], int]:
+        items = self.ledger(ctx.agent_id, exclude=ctx.id)
+        g = self.store.groups.get(ctx.group_id or "")
+        if g is None or g.kind != "joint":
+            return items, 0
+        same = [it for it in items if it.get("group_id") == g.id]
+        return same, len(items) - len(same)
+
     def ledger(self, agent_id: str, exclude: str | None = None) -> list[dict[str, Any]]:
         out = []
         with self._lock:
@@ -827,7 +1209,7 @@ class Network:
                 conv = self.store.conversations.get(ctx.conversation_id)
                 owner = self.store.users.get(conv.owner_id or "") if conv else None
                 item = {"context_id": ctx.id, "kind": ctx.kind, "conversation_id": ctx.conversation_id,
-                        "user": owner.email if owner else None, "since": ctx.started_at}
+                        "group_id": ctx.group_id, "user": owner.email if owner else None, "since": ctx.started_at}
                 if ctx.kind == "task":
                     t = self.store.tasks.get(ctx.id)
                     item.update(what=_short(t.delegation.mission, 80) if t else "",
@@ -841,10 +1223,10 @@ class Network:
                 timeout_s: float, on_session: Any = None) -> RunResult:
         token = secrets.token_urlsafe(18)
         tools = None
-        if ctx.can_delegate:
+        if ctx.tools:  # 席位有用户任务工具；群组里有档案工具；协作工具（委托等）另外要求 delegate
             tools = ToolBridge(url=self.tool_url, token=token,
                                handler=lambda name, args: self.handle_tool(token, name, args),
-                               timeout_s=self.limits.task_timeout_s)
+                               timeout_s=self.limits.task_timeout_s, names=ctx.tools)
         # 审批通道总是挂载：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请
         approvals = ApprovalBridge(url=self.approval_url, token=token,
                                    handler=lambda tool, reason: self.request_approval(token, tool, reason),
@@ -905,6 +1287,9 @@ class Network:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return f"未知工具 {name}", True
+        if name not in ctx.tools:
+            return (f"{name} 只能在对话里使用" if name in REQUEST_TOOLS else
+                    f"{name} 只能在群组里使用" if name in ARCHIVE_TOOLS else f"{name} 需要 delegate 权限"), True
         try:
             return handler(self, ctx, args)
         except NetworkError as e:
@@ -933,10 +1318,11 @@ class Network:
             self.store.save()
         self.bus.emit("approval.updated", approval=ap.to_dict())
         if conv is not None:
-            who = self.store.users.get(ap.owner_id or "")
+            # 申请理由可能带着所有者的内部信息：联合群组里只给所有者看
             self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id,
-                                       text=f"{agent.name} 申请在工作目录以外操作，等 {who.email if who else '所有者'} 批准："
-                                            f"{_short(ap.reason, 200)}"))
+                                       text=f"{agent.name} 申请在工作目录以外操作，等 {self._email(ap.owner_id)} 批准："
+                                            f"{_short(ap.reason, 200)}",
+                                       audience=[ap.owner_id] if ap.owner_id else []))
         if not done.wait(self.limits.approval_timeout_s):
             with self._lock:
                 if ap.status == "pending":
@@ -967,13 +1353,49 @@ class Network:
             return [a for a in self.store.approvals.values()
                     if a.status == "pending" and (actor is None or a.owner_id in (None, actor))]
 
-    def _require_group(self, ctx: ExecContext) -> Group:
-        if not ctx.can_delegate:
+    def _require_group(self, ctx: ExecContext, delegate: bool = True) -> Group:
+        if delegate and not ctx.can_delegate:
             raise NetworkError("当前执行上下文没有委托能力（不在群组中或没有 delegate 权限）")
         g = self.store.groups.get(ctx.group_id or "")
         if g is None:
             raise NetworkError("群组已不存在")
         return g
+
+    # ---- 群组档案工具：群组成员都有，不需要 delegate。联合群组里写进去的内容对所有参与方可见 ----
+    def _tool_record_decision(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_group(ctx, delegate=False)
+        sup = str(args.get("supersedes", "")).strip() or None
+        d = self.record_decision(g.id, str(args.get("text", "")), str(args.get("reason", "")), sup,
+                                 agent_id=ctx.agent_id, source=ctx.id)
+        return f"已记录决定 {d.id}，群组所有成员此后都会看到。", False
+
+    def _tool_list_decisions(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_group(ctx, delegate=False)
+        everything = str(args.get("include_inactive", "")).lower() in ("true", "1", "yes")
+        with self._lock:
+            ds = [d for d in g.decisions if everything or d.status == "active"]
+        if not ds:
+            return "群组档案里还没有决定。", False
+        return "\n".join(format_decision(d, self._name, self._email) for d in ds), False
+
+    def _tool_publish_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        """发布当前工作目录里的一个文件（不是 group/ 或 agent-home/ 下的）。"""
+        g = self._require_group(ctx, delegate=False)
+        holder = self._holder(ctx.kind, ctx.id)
+        root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
+        rel = str(args.get("path", "")).strip()
+        src = (root / rel).resolve()
+        top = Path(rel).parts[0] if Path(rel).parts else ""
+        if not rel or root.resolve() not in src.parents or top in (GROUP_FILES, HOME_DIR) or not src.is_file():
+            return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/ 与 {HOME_DIR}/）", True
+        name = self.publish_file(g.id, str(args.get("name", "")).strip() or src.name, src.read_bytes(),
+                                 agent_id=ctx.agent_id, source=ctx.id)
+        return f"已发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。", False
+
+    def _tool_propose_brief(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_group(ctx, delegate=False)
+        self.suggest_brief(g.id, str(args.get("text", "")), str(args.get("reason", "")), agent_id=ctx.agent_id)
+        return "已提交 brief 修改建议，主持人决定前 brief 不变。", False
 
     def _tool_list_members(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_group(ctx)
@@ -983,8 +1405,9 @@ class Network:
             if a is None or a.id == ctx.agent_id:
                 continue
             note = "；已在本委托链上，不能再委托" if a.id in ctx.chain else ""
+            whose = f" | 属于 {self._email(a.owner_id)}" if g.kind == "joint" else ""
             lines.append(f"- {a.name}：{a.description} | 能力：{', '.join(a.capabilities)} | "
-                         f"自身权限：{', '.join(a.authority) or '无'} | {a.status}{note}")
+                         f"自身权限：{', '.join(a.authority) or '无'} | {a.status}{whose}{note}")
         if len(lines) == 1:
             lines.append("（没有其他成员）")
         lines.append(f"你当前的有效权限：{', '.join(ctx.authority)}；授予对方的权限只能是它的子集。")
@@ -1024,7 +1447,8 @@ class Network:
         task = Task(id=new_id("task"), conversation_id=ctx.conversation_id, group_id=g.id,
                     delegator_id=delegator.id, delegatee_id=target.id if target else None,
                     parent_task_id=parent_task_id, depth=ctx.depth + 1, delegation=delegation,
-                    effective_constraints=_dedup(ctx.constraints + delegation.constraints))
+                    effective_constraints=_dedup(ctx.constraints + delegation.constraints),
+                    owners=_dedup([o for o in (delegator.owner_id, target.owner_id if target else None) if o]))
 
         reason = None
         if target is None:
@@ -1051,6 +1475,9 @@ class Network:
         task.inbox.append({"kind": "start"})
         with self._lock:
             shared, denied_keys = self._share_into(ctx, task.id, delegation.share)
+            req = self._open_request_of(ctx) if ctx.kind == "seat" else None
+            if req is not None:  # 为用户任务发起的委托：看板上不单独成卡，只在任务详情里展示
+                req.task_ids.append(task.id)
         self._save_task(task, created=True)
         if shared or denied_keys:
             self.bus.emit("knowledge.shared", task_id=task.id, from_agent=delegator.id, to_agent=target.id,
@@ -1136,8 +1563,8 @@ class Network:
             if tag not in item.visible_to:
                 item.visible_to.append(tag)
             self.store.save()
-        self.bus.emit("knowledge.shared", task_id=None, from_agent=ctx.agent_id, to_agent=target.id,
-                      keys=[key], denied=[])
+        self.bus.emit("knowledge.shared", task_id=None, context_id=ctx.id, from_agent=ctx.agent_id,
+                      to_agent=target.id, keys=[key], denied=[])
         return f"已把 `{key}` 共享给 {target.name}：它在本对话后续收到的委托中可见。", False
 
     # ================= 提议新建 Agent（Agent 起草，人提交） =================
@@ -1163,7 +1590,8 @@ class Network:
             p = Proposal(id=new_id("prop"), proposer_id=ctx.agent_id, context_kind=ctx.kind, context_id=ctx.id,
                          conversation_id=ctx.conversation_id, group_id=g.id, name=name, description=description,
                          capabilities=_clean_caps(_as_list(args.get("capabilities"))), authority=_dedup(authority),
-                         max_authority=list(ctx.authority), reason=reason)
+                         max_authority=list(ctx.authority), reason=reason,
+                         owner_id=self._agent(ctx.agent_id).owner_id)
             self.store.proposals[p.id] = p
             self.store.save()
         self.bus.emit("proposal.updated", proposal=p.to_dict())
@@ -1173,8 +1601,8 @@ class Network:
     def approve_proposal(self, proposal_id: str, name: str | None = None, description: str | None = None,
                          capabilities: list[str] | None = None, authority: list[str] | None = None,
                          model: dict[str, str] | None = None, note: str = "", actor: str | None = None) -> AgentNode:
-        """对话所有者批准提议：可以修改字段，但权限不能超出提议者提议时的有效权限；
-        以批准人的身份创建（新 Agent 归批准人、默认私有）并加入群组。"""
+        """提议者 Agent 的所有者批准提议：可以修改字段，但权限不能超出提议者提议时的有效权限；
+        以批准人的身份创建（新 Agent 归批准人）并作为他的成员加入群组。"""
         with self._lock:
             p = self._proposal(proposal_id, actor)
             if p.status != "pending":
@@ -1189,7 +1617,7 @@ class Network:
             a = self._new_agent(name or p.name, description or p.description,
                                 capabilities if capabilities is not None else p.capabilities, auth,
                                 chat_enabled=True, model=model, created_by=f"proposal:{p.id}",
-                                owner_id=actor or g.owner_id)
+                                owner_id=actor or p.owner_id or g.owner_id)
             g.member_ids.append(a.id)
             p.status, p.agent_id, p.note, p.decided_at = "approved", a.id, note.strip(), time.time()
             self.store.save()
@@ -1220,12 +1648,151 @@ class Network:
         self._refresh_conv(p.conversation_id)
 
     def _proposal(self, proposal_id: str, actor: str | None = None) -> Proposal:
-        """提议归它所在对话的所有者审核。"""
+        """提议归提议者 Agent 的所有者审核（旧数据没有记录时归对话所有者）。"""
         p = self.store.proposals.get(proposal_id)
-        conv = self.store.conversations.get(p.conversation_id) if p else None
-        self._check(p is not None and (actor is None or conv is None or self.can_see_conv(conv, actor)),
-                    f"proposal {proposal_id}")
+        self._check(p is not None and self.can_review_proposal(p, actor), f"proposal {proposal_id}")
         return p
+
+    def can_review_proposal(self, p: Proposal, actor: str | None) -> bool:
+        if actor is None:
+            return True
+        if p.owner_id:
+            return p.owner_id == actor
+        conv = self.store.conversations.get(p.conversation_id)
+        return conv is None or conv.owner_id in (None, actor)
+
+    # ================= 用户任务（看板） =================
+    # 看板只展示人交代的事。不是每条消息都算：闲聊、问答不算，有交付目标的才算——由接任务的 Agent 判断，
+    # 用 open_request 登记（来源消息与下发人由网络从这一轮送达的消息里认定），做完用 deliver_request 交付，
+    # 下发人验收或退回。为它发起的委托只在任务详情里展示，不单独成卡。
+    def _open_request_of(self, ctx: ExecContext) -> UserRequest | None:
+        """调用方持有锁。这个席位当前在做的用户任务（最近登记、还没交付的那个）。"""
+        agent_id = ctx.agent_id
+        mine = [r for r in self.store.requests.values() if r.conversation_id == ctx.conversation_id
+                and r.agent_id == agent_id and r.status == "in_progress"]
+        return max(mine, key=lambda r: r.created_at) if mine else None
+
+    def _tool_open_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        title = str(args.get("title", "")).strip()
+        outcome = str(args.get("expected_outcome", "")).strip()
+        if not title or not outcome:
+            return "title 与 expected_outcome 不能为空：说不出要交付什么，就不是任务，直接回答即可", True
+        with self._lock:
+            conv = self.store.conversations.get(ctx.conversation_id)
+            msgs = {m.id: m for m in conv.messages} if conv else {}
+            sources = [msgs[i] for i in ctx.addressed if i in msgs]
+            if not sources:
+                return "这一轮没有人交代给你的新消息：只有人交代的事才能登记为任务", True
+            src = sources[-1]
+            dup = next((r for r in self.store.requests.values()
+                        if r.message_id == src.id and r.agent_id == ctx.agent_id), None)
+            if dup is not None:
+                return f"这条消息已经登记为任务 {dup.id}", True
+            r = UserRequest(id=new_id("req"), conversation_id=ctx.conversation_id, agent_id=ctx.agent_id,
+                            requester_id=src.user_id or (conv.owner_id if conv else None), message_id=src.id,
+                            title=title[:120], expected_outcome=outcome[:1000])
+            self.store.requests[r.id] = r
+            self.store.save()
+        self._request_event(r, f"{self._name(r.agent_id)} 接下了「{r.title}」")
+        return f"已登记任务 {r.id}。做完后用 deliver_request 交付（request_id: {r.id}），由下发的人验收。", False
+
+    def _tool_deliver_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        rid = str(args.get("request_id", "")).strip()
+        summary = str(args.get("summary", "")).strip()
+        with self._lock:
+            r = self.store.requests.get(rid)
+            if r is None or r.agent_id != ctx.agent_id or r.conversation_id != ctx.conversation_id:
+                return f"任务 {rid} 不存在，或不是你在这个对话里接下的", True
+            if r.status != "in_progress":
+                return f"任务 {rid} 当前是 {r.status}，只有进行中的任务可以交付", True
+            if not summary:
+                return "summary 不能为空：写清交付了什么、在哪里（文件、结论），下发的人据此验收", True
+            running = [t for t in r.task_ids if (t2 := self.store.tasks.get(t)) and t2.status == TaskStatus.RUNNING]
+            if running:
+                return f"还有委托没有回报（{', '.join(running)}）：等它们交付或失败后再交付", True
+            r.status, r.summary, r.delivered_at = "in_review", summary[:4000], time.time()
+            self.store.save()
+        self._request_event(r, f"{self._name(r.agent_id)} 完成了「{r.title}」，等{self._who(r.requester_id)}验收")
+        return f"已交付 {r.id}，等下发的人验收；要修改会通知你。", False
+
+    def _request_event(self, r: UserRequest, text: str | None = None) -> None:
+        """调用方不持有锁。任务状态变化写进对话（公开的进展），推送给看板。"""
+        conv = self.store.conversations.get(r.conversation_id)
+        if conv is not None and text:
+            self._append(conv, Message(id=new_id("msg"), role="event", agent_id=r.agent_id, text=text))
+        self.bus.emit("request.updated", conversation_id=r.conversation_id, request=r.to_dict())
+
+    def _who(self, user_id: str | None) -> str:
+        """事件文本里的人：有邮箱写邮箱（两侧留空格），没有就写“下发的人”。"""
+        return f" {self._email(user_id)} " if user_id in self.store.users else "下发的人"
+
+    def can_see_request(self, r: UserRequest, actor: str | None) -> bool:
+        """看板：下发的人和接任务的 Agent 的所有者（内部群组、私聊里是同一个人）。"""
+        if actor is None:
+            return True
+        a = self.store.agents.get(r.agent_id)
+        conv = self.store.conversations.get(r.conversation_id)
+        return conv is not None and self.can_see_conv(conv, actor) and (
+            r.requester_id == actor or (a is not None and a.owner_id == actor))
+
+    def _request(self, request_id: str, actor: str | None) -> UserRequest:
+        r = self.store.requests.get(request_id)
+        self._check(r is not None and self.can_see_request(r, actor), f"request {request_id}")
+        return r
+
+    def review_request(self, request_id: str, accept: bool, feedback: str = "", actor: str | None = None) -> UserRequest:
+        """下发的人验收：接受，或写明要改什么退回（接任务的 Agent 在原会话里返工后重新交付）。"""
+        feedback = feedback.strip()
+        with self._lock:
+            r = self._request(request_id, actor)
+            if actor is not None and r.requester_id not in (None, actor):
+                raise NetworkError("只有下发这个任务的人能验收")
+            if r.status != "in_review":
+                raise NetworkError("只有已交付（待验收）的任务可以验收")
+            if accept:
+                r.status, r.finished_at = "completed", time.time()
+            else:
+                if not feedback:
+                    raise NetworkError("退回时写明要改什么")
+                r.status, r.revisions, r.feedback, r.delivered_at = "in_progress", r.revisions + 1, feedback[:2000], None
+                seat = self._seat(self._conv(r.conversation_id), r.agent_id)
+                if seat.blocked:
+                    self._unblock(seat)
+                seat.inbox.append({"kind": "request_changes", "request_id": r.id})
+            self.store.save()
+        who = self._who(actor or r.requester_id)
+        self._request_event(r, f"{who}验收了「{r.title}」" if accept else f"{who}退回了「{r.title}」：{_short(feedback, 80)}")
+        if not accept:
+            self._kick("seat", seat_id(r.conversation_id, r.agent_id))
+        return r
+
+    def cancel_request(self, request_id: str, actor: str | None = None) -> UserRequest:
+        with self._lock:
+            r = self._request(request_id, actor)
+            if actor is not None and r.requester_id not in (None, actor):
+                raise NetworkError("只有下发这个任务的人能取消")
+            if r.status in ("completed", "cancelled"):
+                raise NetworkError("任务已经结束")
+            r.status, r.finished_at = "cancelled", time.time()
+            self.store.save()
+        self._request_event(r, f"{self._who(actor or r.requester_id)}取消了「{r.title}」")
+        return r
+
+    def request_detail(self, request_id: str, actor: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            r = self._request(request_id, actor)
+            conv = self.store.conversations.get(r.conversation_id)
+            src = next((m for m in conv.messages if m.id == r.message_id), None) if conv else None
+            return {**self.request_card(r), "message": src.text if src else "",
+                    "tasks": [self.store.tasks[t].to_dict() for t in r.task_ids
+                              if t in self.store.tasks and self.can_see_task(self.store.tasks[t], actor)]}
+
+    def request_card(self, r: UserRequest) -> dict[str, Any]:
+        """调用方持有锁。"""
+        conv = self.store.conversations.get(r.conversation_id)
+        return {**r.to_dict(), "agent_name": self._name(r.agent_id), "requester": self._email(r.requester_id),
+                "conversation_title": conv.title if conv else "", "conversation_kind": conv.kind if conv else "",
+                "delegations": len(r.task_ids)}
 
     # ================= 人：续接 =================
     def resume_conversation(self, conv_id: str, agent_id: str | None = None, note: str = "",
@@ -1234,7 +1801,8 @@ class Network:
         不指定 agent_id 时续接这个对话里所有中断的席位。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
-            seats = [s for a, s in conv.seats.items() if s.blocked and (agent_id is None or a == agent_id)]
+            seats = [s for a, s in conv.seats.items() if s.blocked and (agent_id is None or a == agent_id)
+                     and (actor is None or (self.store.agents.get(a) and self.store.agents[a].owner_id in (None, actor)))]
             if not seats:
                 raise NetworkError("对话没有中断，不需要继续")
             for s in seats:
@@ -1251,8 +1819,11 @@ class Network:
         seat.blocked = None
 
     def retry_task(self, task_id: str, note: str = "", actor: str | None = None) -> Task:
-        """对话所有者续接一个失败的委托（人的权限在所有 Agent 之上）。"""
+        """委托方 Agent 的所有者续接一个失败的委托（人的权限在所有 Agent 之上）。"""
         t = self.visible_task(task_id, actor)
+        delegator = self.store.agents.get(t.delegator_id)
+        if actor is not None and delegator is not None and delegator.owner_id not in (None, actor):
+            raise NetworkError("只有委托方 Agent 的所有者能续接这个委托")
         if t.status != TaskStatus.FAILED:
             raise NetworkError(f"任务 {t.id} 当前是 {t.status.value}，只有 failed 的任务可以续接")
         reason = self._resume_task(t, note)
@@ -1334,11 +1905,8 @@ class Network:
         return c
 
     def _tasks_of(self, actor: str | None) -> list[Task]:
-        """调用方持有锁。用户能看到的委托：发生在自己对话里的。"""
-        if actor is None:
-            return list(self.store.tasks.values())
-        mine = {c.id for c in self.store.conversations.values() if self.can_see_conv(c, actor)}
-        return [t for t in self.store.tasks.values() if t.conversation_id in mine]
+        """调用方持有锁。用户能看到的委托：两端有自己的 Agent。"""
+        return [t for t in self.store.tasks.values() if self.can_see_task(t, actor)]
 
     def relations(self, actor: str | None = None) -> list[dict[str, Any]]:
         """长期关系：按 (委托方, 执行方) 聚合所有委托。"""
@@ -1360,64 +1928,100 @@ class Network:
     def agent_view(self, a: AgentNode, actor: str | None) -> dict[str, Any]:
         d = a.to_dict()
         d["mine"] = self.can_edit_agent(a, actor)
-        owner = self.store.users.get(a.owner_id or "")
-        d["owner_email"] = owner.email if owner else None
-        if not d["mine"]:
-            d.pop("shared_with")  # 名单只给所有者看
+        d["owner_email"] = self._email(a.owner_id) if a.owner_id else None
+        if not d["mine"]:  # 联合群组里别人的 Agent：只给名片（名称、描述、能力、自身权限）
+            d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
+                                   "chat_enabled")}
         return d
 
     def snapshot(self, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
-            agents = [a for a in self.store.agents.values() if self.can_use_agent(a, actor)]
+            agents = [a for a in self.store.agents.values() if self.can_see_agent(a, actor)]
             groups = [g for g in self.store.groups.values() if self.can_see_group(g, actor)]
             convs = [c for c in self.store.conversations.values() if self.can_see_conv(c, actor)]
             tasks = self._tasks_of(actor)
             conv_ids = {c.id for c in convs}
             return {
                 "agents": [self.agent_view(a, actor) for a in agents],
-                "groups": [g.to_dict() for g in groups],
-                "conversations": [c.to_dict(full=False) for c in sorted(convs, key=lambda c: -c.updated_at)],
+                "groups": [self.group_brief(g, actor) for g in groups],
+                "conversations": [self.conversation_view(c, actor) for c in sorted(convs, key=lambda c: -c.updated_at)],
                 "relations": self.relations(actor),
                 "active_tasks": [t.to_dict() for t in tasks if t.status in (TaskStatus.RUNNING, TaskStatus.IN_REVIEW)],
                 "proposals": [p.to_dict() for p in sorted(self.store.proposals.values(), key=lambda p: -p.created_at)
-                              if actor is None or p.conversation_id in conv_ids],
+                              if p.conversation_id in conv_ids and self.can_review_proposal(p, actor)],
+                "invitations": [self.invitation_view(g) for g in self.store.groups.values()
+                                if actor is not None and actor in g.invited],
                 "approvals": [ap.to_dict() for ap in self.pending_approvals(actor)],
                 "authorities": AUTHORITIES,
                 "seq": self.bus.last_seq,
             }
 
     def board(self, actor: str | None = None) -> dict[str, Any]:
-        """任务看板（参照 Raft task board）：我对话里的全部委托，按状态分列；加上“待我处理”。"""
+        """任务看板（参照 Raft task board）：人交代给 Agent 的任务，按状态分列；加上“待我处理”。
+        Agent 之间的委托不单独成卡，只在任务详情里展示。"""
         with self._lock:
-            tasks = sorted(self._tasks_of(actor), key=lambda t: -t.created_at)
-            convs = {c.id: c for c in self.store.conversations.values()}
-            cards = []
-            for t in tasks:
-                d = t.to_dict()
-                conv = convs.get(t.conversation_id)
-                d["conversation_title"] = conv.title if conv else ""
-                d["delegator_name"], d["delegatee_name"] = self._name(t.delegator_id), self._name(t.delegatee_id)
-                cards.append(d)
-            mine = {c.id for c in convs.values() if self.can_see_conv(c, actor)}
+            reqs = sorted((r for r in self.store.requests.values() if self.can_see_request(r, actor)),
+                          key=lambda r: -r.created_at)
+            cards = [self.request_card(r) for r in reqs]
             proposals = [p.to_dict() for p in self.store.proposals.values()
-                         if p.status == "pending" and (actor is None or p.conversation_id in mine)]
+                         if p.status == "pending" and self.can_review_proposal(p, actor)]
             busy = {a.id: self.ledger(a.id) for a in self.store.agents.values()
                     if a.active and self.can_use_agent(a, actor)}
-        return {"tasks": cards, "approvals": [a.to_dict() for a in self.pending_approvals(actor)],
-                "proposals": proposals, "ledger": busy}
+            invitations = [self.invitation_view(g) for g in self.store.groups.values()
+                           if actor is not None and actor in g.invited]
+            suggestions = [{"group_id": g.id, "group_name": g.name, **asdict(x)} for g in self.store.groups.values()
+                           if g.owner_id in (None, actor) or actor is None
+                           for x in g.suggestions if x.status == "pending"]
+        return {"requests": cards, "approvals": [a.to_dict() for a in self.pending_approvals(actor)],
+                "proposals": proposals, "ledger": busy, "invitations": invitations, "suggestions": suggestions}
 
     def conversation_detail(self, conv_id: str, actor: str | None = None) -> dict[str, Any]:
+        """联合群组里按人过滤：委托只给两端所有者；过程、唤醒摘要、失败说明、审批只给 Agent 的所有者。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
-            tasks = [t.to_dict() for t in self.store.tasks.values() if t.conversation_id == conv_id]
-            proposals = [p.to_dict() for p in self.store.proposals.values() if p.conversation_id == conv_id]
+            tasks = [t.to_dict() for t in self.store.tasks.values()
+                     if t.conversation_id == conv_id and self.can_see_task(t, actor)]
+            proposals = [p.to_dict() for p in self.store.proposals.values()
+                         if p.conversation_id == conv_id and self.can_review_proposal(p, actor)]
+            mine = {a for a in conv.seats if self.store.agents.get(a) and self.can_use_agent(self.store.agents[a], actor)}
             live = {a: list(self._live.get(seat_id(conv_id, a), [])) for a in conv.seats
-                    if seat_id(conv_id, a) in self._running}
+                    if seat_id(conv_id, a) in self._running and a in mine}
+            running = [a for a in conv.seats if seat_id(conv_id, a) in self._running]
             approvals = [{**a.to_dict(), "can_decide": actor is None or a.owner_id in (None, actor)}
-                         for a in self.store.approvals.values() if a.conversation_id == conv_id and a.status == "pending"]
-            return {**conv.to_dict(full=False), "messages": [_msg(m) for m in conv.messages],
+                         for a in self.store.approvals.values() if a.conversation_id == conv_id and a.status == "pending"
+                         and (actor is None or a.owner_id in (None, actor))]
+            d = self.conversation_view(conv, actor)
+            g = self.store.groups.get(conv.group_id or "")
+            return {**d, "messages": [self.message_view(m, actor) for m in conv.messages
+                                      if self.can_see_message(m, actor)],
                     "tasks": sorted(tasks, key=lambda t: t["created_at"]), "proposals": proposals,
-                    "approvals": approvals, "members": self._members(conv), "live": live}
+                    "requests": [self.request_card(r) for r in self.store.requests.values()
+                                 if r.conversation_id == conv_id and self.can_see_request(r, actor)],
+                    "approvals": approvals, "members": self._members(conv), "live": live, "running": running,
+                    "group_kind": g.kind if g else None, "is_host": g is None or actor is None or g.owner_id in (None, actor),
+                    "senders": {u: self._email(u) for u in {m.user_id for m in conv.messages if m.user_id}}}
+
+    def conversation_view(self, c: Conversation, actor: str | None) -> dict[str, Any]:
+        """调用方持有锁。列表摘要：联合群组里只带自己 Agent 的席位状态，最后一条消息按可见性取。"""
+        d = c.to_dict(full=False)
+        if actor is None:
+            return d
+        mine = {a for a in c.seats if (ag := self.store.agents.get(a)) is not None and self.can_use_agent(ag, actor)}
+        d["seats"] = {k: v for k, v in d["seats"].items() if k in mine}
+        d["blocked"] = any(s.blocked for a, s in c.seats.items() if a in mine)
+        last = next((m for m in reversed(c.messages) if m.role != "event" and self.can_see_message(m, actor)), None)
+        d["last_message"] = last.text[:120] if last else ""
+        d["message_count"] = sum(1 for m in c.messages if self.can_see_message(m, actor))
+        return d
+
+    def message_view(self, m: Message, actor: str | None) -> dict[str, Any]:
+        d = _msg(m)
+        if actor is not None and m.private_to and actor not in m.private_to:
+            d["steps"], d["wake"] = [], []
+            d["task_ids"] = [t for t in m.task_ids if t in self.store.tasks and self.can_see_task(self.store.tasks[t], actor)]
+        d.pop("audience", None)
+        d.pop("private_to", None)
+        return d
 
     def _members(self, conv: Conversation) -> list[str]:
         """调用方持有锁。可以 @ 的成员：群聊是群组成员，私聊是对方。"""
@@ -1440,32 +2044,86 @@ class Network:
 
     # ================= 事件可见性 =================
     def event_visible(self, ev_type: str, data: dict[str, Any], actor: str | None) -> bool:
-        """SSE 推送前按用户过滤：不把别人的对话、委托、审批过程推给你。"""
+        return self.event_view(ev_type, data, actor) is not None
+
+    def event_view(self, ev_type: str, data: dict[str, Any], actor: str | None) -> dict[str, Any] | None:
+        """SSE 推送前按用户过滤（不变量 13）：返回给这个用户看的事件数据，None 表示不推送。
+        联合群组里：委托事件只给两端所有者；运行过程只给 Agent 的所有者；消息去掉不给他看的过程。"""
         if actor is None:
-            return True
+            return data
         with self._lock:
-            conv_id = data.get("conversation_id") or (data.get("conversation") or {}).get("id") \
-                or (data.get("task") or {}).get("conversation_id") or (data.get("proposal") or {}).get("conversation_id")
-            if conv_id is None and data.get("task_id") in self.store.tasks:
-                conv_id = self.store.tasks[data["task_id"]].conversation_id
+            if ev_type == "group.invited":
+                return data if data.get("user_id") == actor else None
+            if ev_type == "group.left":  # 退出的人据此从界面上移除群组
+                g = self.store.groups.get(data.get("group_id", ""))
+                return data if data.get("user_id") == actor or (g and self.can_see_group(g, actor)) else None
+            if ev_type == "approval.updated":
+                return data if (data.get("approval") or {}).get("owner_id") in (None, actor) else None
+            if ev_type == "request.updated":
+                r = self.store.requests.get((data.get("request") or {}).get("id", ""))
+                return data if r is None or self.can_see_request(r, actor) else None
+            if ev_type == "proposal.updated":
+                p = self.store.proposals.get((data.get("proposal") or {}).get("id", ""))
+                return data if p is None or self.can_review_proposal(p, actor) else None
+            task_id = (data.get("task") or {}).get("id") or data.get("task_id")
             ctx_id = data.get("context_id")
-            if conv_id is None and ctx_id in self.store.tasks:
-                conv_id = self.store.tasks[ctx_id].conversation_id
-            elif conv_id is None and isinstance(ctx_id, str) and "/" in ctx_id:  # 席位：对话/Agent
-                conv_id = ctx_id.split("/", 1)[0]
+            if task_id is None and ctx_id in self.store.tasks:
+                task_id = ctx_id
+            if task_id is not None and task_id in self.store.tasks:
+                t = self.store.tasks[task_id]
+                if not self.can_see_task(t, actor):
+                    return None
+                if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry"):  # 执行过程：执行方所有者
+                    a = self.store.agents.get(t.delegatee_id or "")
+                    return data if a is None or self.can_use_agent(a, actor) else None
+                return data
+            if isinstance(ctx_id, str) and "/" in ctx_id:  # 席位的运行过程：只给 Agent 的所有者
+                conv_id, _, agent_id = ctx_id.partition("/")
+                c = self.store.conversations.get(conv_id)
+                a = self.store.agents.get(agent_id)
+                if c is not None and not self.can_see_conv(c, actor):
+                    return None
+                return data if a is None or self.can_use_agent(a, actor) else None
+            conv_id = data.get("conversation_id") or (data.get("conversation") or {}).get("id")
             if conv_id is not None:
                 c = self.store.conversations.get(conv_id)
-                return c is None or self.can_see_conv(c, actor)  # 删除事件里对话已不在：不泄露内容，放行
-            if ev_type == "approval.updated":
-                return (data.get("approval") or {}).get("owner_id") in (None, actor)
+                if c is None:
+                    return data  # 删除事件里对话已不在：不泄露内容，放行
+                if not self.can_see_conv(c, actor):
+                    return None
+                if ev_type == "message.added":
+                    m = next((x for x in reversed(c.messages) if x.id == data["message"]["id"]), None)
+                    if m is not None:
+                        return {**data, "message": self.message_view(m, actor)} if self.can_see_message(m, actor) \
+                            else None
+                if ev_type == "conversation.updated":
+                    return {**data, "conversation": self.conversation_view(c, actor)}
+                return data
             if "group" in data:
                 g = self.store.groups.get(data["group"]["id"])
-                return g is None or self.can_see_group(g, actor)
+                if g is None:
+                    return data
+                return {**data, "group": self.group_brief(g, actor)} if self.can_see_group(g, actor) else None
+            if ev_type == "group.deleted":
+                return data
             aid = (data.get("agent") or {}).get("id") or data.get("agent_id")
             if aid is not None:
                 a = self.store.agents.get(aid)
-                return a is None or self.can_use_agent(a, actor)
-            return True
+                if a is None:
+                    return data
+                if ev_type == "agent.updated" and self.can_see_agent(a, actor):
+                    return {**data, "agent": self.agent_view(a, actor)}
+                return data if self.can_use_agent(a, actor) else None
+            return data
+
+    def group_brief(self, g: Group, actor: str | None) -> dict[str, Any]:
+        """调用方持有锁。列表与事件里的群组：邀请名单只给主持人。"""
+        d = g.to_dict()
+        d["host_email"] = self._email(g.owner_id) if g.owner_id else None
+        if actor is not None and g.owner_id not in (None, actor):
+            d.pop("invited")
+            d["suggestions"] = [x for x in d["suggestions"] if x["by_user"] == actor]
+        return d
 
 
 # 网络工具名 → 处理函数。mcp_server.TOOLS（schema）、这里（实现）、protocol（提示词）三处由测试保证一致。
@@ -1478,11 +2136,28 @@ TOOL_HANDLERS = {
     "request_changes": Network._tool_request_changes,
     "retry_task": Network._tool_retry,
     "propose_agent": Network._tool_propose_agent,
+    "record_decision": Network._tool_record_decision,
+    "list_decisions": Network._tool_list_decisions,
+    "publish_file": Network._tool_publish_file,
+    "propose_brief": Network._tool_propose_brief,
+    "open_request": Network._tool_open_request,
+    "deliver_request": Network._tool_deliver_request,
 }
 
 
+def network_tools_for(kind: str, in_group: bool, can_delegate: bool) -> list[str]:
+    """一次执行能用的网络工具：席位（群聊、私聊）有用户任务工具；群组里有档案工具；有 delegate 时再加协作工具。"""
+    def ok(n: str) -> bool:
+        if n in REQUEST_TOOLS:
+            return kind == "seat"
+        if n in ARCHIVE_TOOLS:
+            return in_group
+        return can_delegate
+    return [n for n in TOOL_HANDLERS if ok(n)]
 
-VISIBILITIES = ("private", "public", "shared")
+
+
+UPDATABLE_AGENT_FIELDS = ("name", "description", "capabilities", "authority", "chat_enabled")
 APPROVAL_CN = {"allowed": "批准", "rejected": "拒绝", "cancelled": "作废", "pending": "待审批"}
 
 
@@ -1492,10 +2167,13 @@ class HomeMount:
     home: dict[str, tuple[int, int]]   # 挂载时 home 里的版本（写回时据此判断期间有没有别的运行改过）
 
 
-def _clean_visibility(v: str) -> str:
-    if v not in VISIBILITIES:
-        raise NetworkError(f"未知可见性：{v}（可选 {' / '.join(VISIBILITIES)}）")
-    return v
+def _safe_filename(name: str) -> str:
+    """群组档案里的文件名：只取最后一段，去掉路径分隔与隐藏前缀，防止写到档案目录以外。"""
+    base = Path(str(name or "").replace("\\", "/")).name.strip().lstrip(".")
+    clean = "".join(c if c.isalnum() or c in "-_. " or ord(c) > 127 else "_" for c in base)[:120].strip()
+    if not clean:
+        raise NetworkError("文件名无效")
+    return clean
 
 
 def _fingerprint(root: Path) -> dict[str, tuple[int, int]]:
@@ -1520,7 +2198,8 @@ def _violations(tool_calls: list[dict[str, Any]], authority: list[str]) -> list[
     out = []
     for c in tool_calls:
         tool = str(c.get("tool") or "")
-        if tool.startswith(MCP_PREFIX) and "delegate" not in authority:
+        if tool.startswith(MCP_PREFIX) and "delegate" not in authority \
+                and tool.removeprefix(MCP_PREFIX) not in ARCHIVE_TOOLS + REQUEST_TOOLS:
             out.append(f"无 delegate 权限却调用了 {tool}")
         else:
             need = TOOL_AUTHORITY.get(tool)

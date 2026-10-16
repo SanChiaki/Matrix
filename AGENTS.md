@@ -11,21 +11,23 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - 语言 / 依赖：Python ≥ 3.14，FastAPI + uvicorn，包管理用 `uv`，测试用 pytest。
 - 运行时：默认以 DeepSeek Harness（DSH）headless 为 Agent 运行时；`scripted` 运行时是确定性脚本，用于测试与离线演练。
-- 状态：全部持久化在 `--data` 目录（默认 `.agentnet/`，已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`。
+- 状态：全部持久化在 `--data` 目录（默认 `.agentnet/`，已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个群组有档案目录 `groups/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何项目仓库。
 
 ### 领域模型（`agentnet/models.py`）
 
 | 概念 | 含义 |
 | --- | --- |
 | User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据 |
-| Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（provider / model / reasoning_effort，空则用运行时默认）；**所有者**与可见性（private / public / shared + `shared_with`）。系统不管理注入 Agent 上下文的经验 |
-| Group（群组） | 成员集合，**没有主 Agent**，只对所有者可见。委托只能发给同组成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准 |
-| Conversation | 参照 Raft 的频道与 DM：`group`（群聊）**每个群组一个**，建群组即有，人在消息里 **@ 谁，谁接任务**；`dm`（私聊）**每个（用户, Agent）一个**，第一次打开时创建，不用 @，不能委托。群组 / Agent 删除后对应对话归档为只读 |
+| Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（provider / model / reasoning_effort，空则用运行时默认）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
+| Group（群组） | 成员集合，**没有主 Agent**。`internal`（内部群组）：只有所有者，成员只能是所有者自己的 Agent。`joint`（联合群组，参照 Raft 的 joint channel）：主持人（`owner_id`）邀请用户，接受后成为参与者（`participants`），每人只能加入自己的 Agent。创建后不能转换类型。委托只能发给同组成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准。每个群组带一份**群组档案**（见下） |
+| Conversation | 参照 Raft 的频道与 DM：`group`（群聊）**每个群组一个**，建群组即有，人在消息里 **@ 谁，谁接任务**；`dm`（私聊）**每个 Agent 一个**，只有它的所有者能开，第一次打开时创建，不用 @，不能委托。群组 / Agent 删除后对应对话归档为只读。消息的 `audience` 限定谁看得到这条（如席位失败说明、外溢申请），`private_to` 限定谁看得到它的过程（`steps` / `wake`） |
 | Approval | Agent 想在工作目录以外操作时向**它的所有者**发起的一次性申请（pending / allowed / rejected / cancelled） |
 | Seat（席位） | 一个 Agent 在一个对话里的执行上下文，id 为 `对话/Agent`：独立 DSH 会话、收件箱、工作目录 `conversations/<conv>/<agent>/`。第一次被 @ 时创建 |
-| Task（委托） | Agent ↔ Agent 的一次授权：mission / authority / constraints / expected_outcome / share；带收件箱 |
+| Task（委托） | Agent ↔ Agent 的一次授权：mission / authority / constraints / expected_outcome / share；带收件箱。`owners` 是两端 Agent 的所有者，只有他们看得到这个委托 |
 | KnowledgeItem | 任务结果沉淀为知识，key 形如 `<task_id>:result` |
-| Proposal | Agent 提议新建的 Agent，等人审核；`max_authority` 记录提议者当时的有效权限 |
+| UserRequest（用户任务） | 人交代给 Agent 的一件**有交付目标**的事，看板上的一张卡。由接任务的 Agent 判断并登记（`open_request`）：闲聊、问答不算。来源消息与下发人由网络从这一轮送达的 @ 它的消息里认定，不信任模型自报。`in_progress → in_review → completed`（或 `cancelled`）；交付（`deliver_request`）前它为此发起的委托必须都有结果；下发人验收或退回（原会话返工）。为它发起的委托记在 `task_ids`，只在任务详情里展示 |
+| Proposal | Agent 提议新建的 Agent，由**提议者 Agent 的所有者**审核（`owner_id`），新 Agent 归他；`max_authority` 记录提议者当时的有效权限 |
+| 群组档案 | 归群组所有：`brief`（目标、范围、成功标准、当前阶段，≤4000 字，**每轮推送**）、`decisions`（有效 / 被取代 / 撤销，推送最近的有效决定）、文件（`groups/<id>/files/`，每轮只读拷进工作目录的 `group/`，运行后丢弃改动）、`projects`（项目引用，只是指针，不授予访问权限）、`suggestions`（brief 修改建议）。`archive_rev` 每变一次 +1，席位 / 任务只在版本变化时重新推送 |
 
 ### 群聊：被 @ 的成员接任务
 
@@ -40,6 +42,38 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - 群聊、私聊不能删除，只能清空记录（`/clear`，席位会话从头开始，委托与知识不受影响）；只有归档的对话可以删除。
 - 旧版对话（一个“主 Agent”）加载时迁移为只有这一个席位的群聊（原来在群组里）或私聊，沿用原会话与目录。
   旧版同一个群组 / Agent 有多个对话时，最近活跃的那个成为正式群聊 / 私聊，其余归档为只读（`Store._one_chat_each`）。
+- 旧版 public / shared Agent 加载时（`Store._one_trust_domain`）：别人和它的私聊归档为只读；内部群组里不属于群组所有者的 Agent
+  移出，群聊里记一条事件；已有委托与记录保留。
+
+### 联合群组：跨用户协作只走这里
+
+参照 Raft 的 joint channel：**Agent 不跨信任域，委托可以跨**。共享的是对话空间（群聊 + 群组档案），不共享 Agent。
+
+- 主持人按邮箱邀请（`POST /api/groups/<id>/invitations`），对方在“待我处理”里接受或拒绝。接受前只看得到群组名、描述、主持人。
+- 每个参与者只能加减自己的 Agent；主持人能移出任何 Agent 与参与者。参与者退出 / 被移出时他的 Agent 一并移出（已接下的任务照常完成），
+  之后看不到群组与群聊。主持人不能退出，只能删除。改名、brief、项目引用、清空群聊、删除群组只有主持人能做。
+- 任何参与者能 @ 任何成员。被 @ 的 Agent 仍**以它的所有者的名义、用所有者的资源**运行：外溢审批找它的所有者，提议由它的所有者审核。
+- 可见性（不变量 13）：人的消息、Agent 的最终回复、成员与档案事件对所有参与者可见；Agent 回复的过程（`steps` / `wake`）、运行中的进度、
+  席位失败说明、外溢申请只给这个 Agent 的所有者；委托（详情、看板、事件）只给两端 Agent 的所有者（`Task.owners`）。
+- 私有目录默认**不挂载**（其他参与方的消息是不可信内容，群聊是外泄通道），所有者可以按（Agent, 群组）打开（`home_enabled`）。
+- 工作台账在联合群组里只列同一群组的条目，其余只给数量（不变量 16）。
+
+### 群组档案：群组的上下文不放进项目仓库
+
+- Brief 与仍然有效的决定作为背景推送给席位与委托任务（执行者是群成员，档案是群组的公开内容，不违反不变量 9）；只在档案版本变化时重新推送。
+  提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作）。
+- 档案工具 `record_decision` / `list_decisions` / `publish_file` / `propose_brief` 群组成员都有，**不需要 `delegate`**；
+  用户任务工具 `open_request` / `deliver_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`AGENTNET_TOOLS`），网络端再按执行上下文检查一次。
+- `publish_file` 只能发布当前工作目录里的文件（不含 `group/` 与 `agent-home/`）；`group/` 是只读副本，运行里的改动丢弃。
+- Brief 主持人直接改，其他参与者与 Agent 用 `propose_brief` / “建议修改”提建议，主持人采纳或拒绝。brief 超过 14 天没确认，UI 提醒主持人复核。
+- 联合群组的档案对所有参与者可见：写进去就等于对所有参与方公开（工具描述与提示词里写明）。
+
+### 看板：只有人交代的任务
+
+- 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。
+- 群聊被 @、私聊消息都可以成为任务。是不是任务由接任务的 Agent 判断（提示词 `protocol._requests`），登记、交付、退回都写一条 `event` 进对话。
+- `open_request` / `deliver_request` 只有席位（群聊、私聊）有，不需要 `delegate`；委托任务里没有。
+- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部群组、私聊里是同一个人）。只有下发的人能验收、退回、取消。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
@@ -57,19 +91,19 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 | 文件 | 职责 |
 | --- | --- |
-| `agentnet/engine.py` | `Network` 核心：Agent/群组/对话管理、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测 |
+| `agentnet/engine.py` | `Network` 核心：Agent/群组/对话管理、联合群组的参与者与可见性、群组档案、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测 |
 | `agentnet/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
 | `agentnet/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
 | `agentnet/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
 | `agentnet/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
-| `agentnet/store.py` | 持久化与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
+| `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
 | `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `agentnet/static/` | 单页前端（原生 JS） |
-| `tests/` | `test_network.py`（引擎不变量）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、可见性、外溢审批、台账、看板） |
+| `tests/` | `test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 
 ### 常用命令
@@ -109,13 +143,18 @@ uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --ru
 11. **越权必留痕**：工具调用与权限不符时写入 `task.violations` 并发出 `authority.violation` 事件。
 12. **重启语义**：重启后对话回到 `idle`（席位收件箱保留）；运行中的任务标记为 `FAILED`，失败通知进委托方席位或上级任务的收件箱，可续接；
     待审批的外溢申请作废（那次运行已随重启结束）。
-13. **归属与可见性**：用户只看得到自己的群组 / 群聊 / 私聊、自己的与对自己开放（public / shared）的 Agent；委托、提议、知识、看板
-    随对话归属。只有所有者能改 Agent。无权限一律按“不存在”（404）处理。SSE 推送前按用户过滤（`Network.event_visible`）。
+13. **归属与可见性**：用户只看得到自己的内部群组、自己参与的联合群组及其群聊、自己的私聊、自己的 Agent（和同在联合群组里的别人的
+    Agent 的名片）。委托只给两端 Agent 的所有者；联合群组里过程、失败说明、外溢申请只给 Agent 的所有者；提议给提议者 Agent 的所有者；
+    知识随产生它的委托。无权限一律按“不存在”（404）处理。SSE 推送前按用户过滤并裁剪（`Network.event_view`）。
     引擎方法的 `actor=None` 表示系统内部或测试，不做检查；HTTP 层必须传入当前用户。
 14. **工作区外溢由所有者批准**：dsh 沙箱拒绝工作目录以外的写之后，模型可以申请升权重试一次；申请经 `dsh_plugins/approval.mjs`
     转到 `/internal/approval`，交给 **Agent 的所有者**（不是发起对话的人）。获批只对那一次调用生效；超时（`approval_timeout_s`）作废。
-15. **并发不抢占**：同一 Agent 可同时为多人、多个任务工作。每轮提示词带工作台账（`Network.ledger`）；私有目录写回时按文件三方合并，
+15. **并发不抢占**：同一 Agent 可同时做多件事（包括在联合群组里被别人 @）。每轮提示词带工作台账（`Network.ledger`）；私有目录写回时按文件三方合并，
     期间被别的运行改过的文件不覆盖，另存 `*.conflict-*` 副本。
+16. **Agent 不跨信任域**：Agent 只属于所有者，只有所有者能用它（私聊、拉进群组）、改它；它只代表所有者运行。跨用户协作只能通过联合群组。
+    联合群组里私有目录默认不挂载，工作台账不列出别处工作的细节。
+17. **群组档案只走网络**：写入只能经人的操作或档案工具，变更追加到 `groups/<id>/log.jsonl`，公开变化写进群聊；运行时拿到的是只读副本。
+    推送部分有预算（brief ≤4000 字，最近 12 条有效决定）。
 
 ### 二、工作方式
 
@@ -128,10 +167,11 @@ uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --ru
    `test_network_tools_defined_consistently` 会在漏改时变红。工具里的自由文本参数一律用 `string`，不要放进数组
    （DeepSeek 下数组参数里的长中文容易写成裸文本，导致 `MALFORMED_RESPONSE`）。
 6. 状态结构有变化时保证 `Store._load` 能读旧的 `state.json`（`store._known` 会丢弃未知字段、缺失字段取默认值）。
-7. 规则反复靠记忆失效时，把它挪进代码或测试（参照 Raft 的 structural enforcement）：一条规则如果违反了也没有任何信号，
+7. 每条网络不变量都要有测试，测试 docstring 写“不变量 N”；`test_invariants_have_tests` 在新增不变量却没写测试时变红。
+8. 规则反复靠记忆失效时，把它挪进代码或测试（参照 Raft 的 structural enforcement）：一条规则如果违反了也没有任何信号，
    就要么加一个能变红的检查，要么写明为什么接受这个风险。
-8. 不要提交 `.agentnet/` 下的运行数据；那里可能包含真实研究结果与会话记录。
-9. 依赖使用精确或下限版本，经 `uv add` 写入 `pyproject.toml` 与 `uv.lock`。
+9. 不要提交 `.agentnet/` 下的运行数据；那里可能包含真实研究结果与会话记录。
+10. 依赖使用精确或下限版本，经 `uv add` 写入 `pyproject.toml` 与 `uv.lock`。
 
 ### 三、安全边界
 
@@ -139,5 +179,9 @@ uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --ru
   这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
 - `/internal/tools`、`/internal/approval` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
+- **已知风险（接受）：沙箱只管写、不管读**。任何 Agent 的运行时都能读到整个 `--data` 目录（别人的私有目录、对话、任务、群组档案）。
+  信任域隔离（不变量 13、16）目前只在提示词、网络工具与 API 层成立，文件层挡不住；联合群组会放大这个风险（别的参与者可以 @ 诱导读取）。
+  接受理由：本地单机 Demo、所有用户在同一台机器上；范围：DSH 运行时；复查时机：接入第二个运行时或任何多机部署之前，必须先做读隔离。
+- 群组档案文件经 `/api/groups/<id>/files/<name>` 一律以附件下载（`nosniff`），不在本站点内渲染；文件名经 `_safe_filename` 只取最后一段。
 - 没有 `file.write` 的 Agent 运行在只读沙箱；有则只能写自己的工作目录。不要绕过 `build_patch_yaml` 生成的限制，
   也不要让审批应答者自动批准：工作目录以外的写只能由 Agent 所有者逐次批准。

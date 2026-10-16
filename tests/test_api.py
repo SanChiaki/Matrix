@@ -126,9 +126,11 @@ def test_api_flow(tmp_path: Path):
     assert r.status_code == 200 and r.json()["mentions"] == [lead]
     net.wait_idle(conv["id"], timeout=10)
     d = c.get(f"/api/conversations/{conv['id']}").json()
-    roles = [m["role"] for m in d["messages"]]
+    msgs = [m for m in d["messages"] if m["role"] != "event"]  # 任务登记 / 交付是 event
+    roles = [m["role"] for m in msgs]
     assert roles[0] == "user" and set(roles[1:]) == {"agent"} and len(roles) >= 3  # 委托回报唤醒后续回合
-    assert {m["agent_id"] for m in d["messages"][1:]} == {lead}
+    assert {m["agent_id"] for m in msgs[1:]} == {lead}
+    assert [r["status"] for r in c.get("/api/board").json()["requests"]] == ["in_review"]
     assert "机会成立" in d["messages"][-1]["text"] and d["status"] == "idle"
     assert set(d["members"]) == set(group["member_ids"]) and list(d["seats"]) == [lead]
     assert "inbox" not in d["seats"][lead] and d["seats"][lead]["pending"] == 0
@@ -163,7 +165,7 @@ def test_api_proposal_review(tmp_path: Path):
     from agentnet.runtime import ScriptCall
 
     def handler(call: ScriptCall) -> str:
-        if call.tool_names and call.turn == 1:
+        if call.can_delegate and call.turn == 1:
             call.tool("propose_agent", name="Legal Agent", description="合规", reason="缺人", authority=["web.research"])
         return "ok"
 
@@ -192,6 +194,7 @@ def _free_port() -> int:
 
 
 def test_mcp_server_calls_back_into_network(tmp_path: Path):
+    """不变量 10。"""
     port = _free_port()
     net = Network(ScriptedRuntime(scenario_handler), tmp_path, tool_url=f"http://127.0.0.1:{port}/internal/tools")
     server = uvicorn.Server(uvicorn.Config(create_app(net), host="127.0.0.1", port=port, log_level="warning"))

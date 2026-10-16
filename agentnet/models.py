@@ -38,6 +38,12 @@ MCP_SERVER = "agentnet"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
 AGENT_HOME = "agent-home"  # Agent 私有目录在每次运行的工作目录里的挂载名
+GROUP_FILES = "group"      # 群组档案的文件区在工作目录里的挂载名（只读副本，运行后丢弃）
+
+# 群组档案工具：群组成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
+ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
+# 用户任务工具：席位（群聊、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
+REQUEST_TOOLS = ("open_request", "deliver_request")
 
 
 class TaskStatus(StrEnum):
@@ -63,9 +69,7 @@ class AgentNode:
     # 运行时模型：{provider, model, reasoning_effort?}；None 表示用运行时自己的默认模型
     model: dict[str, str] | None = None
     created_by: str = "seed"             # seed | human | proposal:<id>
-    owner_id: str | None = None          # 所有者（用户 id）：编辑它、审批它在工作目录外的操作；None = 尚未认领
-    visibility: str = "private"          # private：只有所有者 | public：所有用户 | shared：所有者 + shared_with
-    shared_with: list[str] = field(default_factory=list)
+    owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
     active: int = 0                      # 运行中的会话/任务数（不持久化）
 
@@ -84,14 +88,79 @@ class AgentNode:
         return d
 
 
+GROUP_KINDS = ("internal", "joint")
+BRIEF_LIMIT = 4000          # Brief 每轮推送给所有成员，字符上限
+DECISIONS_PUSHED = 12       # 每轮推送的最近有效决定条数；更早的用 list_decisions 查
+GROUP_FILE_LIMIT = 200_000  # 发布到群组档案的单个文件上限（字节）
+
+
+@dataclass
+class Decision:
+    """群组档案里的一条决定：仍然有效的才推送；被取代 / 撤销的保留记录。"""
+
+    id: str
+    text: str
+    reason: str = ""
+    status: str = "active"               # active | superseded | revoked
+    supersedes: str | None = None        # 取代了哪一条
+    by_user: str | None = None           # 人记录的：用户 id
+    by_agent: str | None = None          # Agent 记录的：Agent id
+    source: str | None = None            # 来源：消息 id / 任务 id / 席位 id
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class ProjectRef:
+    """群组引用的项目（仓库、路径、文档）。只是指针，不授予任何访问权限。"""
+
+    id: str
+    name: str
+    location: str
+    note: str = ""
+
+
+@dataclass
+class BriefSuggestion:
+    """参与者或 Agent 提议的 brief 修改：由主持人采纳或拒绝。"""
+
+    id: str
+    text: str
+    reason: str = ""
+    by_user: str | None = None
+    by_agent: str | None = None
+    status: str = "pending"              # pending | accepted | rejected
+    created_at: float = field(default_factory=time.time)
+
+
 @dataclass
 class Group:
+    """群组 = 一个群聊 + 一份群组档案。
+
+    internal（内部群组）：只有所有者，成员只能是所有者自己的 Agent。
+    joint（联合群组，参照 Raft 的 joint channel）：主持人（owner_id）邀请其他用户成为参与者；
+    每个参与者只能加入自己的 Agent；群聊与群组档案对所有参与者可见；Agent 仍只代表它的所有者运行。"""
+
     id: str
     name: str
     description: str
     member_ids: list[str]
-    owner_id: str | None = None          # 群组只对所有者可见
+    owner_id: str | None = None          # 内部群组的所有者 / 联合群组的主持人
+    kind: str = "internal"               # internal | joint；创建后不能转换
+    participants: list[str] = field(default_factory=list)  # 联合群组里除主持人以外、已接受邀请的用户
+    invited: list[str] = field(default_factory=list)       # 已邀请、尚未接受的用户
+    brief: str = ""                      # 目标、范围、成功标准、当前阶段：每轮推送给所有成员
+    brief_updated_at: float | None = None
+    decisions: list[Decision] = field(default_factory=list)
+    projects: list[ProjectRef] = field(default_factory=list)
+    suggestions: list[BriefSuggestion] = field(default_factory=list)
+    home_enabled: list[str] = field(default_factory=list)  # 联合群组里由所有者打开了私有目录挂载的 Agent
+    archive_rev: int = 0                 # 档案（brief / 决定 / 文件 / 项目）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
+
+    @property
+    def people(self) -> list[str]:
+        """看得到这个群组的用户：所有者 / 主持人 + 参与者。"""
+        return [u for u in [self.owner_id, *self.participants] if u]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,6 +176,9 @@ class Message:
     task_ids: list[str] = field(default_factory=list)  # 这一轮里发起的委托
     steps: list[dict[str, Any]] = field(default_factory=list)  # 这一轮的过程：中间文本与工具调用
     wake: list[str] = field(default_factory=list)      # 唤醒这一轮的网络通知（委托回报、提议结果）
+    user_id: str | None = None           # user：哪个用户发的（联合群组里有多个人）
+    audience: list[str] = field(default_factory=list)  # 只给这些用户看（空 = 对话里的所有人），如席位的失败说明
+    private_to: list[str] = field(default_factory=list)  # steps / wake 只给这些用户看（Agent 的所有者）
     ts: float = field(default_factory=time.time)
 
 
@@ -126,6 +198,7 @@ class Seat:
     known: list[str] = field(default_factory=list)  # 已经告诉过它的、别人共享给它的知识 key
     delegations: int = 0                 # 自最近一次被 @ 以来发起的委托数
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
+    archive_seen: int = -1               # 已经送达过的群组档案版本（Group.archive_rev）
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, Any]:
@@ -208,6 +281,8 @@ class Task:
     auto_accepted: bool = False          # 委托方没有显式验收：送达的那一轮结束后视为接受
     retries: int = 0                     # 失败后被续接的次数
     delegations: int = 0                 # 执行者在这个任务里发起的委托数
+    owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
+    archive_seen: int = -1               # 已经送达过的群组档案版本
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
     finished_at: float | None = None
@@ -238,11 +313,37 @@ class Proposal:
     authority: list[str]
     max_authority: list[str]             # 提议者当时的有效权限：批准时的权限上限
     reason: str = ""
+    owner_id: str | None = None          # 由谁审核：提议者 Agent 的所有者（新 Agent 归他）
     status: str = "pending"              # pending | approved | rejected
     agent_id: str | None = None
     note: str = ""                       # 人的审核意见
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class UserRequest:
+    """人交代给 Agent 的一件事（看板上的一张卡）。由接任务的 Agent 认定（open_request）：闲聊、问答不算，
+    有交付目标的才算。来源消息与下发人由网络从对话里认定，不信任模型自报。Agent 之间的委托（Task）不在这里。"""
+
+    id: str
+    conversation_id: str
+    agent_id: str                        # 接任务的 Agent
+    requester_id: str | None             # 下发的人：来源消息的发送者
+    message_id: str                      # 来源消息
+    title: str
+    expected_outcome: str
+    status: str = "in_progress"          # in_progress | in_review | completed | cancelled
+    summary: str = ""                    # 交付说明（Agent 写）
+    task_ids: list[str] = field(default_factory=list)  # 为它发起的委托（只在详情里展示）
+    revisions: int = 0                   # 被下发人退回修改的次数
+    feedback: str = ""                   # 最近一次退回的意见
+    created_at: float = field(default_factory=time.time)
+    delivered_at: float | None = None
+    finished_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -272,7 +373,7 @@ class Approval:
     tool: str
     reason: str                          # dsh 给出的原因，含模型写的理由
     status: str = "pending"              # pending | allowed | rejected | cancelled
-    requested_by: str | None = None      # 这次运行是替哪个用户做的（对话所有者）
+    requested_by: str | None = None      # 这次运行所在对话的所有者（联合群组是主持人）
     note: str = ""
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None

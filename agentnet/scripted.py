@@ -1,9 +1,9 @@
 """确定性脚本场景：用于自动化测试与离线演练（--runtime scripted）。
 
 群聊里被 @ 的成员接任务。被 @ 的若是 Product Strategy Agent（规划者），它分几轮推进：
-1. 被 @：list_members → 逐个委托市场 / 技术 / 竞争 → 越界尝试委托群组外成员（被拒绝）→ 结束这一轮。
+1. 被 @：open_request 登记为用户任务（看板）→ list_members → 逐个委托市场 / 技术 / 竞争 → 越界尝试委托群组外成员（被拒绝）。
 2. 每收到一份交付：验收（accept_task）；竞争格局一到，就把它共享给市场研究再委托一次。
-3. 所有委托都有了结果：整合回复。
+3. 所有委托都有了结果：整合回复，deliver_request 交付任务。
 被 @ 的若是专项成员（市场 / 技术 / 竞争），它自己回答，不转手。
 被委托的 Agent：直接交付一段结果文本。私聊里没有网络工具，只能亲自回答。
 """
@@ -52,10 +52,12 @@ def scenario_handler(call: ScriptCall) -> str:
         call.use("web_search", {"queries": [name]}, "3 results")
         return f"{name} 直接回答：" + ("已参考前面的讨论。" if "**Product Strategy Agent**" in call.prompt else "正文。")
 
-    if not call.tool_names:
+    if not call.can_delegate:
         return f"{name}：我在这里不能委托，只能基于自身能力回答。"
 
     if "（@ 你）" in call.prompt and not st["pending"] and not st["results"]:
+        r = call.tool("open_request", title="研究一个新的 AI 产品机会", expected_outcome="机会判断与依据")
+        st["request"] = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
         roster = call.tool("list_members")
         for n in (n for n in TARGETS if n in roster):
             tid = re.search(r"任务 (task-[0-9a-f]{8})", call.tool("delegate", agent=n, **ASKS[n])).group(1)
@@ -83,5 +85,7 @@ def scenario_handler(call: ScriptCall) -> str:
 
     if st["pending"]:
         return f"已验收一部分，还在等 {len(st['pending'])} 个委托。"
+    if st.get("request"):
+        call.tool("deliver_request", request_id=st.pop("request"), summary="机会判断：面向企业的跨团队 Agent 授权网络")
     return "机会成立：面向企业的跨团队 Agent 授权网络，差异化在授权链与上下文隔离。\n\n" + \
         "\n".join(f"- {n}：{r}" for n, r in st["results"].items())

@@ -13,8 +13,8 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
-from .models import (AgentNode, Approval, Conversation, Delegation, Group, KnowledgeItem, Message, Proposal, Seat,
-                     Task, TaskStatus, User, new_id, seat_id)
+from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Group, KnowledgeItem, Message,
+                     ProjectRef, Proposal, Seat, Task, TaskStatus, User, UserRequest, new_id, seat_id)
 
 
 def _known(cls: type, d: dict[str, Any]) -> dict[str, Any]:
@@ -94,6 +94,7 @@ class Store:
         self.users: dict[str, User] = {}
         self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
         self.approvals: dict[str, Approval] = {}
+        self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         if self.path.exists():
             self._load()
         else:
@@ -107,6 +108,12 @@ class Store:
         d = self.root / "conversations" / conv_id
         if agent_id:
             d = d / agent_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def group_dir(self, group_id: str) -> Path:
+        """群组档案的文件区：不属于任何项目仓库。只有网络写入（publish_file），运行时只读挂载。"""
+        d = self.root / "groups" / group_id / "files"
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -134,6 +141,7 @@ class Store:
                 "users": [asdict(u) for u in self.users.values()],
                 "sessions": self.sessions,
                 "approvals": [a.to_dict() for a in self.approvals.values()],
+                "requests": [r.to_dict() for r in self.requests.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -145,6 +153,9 @@ class Store:
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
             self.agents[a["id"]] = AgentNode(**_known(AgentNode, a))
         for g in raw.get("groups", []):
+            g["decisions"] = [Decision(**_known(Decision, d)) for d in g.get("decisions") or []]
+            g["projects"] = [ProjectRef(**_known(ProjectRef, r)) for r in g.get("projects") or []]
+            g["suggestions"] = [BriefSuggestion(**_known(BriefSuggestion, x)) for x in g.get("suggestions") or []]
             self.groups[g["id"]] = Group(**_known(Group, g))
         for c in raw.get("conversations", []):
             conv = _load_conversation(c)
@@ -187,6 +198,36 @@ class Store:
             if ap.status == "pending":  # 等审批的那次运行已随重启结束
                 ap.status, ap.note = "cancelled", "服务重启，申请作废"
             self.approvals[ap.id] = ap
+        for r in raw.get("requests", []):
+            self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
+        self._one_trust_domain()
+
+    def _one_trust_domain(self) -> None:
+        """Agent 不跨信任域（不变量 16）。旧版本的 public / shared Agent 可以被别人私聊、拉进别人的群组：
+        别人和它的私聊归档为只读；内部群组里不属于群组所有者的 Agent 移出，群聊里记一条事件。已有委托与记录保留。"""
+        for c in self.conversations.values():
+            a = self.agents.get(c.agent_id or "")
+            if c.kind == "dm" and not c.archived and a is not None and a.owner_id and c.owner_id \
+                    and a.owner_id != c.owner_id:
+                c.archived = True
+        for t in self.tasks.values():
+            if not t.owners:  # 旧版委托：归对话所有者
+                conv = self.conversations.get(t.conversation_id)
+                t.owners = [conv.owner_id] if conv and conv.owner_id else []
+        for g in self.groups.values():
+            if g.kind != "internal" or not g.owner_id:
+                continue
+            foreign = [m for m in g.member_ids if (a := self.agents.get(m)) and a.owner_id and a.owner_id != g.owner_id]
+            if not foreign:
+                continue
+            g.member_ids = [m for m in g.member_ids if m not in foreign]
+            chat = next((c for c in self.conversations.values()
+                         if c.kind == "group" and c.group_id == g.id and not c.archived), None)
+            if chat is not None:
+                for m in foreign:
+                    chat.messages.append(Message(id=new_id("msg"), role="event", agent_id=m,
+                                                 text=f"{self.agents[m].name} 因为不属于你而被移出群组"
+                                                      "（Agent 只能为它的所有者工作；跨用户协作请用联合群组）"))
 
     def claim_orphans(self, user_id: str) -> None:
         """第一个注册的用户认领所有还没有所有者的数据（旧版本的单人数据）。调用方持有锁。"""

@@ -64,8 +64,6 @@ class AgentIn(BaseModel):
     authority: list[str] = Field(default_factory=list)
     chat_enabled: bool = True
     model: ModelIn | None = None
-    visibility: str = "private"                     # private | public | shared
-    shared_with: list[str] = Field(default_factory=list, max_length=100)
 
 
 class AgentPatch(BaseModel):
@@ -75,8 +73,6 @@ class AgentPatch(BaseModel):
     authority: list[str] | None = None
     chat_enabled: bool | None = None
     model: ModelIn | None = None  # 显式传 null 表示改回运行时默认模型
-    visibility: str | None = None
-    shared_with: list[str] | None = Field(None, max_length=100)
 
 
 class ProposalApprove(BaseModel):
@@ -100,6 +96,50 @@ class GroupIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field("", max_length=500)
     member_ids: list[str] = Field(default_factory=list)
+    kind: str = "internal"                          # internal（只有你和你的 Agent）| joint（联合群组）
+
+
+class ReviewIn(BaseModel):
+    accept: bool
+    feedback: str = Field("", max_length=2000)
+
+
+class InviteIn(BaseModel):
+    email: str = Field(min_length=3, max_length=200)
+
+
+class RespondIn(BaseModel):
+    accept: bool
+
+
+class HomeMountIn(BaseModel):
+    enabled: bool
+
+
+class BriefIn(BaseModel):
+    text: str = Field("", max_length=4000)
+
+
+class SuggestIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    reason: str = Field("", max_length=1000)
+
+
+class DecisionRecordIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+    reason: str = Field("", max_length=2000)
+    supersedes: str | None = None
+
+
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    location: str = Field(min_length=1, max_length=500)
+    note: str = Field("", max_length=500)
+
+
+class FileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    content: str = Field(max_length=200_000)
 
 
 class GroupPatch(BaseModel):
@@ -219,11 +259,6 @@ def create_app(network: Network) -> FastAPI:
         own = [a for a in store.agents.values() if a.owner_id == user.id]
         return {**user.public(), "agent_count": len(own)}
 
-    @app.get("/api/users")
-    def users(user: Me) -> list[dict]:
-        """分享 Agent 时选人：只给 id 与邮箱。"""
-        return [u.public() for u in store.users.values() if u.id != user.id]
-
     @app.get("/api/network")
     def snapshot(user: Me) -> dict:
         return network.snapshot(user.id)
@@ -250,7 +285,7 @@ def create_app(network: Network) -> FastAPI:
 
     @app.get("/api/agents/{agent_id}/ledger")
     def agent_ledger(agent_id: str, user: Me) -> list[dict]:
-        network.visible_agent(agent_id, user.id)
+        network.visible_agent(agent_id, user.id)  # 只有所有者
         return network.ledger(agent_id)
 
     # ---- 群组 ----
@@ -274,6 +309,93 @@ def create_app(network: Network) -> FastAPI:
     def delete_group(group_id: str, user: Me) -> dict:
         network.delete_group(group_id, actor=user.id)
         return {"ok": True}
+
+    @app.get("/api/groups/{group_id}")
+    def group_detail(group_id: str, user: Me) -> dict:
+        return network.group_detail(group_id, actor=user.id)
+
+    # ---- 联合群组：邀请 → 接受；退出、移出；私有目录挂载 ----
+    @app.post("/api/groups/{group_id}/invitations")
+    def invite(group_id: str, body: InviteIn, user: Me) -> dict:
+        return network.group_detail(network.invite(group_id, body.email, actor=user.id).id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/invitation")
+    def respond(group_id: str, body: RespondIn, user: Me) -> dict:
+        g = network.respond_invitation(group_id, body.accept, actor=user.id)
+        return network.group_detail(g.id, actor=user.id) if g else {"ok": True}
+
+    @app.post("/api/groups/{group_id}/leave")
+    def leave(group_id: str, user: Me) -> dict:
+        network.leave_group(group_id, actor=user.id)
+        return {"ok": True}
+
+    @app.delete("/api/groups/{group_id}/participants/{user_id}")
+    def remove_participant(group_id: str, user_id: str, user: Me) -> dict:
+        network.remove_participant(group_id, user_id, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.put("/api/groups/{group_id}/members/{agent_id}/home")
+    def home_mount(group_id: str, agent_id: str, body: HomeMountIn, user: Me) -> dict:
+        network.set_home_mount(group_id, agent_id, body.enabled, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    # ---- 群组档案 ----
+    @app.put("/api/groups/{group_id}/brief")
+    def set_brief(group_id: str, body: BriefIn, user: Me) -> dict:
+        network.set_brief(group_id, body.text, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/brief/confirm")
+    def confirm_brief(group_id: str, user: Me) -> dict:
+        network.confirm_brief(group_id, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/suggestions")
+    def suggest(group_id: str, body: SuggestIn, user: Me) -> dict:
+        network.suggest_brief(group_id, body.text, body.reason, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/suggestions/{suggestion_id}")
+    def decide_suggestion(group_id: str, suggestion_id: str, body: RespondIn, user: Me) -> dict:
+        network.decide_suggestion(group_id, suggestion_id, body.accept, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/decisions")
+    def record_decision(group_id: str, body: DecisionRecordIn, user: Me) -> dict:
+        network.record_decision(group_id, body.text, body.reason, body.supersedes, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.delete("/api/groups/{group_id}/decisions/{decision_id}")
+    def revoke_decision(group_id: str, decision_id: str, user: Me) -> dict:
+        network.revoke_decision(group_id, decision_id, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/projects")
+    def add_project(group_id: str, body: ProjectIn, user: Me) -> dict:
+        network.add_project(group_id, body.name, body.location, body.note, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.delete("/api/groups/{group_id}/projects/{project_id}")
+    def remove_project(group_id: str, project_id: str, user: Me) -> dict:
+        network.remove_project(group_id, project_id, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.post("/api/groups/{group_id}/files")
+    def publish_file(group_id: str, body: FileIn, user: Me) -> dict:
+        network.publish_file(group_id, body.name, body.content.encode("utf-8"), actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    @app.get("/api/groups/{group_id}/files/{name}")
+    def read_file(group_id: str, name: str, user: Me) -> FileResponse:
+        path = network.group_file(group_id, name, actor=user.id)
+        # 一律当作附件下载，不在本站点内渲染（文件可能来自其他参与方或 Agent）
+        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.delete("/api/groups/{group_id}/files/{name}")
+    def delete_file(group_id: str, name: str, user: Me) -> dict:
+        network.delete_file(group_id, name, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
 
     # ---- 对话 ----
     @app.post("/api/conversations")
@@ -302,6 +424,21 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/conversations/{conv_id}/resume")
     def resume(conv_id: str, body: ResumeIn, user: Me) -> dict:
         return {"resumed": network.resume_conversation(conv_id, body.agent_id, body.note, actor=user.id)}
+
+    # ---- 用户任务（看板） ----
+    @app.get("/api/requests/{request_id}")
+    def request_detail(request_id: str, user: Me) -> dict:
+        return network.request_detail(request_id, actor=user.id)
+
+    @app.post("/api/requests/{request_id}/review")
+    def review_request(request_id: str, body: ReviewIn, user: Me) -> dict:
+        network.review_request(request_id, body.accept, body.feedback, actor=user.id)
+        return network.request_detail(request_id, actor=user.id)
+
+    @app.post("/api/requests/{request_id}/cancel")
+    def cancel_request(request_id: str, user: Me) -> dict:
+        network.cancel_request(request_id, actor=user.id)
+        return network.request_detail(request_id, actor=user.id)
 
     # ---- 委托与知识 ----
     @app.get("/api/tasks/{task_id}")
@@ -343,8 +480,10 @@ def create_app(network: Network) -> FastAPI:
                     continue
                 for ev in evs:
                     seq = ev.seq
-                    if network.event_visible(ev.type, ev.data, user.id):
-                        yield f"id: {ev.seq}\ndata: {json.dumps(ev.to_dict(), ensure_ascii=False)}\n\n"
+                    data = network.event_view(ev.type, ev.data, user.id)  # 过滤并裁剪成这个用户能看的部分
+                    if data is not None:
+                        out = {**ev.to_dict(), "data": data}
+                        yield f"id: {ev.seq}\ndata: {json.dumps(out, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

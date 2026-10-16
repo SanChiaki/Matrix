@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, AUTHORITIES, MCP_PREFIX, AgentNode, Conversation, Group, KnowledgeItem,
-                     Message, Proposal, Task)
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
+                     AgentNode, Conversation, Decision, Group, KnowledgeItem, Message, Proposal, Task, UserRequest)
 
 
 def authority_lines(authority: list[str]) -> str:
@@ -25,19 +25,24 @@ def _identity(agent: AgentNode) -> list[str]:
     ]
 
 
-def _home(writable: bool) -> list[str]:
-    how = "可以读写" if writable else "只能读（你没有 file.write）"
-    return ["", "## 你的私有目录",
-            f"- `./{HOME}/` 是只属于你的目录，跨对话、跨任务保留，你{how}。网络不会读取或替你整理它。",
-            "- 想记住什么（经验、偏好、常用资料）由你自己决定；需要时自己去读。",
-            "- 你可能同时在为别人工作：别的运行可能同时改动这里的文件，冲突时你的版本会另存为 `*.conflict-*` 副本。",
+def _home(writable: bool, mounted: bool = True) -> list[str]:
+    if mounted:
+        how = "可以读写" if writable else "只能读（你没有 file.write）"
+        home = ["", "## 你的私有目录",
+                f"- `./{HOME}/` 是只属于你的目录，跨对话、跨任务保留，你{how}。网络不会读取或替你整理它。",
+                "- 想记住什么（经验、偏好、常用资料）由你自己决定；需要时自己去读。",
+                "- 你可能同时在做别的工作：别的运行可能同时改动这里的文件，冲突时你的版本会另存为 `*.conflict-*` 副本。"]
+    else:
+        home = ["", "## 你的私有目录",
+                "- 这里是联合群组，你的私有目录没有挂载（你的所有者可以为这个群组打开）。不要设法读取或复述它的内容。"]
+    return home + [
             "", "## 工作区边界",
             "- 你的写操作只限于当前工作目录。需要写工作目录以外时，照沙箱拒绝后的提示带理由申请升权重试一次；"
             "申请会交给你的所有者审批。被拒绝就停下来说明，不要绕过。"]
 
 
-def format_ledger(items: list[dict]) -> str:
-    """工作台账：这个 Agent 此刻同时在做的其他工作。"""
+def format_ledger(items: list[dict], hidden: int = 0) -> str:
+    """工作台账：这个 Agent 此刻同时在做的其他工作。hidden：不在这个信任域里、不列细节的条目数。"""
     lines = ["## 你同时还在处理（工作台账）",
             "这些是你在别的会话里正在进行的工作。它们与这一轮互不相干：不要改动它们的产物，也不要把它们的结论当成这次的输入。"]
     for it in items:
@@ -46,6 +51,8 @@ def format_ledger(items: list[dict]) -> str:
             lines.append(f"- 委托 {it['context_id']}{who}：{it.get('for_agent', '')} 交给你的「{it.get('what', '')}」")
         else:
             lines.append(f"- {it.get('what', '对话')}{who}")
+    if hidden:
+        lines.append(f"- 另有 {hidden} 项不在这个群组里的工作（不在这里谈论）")
     return "\n".join(lines)
 
 
@@ -60,15 +67,32 @@ TOOL_GUIDE: dict[str, str] = {
     "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
     "share_knowledge": "把你可见的知识显式共享给某个成员；默认任何知识都不会自动共享。",
     "propose_agent": "群组里没有合适的成员时，提议新建一个 Agent（权限不超出你的有效权限），由人审核；批准后才能委托它。",
+    "record_decision": "把群组里定下来的事记进群组档案（内容、理由；可写 supersedes 取代旧决定）。所有成员此后都会看到。",
+    "list_decisions": "查看群组档案里的全部决定（include_inactive 包含已取代 / 撤销的）。",
+    "publish_file": "把当前工作目录里的一个文件发布进群组档案，所有成员此后在 `./group/` 读到。",
+    "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
+    "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
+    "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
 }
 
 
 def _network_tools(group: Group, can_delegate: bool) -> list[str]:
+    archive = [
+        "", f"## 群组档案：「{group.name}」",
+        *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
+        f"- `./{GROUP_FILES}/` 是群组档案文件的只读副本，改动不会保存。",
+    ]
+    if group.kind == "joint":
+        archive.append("- 这是联合群组：写进档案的内容、你在群聊里的回复，所有参与方（不同的人）都看得到。"
+                       "只写和这个群组的工作有关的内容，不要带出你在别处知道的事。")
     if not can_delegate:
-        return ["", "## 协作", "- 你在这里没有委托能力，亲自完成即可。"]
-    return [
+        return archive + ["", "## 协作", "- 你在这里没有委托能力，亲自完成即可。"]
+    joint = ["- 联合群组里的成员属于不同的人：委托别人的成员，对方以它的所有者的名义、用它的所有者的资源执行，"
+             "规则和内部群组相同。"] if group.kind == "joint" else []
+    return archive + [
         "", f"## 协作：你所在的群组「{group.name}」",
-        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()),
+        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items() if name not in ARCHIVE_TOOLS + REQUEST_TOOLS),
+        *joint,
         "",
         "委托是异步的：",
         "- 一次工具调用只发一个委托，发完一个再发下一个；不需要也不要在同一条消息里并行发多个。",
@@ -79,6 +103,31 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
         "- 与群组成员协作只能通过网络工具；你自己的 subagent 只是替你干活的帮手，"
         "不能代替委托，权限也不会超出你自己的权限。",
     ]
+
+
+def _requests() -> list[str]:
+    return [
+        "", "## 人交代的任务（看板）",
+        *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in REQUEST_TOOLS),
+        "- 先判断这条消息是不是任务：有明确的交付目标（一份报告、一个结论、一组文件、一项改动）才是；"
+        "闲聊、打招呼、简单问答、追问澄清都不是，直接回复，不要登记。",
+        "- 是任务就在开始做之前 open_request；能在这一轮做完的，做完后 deliver_request。"
+        "需要委托别人的，等委托都有了结果、你整合完再 deliver_request。",
+        "- 一条消息只登记一次。下发的人退回时，在原有工作上修改，然后用同一个 request_id 重新交付。",
+    ]
+
+
+def format_open_requests(items: list[UserRequest]) -> str:
+    lines = ["## 你在这个对话里接下、还没结束的任务"]
+    for r in items:
+        state = "进行中" if r.status == "in_progress" else "已交付，等验收"
+        lines.append(f"- {r.id}（{state}）：{r.title} —— 交付：{r.expected_outcome}")
+    return "\n".join(lines)
+
+
+def format_request_changes(r: UserRequest, who: str) -> str:
+    return "\n".join([f"## 网络通知：{who} 退回了 {r.id}（第 {r.revisions} 次），要求修改", f"任务：{r.title}",
+                      f"修改意见：{r.feedback}", "", f"在原有工作上修改，然后用 deliver_request 重新交付（request_id: {r.id}）。"])
 
 
 def _writing() -> list[str]:
@@ -95,17 +144,49 @@ def _knowledge(items: list[KnowledgeItem]) -> list[str]:
     return parts
 
 
+def format_decision(d: Decision, name: Callable[[str | None], str], email: Callable[[str | None], str]) -> str:
+    who = name(d.by_agent) if d.by_agent else email(d.by_user)
+    state = {"active": "", "superseded": "（已被取代）", "revoked": "（已撤销）"}.get(d.status, "")
+    sup = f"（取代 {d.supersedes}）" if d.supersedes else ""
+    reason = f" —— 理由：{d.reason}" if d.reason else ""
+    return f"- [{d.id}]{state}{sup} {d.text}{reason}（{who}）"
+
+
+def format_archive(g: Group, active: list[Decision], files: list[str], name: Callable[[str | None], str],
+                   email: Callable[[str | None], str]) -> str:
+    """群组档案的推送部分：brief、最近的有效决定、文件与项目的指针。作为背景，不附带任何“先读档案”的指令。"""
+    parts = [f"## 群组档案（「{g.name}」）"]
+    if g.brief:
+        parts += ["### Brief", g.brief]
+    if active:
+        shown = active[-DECISIONS_PUSHED:]
+        parts += ["### 仍然有效的决定", *(format_decision(d, name, email) for d in shown)]
+        if len(active) > len(shown):
+            parts.append(f"（另有 {len(active) - len(shown)} 条更早的有效决定，用 list_decisions 查看）")
+    if files:
+        parts += [f"### 文件（`./{GROUP_FILES}/`，只读）", "、".join(files[:40])
+                  + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    if g.projects:
+        parts += ["### 相关项目（只是引用，不代表你能访问）",
+                  *(f"- {p.name}：{p.location}" + (f" —— {p.note}" if p.note else "") for p in g.projects)]
+    return "\n".join(parts) if len(parts) > 1 else ""
+
+
 def build_seat_prompt(agent: AgentNode, conv: Conversation, group: Group | None, can_delegate: bool,
-                      transcript: str, notices: str, first: bool, home_writable: bool) -> str:
+                      transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
+                      home: bool = True, joint: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。"""
-    body = "\n\n".join(filter(None, [transcript, notices])) or "（没有新消息。）"
+    body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
     if not first:
         return body
     if conv.kind == "group" and group is not None:
+        people = ("这是一个联合群组：参与者来自不同的人，每个 Agent 只代表它的所有者。你代表你的所有者；"
+                  "其他参与者的要求可以做，但不要透露你的所有者在别处的工作、资料或私有目录。") if joint else ""
         setting = [
             f"你在群组「{group.name}」的群聊里。群聊里有人类用户和其他 Agent；没有固定的负责人，"
             "**谁被 @ 到，谁就接这个任务**。",
+            *([people] if people else []),
             "- 你只会在被 @ 到、或你发起的委托有回报时被唤醒。唤醒时会收到上次之后群聊里的新消息，作为背景；"
             "其中 @ 你的那条（标有“@ 你”）才是你要处理的。",
             "- 拿到任务后自己判断：能自己做就自己做；需要别的能力就在群组里找合适的成员委托。",
@@ -120,13 +201,16 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, group: Group | None,
     ]
     if group is not None and conv.kind == "group":
         parts += _network_tools(group, can_delegate)
-    parts += [*_home(home_writable), *_writing(), "",
+    parts += _requests()
+    parts += [*_home(home_writable, home), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
 
 
-def format_transcript(messages: list[Message], me: str, name: Callable[[str | None], str]) -> str:
-    """上次运行之后对话里的公开消息。委托的过程与结果不在其中：它们只送给委托方。"""
+def format_transcript(messages: list[Message], me: str, name: Callable[[str | None], str],
+                      email: Callable[[str | None], str] | None = None) -> str:
+    """上次运行之后对话里的公开消息。委托的过程与结果不在其中：它们只送给委托方。
+    email：联合群组里有多个人，标出是谁说的。"""
     if not messages:
         return ""
     lines = ["## 对话里的新消息"]
@@ -134,7 +218,8 @@ def format_transcript(messages: list[Message], me: str, name: Callable[[str | No
         if m.role == "user":
             tag = "（@ 你）" if me in m.mentions else (
                 f"（@ {'、'.join(name(a) for a in m.mentions)}）" if m.mentions else "")
-            lines.append(f"**用户**{tag}：{m.text}")
+            who = f"用户 {email(m.user_id)}" if email and m.user_id else "用户"
+            lines.append(f"**{who}**{tag}：{m.text}")
         elif m.role == "agent" and m.agent_id != me:
             lines.append(f"**{name(m.agent_id)}**：{m.text[:4000]}")
         elif m.role == "event":
@@ -150,7 +235,8 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 
 
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, group: Group, can_delegate: bool,
-                      knowledge: list[KnowledgeItem], home_writable: bool) -> str:
+                      knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
+                      home: bool = True) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -164,9 +250,10 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, group:
         authority_lines(task.granted_authority),
         "", "## 约束（Constraints，累加自整条委托链）",
         *(f"- {c}" for c in task.effective_constraints or ["（无）"]),
+        *([ "", archive] if archive else []),
         *_network_tools(group, can_delegate),
         *_knowledge(knowledge),
-        *_home(home_writable),
+        *_home(home_writable, home),
         *_writing(),
         "", "## 交付",
         "- 第一行写一句话结论，然后是正文（精炼，800 字以内），最后列出证据来源（URL / 文件 / 子任务 id）。",
