@@ -1,5 +1,7 @@
-# Agent Network Demo 行动纲领
+# Matrix 行动纲领
 
+> 产品名为 **Matrix**（原名 Agent Network Demo）。正文中的“Agent Network”指网络这一概念，保留原文。
+>
 > 项目的方向性文档（原文存档）。工程层面的约束与工作方式见 [AGENTS.md](AGENTS.md)；
 > 两者冲突时，以本文件的方向为准，再去修正 AGENTS.md 的具体做法。
 

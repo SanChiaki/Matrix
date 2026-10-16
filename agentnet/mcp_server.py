@@ -25,9 +25,9 @@ TOOLS = [
     },
     {
         "name": "delegate",
-        "description": ("把一个子任务委托给群组内的某个成员，阻塞直到对方交回结果与证据。"
-                        "只能委托 list_members 返回的成员。对方的实际权限 = 对方自身权限 ∩ 你在 authority 里授予的权限；"
-                        "你的约束会被继承。多个独立委托可以并行发起。"),
+        "description": ("把一个子任务委托给群组内的某个成员。立即返回任务 id，不等待结果；对方交付或失败时，"
+                        "网络会把结果作为通知在新的一轮里送给你。只能委托 list_members 返回的成员。"
+                        "对方的实际权限 = 对方自身权限 ∩ 你在 authority 里授予的权限；你的约束会被继承。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -54,6 +54,65 @@ TOOLS = [
                 "agent": {"type": "string", "description": "接收成员名称"},
             },
             "required": ["key", "agent"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_tasks",
+        "description": "列出你发起的委托及其状态（running / in_review / completed / failed / rejected）。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "accept_task",
+        "description": "验收一个处于 in_review 的委托：接受交付，任务完成，结果沉淀为知识。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string", "description": "委托的任务 id"}},
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "request_changes",
+        "description": "退回一个处于 in_review 的委托：执行者会在原会话里看到你的意见并重新交付。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "委托的任务 id"},
+                "feedback": {"type": "string", "description": "要修改什么、为什么"},
+            },
+            "required": ["task_id", "feedback"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "retry_task",
+        "description": "续接一个失败的委托：执行者在原会话里接着做，已完成的部分不会丢。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "委托的任务 id"},
+                "note": {"type": "string", "description": "可选：给执行者的补充说明"},
+            },
+            "required": ["task_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "propose_agent",
+        "description": ("群组里没有合适的成员时，提议新建一个 Agent。网络不会直接创建：人审核（可修改）后批准，"
+                        "新 Agent 加入当前群组；结果会作为通知送给你。提议的权限不能超出你当前的有效权限。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "新 Agent 的名称"},
+                "description": {"type": "string", "description": "它做什么；其他 Agent 会据此判断能否委托"},
+                "capabilities": {"type": "array", "items": {"type": "string"}, "description": "能力标签"},
+                "authority": {"type": "array", "items": {"type": "string"},
+                              "description": "建议的自身权限，只能是你有效权限的子集"},
+                "reason": {"type": "string", "description": "为什么现有成员不够"},
+            },
+            "required": ["name", "description", "reason"],
             "additionalProperties": False,
         },
     },

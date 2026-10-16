@@ -11,8 +11,41 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from .models import (AgentNode, Conversation, Delegation, Group, KnowledgeItem, Message, Task, TaskStatus,
-                     new_id)
+from dataclasses import asdict, fields
+
+from .models import (AgentNode, Approval, Conversation, Delegation, Group, KnowledgeItem, Message, Proposal, Seat,
+                     Task, TaskStatus, User, new_id, seat_id)
+
+
+def _known(cls: type, d: dict[str, Any]) -> dict[str, Any]:
+    """只取 dataclass 认识的字段：旧版 state.json 缺字段用默认值，多余字段（已移除的功能）丢弃。"""
+    names = {f.name for f in fields(cls)}
+    return {k: v for k, v in d.items() if k in names}
+
+
+def _load_conversation(c: dict[str, Any]) -> Conversation:
+    msgs = [Message(**_known(Message, m)) for m in c.pop("messages", [])]
+    if "kind" in c:
+        seats = {a: Seat(**_known(Seat, s)) for a, s in (c.pop("seats", None) or {}).items()}
+        return Conversation(**_known(Conversation, c), seats=seats, messages=msgs)
+    # 旧版：对话 = 一个“主 Agent”。迁移成只有这一个席位的群聊（在群组里）或私聊（不在群组里）；
+    # 席位沿用原来的对话目录和 DSH 会话，所以还能续接。旧的用户消息记为 @ 了它。
+    agent_id = c["agent_id"]
+    seat = Seat(agent_id=agent_id, workdir=f"conversations/{c['id']}", dsh_session_id=c.get("dsh_session_id"),
+                inbox=c.get("inbox") or [], seen=len(msgs), delegations=c.get("delegations", 0),
+                blocked=c.get("blocked"))
+    for m in msgs:
+        if m.role == "user" and not m.mentions:
+            m.mentions = [agent_id]
+        elif m.role in ("agent", "system") and m.agent_id is None:
+            m.agent_id = agent_id
+    group = c.get("group_id")
+    title = c.get("title", "")
+    if group and title.startswith("与 ") and title.endswith(" 的对话"):  # 旧的默认标题是按主 Agent 起的
+        title = ""
+    return Conversation(id=c["id"], kind="group" if group else "dm", group_id=group,
+                        agent_id=None if group else agent_id, title=title, seats={agent_id: seat},
+                        messages=msgs, created_at=c.get("created_at", 0), updated_at=c.get("updated_at", 0))
 
 SEED_AGENTS: list[dict[str, Any]] = [
     {"name": "Product Strategy Agent",
@@ -46,7 +79,8 @@ SEED_GROUP = {
 
 
 class Store:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, seed: bool = True):
+        """seed：全新的数据目录是否预置种子 Agent 与研究组（测试、离线演练用；服务默认不预置，由用户自己创建）。"""
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = root / "state.json"
@@ -56,15 +90,29 @@ class Store:
         self.conversations: dict[str, Conversation] = {}
         self.tasks: dict[str, Task] = {}
         self.knowledge: dict[str, KnowledgeItem] = {}
+        self.proposals: dict[str, Proposal] = {}
+        self.users: dict[str, User] = {}
+        self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
+        self.approvals: dict[str, Approval] = {}
         if self.path.exists():
             self._load()
         else:
-            self._seed()
+            if seed:
+                self._seed()
             self.save()
 
     # ---------- 目录 ----------
-    def conversation_dir(self, conv_id: str) -> Path:
+    def seat_dir(self, conv_id: str, agent_id: str | None) -> Path:
+        """席位工作目录：群聊里每个成员一个子目录，私聊直接用对话目录。"""
         d = self.root / "conversations" / conv_id
+        if agent_id:
+            d = d / agent_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def agent_dir(self, agent_id: str) -> Path:
+        """Agent 的持久私有目录：跨对话、跨任务保留，内容由 Agent 自己决定，网络不读。"""
+        d = self.root / "agents" / agent_id
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -79,9 +127,13 @@ class Store:
             data = {
                 "agents": [a.persist() for a in self.agents.values()],
                 "groups": [g.to_dict() for g in self.groups.values()],
-                "conversations": [c.to_dict() for c in self.conversations.values()],
+                "conversations": [c.to_dict() for c in self.conversations.values()],  # 含收件箱
                 "tasks": [t.to_dict(full=True) for t in self.tasks.values()],
                 "knowledge": [k.to_dict(content=True) for k in self.knowledge.values()],
+                "proposals": [p.to_dict() for p in self.proposals.values()],
+                "users": [asdict(u) for u in self.users.values()],
+                "sessions": self.sessions,
+                "approvals": [a.to_dict() for a in self.approvals.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -91,24 +143,85 @@ class Store:
         raw = json.loads(self.path.read_text(encoding="utf-8"))
         for a in raw.get("agents", []):
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
-            self.agents[a["id"]] = AgentNode(**a)
+            self.agents[a["id"]] = AgentNode(**_known(AgentNode, a))
         for g in raw.get("groups", []):
-            self.groups[g["id"]] = Group(**g)
+            self.groups[g["id"]] = Group(**_known(Group, g))
         for c in raw.get("conversations", []):
-            msgs = [Message(**m) for m in c.pop("messages", [])]
-            conv = Conversation(**c, messages=msgs)
-            conv.status = "idle"  # 重启时中断的轮次不再继续
+            conv = _load_conversation(c)
+            if not conv.title:
+                g = self.groups.get(conv.group_id or "")
+                conv.title = g.name if g else "群聊"
+            conv.status = "idle"  # 重启时中断的轮次不再继续；收件箱保留，下一次被 @ 或“继续”时送达
             self.conversations[conv.id] = conv
+        self._one_chat_each()
         for t in raw.get("tasks", []):
             t.pop("summary", None)
             t["delegation"] = Delegation(**t["delegation"])
             t["status"] = TaskStatus(t["status"])
-            task = Task(**t)
-            if task.status == TaskStatus.RUNNING:
-                task.status, task.error = TaskStatus.FAILED, "服务重启，任务中断"
+            task = Task(**_known(Task, t))
             self.tasks[task.id] = task
+        for task in self.tasks.values():
+            if task.status != TaskStatus.RUNNING:
+                continue
+            # 委托方会在下一轮看到失败通知，可以 retry_task 续接原会话
+            task.status, task.error = TaskStatus.FAILED, "服务重启，任务中断"
+            conv = self.conversations.get(task.conversation_id)
+            parent = self.tasks.get(task.parent_task_id or "") or (conv.seats.get(task.delegator_id) if conv else None)
+            if parent is not None:
+                parent.inbox.append({"kind": "failed", "task_id": task.id})
         for k in raw.get("knowledge", []):
-            self.knowledge[k["key"]] = KnowledgeItem(**k)
+            item = KnowledgeItem(**k)
+            # 旧版里对话本身是委托方的执行上下文；现在是委托方在对话里的席位（对话/Agent）
+            owner = self.tasks.get(item.owner_task_id)
+            if owner is not None and owner.conversation_id in item.visible_to:
+                item.visible_to = [seat_id(owner.conversation_id, owner.delegator_id) if v == owner.conversation_id
+                                   else v for v in item.visible_to]
+            self.knowledge[item.key] = item
+        for p in raw.get("proposals", []):
+            self.proposals[p["id"]] = Proposal(**_known(Proposal, p))
+        for u in raw.get("users", []):
+            self.users[u["id"]] = User(**_known(User, u))
+        self.sessions = {t: s for t, s in (raw.get("sessions") or {}).items() if s.get("user_id") in self.users}
+        for a in raw.get("approvals", []):
+            ap = Approval(**_known(Approval, a))
+            if ap.status == "pending":  # 等审批的那次运行已随重启结束
+                ap.status, ap.note = "cancelled", "服务重启，申请作废"
+            self.approvals[ap.id] = ap
+
+    def claim_orphans(self, user_id: str) -> None:
+        """第一个注册的用户认领所有还没有所有者的数据（旧版本的单人数据）。调用方持有锁。"""
+        for a in self.agents.values():
+            a.owner_id = a.owner_id or user_id
+        for g in self.groups.values():
+            g.owner_id = g.owner_id or user_id
+        for c in self.conversations.values():
+            c.owner_id = c.owner_id or user_id
+
+    def _one_chat_each(self) -> None:
+        """每个群组一个群聊、每个（用户, Agent）一个私聊（参照 Raft 的频道与 DM）。
+        旧版本可以开多个对话：最近活跃的那个作为正式的群聊 / 私聊，其余归档为只读，记录不丢。
+        没有群聊的群组补建一个。"""
+        live: dict[tuple[str, ...], list[Conversation]] = {}
+        for c in self.conversations.values():
+            if c.archived:
+                continue
+            key = ("group", c.group_id) if c.kind == "group" else ("dm", c.agent_id, c.owner_id or "")
+            if key[1] is None or (key[0] == "group" and key[1] not in self.groups) \
+                    or (key[0] == "dm" and key[1] not in self.agents):
+                c.archived = True
+                continue
+            live.setdefault(key, []).append(c)
+        for convs in live.values():
+            convs.sort(key=lambda c: -c.updated_at)
+            for old in convs[1:]:
+                old.archived = True
+        for g in self.groups.values():
+            if ("group", g.id) not in live:
+                c = Conversation(id=new_id("conv"), kind="group", group_id=g.id, agent_id=None, title=g.name,
+                                 owner_id=g.owner_id)
+                self.conversations[c.id] = c
+            else:
+                live[("group", g.id)][0].title = g.name
 
     def _seed(self) -> None:
         for spec in SEED_AGENTS:
@@ -118,6 +231,7 @@ class Store:
         g = Group(id=new_id("group"), name=SEED_GROUP["name"], description=SEED_GROUP["description"],
                   member_ids=[by_name[n] for n in SEED_GROUP["members"]])
         self.groups[g.id] = g
+        self._one_chat_each()
 
     # ---------- 查询 ----------
     def agent_by_name(self, name: str) -> AgentNode | None:

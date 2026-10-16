@@ -3,34 +3,78 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Agent Network</title>
+<title>Matrix</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<!-- 登录 / 注册 / 首个 Agent 引导：未就绪时盖住整个应用 -->
+<div id="gate" class="gate" hidden>
+  <div class="gate-card">
+    <div class="gate-brand"><img src="/static/logo.svg" alt="" width="40" height="40"><span>Matrix</span></div>
+    <form id="auth-form" aria-labelledby="auth-title" hidden>
+      <h1 id="auth-title">登录</h1>
+      <p class="muted" id="auth-sub">用邮箱和密码登录。</p>
+      <div class="field"><label for="auth-email">邮箱</label><input id="auth-email" type="email" autocomplete="email" required></div>
+      <div class="field"><label for="auth-pass">密码</label><input id="auth-pass" type="password" autocomplete="current-password" minlength="8" required></div>
+      <p class="error" role="alert" id="auth-error"></p>
+      <button type="submit" id="auth-submit">登录</button>
+      <p class="hint"><span id="auth-switch-text">还没有账号？</span> <button type="button" class="link" id="auth-switch">注册</button></p>
+    </form>
+    <form id="onboard-form" aria-labelledby="onboard-title" hidden>
+      <h1 id="onboard-title">创建你的第一个 Agent</h1>
+      <p class="muted">它是你在 Matrix 里的代理人：别人有事找你，可以先和它说；你也可以把它拉进群聊、让它委托别的 Agent。</p>
+      <div class="field"><label for="ob-name">名称</label><input id="ob-name" required minlength="2" maxlength="80" placeholder="例如：小林的助理"></div>
+      <div class="field"><label for="ob-desc">它做什么</label><textarea id="ob-desc" rows="3" required minlength="2" maxlength="500" placeholder="例如：替我回答关于项目进度的问题，整理会议纪要，需要我拍板的事转给我。"></textarea></div>
+      <fieldset class="checks" id="ob-auth"><legend>权限</legend></fieldset>
+      <fieldset class="seg" aria-label="谁能用它">
+        <label><input type="radio" name="ob-vis" value="public" checked> 所有人可用</label>
+        <label><input type="radio" name="ob-vis" value="private"> 只有我</label>
+      </fieldset>
+      <p class="error" role="alert" id="ob-error"></p>
+      <button type="submit">创建并开始对话</button>
+      <p class="hint"><button type="button" class="link" id="ob-skip">先跳过</button></p>
+    </form>
+  </div>
+</div>
+
 <aside class="rail">
   <div class="brand">
-    <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="#fff" stroke-width="1.6"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="5" r="2"/><circle cx="7" cy="12" r="2"/><path d="M5.8 4.3 10 4.8M5 5.7 6.4 10.1M11 6.8 8.3 10.5"/></svg></span>
-    Agent Network
+    <img class="brand-mark" src="/static/logo.svg" alt="" width="26" height="26">
+    Matrix
   </div>
   <nav aria-label="视图">
     <button type="button" class="tab" data-view="network" aria-pressed="true">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="3.5" r="2"/><circle cx="12.5" cy="12.5" r="2"/><path d="M5.3 7.1 10.7 4.4M5.3 8.9l5.4 2.7"/></svg>网络</button>
     <button type="button" class="tab" data-view="agents" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="4" width="11" height="9" rx="2.5"/><path d="M8 4V1.8M5.8 8.2h.01M10.2 8.2h.01"/></svg>Agent</button>
+    <button type="button" class="tab" data-view="board" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.5" width="3.6" height="11" rx="1"/><rect x="6.2" y="2.5" width="3.6" height="7" rx="1"/><rect x="10.6" y="2.5" width="3.6" height="9" rx="1"/></svg>看板<span id="todo-count" class="count" hidden></span></button>
     <button type="button" class="tab" data-view="groups" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><path d="M1.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5"/><path d="M10.5 3.8a2.3 2.3 0 0 1 0 4.4M12.2 10.3c1.1.5 1.9 1.6 2.3 3.2"/></svg>群组</button>
   </nav>
-  <section class="rail-convs" aria-labelledby="rail-convs-title">
-    <div class="rail-convs-head">
-      <h2 id="rail-convs-title">对话</h2>
-      <button type="button" id="conv-new" class="ghost icon" aria-label="新建对话" title="新建对话">
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
-    </div>
-    <ul id="conv-list" aria-label="对话列表"></ul>
-  </section>
+  <div class="rail-convs">
+    <section aria-labelledby="rail-groups-title">
+      <div class="rail-convs-head">
+        <h2 id="rail-groups-title">群聊</h2>
+        <button type="button" id="group-quick" class="ghost icon" aria-label="新建群组" title="新建群组">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+      </div>
+      <ul id="group-chat-list" class="conv-list" aria-label="群聊列表"></ul>
+    </section>
+    <section aria-labelledby="rail-dms-title">
+      <div class="rail-convs-head"><h2 id="rail-dms-title">私聊</h2></div>
+      <ul id="dm-list" class="conv-list" aria-label="私聊列表"></ul>
+    </section>
+    <details id="archived" class="rail-archived" hidden>
+      <summary>已归档</summary>
+      <ul id="archived-list" class="conv-list" aria-label="已归档的对话"></ul>
+    </details>
+  </div>
   <div class="rail-foot">
     <span id="live" class="status-line" aria-live="polite"></span>
     <span id="runtime"></span>
+    <span class="me"><span id="me-email"></span><button type="button" class="link" id="logout">退出</button></span>
   </div>
 </aside>
 
@@ -53,6 +97,28 @@
     <aside id="net-detail" class="side" aria-live="polite"></aside>
   </section>
 
+  <section id="view-board" class="view" hidden aria-label="任务看板">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>看板</h1><p>你的群聊里委派出去的全部任务，按状态分列；最上面是等你处理的事。</p></div>
+        <div class="board-filter">
+          <label for="board-agent" class="sr-only">按 Agent 筛选</label>
+          <select id="board-agent"></select>
+        </div>
+      </div>
+      <section id="todo" class="todo" aria-labelledby="todo-title" hidden>
+        <h2 id="todo-title">待我处理</h2>
+        <ul id="todo-list" class="todo-list"></ul>
+      </section>
+      <div id="board-cols" class="board-cols"></div>
+      <section id="busy" class="busy" aria-labelledby="busy-title" hidden>
+        <h2 id="busy-title">正在工作（工作台账）</h2>
+        <ul id="busy-list" class="busy-list"></ul>
+      </section>
+    </div>
+    <aside id="board-detail" class="side" aria-live="polite"></aside>
+  </section>
+
   <section id="view-agents" class="view" hidden aria-label="Agent 管理">
     <div class="pane">
       <div class="view-head">
@@ -67,7 +133,7 @@
   <section id="view-groups" class="view" hidden aria-label="群组管理">
     <div class="pane">
       <div class="view-head">
-        <div><h1>群组</h1><p>群组只是成员集合。在群组里对话时，Agent 只能把任务委托给本群成员，网络不会自动加人。</p></div>
+        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。它自己做，或者把一部分委托给本群成员；网络不会自动加人。</p></div>
         <button type="button" id="group-new">新建群组</button>
       </div>
       <ul id="group-list" class="cards"></ul>
@@ -77,29 +143,25 @@
 
   <section id="view-chats" class="view chats" hidden aria-label="对话管理">
     <div class="thread-col">
-      <div id="conv-start" class="conv-start" hidden>
-        <form id="conv-form" aria-labelledby="conv-start-title">
-          <h1 id="conv-start-title">新对话</h1>
-          <p class="muted">选一个 Agent 和它所在的群组。在群组里，它可以把子任务委托给同组成员。</p>
-          <div class="conv-start-fields">
-            <div class="field"><label for="conv-agent">对话对象</label><select id="conv-agent" required></select></div>
-            <div class="field"><label for="conv-group">所在群组</label><select id="conv-group"></select></div>
-          </div>
-          <p id="conv-group-hint" class="hint"></p>
-          <button type="submit">开始对话</button>
-        </form>
-      </div>
       <div id="thread-head"></div>
       <ol id="thread" aria-live="polite"></ol>
       <div class="composer">
         <form id="msg-form" aria-label="发送消息" hidden>
           <label for="msg" class="sr-only">消息</label>
-          <textarea id="msg" rows="3" placeholder="和 Agent 说点什么，例如：我要研究一个新的 AI 产品机会，结论写到 report.md" required></textarea>
-          <div class="bar"><span class="hint"><kbd>⌘</kbd> <kbd>Enter</kbd> 发送</span><button type="submit">发送</button></div>
+          <textarea id="msg" rows="3" required aria-describedby="msg-hint"></textarea>
+          <ul id="mention-pop" class="mention-pop" role="listbox" aria-label="选择要 @ 的成员" hidden></ul>
+          <div class="bar"><span class="hint" id="msg-hint"></span><button type="submit">发送</button></div>
         </form>
       </div>
     </div>
-    <aside id="task-detail" class="side" aria-live="polite"></aside>
+    <aside class="side chat-side">
+      <div class="side-tabs" role="tablist" aria-label="侧栏">
+        <button type="button" role="tab" id="tab-members" aria-controls="members-panel" aria-selected="true">成员</button>
+        <button type="button" role="tab" id="tab-task" aria-controls="task-detail" aria-selected="false">委托详情</button>
+      </div>
+      <div id="members-panel" role="tabpanel" aria-labelledby="tab-members"></div>
+      <div id="task-detail" role="tabpanel" aria-labelledby="tab-task" aria-live="polite" hidden></div>
+    </aside>
   </section>
 </main>
 <script src="/static/app.js" type="module"></script>
