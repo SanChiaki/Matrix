@@ -33,6 +33,7 @@ services:
       - "443:443"
     environment:
       MATRIX_SITE: ${MATRIX_SITE:-47.88.79.27}
+      MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-on}   # off = 关掉 basic auth（不安全）
       MATRIX_BASIC_USER: ${MATRIX_BASIC_USER:-matrix}
       MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:?在 deploy/.env 里设置 MATRIX_BASIC_HASH（caddy hash-password 生成）}
     volumes:
