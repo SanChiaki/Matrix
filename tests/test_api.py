@@ -49,9 +49,16 @@ def test_event_stream_closes_on_shutdown(tmp_path: Path):
 
     ended: dict[str, float] = {}
 
+    from agentnet import auth
+    _, token, _ = auth.register(net.store, "owner@example.com", "password-123")
+    opened = threading.Event()
+
     def read() -> None:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/events", timeout=20) as r:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/api/events",
+                                         headers={"Cookie": f"{auth.COOKIE}={token}"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                opened.set()
                 for _ in r:
                     pass
         except Exception:  # noqa: BLE001 —— 断开方式不重要，重要的是断开
@@ -60,13 +67,23 @@ def test_event_stream_closes_on_shutdown(tmp_path: Path):
 
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
-    time.sleep(0.5)
+    assert opened.wait(5), "事件流没有建立（登录态没生效？）"
+    time.sleep(0.3)
     t0 = time.time()
     server.handle_exit(signal.SIGTERM, None)
     th.join(10)
     reader.join(10)
     assert not th.is_alive(), "服务没有退出"
     assert "t" in ended and ended["t"] - t0 < 3, "事件流没有随服务关闭而断开"
+
+
+def login(c: TestClient, email: str = "owner@example.com", password: str = "password-123") -> dict:
+    """注册（已注册则登录）；TestClient 自动带上 cookie。"""
+    r = c.post("/api/auth/register", json={"email": email, "password": password})
+    if r.status_code == 400 and "注册过" in r.text:
+        r = c.post("/api/auth/login", json={"email": email, "password": password})
+    assert r.status_code == 200, r.text
+    return r.json()
 
 
 def test_api_flow(tmp_path: Path):
@@ -76,6 +93,9 @@ def test_api_flow(tmp_path: Path):
     assert c.get("/").status_code == 200
     assert c.get("/static/app.js").status_code == 200
     assert c.get("/api/info").json()["runtime"] == "scripted"
+    assert c.get("/api/network").status_code == 401  # 没登录
+    me = login(c)
+    assert me["claimed_existing"] is True  # 第一个用户认领种子数据
     snap = c.get("/api/network").json()
     assert len(snap["agents"]) == 5 and len(snap["groups"]) == 1
     names = {a["name"]: a["id"] for a in snap["agents"]}
@@ -88,31 +108,81 @@ def test_api_flow(tmp_path: Path):
     assert c.post("/api/agents", json={"name": "Bad Agent", "description": "xx", "authority": ["root"]}).status_code == 409
     assert c.patch(f"/api/agents/{new['id']}", json={"authority": ["web.research", "file.write"]}).json()["authority"] \
         == ["web.research", "file.write"]
+    m = {"provider": "hi-code-claude", "model": "claude-opus-5-5"}
+    assert c.patch(f"/api/agents/{new['id']}", json={"model": m}).json()["model"] == m
+    assert c.patch(f"/api/agents/{new['id']}", json={"description": "财务测算与预算"}).json()["model"] == m
+    assert c.patch(f"/api/agents/{new['id']}", json={"model": None}).json()["model"] is None
 
     # 群组管理
     g2 = c.post("/api/groups", json={"name": "财务组", "member_ids": [names["Product Strategy Agent"], new["id"]]}).json()
     assert c.patch(f"/api/groups/{g2['id']}", json={"member_ids": [new["id"]]}).json()["member_ids"] == [new["id"]]
     assert c.post("/api/groups", json={"name": "x", "member_ids": ["agent-nope"]}).status_code == 404
 
-    # 对话
-    conv = c.post("/api/conversations", json={"agent_id": names["Product Strategy Agent"],
-                                              "group_id": group["id"]}).json()
-    assert c.post(f"/api/conversations/{conv['id']}/messages", json={"text": "研究 AI 产品机会"}).status_code == 200
+    # 群聊：@ 谁谁接
+    conv = c.post("/api/conversations", json={"group_id": group["id"]}).json()
+    assert conv["kind"] == "group" and conv["seats"] == {}
+    lead = names["Product Strategy Agent"]
+    r = c.post(f"/api/conversations/{conv['id']}/messages", json={"text": "研究 AI 产品机会", "mentions": [lead]})
+    assert r.status_code == 200 and r.json()["mentions"] == [lead]
     net.wait_idle(conv["id"], timeout=10)
     d = c.get(f"/api/conversations/{conv['id']}").json()
-    assert [m["role"] for m in d["messages"]] == ["user", "agent"]
+    roles = [m["role"] for m in d["messages"]]
+    assert roles[0] == "user" and set(roles[1:]) == {"agent"} and len(roles) >= 3  # 委托回报唤醒后续回合
+    assert {m["agent_id"] for m in d["messages"][1:]} == {lead}
+    assert "机会成立" in d["messages"][-1]["text"] and d["status"] == "idle"
+    assert set(d["members"]) == set(group["member_ids"]) and list(d["seats"]) == [lead]
+    assert "inbox" not in d["seats"][lead] and d["seats"][lead]["pending"] == 0
     assert len(d["tasks"]) == 5
     t = next(t for t in d["tasks"] if t["status"] == "completed")
     full = c.get(f"/api/tasks/{t['id']}").json()
     assert full["result"]["report"] and c.get(f"/api/knowledge/{full['result']['knowledge_key']}").json()["content"]
     assert c.get("/api/network").json()["relations"]
-
-    assert c.post("/api/conversations", json={"agent_id": new["id"], "group_id": group["id"]}).status_code == 409
+    # 没 @ 任何人：发出但不唤醒
+    before = len(d["messages"])
+    c.post(f"/api/conversations/{conv['id']}/messages", json={"text": "收到，谢谢"})
+    net.wait_idle(conv["id"], timeout=10)
+    assert len(c.get(f"/api/conversations/{conv['id']}").json()["messages"]) == before + 1
+    # 只能 @ 群组成员
+    assert c.post(f"/api/conversations/{conv['id']}/messages",
+                  json={"text": "x", "mentions": [new["id"]]}).status_code == 409
+    # 私聊
+    dm = c.post("/api/conversations", json={"agent_id": new["id"]}).json()
+    assert dm["kind"] == "dm" and dm["agent_id"] == new["id"]
+    assert c.post("/api/conversations", json={}).status_code == 409
     assert c.get("/api/tasks/nope").status_code == 404
     assert c.post(f"/api/conversations/{conv['id']}/messages", json={"text": ""}).status_code == 422
     assert c.post("/internal/tools", json={"token": "x", "tool": "list_members"}).json()["is_error"] is True
+    assert c.post(f"/api/conversations/{conv['id']}/resume", json={}).status_code == 409  # 没有中断
+    assert c.post(f"/api/tasks/{t['id']}/retry", json={}).status_code == 409             # 不是失败任务
     assert c.delete(f"/api/agents/{new['id']}").json()["ok"]
     assert new["id"] not in c.get("/api/network").json()["groups"][1]["member_ids"]
+
+
+def test_api_proposal_review(tmp_path: Path):
+    """人在 API 上审核 Agent 的提议：批准时可改字段，权限不能超出提议者。"""
+    from agentnet.runtime import ScriptCall
+
+    def handler(call: ScriptCall) -> str:
+        if call.tool_names and call.turn == 1:
+            call.tool("propose_agent", name="Legal Agent", description="合规", reason="缺人", authority=["web.research"])
+        return "ok"
+
+    net = Network(ScriptedRuntime(handler), tmp_path)
+    c = TestClient(create_app(net))
+    login(c)
+    lead = net.store.agent_by_name("Product Strategy Agent")
+    group = next(iter(net.store.groups.values()))
+    conv = net.create_conversation(group.id)
+    net.send_message(conv.id, f"@{lead.name} 需要合规", background=False)
+    props = c.get("/api/network").json()["proposals"]
+    assert len(props) == 1 and props[0]["status"] == "pending"
+    pid = props[0]["id"]
+    assert c.post(f"/api/proposals/{pid}/approve", json={"authority": ["shell.exec"]}).status_code == 409
+    a = c.post(f"/api/proposals/{pid}/approve", json={"description": "合规与隐私", "note": "ok"}).json()
+    assert a["description"] == "合规与隐私" and a["authority"] == ["web.research"]
+    assert a["id"] in c.get("/api/network").json()["groups"][0]["member_ids"]
+    assert c.post(f"/api/proposals/{pid}/reject", json={}).status_code == 409
+    assert c.post("/api/proposals/nope/approve", json={}).status_code == 404
 
 
 def _free_port() -> int:
@@ -131,8 +201,10 @@ def test_mcp_server_calls_back_into_network(tmp_path: Path):
     try:
         lead = net.store.agent_by_name("Product Strategy Agent")
         group = next(iter(net.store.groups.values()))
-        conv = net.create_conversation(lead.id, group.id)
-        net._contexts["tok"] = ExecContext(kind="conversation", id=conv.id, agent_id=lead.id,
+        conv = net.create_conversation(group.id)
+        with net.store.lock:
+            net._seat(conv, lead.id)  # 委托方的席位：交付通知会送到这里
+        net._contexts["tok"] = ExecContext(kind="seat", id=f"{conv.id}/{lead.id}", agent_id=lead.id,
                                            conversation_id=conv.id, group_id=group.id, authority=lead.authority,
                                            constraints=[], depth=0, chain=[lead.id])
         msgs = [
@@ -146,7 +218,9 @@ def test_mcp_server_calls_back_into_network(tmp_path: Path):
                              env={"AGENTNET_TOOL_URL": net.tool_url, "AGENTNET_TOKEN": "tok"}).stdout
         res = {r["id"]: r["result"] for r in map(json.loads, out.splitlines())}
         assert "Market Research Agent" in res[2]["content"][0]["text"] and not res[2]["isError"]
-        assert "completed" in res[3]["content"][0]["text"] and not res[3]["isError"]
-        assert len(net.store.tasks) == 1
+        assert "已受理" in res[3]["content"][0]["text"] and not res[3]["isError"]  # 异步：立即返回
+        net.wait_quiet()
+        # 交付唤醒对话 Agent 的下一轮，由它验收
+        assert len(net.store.tasks) == 1 and next(iter(net.store.tasks.values())).status.value == "completed"
     finally:
         server.should_exit = True

@@ -1,4 +1,4 @@
-"""命令行：在群组中与某个 Agent 对话一轮（无 UI），打印事件流与回复。
+"""命令行：在群聊里 @ 某个 Agent 发一条消息（无 UI），打印事件流与回复，直到所有委托都有结果。
 
     uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" [--agent "Product Strategy Agent"] [--runtime scripted]
 
@@ -12,7 +12,8 @@ import threading
 
 from .server import build_network, create_app
 
-SHOW = {"runtime.invoke", "tool.call", "task.created", "task.updated", "knowledge.shared", "authority.violation"}
+SHOW = {"runtime.invoke", "tool.call", "task.created", "task.updated", "knowledge.shared", "authority.violation",
+        "run.retry", "proposal.updated", "message.added"}
 
 
 def main() -> None:
@@ -25,7 +26,7 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8766)
     args = p.parse_args()
 
-    net = build_network(args.runtime, args.data, args.port)
+    net = build_network(args.runtime, args.data, args.port, seed=True)
     if args.runtime == "dsh":
         import uvicorn
         server = uvicorn.Server(uvicorn.Config(create_app(net), host="127.0.0.1", port=args.port, log_level="warning"))
@@ -36,12 +37,18 @@ def main() -> None:
         raise SystemExit(f"unknown agent {args.agent}")
     groups = net.store.groups_of(agent.id)
     group = next((g for g in groups if g.name == args.group), None) if args.group else (groups[0] if groups else None)
-    conv = net.create_conversation(agent.id, group.id if group else None)
+    # 在群组里：开一个群聊，@ 这个 Agent；不在群组里：私聊
+    conv = net.create_conversation(group.id) if group else net.create_conversation(agent_id=agent.id)
     name = lambda i: net.store.agents[i].name if i in net.store.agents else i  # noqa: E731
 
     seq = net.bus.last_seq
-    net.send_message(conv.id, args.text)
-    while conv.status == "thinking":
+    net.send_message(conv.id, args.text, mentions=[agent.id] if group else None)
+    # 委托是异步的：一直跑到对话回到 idle（没有在跑的轮次，也没有进行中的委托）
+    while True:
+        with net.store.lock:
+            quiet = not net._running and conv.status == "idle"
+        if quiet:
+            break
         for ev in net.bus.wait(seq, 2):
             seq = ev.seq
             if ev.type not in SHOW:
@@ -53,11 +60,17 @@ def main() -> None:
                       + (f" ({t['error']})" if t["error"] else "")
             elif ev.type == "tool.call":
                 msg = f"{name(d['agent_id'])} {d['tool']} {d['input'][:100]}"
+            elif ev.type == "message.added":
+                m = d["message"]
+                msg = f"[{m['role']}] {m['text'][:160]!r}"
             else:
                 msg = str(d)[:200]
             print(f"[{ev.seq:04d}] {ev.type:20s} {msg}", flush=True)
+    pending = [p for p in net.store.proposals.values() if p.conversation_id == conv.id and p.status == "pending"]
     print("\n==== REPLY ====")
     print(conv.messages[-1].text)
+    if pending:
+        print("\n待审核的 Agent 提议（在 UI 里批准或拒绝）：", ", ".join(p.name for p in pending))
     print("\nconversation:", conv.id)
 
 

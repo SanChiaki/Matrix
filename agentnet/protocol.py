@@ -1,11 +1,15 @@
-"""提示词构造：对话（人 ↔ Agent）与委托任务（Agent ↔ Agent）。
+"""提示词构造：对话（人 ↔ Agent）、委托任务（Agent ↔ Agent）、网络通知与失败说明。
 
-Agent 不再输出结构化协议：委托通过网络工具（MCP）完成，最终回复就是交付内容。
+Agent 不输出结构化协议：委托通过网络工具（MCP）完成，最终回复就是交付内容。
+委托是异步的：delegate 立即返回，结果作为网络通知在新的一轮里送达。
 """
 
 from __future__ import annotations
 
-from .models import AUTHORITIES, MCP_PREFIX, AgentNode, Conversation, Group, KnowledgeItem, Task
+from typing import Callable
+
+from .models import (AGENT_HOME as HOME, AUTHORITIES, MCP_PREFIX, AgentNode, Conversation, Group, KnowledgeItem,
+                     Message, Proposal, Task)
 
 
 def authority_lines(authority: list[str]) -> str:
@@ -15,11 +19,48 @@ def authority_lines(authority: list[str]) -> str:
 
 
 def _identity(agent: AgentNode) -> list[str]:
-    parts = [
-        f"你是 Agent Network 中的一个节点：**{agent.name}**（id: {agent.id}）。",
+    return [
+        f"你是 Agent 协作网络 Matrix 中的一个节点：**{agent.name}**（id: {agent.id}）。",
         f"你的能力：{', '.join(agent.capabilities) or '（未声明）'}。{agent.description}",
     ]
-    return parts
+
+
+def _home(writable: bool) -> list[str]:
+    how = "可以读写" if writable else "只能读（你没有 file.write）"
+    return ["", "## 你的私有目录",
+            f"- `./{HOME}/` 是只属于你的目录，跨对话、跨任务保留，你{how}。网络不会读取或替你整理它。",
+            "- 想记住什么（经验、偏好、常用资料）由你自己决定；需要时自己去读。",
+            "- 你可能同时在为别人工作：别的运行可能同时改动这里的文件，冲突时你的版本会另存为 `*.conflict-*` 副本。",
+            "", "## 工作区边界",
+            "- 你的写操作只限于当前工作目录。需要写工作目录以外时，照沙箱拒绝后的提示带理由申请升权重试一次；"
+            "申请会交给你的所有者审批。被拒绝就停下来说明，不要绕过。"]
+
+
+def format_ledger(items: list[dict]) -> str:
+    """工作台账：这个 Agent 此刻同时在做的其他工作。"""
+    lines = ["## 你同时还在处理（工作台账）",
+            "这些是你在别的会话里正在进行的工作。它们与这一轮互不相干：不要改动它们的产物，也不要把它们的结论当成这次的输入。"]
+    for it in items:
+        who = f"（为 {it['user']}）" if it.get("user") else ""
+        if it["kind"] == "task":
+            lines.append(f"- 委托 {it['context_id']}{who}：{it.get('for_agent', '')} 交给你的「{it.get('what', '')}」")
+        else:
+            lines.append(f"- {it.get('what', '对话')}{who}")
+    return "\n".join(lines)
+
+
+# 网络工具 → 提示词里的一行用法。键必须与 mcp_server.TOOLS 一致（测试保证）。
+TOOL_GUIDE: dict[str, str] = {
+    "list_members": "查看群组成员及其能力；只能委托这些成员。",
+    "delegate": ("委托一个成员：写清 mission、expected_outcome（交回什么、以什么形式），可选 authority（只能收窄对方自身权限）、"
+                 "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）。**立即返回任务 id，不等待结果**。"),
+    "list_tasks": "查看你发起的委托及其状态。",
+    "accept_task": "接受一个已交付（in_review）的委托。",
+    "request_changes": "退回一个已交付的委托并写明要改什么，对方会在原会话里修改后重新交付。",
+    "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
+    "share_knowledge": "把你可见的知识显式共享给某个成员；默认任何知识都不会自动共享。",
+    "propose_agent": "群组里没有合适的成员时，提议新建一个 Agent（权限不超出你的有效权限），由人审核；批准后才能委托它。",
+}
 
 
 def _network_tools(group: Group, can_delegate: bool) -> list[str]:
@@ -27,14 +68,22 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
         return ["", "## 协作", "- 你在这里没有委托能力，亲自完成即可。"]
     return [
         "", f"## 协作：你所在的群组「{group.name}」",
-        f"- 用 `{MCP_PREFIX}list_members` 查看群组成员及其能力；只能委托这些成员，网络不会为你创建新 Agent。",
-        f"- 用 `{MCP_PREFIX}delegate` 委托：写清 mission、expected_outcome（交回什么、以什么形式），"
-        "可选 authority（只能收窄对方自身权限）、constraints（不能做什么，每行一条）、share（共享给对方的知识 key）。工具会阻塞直到对方交回结果。",
-        "- 多个相互独立的委托可以在同一轮里并行调用。",
-        f"- 用 `{MCP_PREFIX}share_knowledge` 把你可见的知识显式共享给某个成员；默认任何知识都不会自动共享。",
-        "- 不属于你自身能力的部分交给合适的成员，不要硬做；结果返回后由你判断是否继续委托。",
-        "- 不要使用 subagent / workflow 之类的工具，协作只通过网络工具进行。",
+        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()),
+        "",
+        "委托是异步的：",
+        "- 一次工具调用只发一个委托，发完一个再发下一个；不需要也不要在同一条消息里并行发多个。",
+        "- 发完委托就可以结束这一轮：简短说明你委托了什么、在等什么。不要空等，也不要猜测结果。",
+        "- 成员交付或失败时，网络会在新的一轮里把结果作为通知送给你。届时逐个验收：满意就 accept_task，"
+        "需要修改就 request_changes；这一轮结束时仍未处理的交付视为接受。",
+        "- 先判断自己能不能做：在你能力范围内的直接做；只把确实需要别的能力的部分委托给合适的成员，不要为了分工而分工。",
+        "- 与群组成员协作只能通过网络工具；你自己的 subagent 只是替你干活的帮手，"
+        "不能代替委托，权限也不会超出你自己的权限。",
     ]
+
+
+def _writing() -> list[str]:
+    return ["", "## 写作",
+            "- 长文档分节写：先写骨架，再逐节追加（edit），不要一次写入上万字。"]
 
 
 def _knowledge(items: list[KnowledgeItem]) -> list[str]:
@@ -46,25 +95,62 @@ def _knowledge(items: list[KnowledgeItem]) -> list[str]:
     return parts
 
 
-def build_conversation_prompt(agent: AgentNode, conv: Conversation, group: Group | None, can_delegate: bool,
-                              knowledge: list[KnowledgeItem], text: str, first: bool) -> str:
+def build_seat_prompt(agent: AgentNode, conv: Conversation, group: Group | None, can_delegate: bool,
+                      transcript: str, notices: str, first: bool, home_writable: bool) -> str:
+    """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
+    只送上次运行之后对话里的新消息和网络通知。"""
+    body = "\n\n".join(filter(None, [transcript, notices])) or "（没有新消息。）"
     if not first:
-        return "\n".join([*_knowledge(knowledge), "", "## 用户", text]) if knowledge else text
+        return body
+    if conv.kind == "group" and group is not None:
+        setting = [
+            f"你在群组「{group.name}」的群聊里。群聊里有人类用户和其他 Agent；没有固定的负责人，"
+            "**谁被 @ 到，谁就接这个任务**。",
+            "- 你只会在被 @ 到、或你发起的委托有回报时被唤醒。唤醒时会收到上次之后群聊里的新消息，作为背景；"
+            "其中 @ 你的那条（标有“@ 你”）才是你要处理的。",
+            "- 拿到任务后自己判断：能自己做就自己做；需要别的能力就在群组里找合适的成员委托。",
+            "- 你的回复会作为你的发言出现在群聊里，人和之后被 @ 的成员都能看到。",
+        ]
+    else:
+        setting = ["你正在和一位人类用户私聊。这是一个长期会话：后续消息会在同一会话里继续。"]
     parts = [
-        *_identity(agent), "",
-        "你正在与一位人类用户持续对话。这是一个长期会话：后续消息会在同一会话里继续。",
+        *_identity(agent), "", *setting,
         "", "## 你的权限 —— 运行时只启用了这些工具，越权调用会被记录为违规",
         authority_lines(agent.authority),
     ]
-    if group is not None:
+    if group is not None and conv.kind == "group":
         parts += _network_tools(group, can_delegate)
-    parts += [*_knowledge(knowledge), "",
-              "回复直接面向用户，结论要有依据，信息缺口要标注。", "", "## 用户", text]
+    parts += [*_home(home_writable), *_writing(), "",
+              "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
+    return "\n".join(parts)
+
+
+def format_transcript(messages: list[Message], me: str, name: Callable[[str | None], str]) -> str:
+    """上次运行之后对话里的公开消息。委托的过程与结果不在其中：它们只送给委托方。"""
+    if not messages:
+        return ""
+    lines = ["## 对话里的新消息"]
+    for m in messages:
+        if m.role == "user":
+            tag = "（@ 你）" if me in m.mentions else (
+                f"（@ {'、'.join(name(a) for a in m.mentions)}）" if m.mentions else "")
+            lines.append(f"**用户**{tag}：{m.text}")
+        elif m.role == "agent" and m.agent_id != me:
+            lines.append(f"**{name(m.agent_id)}**：{m.text[:4000]}")
+        elif m.role == "event":
+            lines.append(f"（{m.text}）")
+    return "\n\n".join(lines) if len(lines) > 1 else ""
+
+
+def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
+    parts = ["## 网络通知：有成员把知识共享给了你"]
+    for k in items:
+        parts += [f"### [{k.key}] {k.title}", k.content[:3000]]
     return "\n".join(parts)
 
 
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, group: Group, can_delegate: bool,
-                      knowledge: list[KnowledgeItem]) -> str:
+                      knowledge: list[KnowledgeItem], home_writable: bool) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -80,23 +166,98 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, group:
         *(f"- {c}" for c in task.effective_constraints or ["（无）"]),
         *_network_tools(group, can_delegate),
         *_knowledge(knowledge),
+        *_home(home_writable),
+        *_writing(),
         "", "## 交付",
         "- 第一行写一句话结论，然后是正文（精炼，800 字以内），最后列出证据来源（URL / 文件 / 子任务 id）。",
         "- 工具调用控制在 6 次以内；无法确认的内容要标注。",
     ]
+    if can_delegate:
+        parts.append("- 你委托出去的子任务全部有了结果（交付或失败）之后，你的最终回复才会作为交付；"
+                     "在那之前每一轮的回复只算进展说明。")
+    parts.append("- 委托方可能要求修改；修改意见会在本会话里送达。")
     return "\n".join(parts)
 
 
+def build_notice_prompt(inbox: str) -> str:
+    """续接会话时送达的网络通知（委托回报、验收意见、续接说明）。"""
+    return inbox or "（网络通知：没有新内容，请继续。）"
+
+
+def retry_prompt(note: str | None, error: str | None) -> str:
+    lines = ["## 网络通知：上一轮运行中断，现在续接",
+             f"中断原因：{(error or '未知')[:300]}"]
+    if error and "MALFORMED_RESPONSE" in error:
+        lines.append("最可能是某次工具调用的参数不是合法 JSON。请重新发出那一步；长文本分段写，一次只发一个工具调用。")
+    lines.append("已经完成的工作（文件、已交付的委托、已入库的知识）都还在，不要从头再来，从中断处继续。")
+    if note:
+        lines += ["", f"补充说明：{note}"]
+    return "\n".join(lines)
+
+
 def format_task_result(task: Task, agent_name: str) -> str:
-    """delegate 工具返回给委托方的文本。"""
+    """delegate 工具的返回：已受理（异步执行）或被拒绝。"""
     head = [f"任务 {task.id} → {agent_name}：{task.status.value}",
             f"实际权限：{', '.join(task.granted_authority) or '无'}"
             + (f"；未授予：{', '.join(task.denied_authority)}" if task.denied_authority else "")]
+    if task.error:
+        return "\n".join(head + [f"拒绝原因：{task.error}"])
+    return "\n".join(head + ["已受理，正在执行。结果会作为网络通知送给你；现在不必等待。"])
+
+
+def format_delivery(task: Task, agent_name: str) -> str:
+    """交付通知：委托方据此验收。"""
+    r = task.result or {}
+    head = [f"## 网络通知：{agent_name} 交付了任务 {task.id}（待你验收）",
+            f"目标：{task.delegation.mission}",
+            f"实际权限：{', '.join(task.granted_authority) or '无'}"]
+    if task.revisions:
+        head.append(f"这是第 {task.revisions} 次修改后的交付。")
     if task.violations:
         head.append("越权记录：" + "；".join(task.violations))
-    if task.error:
-        return "\n".join(head + [f"失败原因：{task.error}"])
-    r = task.result or {}
-    if r.get("knowledge_key"):
-        head.append(f"结果已沉淀为知识 `{r['knowledge_key']}`，可在后续委托的 share 中引用。")
-    return "\n".join(head + ["", str(r.get("report", ""))[:6000]])
+    head.append(f"结果知识 `{r.get('knowledge_key')}`；接受后可在后续委托的 share 中引用。")
+    return "\n".join(head + ["", str(r.get("report", ""))[:6000],
+                             "", f"用 accept_task 接受，或用 request_changes 写明要改什么（task_id: {task.id}）。"])
+
+
+def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
+    left = max(0, max_retries - task.retries)
+    return "\n".join([
+        f"## 网络通知：{agent_name} 的任务 {task.id} 失败",
+        f"目标：{task.delegation.mission}",
+        f"原因：{(task.error or '未知')[:400]}",
+        (f"可以用 retry_task 续接原会话（还能续接 {left} 次），或换一个成员重新委托，或亲自处理。" if left
+         else "续接次数已用完：换一个成员重新委托，或亲自处理。"),
+    ])
+
+
+def format_proposal_notice(p: Proposal, agent_name: str) -> str:
+    if p.status == "approved":
+        text = [f"## 网络通知：你提议的 Agent 已批准", f"新成员：{agent_name}（已加入群组，可以委托）"]
+    else:
+        text = [f"## 网络通知：你提议的 Agent「{p.name}」被拒绝", "不要委托它；换现有成员或亲自处理。"]
+    if p.note:
+        text.append(f"审核意见：{p.note}")
+    return "\n".join(text)
+
+
+def format_failure(agent_name: str, error: str, error_class: str, tasks: list[Task], knowledge: list[KnowledgeItem],
+                   name: Callable[[str | None], str]) -> str:
+    """某个席位这一轮失败时给人看的说明：哪些成果已经在了，怎么接着做。"""
+    hint = {
+        "malformed_tool_call": "模型写出的工具参数不是合法 JSON，网络已自动续接一次仍未成功",
+        "empty_response": "模型返回了空响应，网络已自动续接一次仍未成功",
+        "timeout": "运行超时",
+        "rate_limited": "模型服务限流",
+    }.get(error_class, "运行时出错")
+    lines = [f"（{agent_name} 这一轮中断：{hint}。）", f"原因：{error[:300]}"]
+    done = [t for t in tasks if t.status.value in ("completed", "in_review")]
+    running = [t for t in tasks if t.status.value == "running"]
+    if done:
+        lines.append("已完成的委托：" + "、".join(f"{name(t.delegatee_id)}（{t.id}）" for t in done))
+    if running:
+        lines.append("仍在进行的委托：" + "、".join(f"{name(t.delegatee_id)}（{t.id}）" for t in running))
+    if knowledge:
+        lines.append(f"已入库的知识 {len(knowledge)} 条。")
+    lines.append(f"会话保留：点“继续”或再 @ {agent_name}，它会在同一会话里从中断处接着做，不必重发原需求。")
+    return "\n".join(lines)
