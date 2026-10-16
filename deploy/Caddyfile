@@ -3,6 +3,8 @@
 {
 	# 裸 IP 拿不到公开证书：用内部 CA，不去 ACME
 	local_certs
+	# 按 IP 访问时客户端不发 SNI，Caddy 需要知道默认用哪张证书
+	default_sni {$MATRIX_SITE}
 }
 
 {$MATRIX_SITE} {
