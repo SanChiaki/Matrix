@@ -88,9 +88,13 @@ def test_conversation_delegates_within_group(scenario):
     """异步：第一轮发出委托就结束；交付唤醒对话 Agent 验收；全部有结果后整合回复。"""
     net, rt, conv = scenario
     assert conv.status == "idle"
-    first, last = conv.messages[1], conv.messages[-1]
+    talk_msgs = [m for m in conv.messages if m.role != "event"]
+    first, last = talk_msgs[1], talk_msgs[-1]
     assert first.role == "agent" and "已委托 3 个成员" in first.text
     assert last.role == "agent" and "机会成立" in last.text
+    req = next(iter(net.store.requests.values()))  # 被 @ 的事登记为用户任务，整合后交付
+    assert req.status == "in_review" and req.requester_id is None
+    assert sorted(req.task_ids) == sorted(t.id for t in tasks(net) if t.status != TaskStatus.REJECTED)  # 被拒的不算
     done = [t for t in tasks(net) if t.status == TaskStatus.COMPLETED]
     assert len(done) == 4  # 市场 ×2、技术、竞争：全部经过 accept_task
     assert not any(t.auto_accepted for t in done)
@@ -122,6 +126,7 @@ def test_delegate_returns_immediately(tmp_path: Path):
 
 
 def test_outside_group_rejected_no_autocreate(scenario):
+    """不变量 2。"""
     net, _, _ = scenario
     rejected = [t for t in tasks(net) if t.status == TaskStatus.REJECTED]
     assert len(rejected) == 1 and rejected[0].delegatee_id is None
@@ -130,6 +135,7 @@ def test_outside_group_rejected_no_autocreate(scenario):
 
 
 def test_authority_is_agent_own_intersect_grant(scenario):
+    """不变量 1。"""
     net, _, _ = scenario
     tech = by_target(net, "Technical Analysis Agent")[0]
     # 委托方请求 web.research + shell.exec；执行者自身权限是 web.research + file.write
@@ -141,8 +147,9 @@ def test_authority_is_agent_own_intersect_grant(scenario):
 
 
 def test_grant_cannot_exceed_delegator(tmp_path: Path):
+    """不变量 1。"""
     def handler(call: ScriptCall) -> str:
-        if call.tool_names and not is_task(call) and call.turn == 1:
+        if call.can_delegate and not is_task(call) and call.turn == 1:
             call.tool("delegate", agent="Worker", mission="m", expected_outcome="o",
                       authority=["web.research", "shell.exec"])
         return "done"
@@ -158,14 +165,14 @@ def test_grant_cannot_exceed_delegator(tmp_path: Path):
 
 
 def test_constraints_inherit_and_nested_no_cycle(tmp_path: Path):
-    """嵌套委托：B 在等 C 时这一轮只算进展，C 交付唤醒 B 后 B 才交付给 A。约束沿链累加，成环被拒。"""
+    """不变量 3、4：嵌套委托：B 在等 C 时这一轮只算进展，C 交付唤醒 B 后 B 才交付给 A。约束沿链累加，成环被拒。"""
     seen: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
         name = "A" if "**A**" in call.prompt else "B" if "**B**" in call.prompt else seen.get(call.session_id, "C")
         seen.setdefault(call.session_id, name)
         name = seen[call.session_id]
-        if not call.tool_names:
+        if not call.can_delegate:
             return f"{name} done"
         if name == "A":
             if call.turn == 1:
@@ -234,7 +241,7 @@ def test_run_progress_is_live_and_kept_on_reply(tmp_path: Path):
 def test_delegate_constraints_as_text(tmp_path: Path):
     """constraints 在工具 schema 里是字符串（每行一条），引擎拆成列表；旧的数组写法仍然兼容。"""
     def handler(call: ScriptCall) -> str:
-        if not call.tool_names or is_task(call) or call.turn > 1:
+        if not call.can_delegate or is_task(call) or call.turn > 1:
             return "done"
         call.tool("delegate", agent="B", mission="m", expected_outcome="o",
                   constraints="只用公开信息\n- 不编造数据；不评估技术实现\n\n")
@@ -260,11 +267,12 @@ def test_delegate_schema_keeps_free_text_in_strings():
 
 
 def test_depth_limit_unmounts_tools(tmp_path: Path):
+    """不变量 4。"""
     mounted: list[bool] = []
 
     def handler(call: ScriptCall) -> str:
         if is_task(call):
-            mounted.append(bool(call.tool_names))
+            mounted.append(any(t.endswith("__delegate") for t in call.tool_names))
             return "leaf"
         if call.turn == 1:
             call.tool("delegate", agent="B", mission="m", expected_outcome="o")
@@ -275,11 +283,11 @@ def test_depth_limit_unmounts_tools(tmp_path: Path):
     b = net.create_agent("B", "b", ["b"], ["delegate"])
     g = net.create_group("G", "", [a.id, b.id])
     talk(net, a, g, "go")
-    assert mounted == [False]
+    assert mounted == [False]  # 协作工具卸下；群组档案工具仍在（不需要 delegate）
 
 
 def test_delegation_limit_spans_rounds(tmp_path: Path):
-    """委托次数上限按“一条用户消息引出的工作”累计，跨轮次有效；新的用户消息重新计数。"""
+    """不变量 4：委托次数上限按“一条用户消息引出的工作”累计，跨轮次有效；新的用户消息重新计数。"""
     results: list[str] = []
 
     def handler(call: ScriptCall) -> str:
@@ -304,7 +312,8 @@ def test_dm_has_no_network_tools(tmp_path: Path):
     net = Network(rt, tmp_path)
     lead = net.store.agent_by_name("Product Strategy Agent")
     conv = talk(net, lead, None, GOAL)
-    assert conv.kind == "dm" and rt.calls[0].tool_names == []
+    assert conv.kind == "dm" and not rt.calls[0].can_delegate
+    assert sorted(t.removeprefix("mcp__agentnet__") for t in rt.calls[0].tool_names) == ["deliver_request", "open_request"]
     assert "不能委托" in conv.messages[-1].text and not tasks(net)
     assert conv.messages[0].mentions == [lead.id]
 
@@ -327,6 +336,7 @@ def test_conversation_rules(tmp_path: Path):
 
 
 def test_session_resumed_per_seat_isolated_per_task(scenario):
+    """不变量 7。"""
     net, rt, conv = scenario
     lead = net.store.agent_by_name("Product Strategy Agent")
     lead_calls = calls_of(rt, conv, lead)
@@ -349,7 +359,7 @@ def test_mentioned_member_takes_task_without_lead(scenario):
     market = net.store.agent_by_name("Market Research Agent")
     before = len(tasks(net))
     talk(net, market, None, "基于上面的结论补一句市场判断", conv)
-    reply = conv.messages[-1]
+    reply = [m for m in conv.messages if m.role != "event"][-1]
     assert reply.agent_id == market.id and "已参考前面的讨论" in reply.text
     assert len(tasks(net)) == before  # 自己做，没有转手
     prompt = calls_of(rt, conv, market)[0].prompt
@@ -486,6 +496,7 @@ def test_user_message_queued_while_running(tmp_path: Path):
 
 
 def test_knowledge_shared_only_explicitly(scenario):
+    """不变量 9。"""
     net, rt, _ = scenario
     markets = sorted(by_target(net, "Market Research Agent"), key=lambda t: t.created_at)
     first, second = markets
@@ -500,6 +511,7 @@ def test_knowledge_shared_only_explicitly(scenario):
 
 
 def test_share_requires_visibility(scenario):
+    """不变量 9。"""
     net, _, conv = scenario
     from agentnet.engine import ExecContext
     tech = net.store.agent_by_name("Technical Analysis Agent")
@@ -514,6 +526,7 @@ def test_share_requires_visibility(scenario):
 
 
 def test_violation_recorded(tmp_path: Path):
+    """不变量 6、11。"""
     def handler(call: ScriptCall) -> str:
         if is_task(call):
             call.use("bash", {"command": "ls"})
@@ -562,6 +575,7 @@ def test_request_changes_reworks_in_same_session(tmp_path: Path):
 
 
 def test_only_direct_delegator_can_review(tmp_path: Path):
+    """不变量 5。"""
     out: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
@@ -698,7 +712,7 @@ def _proposer(out: dict[str, str]):
 
 
 def test_propose_agent_approved_joins_group(tmp_path: Path):
-    """Agent 只能提议；人批准（可修改，但权限不超出提议者）后以人的身份创建、加入群组，并唤醒提议者。"""
+    """不变量 2：Agent 只能提议；人批准（可修改，但权限不超出提议者）后以人的身份创建、加入群组，并唤醒提议者。"""
     out: dict[str, str] = {}
     net = Network(ScriptedRuntime(_proposer(out)), tmp_path)
     a, b, g = pair(net)
@@ -755,7 +769,7 @@ def test_task_waits_for_pending_proposal(tmp_path: Path):
 
 # ================= 私有目录与模型 =================
 def test_agent_home_persists_without_injection(tmp_path: Path):
-    """每个 Agent 有跨对话、跨任务持久的私有目录；网络只挂载，不读取也不注入提示词。"""
+    """不变量 8：每个 Agent 有跨对话、跨任务持久的私有目录；网络只挂载，不读取也不注入提示词。"""
     seen: list[str] = []
 
     def handler(call: ScriptCall) -> str:
@@ -810,7 +824,7 @@ def test_persistence_roundtrip(scenario, tmp_path: Path):
 
 
 def test_restart_fails_running_tasks_and_notifies(tmp_path: Path):
-    """重启：运行中的任务标记为失败，失败通知进委托方收件箱，下一次运行时送达，可以续接。"""
+    """不变量 12：重启：运行中的任务标记为失败，失败通知进委托方收件箱，下一次运行时送达，可以续接。"""
     net = Network(ScriptedRuntime(lambda c: "x"), tmp_path)
     a, b, g = pair(net)
     conv = talk(net, a, g, "go")
@@ -841,6 +855,7 @@ def test_load_legacy_state(scenario, tmp_path: Path):
         c.update(agent_id=lead.id, dsh_session_id=old_seat.dsh_session_id, inbox=[])
         for k in ("kind", "seats"):
             c.pop(k)
+        c["messages"] = [m for m in c["messages"] if m["role"] != "event"]  # 旧版没有事件消息
         for m in c["messages"]:
             for k in ("wake", "agent_id", "mentions"):
                 m.pop(k, None)
@@ -853,6 +868,7 @@ def test_load_legacy_state(scenario, tmp_path: Path):
     for k in raw["knowledge"]:  # 旧版：委托方的执行上下文就是对话本身
         k["visible_to"] = [conv.id if v == f"{conv.id}/{lead.id}" else v for v in k["visible_to"]]
     raw.pop("proposals", None)
+    raw.pop("requests", None)
     path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
     net2 = Network(ScriptedRuntime(scenario_handler), tmp_path)
@@ -895,9 +911,43 @@ def test_network_tools_defined_consistently():
     from agentnet.engine import TOOL_HANDLERS
     from agentnet.mcp_server import TOOLS
     from agentnet.protocol import TOOL_GUIDE
+    from agentnet.models import ARCHIVE_TOOLS
     names = [t["name"] for t in TOOLS]
     assert len(names) == len(set(names))
     assert set(names) == set(TOOL_HANDLERS) == set(TOOL_GUIDE)
+    from agentnet.models import REQUEST_TOOLS
+    assert set(ARCHIVE_TOOLS + REQUEST_TOOLS) <= set(names)  # 档案、用户任务工具（不需要 delegate）也必须是已定义的网络工具
+
+
+def test_archive_tools_mounted_without_delegate_and_checked_by_network():
+    """没有 delegate 时 MCP 只列档案工具，网络端也拒绝协作工具（不只靠 MCP 过滤）。"""
+    import os
+    import subprocess
+    import sys
+    from agentnet.engine import network_tools_for
+    from agentnet.models import ARCHIVE_TOOLS
+    from agentnet.runtime import MCP_SERVER_SCRIPT
+    from agentnet.models import REQUEST_TOOLS
+    assert network_tools_for("task", True, False) == list(ARCHIVE_TOOLS)          # 委托任务：没有用户任务工具
+    assert network_tools_for("seat", False, False) == list(REQUEST_TOOLS)          # 私聊
+    assert set(network_tools_for("seat", True, False)) == set(ARCHIVE_TOOLS + REQUEST_TOOLS)
+    env = {**os.environ, "AGENTNET_TOOLS": ",".join(network_tools_for("task", True, False))}
+    out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n',
+                         capture_output=True, text=True, env=env, timeout=10).stdout
+    import json
+    assert [t["name"] for t in json.loads(out)["result"]["tools"]] == list(ARCHIVE_TOOLS)
+
+
+def test_invariants_have_tests():
+    """AGENTS.md 里的每条网络不变量都要有测试：测试 docstring 写“不变量 N”。新增不变量却没写测试时变红。"""
+    import re
+    root = Path(__file__).parent.parent
+    doc = (root / "AGENTS.md").read_text(encoding="utf-8")
+    section = doc.split("### 一、网络不变量", 1)[1].split("### 二、", 1)[0]
+    declared = {int(n) for n in re.findall(r"^(\d+)\. \*\*", section, re.M)}
+    tests = "".join(p.read_text(encoding="utf-8") for p in (root / "tests").glob("test_*.py"))
+    covered = {int(n) for tag in re.findall(r"不变量 ([\d、]+)", tests) for n in tag.split("、") if n}
+    assert declared and declared <= covered, f"没有测试标注的不变量：{sorted(declared - covered)}"
 
 
 def test_authorities_registered_everywhere():
