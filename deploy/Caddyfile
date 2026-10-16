@@ -13,7 +13,7 @@
 
 	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
 	# MATRIX_BASIC_AUTH=off 时关掉（只剩 Matrix 自己的登录，不安全，只用于临时演示）。
-	@guarded `{$MATRIX_BASIC_AUTH:on} != "off"`
+	@guarded expression `"{$MATRIX_BASIC_AUTH:on}" != "off"`
 	basic_auth @guarded {
 		{$MATRIX_BASIC_USER} {$MATRIX_BASIC_HASH}
 	}
