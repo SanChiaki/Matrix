@@ -63,7 +63,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - Brief 与仍然有效的决定作为背景推送给席位与委托任务（执行者是群成员，档案是群组的公开内容，不违反不变量 9）；只在档案版本变化时重新推送。
   提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作）。
 - 档案工具 `record_decision` / `list_decisions` / `publish_file` / `propose_brief` 群组成员都有，**不需要 `delegate`**；
-  用户任务工具 `open_request` / `deliver_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`AGENTNET_TOOLS`），网络端再按执行上下文检查一次。
+  用户任务工具 `open_request` / `deliver_request` / `accept_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`AGENTNET_TOOLS`），网络端再按执行上下文检查一次。
 - `publish_file` 只能发布当前工作目录里的文件（不含 `group/` 与 `agent-home/`）；`group/` 是只读副本，运行里的改动丢弃。
 - Brief 主持人直接改，其他参与者与 Agent 用 `propose_brief` / “建议修改”提建议，主持人采纳或拒绝。brief 超过 14 天没确认，UI 提醒主持人复核。
 - 联合群组的档案对所有参与者可见：写进去就等于对所有参与方公开（工具描述与提示词里写明）。
@@ -72,8 +72,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。
 - 群聊被 @、私聊消息都可以成为任务。是不是任务由接任务的 Agent 判断（提示词 `protocol._requests`），登记、交付、退回都写一条 `event` 进对话。
-- `open_request` / `deliver_request` 只有席位（群聊、私聊）有，不需要 `delegate`；委托任务里没有。
-- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部群组、私聊里是同一个人）。只有下发的人能验收、退回、取消。
+- `open_request` / `deliver_request` / `accept_request` 只有席位（群聊、私聊）有，不需要 `delegate`；委托任务里没有。
+- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部群组、私聊里是同一个人）。只有下发的人能验收、退回、取消；也可在本轮送达且 @ 接任务席位的消息里明确验收，由该席位用 `accept_request` 代办（记录消息依据，不开放退回或取消）。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
@@ -139,7 +139,7 @@ uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --ru
 8. **私有目录归 Agent 自己**：`agents/<id>/` 每次运行挂载到工作目录的 `agent-home/`（运行前拷入、运行后同步回去），
    网络不读取、不注入提示词；没有 `file.write` 时只读。
 9. **知识只显式共享**：结果只对产生者与直接委托方可见，其余必须通过 `share` 或 `share_knowledge`，且只能共享自己可见的知识。
-10. **身份由网络认定**：调用方由运行期间才有效的执行上下文令牌识别，不信任模型自报身份。
+10. **身份由网络认定**：调用方由运行期间才有效的执行上下文令牌识别，不信任模型自报身份。用户任务代验收只认本轮送达、@ 当前席位的下发人消息，验收语义由模型判断。
 11. **越权必留痕**：工具调用与权限不符时写入 `task.violations` 并发出 `authority.violation` 事件。
 12. **重启语义**：重启后对话回到 `idle`（席位收件箱保留）；运行中的任务标记为 `FAILED`，失败通知进委托方席位或上级任务的收件箱，可续接；
     待审批的外溢申请作废（那次运行已随重启结束）。

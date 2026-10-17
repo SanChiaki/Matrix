@@ -1715,6 +1715,33 @@ class Network:
         self._request_event(r, f"{self._name(r.agent_id)} 完成了「{r.title}」，等{self._who(r.requester_id)}验收")
         return f"已交付 {r.id}，等下发的人验收；要修改会通知你。", False
 
+    def _tool_accept_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        rid = str(args.get("request_id", "")).strip()
+        with self._lock:
+            r = self.store.requests.get(rid)
+            if r is None or r.agent_id != ctx.agent_id or r.conversation_id != ctx.conversation_id:
+                return f"任务 {rid} 不存在，或不是你在这个对话里接下的", True
+            if r.status != "in_review":
+                return "只有已交付（待验收）的任务可以验收", True
+            conv = self.store.conversations.get(ctx.conversation_id)
+            sources = [m for m in conv.messages if m.id in ctx.addressed and m.role == "user"
+                       and m.user_id == r.requester_id and r.requester_id is not None
+                       and ctx.agent_id in m.mentions] if conv else []
+            if not sources:
+                return "下发的人没有在这一轮消息里表示验收：需要本人这一轮实际送达、@ 你的消息", True
+            running = [t for t in r.task_ids if (t2 := self.store.tasks.get(t)) and t2.status == TaskStatus.RUNNING]
+            if running:
+                return f"还有委托没有回报（{', '.join(running)}）：等它们交付或失败后再验收", True
+            self._complete_request(r, r.requester_id, sources[-1].id)
+            self.store.save()
+        self._request_event(r, f"{self._name(r.agent_id)} 按{self._who(r.requester_id)}的指示验收了「{r.title}」")
+        return f"已按下发人的指示验收 {r.id}，任务已完成。", False
+
+    def _complete_request(self, r: UserRequest, reviewer: str | None, message_id: str | None = None) -> None:
+        """调用方持有锁。看板与对话代验收共用完成状态与审计字段。"""
+        r.status, r.finished_at = "completed", time.time()
+        r.reviewed_by, r.accepted_by_message_id = reviewer, message_id
+
     def _request_event(self, r: UserRequest, text: str | None = None) -> None:
         """调用方不持有锁。任务状态变化写进对话（公开的进展），推送给看板。"""
         conv = self.store.conversations.get(r.conversation_id)
@@ -1750,7 +1777,7 @@ class Network:
             if r.status != "in_review":
                 raise NetworkError("只有已交付（待验收）的任务可以验收")
             if accept:
-                r.status, r.finished_at = "completed", time.time()
+                self._complete_request(r, actor or r.requester_id)
             else:
                 if not feedback:
                     raise NetworkError("退回时写明要改什么")
@@ -2142,6 +2169,7 @@ TOOL_HANDLERS = {
     "propose_brief": Network._tool_propose_brief,
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
+    "accept_request": Network._tool_accept_request,
 }
 
 
