@@ -240,6 +240,7 @@ button.icon.sm { width: 22px; height: 22px; padding: 3px; }
 #thread-head { display: flex; align-items: center; gap: 12px; padding: 16px 28px; border-bottom: 1px solid var(--border); min-height: 69px; }
 #thread-head:empty { display: none; }
 #thread-head .info { flex: 1; min-width: 0; }
+#thread-head .net-warn { flex: none; font-size: 12px; color: var(--human); padding: 4px 8px; border-radius: var(--radius-sm); background: rgba(233, 178, 107, .08); }
 #thread-head .info .muted { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #thread { list-style: none; margin: 0; padding: 28px; flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 18px; }
 .msg { display: flex; gap: 12px; max-width: 760px; width: 100%; }

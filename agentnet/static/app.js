@@ -20,19 +20,30 @@ const group = (id) => S.snap?.groups.find((g) => g.id === id);
 const aname = (id) => agent(id)?.name || id || "（未知）";
 const gcolor = (id) => GROUP_COLORS[Math.max(0, S.snap.groups.findIndex((g) => g.id === id)) % GROUP_COLORS.length];
 
+// 错误带上 HTTP 状态码（断网、超时为 0）：调用方据此区分“确实不存在”（404）和“这次没拿到”。
+// 慢网、网关（如 Caddy 连不上后端时的 502）下后者很常见，不能当成前者显示。
+const API_TIMEOUT_MS = 30000;
+const httpError = (message, status) => Object.assign(new Error(message), { status });
+
 async function api(path, opts = {}) {
   if (opts.body && typeof opts.body !== "string") {
     opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
   }
-  const r = await fetch(path, opts);
+  let r;
+  try {
+    r = await fetch(path, { ...opts, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+  } catch (e) {
+    throw httpError(e?.name === "TimeoutError" ? "请求超时，请检查网络" : "网络连接失败，请检查网络", 0);
+  }
   const data = await r.json().catch(() => ({}));
   if (r.status === 401 && !path.startsWith("/api/auth/")) {  // 登录过期 / 退出：回到登录页
     showGate("login");
-    throw new Error("请先登录");
+    throw httpError("请先登录", 401);
   }
   if (!r.ok) {
     const d = data.detail;
-    throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("；") : `${r.status}`);
+    throw httpError(typeof d === "string" ? d : Array.isArray(d) ? d.map((x) => x.msg).join("；")
+      : r.status >= 500 ? `服务暂时不可用（${r.status}），请稍后重试` : `${r.status}`, r.status);
   }
   return data;
 }
@@ -146,9 +157,10 @@ function route() {
   const m = hash.match(/^(g|dm)-(.+)$/);
   if (m) {
     const body = m[1] === "g" ? { group_id: m[2] } : { agent_id: m[2] };
+    const still = () => location.hash === `#${hash}`;
     api("/api/conversations", { method: "POST", body })
-      .then((c) => { location.replace(`#${c.id}`); })
-      .catch((err) => { alert(err.message); location.replace("#network"); });
+      .then((c) => { if (still()) location.replace(`#${c.id}`); })
+      .catch((err) => { if (still()) { alert(err.message); location.replace("#network"); } });
     return;
   }
   if (hash.startsWith("conv-")) {
@@ -175,7 +187,7 @@ function show(view) {
 
 async function reload() {
   S.snap = await api("/api/network");
-  if (S.convId) S.conv = await api(`/api/conversations/${S.convId}`).catch(() => null);
+  if (S.convId) await loadConv(S.convId);
   render();
 }
 
@@ -339,7 +351,7 @@ const scheduleConv = throttle(() => refreshConv(), 250);
 const scheduleTask = throttle(() => renderTask(), 400);
 
 function onEvent(ev) {
-  S.seq = Math.max(S.seq || 0, ev.seq);
+  S.seq = ev.seq;  // 事件流按序到达：最后收到的就是续接点（服务重启后序号会从头计）
   const d = ev.data;
   if (ev.type === "task.created" || ev.type === "task.updated") {
     if (d.task.status === "running" || d.task.status === "in_review") S.running.set(d.task.id, d.task);
@@ -365,13 +377,35 @@ function onEvent(ev) {
 }
 
 function connect() {
-  const es = new EventSource(`/api/events?since=${S.snap.seq}`);
+  clearTimeout(S.esRetry);
+  S.es?.close();
+  const es = S.es = new EventSource(`/api/events?since=${S.seq ?? S.snap.seq}`);
   es.onmessage = (m) => onEvent(JSON.parse(m.data));
-  es.onopen = () => setLink(true);
-  // EventSource 会自动重连并带上 Last-Event-ID；断开期间可能漏掉状态，重连后整体对齐一次。
-  es.onerror = () => { setLink(false); };
-  es.addEventListener("open", () => { if (S.linkLost) { S.linkLost = false; schedule(); } });
+  // 断开期间可能漏掉状态，重连后整体对齐一次（会连同当前对话一起重拉）。
+  es.onopen = () => {
+    S.esRetryN = 0;
+    const lost = S.linkLost;
+    S.linkLost = false;
+    setLink(true);
+    if (lost) schedule();
+  };
+  // 网络错误时浏览器会自己重连（带 Last-Event-ID）；但重连收到非 200（服务重启中、网关 502）时
+  // EventSource 直接关闭、不再重试，页面从此不再刷新——这种情况由这里按退避重建连接。
+  es.onerror = () => {
+    setLink(false);
+    if (es.readyState === EventSource.CLOSED && S.es === es) {
+      const wait = Math.min(30000, 1000 * 2 ** Math.min(S.esRetryN = (S.esRetryN || 0) + 1, 5));
+      S.esRetry = setTimeout(() => { if (S.es === es) connect(); }, wait);
+    }
+  };
 }
+
+// 网络恢复（换网、从休眠唤醒）时不等退避：立刻重连并对齐一次
+window.addEventListener("online", () => {
+  if (!S.snap) return;
+  if (!S.es || S.es.readyState === EventSource.CLOSED) connect();
+  schedule();
+});
 
 function setLink(ok) {
   if (!ok) S.linkLost = true;
@@ -806,15 +840,56 @@ async function openConv(id) {
   if (S.convId !== id) S.taskSel = null;
   S.convId = id;
   history.replaceState(null, "", `#${id}`);
-  S.conv = await api(`/api/conversations/${id}`).catch(() => ({ id, missing: true }));
+  // 新对话的数据到之前先显示“加载中”：否则慢网下屏幕上还是上一个对话，@ 列表也是它的成员
+  if (S.conv?.id !== id) { S.conv = { id, loading: true }; render(); }
+  await loadConv(id);
   if (S.convId === id) render();
 }
 
 async function refreshConv() {
   const id = S.convId;
   if (!id || S.view !== "chats") return;
-  const c = await api(`/api/conversations/${id}`).catch(() => null);
-  if (c && S.convId === id) { S.conv = c; renderThread(); }
+  await loadConv(id);
+  if (S.convId === id) renderThread();
+}
+
+// 对话详情的唯一入口（打开、事件刷新、整体重拉、重试都走这里）。
+// - 慢网下响应会乱序：只认当前对话的、比已采用的更新的那次响应；
+// - 只有 404 才算不存在；其它失败保留上一次成功的数据，标记“没拿到最新”，退避重试。
+let convSeq = 0, convApplied = 0;
+async function loadConv(id) {
+  const n = ++convSeq;
+  const fresh = () => S.convId === id && n > convApplied;
+  try {
+    const c = await api(`/api/conversations/${id}`);
+    if (!fresh()) return;
+    convApplied = n;
+    S.conv = c;
+    convOk();
+  } catch (e) {
+    if (!fresh()) return;
+    convApplied = n;
+    if (e.status === 404) { S.conv = { id, missing: true }; convOk(); return; }
+    if (e.status === 401) return;
+    S.convError = e.message;
+    if (S.conv?.id !== id || S.conv.loading) S.conv = { id, failed: true };
+    retryConv(id);
+  }
+}
+
+function convOk() {
+  S.convError = null; S.convRetryN = 0;
+  clearTimeout(S.convRetry);
+}
+
+function retryConv(id) {
+  clearTimeout(S.convRetry);
+  const wait = Math.min(15000, 1000 * 2 ** Math.min(S.convRetryN = (S.convRetryN || 0) + 1, 4));
+  S.convRetry = setTimeout(async () => {
+    if (S.convId !== id || !S.convError) return;
+    await loadConv(id);
+    if (S.convId === id && S.view === "chats") render();
+  }, wait);
 }
 
 const TOOL_CN = { [`mcp__agentnet__delegate`]: "委托", [`mcp__agentnet__list_members`]: "查看成员",
@@ -984,7 +1059,7 @@ async function renderArchive() {
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。
 function renderMembers() {
   const box = $("#members-panel"), c = S.conv;
-  if (!c || c.missing) { box.innerHTML = ""; return; }
+  if (!c || c.missing || c.loading || c.failed) { box.innerHTML = ""; return; }
   const row = (a, extra = "", whose = "") => `<li>${avatar(a.name, "sm")}<span class="m-body"><span class="n">${esc(a.name)}
       ${c.live?.[a.id] ? '<span class="dot-live" title="运行中"></span>' : ""}</span>
       <span class="s">${whose ? `${esc(whose)} · ` : ""}${esc(a.capabilities.join(" · ") || a.description)}</span></span>${extra}</li>`;
@@ -1040,9 +1115,11 @@ function renderMembers() {
 function renderThread() {
   const c = S.conv;
   if (!c) return;
-  if (c.missing) {
+  if (c.missing || c.loading || c.failed) {
     $("#thread-head").innerHTML = "";
-    $("#thread").innerHTML = `<li>${placeholder("这个对话不存在或已删除。")}</li>`;
+    $("#thread").innerHTML = `<li>${placeholder(c.missing ? "这个对话不存在或已删除。" : c.loading ? "正在加载…"
+      : `对话加载失败：${esc(S.convError || "网络错误")}。正在自动重试… <button type="button" class="ghost sm" id="conv-retry">立即重试</button>`)}</li>`;
+    $("#conv-retry")?.addEventListener("click", () => { S.convRetryN = 0; refreshConv(); });
     $("#msg-form").hidden = true; renderTask(); return;
   }
   $("#msg-form").hidden = !!c.archived;
@@ -1056,7 +1133,8 @@ function renderThread() {
   const actions = c.archived ? '<button type="button" class="danger" id="conv-del">删除</button>'
     : c.is_host === false ? ""  // 联合群组的群聊只有主持人能清空
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
-  $("#thread-head").innerHTML = head + actions;
+  const stale = S.convError ? `<span class="net-warn" role="status" title="${esc(S.convError)}">网络不稳定，显示的可能不是最新内容，正在重试…</span>` : "";
+  $("#thread-head").innerHTML = head + stale + actions;
   $("#conv-del")?.addEventListener("click", async () => {
     if (!confirm("删除这个已归档的对话？")) return;
     try { await api(`/api/conversations/${c.id}`, { method: "DELETE" }); S.convId = null; S.conv = null; location.hash = "network"; await reload(); }
@@ -1220,7 +1298,7 @@ async function sendMsg(e) {
 
 // ---------- 输入框：@ 成员 ----------
 // 群聊里 @ 谁谁接任务：输入 @ 弹出成员列表补全。私聊不需要 @。
-const members = () => (S.conv?.members || []).map(agent).filter(Boolean);
+const members = () => (S.conv?.members || group(S.conv?.group_id)?.member_ids || []).map(agent).filter(Boolean);
 const mentionedIn = (text) => members().filter((a) => text.toLowerCase().includes(`@${a.name.toLowerCase()}`));
 
 function renderComposer() {
