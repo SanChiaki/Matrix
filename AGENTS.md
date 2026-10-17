@@ -91,8 +91,9 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   外部请求进来的任务不获得本系统内的授权。
 - 当前状态：**运行时契约、能力报告、连接器协议与配对已实现**（`runtime.RuntimeCapabilities`、
   `engine.Network.capabilities`/`_effective`/`runtime_for`、`Task.narrowed`、`device.py`、设备令牌与
-  `/api/devices/connect`）。**还没有**：连接器本体（`matrix-connect` 与各 harness 驱动）、材料下发与回传、
-  端侧 UI。默认运行时仍是 dsh（全部 `enforced`）。下文不变量里标注"接入端侧后"的部分是方向，不是现状。
+  `/api/devices/connect`）。**连接器本体已实现**：`uv run matrix-connect`（`agentnet/connector/`），dsh、
+  Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端。**还没有**：材料下发与回传、
+  端侧 UI、端侧不可达的等待语义（不变量 12、14 的端侧部分）。下文标注"接入端侧后"的部分仍是方向。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
@@ -117,6 +118,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
+| `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动 |
 | `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
 | `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |

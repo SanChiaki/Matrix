@@ -520,7 +520,7 @@ def create_app(network: Network) -> FastAPI:
             await ws.close(code=1008)
             return
         await ws.accept()
-        link = WebSocketLink(ws)
+        link = WebSocketLink(ws, asyncio.get_running_loop())  # 运行线程经这个循环发消息
         try:
             await ws.send_json({"type": HELLO, "protocol": PROTOCOL, "device_id": dev.id})
             info = capabilities_from_hello(await ws.receive_json())

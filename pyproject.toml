@@ -5,10 +5,12 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.143.0",
     "uvicorn>=0.54.0",
+    "websockets>=17.2",
 ]
 
 [project.scripts]
 agentnet = "agentnet.server:main"
+matrix-connect = "agentnet.connector.main:main"
 
 [build-system]
 requires = ["hatchling"]
