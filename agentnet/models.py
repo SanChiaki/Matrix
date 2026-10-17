@@ -356,6 +356,29 @@ class UserRequest:
 
 
 @dataclass
+class Device:
+    """一个端侧连接器（用户电脑上的 matrix-connect，见 docs/device-runtimes.md 第 2 节）。
+    令牌是高熵随机串，只存 sha256；吊销后立即失效。一个用户可以有多台设备。"""
+
+    id: str
+    user_id: str
+    name: str
+    token_hash: str                      # sha256(token)，hex
+    created_at: float = field(default_factory=time.time)
+    last_seen_at: float | None = None    # 最近一次握手时间
+    revoked_at: float | None = None
+
+    @property
+    def revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    def public(self) -> dict[str, Any]:
+        """对外的设备信息：不含令牌与哈希。"""
+        return {"id": self.id, "name": self.name, "created_at": self.created_at,
+                "last_seen_at": self.last_seen_at, "revoked": self.revoked}
+
+
+@dataclass
 class User:
     id: str
     email: str

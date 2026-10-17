@@ -22,6 +22,9 @@
 	@internal path /internal/*
 	respond @internal 404
 
+	# 端侧连接器：/api/devices/connect 是 WebSocket（升级由 reverse_proxy 自动处理），
+	# 令牌走 query，鉴权由应用自己做；这里不需要额外放行。
+
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Content-Type-Options "nosniff"

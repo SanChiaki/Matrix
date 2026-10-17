@@ -11,7 +11,7 @@ import re
 import secrets
 import time
 
-from .models import User, new_id
+from .models import Device, User, new_id
 from .store import Store
 
 COOKIE = "matrix_session"
@@ -77,6 +77,44 @@ def user_of(store: Store, token: str | None) -> User | None:
         return None
     s = store.sessions.get(token)
     return store.users.get(s["user_id"]) if s else None
+
+
+# ---- 端侧连接器令牌（与登录 cookie 分开：可多条、按设备吊销、不随退出登录失效） ----
+def _device_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def issue_device_token(store: Store, user_id: str, name: str = "") -> tuple[Device, str]:
+    """签发一个连接器令牌；明文只在这里返回一次，之后只存哈希。"""
+    token = secrets.token_urlsafe(32)
+    dev = Device(id=new_id("dev"), user_id=user_id, name=(name.strip() or "未命名设备")[:80],
+                 token_hash=_device_hash(token))
+    with store.lock:
+        store.devices[dev.id] = dev
+        store.save()
+    return dev, token
+
+
+def device_of(store: Store, token: str | None) -> Device | None:
+    """令牌 → 设备；吊销的不认。"""
+    if not token:
+        return None
+    h = _device_hash(token)
+    for d in store.devices.values():
+        if d.revoked_at is None and hmac.compare_digest(d.token_hash, h):
+            return d
+    return None
+
+
+def revoke_device(store: Store, device_id: str, actor: str | None) -> Device:
+    with store.lock:
+        d = store.devices.get(device_id)
+        if d is None or (actor is not None and d.user_id != actor):
+            raise AuthError("设备不存在")
+        if not d.revoked:
+            d.revoked_at = time.time()
+            store.save()
+    return d
 
 
 def _new_session(store: Store, user_id: str) -> str:

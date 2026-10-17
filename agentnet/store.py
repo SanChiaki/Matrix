@@ -13,8 +13,8 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
-from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Group, KnowledgeItem, Message,
-                     ProjectRef, Proposal, Seat, Task, TaskStatus, User, UserRequest, new_id, seat_id)
+from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Device, Group, KnowledgeItem,
+                     Message, ProjectRef, Proposal, Seat, Task, TaskStatus, User, UserRequest, new_id, seat_id)
 
 
 def _known(cls: type, d: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +95,7 @@ class Store:
         self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
         self.approvals: dict[str, Approval] = {}
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
+        self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
         if self.path.exists():
             self._load()
         else:
@@ -142,6 +143,7 @@ class Store:
                 "sessions": self.sessions,
                 "approvals": [a.to_dict() for a in self.approvals.values()],
                 "requests": [r.to_dict() for r in self.requests.values()],
+                "devices": [asdict(d) for d in self.devices.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -199,6 +201,8 @@ class Store:
                 ap.status, ap.note = "cancelled", "服务重启，申请作废"
             self.approvals[ap.id] = ap
         # UserRequest 新增审计字段缺失时由 dataclass 默认 None，旧状态无需迁移。
+        for d in raw.get("devices", []):
+            self.devices[d["id"]] = Device(**_known(Device, d))
         for r in raw.get("requests", []):
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
         self._one_trust_domain()

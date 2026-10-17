@@ -79,17 +79,20 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - Agent 可以跑在**平台云侧**（内置 dsh）或**用户端侧**（用户自己的 Claude Code / Codex 等 harness）。
   网络对两者**同等看待**：位置只是节点属性，不改 Seat / Task / Approval / 知识 / 群组成员的语义。
-- 端侧的接入方式是用户电脑上的**出站连接器**（不开入站端口），按用户配对；网络工具经连接器回传，
-  身份仍由执行上下文令牌认定；审批上行进入现有 Approval 记录，由 Agent 的所有者决定。
+- 端侧的接入方式是用户电脑上的**出站连接器**（不开入站端口），按用户配对：一个用户可以签发**多条**
+  设备令牌（`POST /api/devices`，只存 sha256，可单独吊销），连接器用令牌连 `GET /api/devices/connect`
+  （WebSocket，令牌走 query）。网络工具经连接器回传，身份仍由执行上下文令牌认定；
+  审批上行进入现有 Approval 记录，由 Agent 的所有者决定。
 - **有效权限要再交运行时强制执行能力**：只有该 harness 能强制的权限才进入有效权限，
   只能靠提示词约定的按 `advisory` 记账、自动收窄，并在委托详情里写明原因。
 - 私有目录在端侧就留在用户电脑上，网络不读、不注入、不做写回合并；群组文件按轮下发只读副本。
 - **端侧不可达是等待，不是失败**：不消耗重试，无限等，上线后消费积压事件。
 - **A2A 只用于网络边界**（外部 A2A 网络、多套 Matrix 之间），内部 Agent 协作仍然只走网络工具；
   外部请求进来的任务不获得本系统内的授权。
-- 当前状态：**运行时契约与能力报告已实现**（`runtime.RuntimeCapabilities`、`Network.capabilities`/
-  `Network._effective`、`Task.narrowed`），但只有 dsh 一个运行时（全部 `enforced`），端侧连接器尚未实现。
-  下文不变量里标注"接入端侧后"的部分是方向，不是现状。
+- 当前状态：**运行时契约、能力报告、连接器协议与配对已实现**（`runtime.RuntimeCapabilities`、
+  `engine.Network.capabilities`/`_effective`/`runtime_for`、`Task.narrowed`、`device.py`、设备令牌与
+  `/api/devices/connect`）。**还没有**：连接器本体（`matrix-connect` 与各 harness 驱动）、材料下发与回传、
+  端侧 UI。默认运行时仍是 dsh（全部 `enforced`）。下文不变量里标注"接入端侧后"的部分是方向，不是现状。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
