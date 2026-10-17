@@ -31,7 +31,7 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
-from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, ToolBridge
+from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
 from .store import Store
 
 
@@ -882,6 +882,17 @@ class Network:
             self.store.save()
 
     # ================= 一轮：对话里的席位 =================
+    def capabilities(self) -> RuntimeCapabilities:
+        """当前运行时的能力。运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。"""
+        get = getattr(self.runtime, "capabilities", None)
+        return get() if callable(get) else RuntimeCapabilities.all_enforced(getattr(self.runtime, "name", "runtime"))
+
+    def _effective(self, agent: AgentNode, authority: list[str]) -> tuple[list[str], dict[str, str]]:
+        """有效权限 = 自身权限 ∩ 运行时能强制的部分；返回 (有效权限, 被收窄的权限与原因)。
+        委托这一侧再交委托授予，见 _tool_delegate。"""
+        owned = list(dict.fromkeys(authority))
+        return self.capabilities().effective(owned), self.capabilities().narrowed(owned)
+
     def _seat_round(self, conv: Conversation, agent_id: str) -> None:
         agent = self._agent(agent_id)
         seat = conv.seats[agent_id]
@@ -889,7 +900,7 @@ class Network:
         items = self._drain(seat)
         sid = seat_id(conv.id, agent_id)
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
-                          group_id=group.id if group else None, authority=list(agent.authority),
+                          group_id=group.id if group else None, authority=self._effective(agent, agent.authority)[0],
                           constraints=[], depth=0, chain=[agent.id])
         with self._lock:
             upto = len(conv.messages)
@@ -1468,10 +1479,12 @@ class Network:
             return format_task_result(task, target.name if target else str(args.get("agent", ""))), True
 
         assert target is not None
-        # 有效权限 = 执行者自身权限 ∩ 委托授予；委托授予只能来自委托方的有效权限
+        # 有效权限 = 执行者自身权限 ∩ 委托授予 ∩ 运行时能强制的部分；委托授予只能来自委托方的有效权限
         offered = [a for a in delegation.authority if a in ctx.authority]
-        task.granted_authority = [a for a in target.authority if a in offered]
+        narrowed = self.capabilities().narrowed([a for a in target.authority if a in offered])
+        task.granted_authority = [a for a in target.authority if a in offered and a not in narrowed]
         task.denied_authority = [a for a in _dedup(delegation.authority) if a not in task.granted_authority]
+        task.narrowed = narrowed
         task.inbox.append({"kind": "start"})
         with self._lock:
             shared, denied_keys = self._share_into(ctx, task.id, delegation.share)
@@ -1956,6 +1969,10 @@ class Network:
         d = a.to_dict()
         d["mine"] = self.can_edit_agent(a, actor)
         d["owner_email"] = self._email(a.owner_id) if a.owner_id else None
+        caps = self.capabilities()
+        d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
+                                     "enforcement": {x: caps.level(x) for x in a.authority}}
+        d["effective_authority"] = caps.effective(a.authority)
         if not d["mine"]:  # 联合群组里别人的 Agent：只给名片（名称、描述、能力、自身权限）
             d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
                                    "chat_enabled")}

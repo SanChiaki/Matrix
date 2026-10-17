@@ -291,6 +291,8 @@ def format_task_result(task: Task, agent_name: str) -> str:
     head = [f"任务 {task.id} → {agent_name}：{task.status.value}",
             f"实际权限：{', '.join(task.granted_authority) or '无'}"
             + (f"；未授予：{', '.join(task.denied_authority)}" if task.denied_authority else "")]
+    if task.narrowed:  # 执行者的运行时无法强制：不是委托方不给，而是做不到
+        head.append("运行时限制（不算未授予）：" + "、".join(f"{k}（{v}）" for k, v in task.narrowed.items()))
     if task.error:
         return "\n".join(head + [f"拒绝原因：{task.error}"])
     return "\n".join(head + ["已受理，正在执行。结果会作为网络通知送给你；现在不必等待。"])

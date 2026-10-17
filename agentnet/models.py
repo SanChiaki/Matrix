@@ -268,6 +268,8 @@ class Task:
     status: TaskStatus = TaskStatus.RUNNING
     granted_authority: list[str] = field(default_factory=list)
     denied_authority: list[str] = field(default_factory=list)
+    # 因执行者的运行时无法强制而被收窄的权限：{权限: 原因}（见 docs/device-runtimes.md 第 3 节）
+    narrowed: dict[str, str] = field(default_factory=dict)
     effective_constraints: list[str] = field(default_factory=list)
     dsh_session_id: str | None = None
     result: dict[str, Any] | None = None
