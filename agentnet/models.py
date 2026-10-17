@@ -68,6 +68,8 @@ class AgentNode:
     chat_enabled: bool = True            # 人是否可以直接与它对话
     # 运行时模型：{provider, model, reasoning_effort?}；None 表示用运行时自己的默认模型
     model: dict[str, str] | None = None
+    # 绑定的运行时：None = 默认运行时（平台云侧）；非 None = 已注册的端侧运行时名（docs/device-runtimes.md）
+    device_runtime: str | None = None
     created_by: str = "seed"             # seed | human | proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)

@@ -91,6 +91,7 @@ class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True):
         self.runtime = runtime
+        self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.limits = limits or Limits()
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
@@ -882,16 +883,36 @@ class Network:
             self.store.save()
 
     # ================= 一轮：对话里的席位 =================
-    def capabilities(self) -> RuntimeCapabilities:
-        """当前运行时的能力。运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。"""
-        get = getattr(self.runtime, "capabilities", None)
-        return get() if callable(get) else RuntimeCapabilities.all_enforced(getattr(self.runtime, "name", "runtime"))
+    def register_runtime(self, name: str, runtime: AgentRuntime) -> None:
+        """注册一个端侧运行时（连接器上线时调用）。同名覆盖：重连后以新的能力声明为准。"""
+        self._runtimes[name] = runtime
+
+    def unregister_runtime(self, name: str) -> None:
+        self._runtimes.pop(name, None)
+
+    def runtime_for(self, agent: AgentNode | None = None) -> AgentRuntime | None:
+        """Agent 绑定的运行时；未绑定用默认运行时；绑定了但不在线返回 None（这一轮按不可达处理）。"""
+        if agent is not None and agent.device_runtime:
+            return self._runtimes.get(agent.device_runtime)
+        return self.runtime
+
+    @staticmethod
+    def _caps_of(runtime: AgentRuntime | None) -> RuntimeCapabilities:
+        """运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。"""
+        if runtime is None:
+            return RuntimeCapabilities(name="offline", placement="device")
+        get = getattr(runtime, "capabilities", None)
+        return get() if callable(get) else RuntimeCapabilities.all_enforced(getattr(runtime, "name", "runtime"))
+
+    def capabilities(self, agent: AgentNode | None = None) -> RuntimeCapabilities:
+        return self._caps_of(self.runtime_for(agent))
 
     def _effective(self, agent: AgentNode, authority: list[str]) -> tuple[list[str], dict[str, str]]:
         """有效权限 = 自身权限 ∩ 运行时能强制的部分；返回 (有效权限, 被收窄的权限与原因)。
         委托这一侧再交委托授予，见 _tool_delegate。"""
         owned = list(dict.fromkeys(authority))
-        return self.capabilities().effective(owned), self.capabilities().narrowed(owned)
+        caps = self.capabilities(agent)
+        return caps.effective(owned), caps.narrowed(owned)
 
     def _seat_round(self, conv: Conversation, agent_id: str) -> None:
         agent = self._agent(agent_id)
@@ -1276,8 +1297,16 @@ class Network:
             self.bus.emit("run.progress", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
                           conversation_id=ctx.conversation_id, step=step)
 
+        runtime = self.runtime_for(agent)
+        if runtime is None:  # 绑定的端侧运行时不在线：这一轮不能跑，但不是执行失败（第 5 节）
+            with self._lock:
+                self._contexts.pop(token, None)
+                agent.active = max(0, agent.active - 1)
+            self.bus.emit("agent.updated", agent=agent.to_dict())
+            return RunResult(session_id or "", "", ok=False,
+                             error=f"TRANSPORT 端侧运行时 {agent.device_runtime} 未连接")
         try:
-            res = self.runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
+            res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=agent.model,
                                               approvals=approvals))
@@ -1481,7 +1510,7 @@ class Network:
         assert target is not None
         # 有效权限 = 执行者自身权限 ∩ 委托授予 ∩ 运行时能强制的部分；委托授予只能来自委托方的有效权限
         offered = [a for a in delegation.authority if a in ctx.authority]
-        narrowed = self.capabilities().narrowed([a for a in target.authority if a in offered])
+        narrowed = self.capabilities(target).narrowed([a for a in target.authority if a in offered])
         task.granted_authority = [a for a in target.authority if a in offered and a not in narrowed]
         task.denied_authority = [a for a in _dedup(delegation.authority) if a not in task.granted_authority]
         task.narrowed = narrowed
@@ -1969,7 +1998,7 @@ class Network:
         d = a.to_dict()
         d["mine"] = self.can_edit_agent(a, actor)
         d["owner_email"] = self._email(a.owner_id) if a.owner_id else None
-        caps = self.capabilities()
+        caps = self.capabilities(a)
         d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
                                      "enforcement": {x: caps.level(x) for x in a.authority}}
         d["effective_authority"] = caps.effective(a.authority)
