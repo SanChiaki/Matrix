@@ -11,19 +11,21 @@ import argparse
 import asyncio
 import json
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 from pydantic import BaseModel, Field
 
 from . import auth
+from .device import HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
 from .models import User
 from .runtime import DshRuntime, ScriptedRuntime
@@ -86,6 +88,10 @@ class ProposalApprove(BaseModel):
 
 class MemberIn(BaseModel):
     agent_id: str
+
+
+class DeviceIn(BaseModel):
+    name: str = Field("", max_length=80)
 
 
 class NoteIn(BaseModel):
@@ -487,6 +493,57 @@ def create_app(network: Network) -> FastAPI:
 
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---- 端侧连接器 ----
+    @app.get("/api/devices")
+    def devices(user: Me) -> list[dict]:
+        return [d.public() for d in store.devices.values() if d.user_id == user.id]
+
+    @app.post("/api/devices")
+    def create_device(body: DeviceIn, user: Me) -> dict:
+        """签发一个连接器令牌。明文只在这里返回一次，之后只能看到设备列表。"""
+        dev, token = auth.issue_device_token(store, user.id, body.name)
+        return {**dev.public(), "token": token}
+
+    @app.delete("/api/devices/{device_id}")
+    def delete_device(device_id: str, user: Me) -> dict:
+        auth.revoke_device(store, device_id, user.id)
+        network.unregister_runtime(device_id)  # 在线的连接随之失效
+        return {"ok": True}
+
+    @app.websocket("/api/devices/connect")
+    async def device_connect(ws: WebSocket, token: str = "") -> None:
+        """连接器出站连上来。令牌走 query（浏览器的 WebSocket 带不了自定义头）；
+        连接只代表这台设备，身份仍由网络按用户与执行上下文认定。"""
+        dev = auth.device_of(store, token)
+        if dev is None:
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        link = WebSocketLink(ws)
+        try:
+            await ws.send_json({"type": HELLO, "protocol": PROTOCOL, "device_id": dev.id})
+            info = capabilities_from_hello(await ws.receive_json())
+        except Exception:  # noqa: BLE001 —— 握手内容不合法 / 断开
+            await ws.close(code=1008)
+            return
+        rt = DeviceRuntime(link, info)
+        link.on_message = rt.on_message
+        network.register_runtime(dev.id, rt)
+        with store.lock:
+            dev.last_seen_at = time.time()
+            store.save()
+        network.bus.emit("device.connected", device_id=dev.id, runtime=info.runtime)
+        try:
+            while True:
+                reply = rt.on_message(await ws.receive_json())
+                if reply is not None:
+                    await ws.send_json(reply)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            network.unregister_runtime(dev.id)
+            network.bus.emit("device.disconnected", device_id=dev.id)
 
     # ---- 运行时回调（凭执行上下文令牌，不走登录） ----
     @app.post("/internal/tools")

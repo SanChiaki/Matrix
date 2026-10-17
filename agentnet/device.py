@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from dataclasses import dataclass, field
@@ -160,6 +161,35 @@ class DeviceRuntime:
         with self._lock:
             self._seq += 1
             return f"run-{self._seq}-{int(self._now())}"
+
+
+class WebSocketLink:
+    """线上传输：一个已接受的 WebSocket。服务器的运行线程通过 `run_coroutine_threadsafe` 发消息。"""
+
+    def __init__(self, ws: Any, loop: Any = None):
+        self._ws = ws
+        self._loop = loop
+        self.on_message: Callable[[dict[str, Any]], dict[str, Any] | None] = lambda m: None
+
+    def _call(self, coro: Any, timeout_s: float | None = None) -> Any:
+        loop = self._loop or asyncio.get_event_loop()
+        return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout_s)
+
+    def send(self, payload: dict[str, Any]) -> None:
+        try:
+            self._call(self._ws.send_json(payload), 30)
+        except Exception as e:  # noqa: BLE001 —— 连接已断
+            raise DeviceError(str(e)) from e
+
+    def request(self, payload: dict[str, Any], timeout_s: float) -> dict[str, Any]:
+        self.send(payload)
+        return {}
+
+    def close(self) -> None:
+        try:
+            self._call(self._ws.close(), 5)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def capabilities_from_hello(msg: dict[str, Any]) -> DeviceInfo:

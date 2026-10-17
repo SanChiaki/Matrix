@@ -2132,6 +2132,9 @@ class Network:
                 return data if data.get("user_id") == actor or (g and self.can_see_group(g, actor)) else None
             if ev_type == "approval.updated":
                 return data if (data.get("approval") or {}).get("owner_id") in (None, actor) else None
+            if ev_type in ("device.connected", "device.disconnected"):
+                d = self.store.devices.get(str(data.get("device_id", "")))
+                return data if d is not None and d.user_id == actor else None
             if ev_type == "request.updated":
                 r = self.store.requests.get((data.get("request") or {}).get("id", ""))
                 return data if r is None or self.can_see_request(r, actor) else None
