@@ -1,0 +1,10 @@
+.venv/
+.agentnet/
+.git/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.claude/
+.gstack/
+tests/
+deploy/.env

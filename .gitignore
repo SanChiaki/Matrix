@@ -4,3 +4,4 @@ __pycache__/
 .agentnet/
 *.pyc
 .gstack/
+deploy/.env

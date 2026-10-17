@@ -1,0 +1,43 @@
+# 唯一对外入口。站点是裸 IP 时 Caddy 用自己的内部 CA 签证书（浏览器会提示不受信任）；
+# 换成域名（MATRIX_SITE=matrix.example.com）、删掉 local_certs 和 tls internal 后自动申请正式证书。
+{
+	# 裸 IP 拿不到公开证书：用内部 CA，不去 ACME
+	local_certs
+	# 按 IP 访问时客户端不发 SNI，Caddy 需要知道默认用哪张证书
+	default_sni {$MATRIX_SITE}
+}
+
+{$MATRIX_SITE} {
+	# 显式写 tls internal：default_sni 才会生成“空 SNI 也用这张证书”的连接策略（换成域名时删掉这行和 local_certs）
+	tls internal
+
+	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
+	# MATRIX_BASIC_AUTH=off 时关掉（只剩 Matrix 自己的登录，不安全，只用于临时演示）。
+	@guarded expression `"{$MATRIX_BASIC_AUTH:on}" != "off"`
+	basic_auth @guarded {
+		{$MATRIX_BASIC_USER} {$MATRIX_BASIC_HASH}
+	}
+
+	# /internal/* 只给容器里的 dsh / MCP 回调用（走 127.0.0.1），不对外
+	@internal path /internal/*
+	respond @internal 404
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	reverse_proxy matrix:8765 {
+		# SSE（/api/events）不缓冲
+		flush_interval -1
+	}
+}
+
+# 其它 Host（例如 127.0.0.1、别的域名）：不转给 Matrix
+:443 {
+	tls internal
+	respond 404
+}
