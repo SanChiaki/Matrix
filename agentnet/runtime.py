@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .mcp_server import TOOLS as NETWORK_TOOLS
-from .models import MCP_PREFIX, MCP_SERVER
+from .models import AUTHORITIES, MCP_PREFIX, MCP_SERVER
 
 EventSink = Callable[[dict[str, Any]], None]
 ToolHandler = Callable[[str, dict[str, Any]], tuple[str, bool]]  # (name, args) -> (text, is_error)
@@ -116,8 +116,46 @@ class RunResult:
         return not self.ok and classify_error(self.error)[1]
 
 
+# 权限在一个运行时上的强制等级（见 docs/device-runtimes.md 第 3 节）：
+# - enforced：运行时不提供该能力，或越界会被运行时阻断；
+# - advisory：只能靠提示词与网络工具检查，运行时本身拦不住（不进入有效权限）；
+# - unavailable：这个运行时没有该能力。
+ENFORCED, ADVISORY, UNAVAILABLE = "enforced", "advisory", "unavailable"
+
+
+@dataclass
+class RuntimeCapabilities:
+    """一个运行时能强制哪些权限。有效权限 = 自身权限 ∩ 委托授予 ∩ 这里 enforced 的部分。"""
+    name: str
+    placement: str = "hosted"                       # hosted | device
+    enforcement: dict[str, str] = field(default_factory=dict)  # 权限 -> enforced | advisory | unavailable
+    session_resume: bool = True
+    steer: bool = False                             # 运行中能否追加输入
+    approval: str = "interactive"                   # interactive | sandbox-only | none
+    sandbox: str = "workspace-write"                # read-only | workspace-write | none
+
+    @classmethod
+    def all_enforced(cls, name: str, **kw: Any) -> "RuntimeCapabilities":
+        return cls(name=name, enforcement={a: ENFORCED for a in AUTHORITIES}, **kw)
+
+    def level(self, authority: str) -> str:
+        return self.enforcement.get(authority, UNAVAILABLE)
+
+    def enforces(self, authority: str) -> bool:
+        return self.level(authority) == ENFORCED
+
+    def effective(self, authority: list[str]) -> list[str]:
+        return [a for a in authority if self.enforces(a)]
+
+    def narrowed(self, authority: list[str]) -> dict[str, str]:
+        """被运行时收窄掉的权限与原因（只算 Agent 自己声明过的）。"""
+        return {a: f"运行时 {self.name} 无法强制（{self.level(a)}）" for a in authority if not self.enforces(a)}
+
+
 class AgentRuntime(Protocol):
     name: str
+
+    def capabilities(self) -> RuntimeCapabilities: ...
 
     def run(self, req: RunRequest) -> RunResult: ...
 
@@ -207,6 +245,10 @@ def _clip(v: Any, n: int) -> Any:
 
 class DshRuntime:
     name = "dsh"
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """dsh 的权限由 --patch 覆盖层禁用插件 + 沙箱强制执行；审批经 dsh 插件转给网络。"""
+        return RuntimeCapabilities.all_enforced("dsh", approval="interactive", sandbox="workspace-write")
 
     def __init__(self, dsh_bin: str = "dsh", profile: str = "headless"):
         self.dsh_bin = dsh_bin
@@ -384,11 +426,16 @@ class ScriptedRuntime:
 
     name = "scripted"
 
-    def __init__(self, handler: ScriptHandler):
+    def __init__(self, handler: ScriptHandler, capabilities: RuntimeCapabilities | None = None):
         self.handler = handler
+        # 默认与 dsh 一样全部可强制；测试里可以传入收窄的能力表，模拟端侧 harness
+        self._capabilities = capabilities or RuntimeCapabilities.all_enforced("scripted")
         self.calls: list[ScriptCall] = []
         self._turns: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def capabilities(self) -> RuntimeCapabilities:
+        return self._capabilities
 
     def run(self, req: RunRequest) -> RunResult:
         with self._lock:
