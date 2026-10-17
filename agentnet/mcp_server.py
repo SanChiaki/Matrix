@@ -197,6 +197,16 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "accept_request",
+        "description": "下发的人在本轮实际送达、@ 你的消息中明确表示通过后，代为验收你在当前对话已交付的任务。含糊、催促、继续修改不算，不得自行验收。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"request_id": {"type": "string", "description": "你已交付、待验收的用户任务 id"}},
+            "required": ["request_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 

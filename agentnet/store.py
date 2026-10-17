@@ -198,6 +198,7 @@ class Store:
             if ap.status == "pending":  # 等审批的那次运行已随重启结束
                 ap.status, ap.note = "cancelled", "服务重启，申请作废"
             self.approvals[ap.id] = ap
+        # UserRequest 新增审计字段缺失时由 dataclass 默认 None，旧状态无需迁移。
         for r in raw.get("requests", []):
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
         self._one_trust_domain()

@@ -43,7 +43,7 @@ GROUP_FILES = "group"      # 群组档案的文件区在工作目录里的挂载
 # 群组档案工具：群组成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
 # 用户任务工具：席位（群聊、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
-REQUEST_TOOLS = ("open_request", "deliver_request")
+REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 
 
 class TaskStatus(StrEnum):
@@ -344,6 +344,8 @@ class UserRequest:
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
     finished_at: float | None = None
+    reviewed_by: str | None = None       # 验收的人（网络认定）
+    accepted_by_message_id: str | None = None  # 代验收依据；看板操作无消息
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
