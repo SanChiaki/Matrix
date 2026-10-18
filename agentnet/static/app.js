@@ -1408,7 +1408,7 @@ async function renderDevicesView() {
   try { devices = await api("/api/devices"); } catch { devices = []; }
   S.devices = devices;
   $("#device-list").innerHTML = devices.map((d) => {
-    const online = S.snap.agents.some((a) => a.device_runtime === d.id && a.device_online);
+    const online = d.online;
     const agents = S.snap.agents.filter((a) => a.device_runtime === d.id);
     return `<li class="${S.deviceSel === d.id ? "selected" : ""}"><div class="card">
       <button type="button" class="card-main" data-id="${esc(d.id)}" aria-label="查看设备 ${esc(d.name)}">
@@ -1447,8 +1447,9 @@ function renderDeviceDetail(isNew = false) {
         $("#device-form").hidden = true;
         const origin = location.origin.replace(/^http/, "ws");
         $("#device-token").innerHTML = `<div class="warn-box">令牌只显示这一次，请现在复制。</div>
-          <pre class="cmd">matrix-connect --url ${esc(origin)}/api/devices/connect --token ${esc(d.token)} --driver claude-code</pre>
-          <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
+          <pre class="cmd">uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
+  --url ${esc(origin)}/api/devices/connect --token ${esc(d.token)} --driver claude-code</pre>
+          <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。本机需要先装好对应的 harness 并登录（claude / codex / dsh 在 PATH 里）。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
         await reload();
       } catch (err) { $(".error", $("#device-form")).textContent = err.message; }
     });

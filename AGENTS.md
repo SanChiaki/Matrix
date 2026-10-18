@@ -139,6 +139,7 @@ uv run pytest -q                                # 全部测试（离线，不需
 uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
 uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
 uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在群聊里 @ Product Strategy Agent
+uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 端侧连接器
 ```
 
 ## 工程约束

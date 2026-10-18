@@ -499,7 +499,9 @@ def create_app(network: Network) -> FastAPI:
     # ---- 端侧连接器 ----
     @app.get("/api/devices")
     def devices(user: Me) -> list[dict]:
-        return [d.public() for d in store.devices.values() if d.user_id == user.id]
+        # 在线以连接本身为准：没有绑 Agent 的设备连上来也应该显示在线
+        return [{**d.public(), "online": d.id in network._runtimes}
+                for d in store.devices.values() if d.user_id == user.id]
 
     @app.post("/api/devices")
     def create_device(body: DeviceIn, user: Me) -> dict:
