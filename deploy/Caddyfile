@@ -1,15 +1,17 @@
-# 唯一对外入口。站点是裸 IP 时 Caddy 用自己的内部 CA 签证书（浏览器会提示不受信任）；
-# 换成域名（MATRIX_SITE=matrix.example.com）、删掉 local_certs 和 tls internal 后自动申请正式证书。
+# 唯一对外入口。证书签发方由 MATRIX_TLS_ISSUER 决定：
+# - internal（默认）：Caddy 自己的内部 CA，适合裸 IP（浏览器会提示不受信任）；
+# - acme：Let's Encrypt 正式证书，MATRIX_SITE 必须是能从公网解析到本机的域名（例如 47-88-79-27.nip.io），
+#   且 80 / 443 对外开放。不需要邮箱。
 {
-	# 裸 IP 拿不到公开证书：用内部 CA，不去 ACME
-	local_certs
 	# 按 IP 访问时客户端不发 SNI，Caddy 需要知道默认用哪张证书
 	default_sni {$MATRIX_SITE}
 }
 
 {$MATRIX_SITE} {
-	# 显式写 tls internal：default_sni 才会生成“空 SNI 也用这张证书”的连接策略（换成域名时删掉这行和 local_certs）
-	tls internal
+	# 显式写 tls：default_sni 才会生成“空 SNI 也用这张证书”的连接策略
+	tls {
+		issuer {$MATRIX_TLS_ISSUER:internal}
+	}
 
 	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
 	# MATRIX_BASIC_AUTH=off 时关掉（只剩 Matrix 自己的登录，不安全，只用于临时演示）。

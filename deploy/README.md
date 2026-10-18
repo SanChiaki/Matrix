@@ -33,7 +33,19 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 
 ## 证书
 
-`MATRIX_SITE` 在 `deploy/.env` 里必填（服务器 IP 或域名），仓库里不写真实地址。裸 IP 拿不到公开证书，Caddy 会用自己的内部 CA 签发，浏览器会提示证书不受信任，属于正常现象。改成域名（`MATRIX_SITE=matrix.example.com`，并把 DNS 指向服务器）之后，Caddy 会自动申请正式证书，这时要去掉 `Caddyfile` 里的 `local_certs` 和 `tls internal`。
+由 `deploy/.env` 里的 `MATRIX_TLS_ISSUER` 决定：
+
+- `internal`（默认）：Caddy 自己的内部 CA。适合只有裸 IP 的情况，浏览器会提示证书不受信任，属于正常现象。
+- `acme`：Let's Encrypt 正式证书，浏览器直接信任。要求 `MATRIX_SITE` 是能从公网解析到这台服务器的域名，且 80 / 443 对外开放。
+
+没有自己的域名时可以用 [nip.io](https://nip.io)：它是通配 DNS，`47-88-79-27.nip.io` 直接解析到 `47.88.79.27`，不转发流量、不签证书。
+
+```bash
+MATRIX_SITE=47-88-79-27.nip.io
+MATRIX_TLS_ISSUER=acme
+```
+
+改完执行 `docker compose up -d --force-recreate caddy`。nip.io 是多人共用的域名，Let's Encrypt 按注册域名限流，签发失败时 Caddy 日志会写原因；可以改用 sslip.io，或者换成自己的域名。
 
 ## 端侧连接器
 
