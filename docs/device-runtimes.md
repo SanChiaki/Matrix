@@ -158,8 +158,10 @@ class AgentRuntime(Protocol):
 
 > 验证进度（2026-10-18，本机）：
 > - **Codex**：沙箱行为已实测（只读时写 `/tmp` 被拒、`workspace-write` 写工作目录成功）；端到端跑通一轮对话。
-> - **Claude Code**：命令形态与 stream-json 解析有确定性测试；本机 `claude -p` 未登录，真实端到端停在
->   “Not logged in”；工具白名单的实际阻断效果未逐条验证。
+> - **Claude Code**：**已跑通真实端到端两轮**（第二轮经 `--resume` 正确回忆第一轮内容）。此前出现
+>   “Not logged in”，原因是宿主进程注入的环境变量（`CLAUDECODE`、`CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`、
+>   `ANTHROPIC_BASE_URL` 等）让子进程改用宿主凭据；驱动现在启动前清掉它们，用户自己的登录才生效。
+>   工具白名单的实际阻断效果仍未逐条验证。
 > - **ACP 路线**（第 2.3 节的另一种驱动）尚未实现，仍是后续项。
 > - 审批上行：三家都还是 `approval: none`，工作目录以外的写只能被拒绝，不能转给所有者。
 

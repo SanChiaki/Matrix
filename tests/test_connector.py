@@ -275,3 +275,12 @@ print(json.dumps({"type":"result","session_id":"s","is_error":True,"result":"Not
     d = ClaudeDriver(fake_bin(tmp_path, "claude", body))
     out = d.run(spec(tmp_path), Ctx(), threading.Event())
     assert not out.ok and "Not logged in" in out.error
+
+
+def test_claude_env_drops_host_credentials():
+    """宿主进程注入的凭据 / 网关变量不能带进用户的 claude，否则会变成 "Not logged in"。"""
+    from agentnet.connector.drivers.claude import clean_env
+
+    env = clean_env({"PATH": "/bin", "CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://host",
+                     "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1", "HOME": "/Users/x"})
+    assert env == {"PATH": "/bin", "HOME": "/Users/x"}

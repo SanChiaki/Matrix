@@ -23,6 +23,20 @@ import sys
 from ...runtime import MCP_SERVER_SCRIPT, ENFORCED, UNAVAILABLE, RuntimeCapabilities
 from .base import RunOutcome, RunSpec
 
+# 宿主环境里这些变量会让子进程里的 claude 改用宿主进程的凭据 / 网关，而不是用户自己的登录，
+# 表现为 "Not logged in"。连接器要跑的是"用户的 Claude Code"，所以启动前清掉它们。
+HOST_ENV = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
+            "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_MESSAGING_SOCKET", "ANTHROPIC_BASE_URL")
+
+
+def clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
+    out = dict(os.environ if env is None else env)
+    for k in HOST_ENV:
+        out.pop(k, None)
+    return out
+
+
 # 权限 -> Claude Code 工具。只要有一个工具，该权限就是 enforced（工具不在白名单里就调不到）。
 CLAUDE_TOOLS = {
     "web.research": ["WebSearch", "WebFetch"],
@@ -78,8 +92,9 @@ class ClaudeDriver:
 
     def run(self, spec: RunSpec, ctx, cancel: threading.Event) -> RunOutcome:
         spec.workdir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(self.command(spec), cwd=Path(spec.workdir), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        proc = subprocess.Popen(self.command(spec), cwd=Path(spec.workdir), env=clean_env(),
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8")
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(spec.prompt)
         proc.stdin.close()
