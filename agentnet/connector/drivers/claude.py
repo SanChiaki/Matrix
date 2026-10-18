@@ -85,6 +85,7 @@ class ClaudeDriver:
         proc.stdin.close()
         session_id, final = spec.session_id or "", ""
         tools: list[dict] = []
+        result_error = ""
         for line in proc.stdout:
             line = line.strip()
             if not line.startswith("{"):
@@ -105,9 +106,13 @@ class ClaudeDriver:
             elif t == "result":
                 session_id = ev.get("session_id") or session_id
                 final = ev.get("result") or final
+                if ev.get("is_error") or ev.get("subtype") not in (None, "success"):
+                    result_error = ev.get("result") or ev.get("subtype") or "claude reported an error"
         code = proc.wait()
         err = (proc.stderr.read() if proc.stderr else "")[-2000:]
-        if code != 0:
+        if code != 0 or result_error:
+            # 退出码之外，harness 自己的 result 事件通常说清了原因（如未登录）；空 stderr 时尤其重要
+            detail = err.strip() or result_error or "（没有输出）"
             return RunOutcome(session_id=session_id, tool_calls=tools, ok=False,
-                              error=f"SERVER claude exited {code}: {err}")
+                              error=f"SERVER claude exited {code}: {detail}")
         return RunOutcome(session_id=session_id, final_text=final, tool_calls=tools)
