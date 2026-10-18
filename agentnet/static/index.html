@@ -46,6 +46,8 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="4" width="11" height="9" rx="2.5"/><path d="M8 4V1.8M5.8 8.2h.01M10.2 8.2h.01"/></svg>Agent</button>
     <button type="button" class="tab" data-view="board" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.5" width="3.6" height="11" rx="1"/><rect x="6.2" y="2.5" width="3.6" height="7" rx="1"/><rect x="10.6" y="2.5" width="3.6" height="9" rx="1"/></svg>看板<span id="todo-count" class="count" hidden></span></button>
+    <button type="button" class="tab" data-view="devices" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3" width="11" height="8" rx="1.5"/><path d="M5.5 13.5h5"/></svg>设备</button>
     <button type="button" class="tab" data-view="groups" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><path d="M1.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5"/><path d="M10.5 3.8a2.3 2.3 0 0 1 0 4.4M12.2 10.3c1.1.5 1.9 1.6 2.3 3.2"/></svg>群组</button>
   </nav>
@@ -135,6 +137,17 @@
       <ul id="group-list" class="cards"></ul>
     </div>
     <aside id="group-editor" class="side"></aside>
+  </section>
+
+  <section id="view-devices" class="view" hidden aria-label="设备">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>设备</h1><p>在你自己的电脑上跑 Claude Code、Codex 或 dsh，把本机 Agent 接进网络。连接只发出站请求；令牌可随时吊销。</p></div>
+        <button type="button" id="device-new">连接一台设备</button>
+      </div>
+      <ul id="device-list" class="cards"></ul>
+    </div>
+    <aside id="device-detail" class="side"></aside>
   </section>
 
   <section id="view-chats" class="view chats" hidden aria-label="对话管理">

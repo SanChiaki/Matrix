@@ -31,6 +31,7 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
+from .device import DeviceRuntime
 from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
 from .store import Store
 
@@ -182,9 +183,11 @@ class Network:
     # ================= Agent 管理 =================
     def create_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
                      chat_enabled: bool = True, model: dict[str, str] | None = None,
-                     actor: str | None = None) -> AgentNode:
+                     device_runtime: str | None = None, actor: str | None = None) -> AgentNode:
         with self._lock:
+            self._check_device_runtime(device_runtime, actor)
             a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor)
+            a.device_runtime = device_runtime or None
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
 
@@ -217,12 +220,22 @@ class Network:
                     v = _clean_auth(v)
                 elif k == "capabilities":
                     v = _clean_caps(v)
+                elif k == "device_runtime":
+                    self._check_device_runtime(v or None, actor)
                 elif k not in UPDATABLE_AGENT_FIELDS:
                     raise NetworkError(f"不能修改 {k}")
                 setattr(a, k, v)
             self.store.save()
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
+
+    def _check_device_runtime(self, device_id: str | None, actor: str | None) -> None:
+        """只能绑定自己的、未吊销的设备（不变量 16）。调用方持有锁。"""
+        if not device_id:
+            return
+        d = self.store.devices.get(device_id)
+        if d is None or d.revoked or (actor is not None and d.user_id != actor):
+            raise NetworkError(f"设备 {device_id} 不存在或属于别人")
 
     def delete_agent(self, agent_id: str, actor: str | None = None) -> None:
         with self._lock:
@@ -948,6 +961,14 @@ class Network:
             return self._runtimes.get(agent.device_runtime)
         return self.runtime
 
+    def _device_of_context(self, context_id: str) -> DeviceRuntime | None:
+        """正在为这个执行上下文提供服务的端侧运行时（publish_file 回读文件用）。"""
+        with self._lock:
+            ctx = next((c for c in self._contexts.values() if c.id == context_id), None)
+            agent = self.store.agents.get(ctx.agent_id) if ctx else None
+        rt = self.runtime_for(agent)
+        return rt if isinstance(rt, DeviceRuntime) else None
+
     def device_online(self, agent: AgentNode | None) -> bool:
         """端侧运行时是否在线。未绑定端侧的 Agent 视为在线（走默认运行时）。"""
         return agent is None or not agent.device_runtime or agent.device_runtime in self._runtimes
@@ -964,8 +985,10 @@ class Network:
         rt = self.runtime_for(agent)
         if rt is not None:
             return self._caps_of(rt)
-        if agent is not None and agent.enforcement:  # 端侧离线：沿用最近一次握手声明的能力
-            return RuntimeCapabilities(name=agent.device_runtime or "device", placement="device",
+        if agent is not None and agent.device_runtime:
+            # 端侧离线：沿用最近一次握手声明的能力（第 5 节）。从没连过的设备没有任何声明，
+            # 这时权限按 unavailable 处理——不能因为"还不知道"就当成可以强制。
+            return RuntimeCapabilities(name=agent.device_runtime, placement="device",
                                        enforcement=dict(agent.enforcement))
         return self._caps_of(None)
 
@@ -1327,6 +1350,19 @@ class Network:
                 out.append(item)
         return out
 
+    def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
+        """端侧运行时每轮要收到的只读材料：群组档案文件（运行时当只读副本用）。
+        私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
+        g = self.store.groups.get(ctx.group_id or "")
+        out: list[dict[str, Any]] = []
+        if g is None:
+            return out
+        d = self.store.group_dir(g.id)
+        for p in sorted(d.iterdir()):
+            if p.is_file() and p.stat().st_size <= 2_000_000:
+                out.append({"path": f"{GROUP_FILES}/{p.name}", "data": p.read_bytes()})
+        return out
+
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float, on_session: Any = None) -> RunResult:
         token = secrets.token_urlsafe(18)
@@ -1382,10 +1418,12 @@ class Network:
             return RunResult(session_id or "", "", ok=False,
                              error=f"TRANSPORT 端侧运行时 {agent.device_runtime} 未连接")
         try:
+            with self._lock:
+                materials = self._materials(ctx) if agent.device_runtime else []
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=agent.model,
-                                              approvals=approvals))
+                                              approvals=approvals, materials=materials))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -1507,11 +1545,23 @@ class Network:
         """发布当前工作目录里的一个文件（不是 group/ 或 agent-home/ 下的）。"""
         g = self._require_group(ctx, delegate=False)
         holder = self._holder(ctx.kind, ctx.id)
-        root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
         rel = str(args.get("path", "")).strip()
-        src = (root / rel).resolve()
         top = Path(rel).parts[0] if Path(rel).parts else ""
-        if not rel or root.resolve() not in src.parents or top in (GROUP_FILES, HOME_DIR) or not src.is_file():
+        if not rel or top in (GROUP_FILES, HOME_DIR) or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/ 与 {HOME_DIR}/）", True
+        agent = self.store.agents.get(ctx.agent_id)
+        if agent is not None and agent.device_runtime:
+            # 端侧：工作目录在用户电脑上，向连接器要文件（越界由连接器再挡一次）
+            content = self._device_of_context(ctx.id).fetch_file(ctx.id, rel) \
+                if self._device_of_context(ctx.id) is not None else None
+            if content is None:
+                return f"找不到 {rel}：端侧运行时未连接，或文件不在工作目录里", True
+            name = self.publish_file(g.id, str(args.get("name", "")).strip() or Path(rel).name, content,
+                                     agent_id=ctx.agent_id, source=ctx.id)
+            return f"已从端侧发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。", False
+        root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
+        src = (root / rel).resolve()
+        if root.resolve() not in src.parents or not src.is_file():
             return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/ 与 {HOME_DIR}/）", True
         name = self.publish_file(g.id, str(args.get("name", "")).strip() or src.name, src.read_bytes(),
                                  agent_id=ctx.agent_id, source=ctx.id)
@@ -2084,6 +2134,7 @@ class Network:
         d["mine"] = self.can_edit_agent(a, actor)
         d["owner_email"] = self._email(a.owner_id) if a.owner_id else None
         caps = self.capabilities(a)
+        d["device_online"] = self.device_online(a)
         d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
                                      "enforcement": {x: caps.level(x) for x in a.authority}}
         d["effective_authority"] = caps.effective(a.authority)

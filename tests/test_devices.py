@@ -116,3 +116,31 @@ def _agent_for(net, email):
     a = net.create_agent("L", "端侧", [], ["web.research"], actor=uid)
     a.device_runtime = "whatever"
     return a
+
+
+def test_agent_binds_only_to_own_device(tmp_path):
+    net = build(tmp_path)
+    alice = next(u for u in net.store.users.values() if u.email == "alice@x.io")
+    bob = next(u for u in net.store.users.values() if u.email == "bob@x.io")
+    va, ta = auth.issue_device_token(net.store, alice.id, "alice 的")
+    vb, tb = auth.issue_device_token(net.store, bob.id, "bob 的")
+
+    a = net.create_agent("A", "x", [], ["web.research"], actor=alice.id, device_runtime=va.id)
+    assert a.device_runtime == va.id
+    view = net.agent_view(a, alice.id)
+    assert view["device_online"] is False  # 没有连接器连上
+
+    try:
+        net.create_agent("B", "x", [], [], actor=alice.id, device_runtime=vb.id)
+    except Exception as e:
+        assert "属于别人" in str(e)
+    else:  # pragma: no cover
+        raise AssertionError("不能绑定别人的设备")
+
+    auth.revoke_device(net.store, va.id, alice.id)
+    try:
+        net.update_agent(a.id, actor=alice.id, device_runtime=va.id)
+    except Exception as e:
+        assert "不存在或属于别人" in str(e)
+    else:  # pragma: no cover
+        raise AssertionError("吊销的设备不能绑定")

@@ -1,6 +1,7 @@
 # 云侧与端侧运行时（设计文档）
 
-状态：**草案**。本文只描述方向与结构，不描述已实现的代码；实现状态见 [REQUIREMENTS.md](../REQUIREMENTS.md)。
+状态：**方向已定，部分已实现**。已实现：运行时契约与能力报告、连接器协议与配对、`matrix-connect` 与三个驱动、
+端侧可达性、材料下发与回传、端侧 UI。未实现：云侧的读隔离（需求 #34）。实现状态见 [REQUIREMENTS.md](../REQUIREMENTS.md)。
 
 目标：让 Matrix 里的 Agent 既可以跑在**平台云侧**（内置的 DSH 运行时），也可以跑在**用户端侧**
 （用户自己的 Claude Code、Codex 等 harness），并在网络中**同等看待**。
@@ -168,11 +169,13 @@ class AgentRuntime(Protocol):
 
 ```
 席位 / 任务开始一轮
-  ├─ 群组档案文件（只读副本）      ┐
-  ├─ 委托附件、共享知识            ├─ runtime.materials(...) → 端侧席位的 materials/
-  ├─ 席位工作目录（若已有产出）     ┘
-  └─ 私有目录（agent-home）         不离开端侧
+  ├─ 群组档案文件（只读副本）→ run.request.materials → 端侧工作目录的 group/
+  └─ 私有目录（agent-home）   不离开端侧，也不经过网络
 ```
+
+（已实现：群组档案文件随 `run.request.materials` 下发，连接器写入并先清掉上一轮的副本；
+`publish_file` 在端侧由服务器发 `file.fetch` 向连接器取文件，路径越界由连接器拒绝。
+委托附带的共享知识仍写在服务器上的 `shared/`，端侧暂不单独下发。）
 
 要点：
 

@@ -94,8 +94,9 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - 当前状态：**运行时契约、能力报告、连接器协议与配对已实现**（`runtime.RuntimeCapabilities`、
   `engine.Network.capabilities`/`_effective`/`runtime_for`、`Task.narrowed`、`device.py`、设备令牌与
   `/api/devices/connect`）。**连接器本体已实现**：`uv run matrix-connect`（`agentnet/connector/`），dsh、
-  Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端。**还没有**：材料下发与回传、
-  端侧 UI、材料下发与回传。
+  Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端。**端侧其余部分也已实现**：
+  设备管理页（签发 / 吊销令牌、在线状态）、Agent 绑定设备与能力缺口展示、材料下发（`run.request.materials`）
+  与 `publish_file` 回传（`file.fetch`）。**还没有**：云侧的读隔离（需求 #34）。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
