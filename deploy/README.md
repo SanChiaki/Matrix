@@ -35,6 +35,21 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 
 `MATRIX_SITE` 在 `deploy/.env` 里必填（服务器 IP 或域名），仓库里不写真实地址。裸 IP 拿不到公开证书，Caddy 会用自己的内部 CA 签发，浏览器会提示证书不受信任，属于正常现象。改成域名（`MATRIX_SITE=matrix.example.com`，并把 DNS 指向服务器）之后，Caddy 会自动申请正式证书，这时要去掉 `Caddyfile` 里的 `local_certs` 和 `tls internal`。
 
+## 端侧连接器
+
+用户在自己的电脑上把 Claude Code、Codex 或 dsh 接进 Matrix：在「设备」页签发一个令牌，然后在本机运行
+
+```bash
+uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
+  --url wss://<MATRIX_SITE>/api/devices/connect --token <令牌> --driver claude-code
+```
+
+- 连接器**只发出站** WebSocket，不开入站端口；Caddy 的 `reverse_proxy` 自动处理升级，不需要额外配置。
+- 令牌可随时在「设备」页吊销；吊销后连接立即断开，绑在该设备上的 Agent 进入等待。
+- 如果开着 basic auth（`MATRIX_BASIC_AUTH=on`），连接器还要带上 basic auth 凭据，否则握手会被 Caddy 拒绝；
+  简化起见可以在演示时关掉 basic auth，只依赖 Matrix 自己的登录。
+- 设备离线不是故障：任务进入 `waiting`，不消耗重试，连接器重连后继续。
+
 ## 沙箱
 
 dsh 在 Linux 上用 bwrap 做沙箱。如果没有可用的沙箱，它会 fail closed，也就是拒绝执行命令，而不是不加限制地执行。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
