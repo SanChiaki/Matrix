@@ -17,8 +17,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -28,7 +30,8 @@ from .runtime import (ENFORCED, RunRequest, RunResult, RuntimeCapabilities)
 # ---- 消息（服务器 → 连接器）----
 HELLO = "hello"                    # {protocol, token, runtime}
 RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation_id, session_id, workdir_ref,
-                                   #  prompt, authority, tool_names, model, timeout_s}
+                                   #  prompt, authority, tool_names, model, materials}
+                                   #  materials: [{path, data(base64)}] —— 群组文件与委托材料的只读副本
 CANCEL = "cancel"                  # {run_id}
 SHUTDOWN = "shutdown"
 
@@ -38,6 +41,7 @@ RUN_EVENT = "run.event"            # {run_id, event}  —— 与 RunRequest.on_e
 RUN_RESULT = "run.result"          # {run_id, session_id, final_text, tool_calls, usage, ok, error}
 TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
 APPROVAL_REQUEST = "approval.request"  # {run_id, call_id, tool, reason}
+FILE_FETCH = "file.fetch"          # {run_id, call_id, path} —— 服务器要读端侧工作目录里的文件（publish_file）
 
 PROTOCOL = 1
 
@@ -78,6 +82,8 @@ class DeviceRuntime:
         self._now = now
         self._runs: dict[str, threading.Event] = {}
         self._results: dict[str, dict[str, Any]] = {}
+        self._by_context: dict[str, str] = {}          # 执行上下文 id -> 正在跑的 run_id
+        self._fetches: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self._lock = threading.Lock()
         self._seq = 0
 
@@ -90,13 +96,14 @@ class DeviceRuntime:
         done = threading.Event()
         with self._lock:
             self._runs[run_id] = done
+            self._by_context[req.context_id] = run_id
         payload = {
             "type": RUN_REQUEST, "run_id": run_id,
             "agent_id": req.agent_id, "context_id": req.context_id,
             "session_id": req.session_id, "workdir_ref": self.workdir_ref(req),
             "prompt": req.prompt, "authority": list(req.authority),
             "tool_names": list(req.tools.names or []) if req.tools else [],
-            "model": req.model,
+            "model": req.model, "materials": list(getattr(req, "materials", None) or []),
         }
         try:
             self.link.send(payload)
@@ -106,6 +113,8 @@ class DeviceRuntime:
         finally:
             with self._lock:
                 self._runs.pop(run_id, None)
+                if self._by_context.get(req.context_id) == run_id:
+                    self._by_context.pop(req.context_id, None)
         if not replied:
             self.cancel(run_id)
             return RunResult("", "", ok=False, error=f"TIMEOUT device did not answer in {req.timeout_s:.0f}s")
@@ -150,7 +159,41 @@ class DeviceRuntime:
                 done = self._runs.get(run_id)
             if done is not None:
                 done.set()
+        elif "reply_to" in msg and run_id == "":  # file.fetch 的回执
+            cid = str(msg.get("reply_to", ""))
+            with self._lock:
+                pending = self._fetches.pop(cid, None)
+            if pending is not None:
+                pending[1].update(msg)
+                pending[0].set()
         return None
+
+    # ---- 读端侧工作目录里的文件（publish_file 用） ----
+    def fetch_file(self, context_id: str, path: str, timeout_s: float = 60) -> bytes | None:
+        """向连接器要一个文件的字节；不在线 / 越界 / 不存在返回 None。"""
+        with self._lock:
+            run_id = self._by_context.get(context_id)
+        if run_id is None:
+            return None
+        cid = f"f{uuid.uuid4().hex[:12]}"
+        done, box = threading.Event(), {}
+        with self._lock:
+            self._fetches[cid] = (done, box)
+        try:
+            self.link.send({"type": FILE_FETCH, "run_id": run_id, "call_id": cid, "path": path})
+            if not done.wait(timeout_s):
+                return None
+        except DeviceError:
+            return None
+        finally:
+            with self._lock:
+                self._fetches.pop(cid, None)
+        if box.get("error") or not box.get("data"):
+            return None
+        try:
+            return base64.b64decode(box["data"])
+        except Exception:  # noqa: BLE001
+            return None
 
     def workdir_ref(self, req: RunRequest) -> str:
         """端侧工作目录的引用：网络只保存不透明引用，不拼路径（第 4 节）。

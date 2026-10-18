@@ -120,3 +120,38 @@ def test_device_approval_does_not_expire_with_time(tmp_path):
     net.decide_approval(ap.id, True, actor=alice)
     t.join(3)
     assert out["o"] == "allowed-once"
+
+
+def test_device_publish_file_fetches_from_the_connector(tmp_path):
+    """端侧 publish_file：服务器向连接器要文件后发布进群组档案（工作目录在用户电脑上）。"""
+    import base64
+    from agentnet.engine import ExecContext
+
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice = users(net, "alice@x.io")[0]
+    a = net.create_agent("Local", "端侧", [], ["file.write"], actor=alice)
+    a.device_runtime = "dev-1"
+    g = net.create_group("G", "", [a.id], actor=alice)
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), hello())
+    sent = []
+
+    def serve(msg):
+        sent.append(msg)
+        if msg.get("type") == "file.fetch":
+            rt.on_message({"reply_to": msg["call_id"], "run_id": "",
+                           "data": base64.b64encode(b"# report").decode()})
+        return None
+
+    rt.link = MemoryLink(serve=serve)
+    net.register_runtime("dev-1", rt)
+    ctx = ExecContext(kind="seat", id=f"{net.group_chat(g.id, actor=alice).id}/{a.id}", agent_id=a.id,
+                      conversation_id=net.group_chat(g.id, actor=alice).id, group_id=g.id,
+                      authority=["file.write"], constraints=[], depth=0, chain=[a.id])
+    net._contexts["tok"] = ctx
+    rt._by_context[ctx.id] = "run-9"
+    text, is_error = net.handle_tool("tok", "publish_file", {"path": "out/report.md"})
+    assert not is_error, text
+    assert (tmp_path / "groups" / g.id / "files" / "report.md").read_bytes() == b"# report"
+    # 越界路径仍然被拒
+    text, is_error = net.handle_tool("tok", "publish_file", {"path": "../secret"})
+    assert is_error and "只能发布" in text

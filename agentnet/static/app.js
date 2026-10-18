@@ -136,6 +136,7 @@ async function start() {
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
+  $("#device-new").addEventListener("click", () => renderDeviceDetail(true));
   $("#group-new").addEventListener("click", () => { S.groupSel = null; renderGroupEditor(true); renderGroups(); });
   $("#group-quick").addEventListener("click", () => { S.groupSel = null; S.newGroup = true; location.hash = "groups"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
@@ -152,7 +153,7 @@ async function start() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "board", "agents", "groups"];
+  const PLAIN = ["network", "board", "agents", "groups", "devices"];
   // 参照 Raft：#g-<群组> 打开群组的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   const m = hash.match(/^(g|dm)-(.+)$/);
   if (m) {
@@ -203,7 +204,8 @@ function render() {
   $("#todo-count").hidden = !todo;
   $("#todo-count").textContent = todo;
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
-  ({ network: renderGraph, board: loadBoard, agents: renderAgentsView, groups: renderGroupsView, chats: renderChats })[S.view]();
+  ({ network: renderGraph, board: loadBoard, agents: renderAgentsView, groups: renderGroupsView, chats: renderChats,
+     devices: renderDevicesView })[S.view]();
 }
 
 // ---------- 看板（参照 Raft task board） ----------
@@ -566,7 +568,8 @@ function renderAgents() {
       <button type="button" class="card-main" data-id="${esc(a.id)}" aria-label="编辑 ${esc(a.name)}">
         <div class="card-head">${avatar(a.name)}<span class="name">${esc(a.name)}</span>${pill(a.status)}</div>
         <p class="card-desc">${esc(a.description)}</p>
-        <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}</div>
+        <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}${a.device_runtime
+          ? `<span class="tag model" title="端侧运行时">${a.device_online ? "本机" : "设备离线"}</span>` : ""}</div>
       </button>
       <div class="card-foot"><span>${a.mine ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
         ${!a.mine ? '<span class="muted">联合群组里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
@@ -602,6 +605,10 @@ function renderAgentReadonly(box, a) {
 }
 
 function renderAgentEditor(isNew = false) {
+  if (S.devices === undefined) {  // 第一次打开时先取设备列表（用于“运行位置”）
+    api("/api/devices").then((d) => { S.devices = d; if (S.view === "agents") renderAgentEditor(isNew); })
+      .catch(() => { S.devices = []; });
+  }
   const box = $("#agent-editor"), a = agent(S.agentSel);
   if (!a && !isNew) { box.innerHTML = placeholder("选择一个 Agent 编辑，或新建。"); return; }
   if (a && !a.mine) { renderAgentReadonly(box, a); return; }
@@ -616,6 +623,20 @@ function renderAgentEditor(isNew = false) {
       <div class="field"><label for="af-caps">能力</label><input id="af-caps" name="capabilities" value="${esc(x.capabilities.join(", "))}">
         <p class="hint">逗号分隔。</p></div>
       <fieldset class="checks"><legend>自身权限 · 委托只能在此之内再收窄</legend>${authorityBoxes(x.authority)}</fieldset>
+      ${a && a.runtime_capabilities ? `<div class="field"><label>这个运行时的实际能力</label>
+        <div class="card-meta">${Object.entries(a.runtime_capabilities.enforcement).map(([k, v]) =>
+          `<span class="tag ${v === "enforced" ? "ok" : ""}" title="${esc(v)}">${esc(k)}${v === "enforced" ? "" : ` · ${esc(v === "advisory" ? "仅约定" : "不可用")}`}</span>`).join("")}</div>
+        <p class="hint">只有“可强制”的权限会进入有效权限；其余会在委托时自动收窄，并写明原因。</p></div>` : ""}
+      <fieldset class="model"><legend>运行位置</legend>
+        <div class="field"><label for="af-device">运行在</label>
+          <select id="af-device" name="device_runtime">
+            <option value="">平台云侧（内置 dsh）</option>
+            ${(S.devices || []).filter((d) => !d.revoked).map((d) =>
+              `<option value="${esc(d.id)}" ${x.device_runtime === d.id ? "selected" : ""}>设备：${esc(d.name)}</option>`).join("")}
+          </select>
+          <p class="hint">${S.devices?.length ? "端侧 Agent 在你这台电脑上跑，用你本机的登录与文件；它读不到服务器上的数据。" : "还没有设备。先到「设备」页连接一台，才可以选择端侧运行。"}</p>
+        </div>
+      </fieldset>
       <fieldset class="model"><legend>模型</legend>
         <div class="model-fields">
           <div class="field"><label for="af-provider">Provider</label><input id="af-provider" name="provider" value="${esc(x.model?.provider || "")}" placeholder="${esc(S.defaultModel?.provider || "")}"></div>
@@ -639,6 +660,7 @@ function renderAgentEditor(isNew = false) {
       authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
       chat_enabled: f.chat_enabled.checked,
       model: readModel(f),
+      device_runtime: f.device_runtime.value || null,
     };
     if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
       $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
@@ -1378,3 +1400,65 @@ function bindComposer() {
 }
 
 init().catch((e) => { document.body.insertAdjacentHTML("afterbegin", `<p class="error" role="alert">加载失败：${esc(e.message)}</p>`); });
+
+// ================= 设备（端侧运行时） =================
+// 一台设备 = 一个连接器；令牌只显示一次。Agent 在编辑器里选择"跑在哪台设备上"。
+async function renderDevicesView() {
+  let devices = [];
+  try { devices = await api("/api/devices"); } catch { devices = []; }
+  S.devices = devices;
+  $("#device-list").innerHTML = devices.map((d) => {
+    const online = S.snap.agents.some((a) => a.device_runtime === d.id && a.device_online);
+    const agents = S.snap.agents.filter((a) => a.device_runtime === d.id);
+    return `<li class="${S.deviceSel === d.id ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-id="${esc(d.id)}" aria-label="查看设备 ${esc(d.name)}">
+        <div class="card-head"><span class="name">${esc(d.name)}</span>
+          ${d.revoked ? '<span class="vis-tag other">已吊销</span>'
+            : `<span class="pill status ${online ? "busy" : "idle"}">${online ? "在线" : "离线"}</span>`}</div>
+        <p class="card-desc">${agents.length ? `运行 ${agents.map((a) => esc(a.name)).join("、")}` : "还没有 Agent 绑到这台设备"}</p>
+        <div class="card-meta"><span class="muted">${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</span></div>
+      </button>
+      <div class="card-foot"><span></span>${d.revoked ? "" : `<button type="button" class="danger sm" data-revoke="${esc(d.id)}">吊销</button>`}</div>
+    </div></li>`;
+  }).join("") || '<li class="empty">还没有设备。点“连接一台设备”，在要运行 Agent 的电脑上启动连接器。</li>';
+  $("#device-list").querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("吊销后这台设备上的连接器会立即断开，绑在它上面的 Agent 进入等待。")) return;
+    try { await api(`/api/devices/${b.dataset.revoke}`, { method: "DELETE" }); await reload(); }
+    catch (e) { alert(e.message); }
+  }));
+  renderDeviceDetail();
+}
+
+function renderDeviceDetail(isNew = false) {
+  const box = $("#device-detail");
+  if (isNew) {
+    box.innerHTML = `<h2 class="panel-title">连接一台设备</h2>
+      <p class="muted">先给这台电脑起个名字，签发一个令牌，然后在它上面运行连接器。</p>
+      <form class="editor" id="device-form">
+        <div class="field"><label for="dv-name">设备名称</label><input id="dv-name" name="name" placeholder="我的笔记本" maxlength="80"></div>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit">签发令牌</button></div>
+      </form>
+      <div id="device-token"></div>`;
+    $("#device-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const d = await api("/api/devices", { method: "POST", body: { name: $("#dv-name").value.trim() } });
+        $("#device-form").hidden = true;
+        const origin = location.origin.replace(/^http/, "ws");
+        $("#device-token").innerHTML = `<div class="warn-box">令牌只显示这一次，请现在复制。</div>
+          <pre class="cmd">matrix-connect --url ${esc(origin)}/api/devices/connect --token ${esc(d.token)} --driver claude-code</pre>
+          <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
+        await reload();
+      } catch (err) { $(".error", $("#device-form")).textContent = err.message; }
+    });
+    return;
+  }
+  const d = (S.devices || []).find((x) => x.id === S.deviceSel);
+  if (!d) { box.innerHTML = placeholder("选择一台设备查看，或连接新设备。"); return; }
+  const agents = S.snap.agents.filter((a) => a.device_runtime === d.id);
+  box.innerHTML = `<h2 class="panel-title">${esc(d.name)}</h2>
+    <p class="muted">${d.revoked ? "已吊销" : "有效"} · ${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</p>
+    <dl><dt>运行在这台设备上的 Agent</dt><dd>${agents.length ? tags(agents.map((a) => a.name)) : '<span class="muted">无</span>'}</dd></dl>
+    <p class="hint">连接器只发出站请求；设备离线时绑在它上面的 Agent 进入等待，不消耗重试。令牌只在签发时显示一次。</p>`;
+}

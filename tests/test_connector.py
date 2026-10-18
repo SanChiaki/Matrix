@@ -13,6 +13,8 @@ from agentnet.connector.client import Connector
 from agentnet.connector.drivers.base import RunSpec
 from agentnet.connector.drivers.claude import ClaudeDriver
 from agentnet.connector.drivers.codex import CodexDriver
+from agentnet.device import RUN_REQUEST as RUN_REQUEST_MSG
+from agentnet.device import DeviceRuntime, MemoryLink
 from agentnet.runtime import ADVISORY, ENFORCED, ToolBridge
 
 
@@ -161,4 +163,104 @@ def test_run_ctx_relays_tools_and_approvals():
     assert run.call_tool("delegate", {}) == ("network said hi", False)
     c.send = lambda payload: c._deliver({"reply_to": payload["call_id"], "outcome": "rejected"})
     assert run.ask_approval("write", "outside") == "rejected"
+    c.close()
+
+
+# ================= 材料下发与回传 =================
+def test_materials_are_written_and_group_is_refreshed(tmp_path):
+    from agentnet.connector.client import Connector
+    import base64
+    c = Connector(ClaudeDriver(), tmp_path)
+    wd = c.workdir_of("a/c")
+    (wd / "group").mkdir(parents=True)
+    (wd / "group" / "stale.md").write_text("old")
+    c._write_materials(wd, [{"path": "group/brief.md", "data": base64.b64encode("新档案".encode()).decode()}])
+    assert (wd / "group" / "brief.md").read_text() == "新档案"
+    assert not (wd / "group" / "stale.md").exists()  # 上一轮的只读副本不残留
+    for bad in ({"path": "/etc/passwd", "data": ""}, {"path": "../x", "data": ""}):
+        with pytest.raises(Exception):
+            c._write_materials(wd, [bad])
+    c.close()
+
+
+def test_safe_path_rejects_escape_and_missing(tmp_path):
+    from agentnet.connector.client import Connector
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "ok.md").write_text("x")
+    assert Connector._safe_path(root, "sub/ok.md").read_text() == "x"
+    for bad in ("../root/sub/ok.md", "/etc/passwd", "sub/../../x", "nope.md"):
+        with pytest.raises(Exception):
+            Connector._safe_path(root, bad)
+
+
+def test_fetch_file_round_trip():
+    """publish_file 的回读：服务器发 file.fetch，连接器校验路径后回 base64。"""
+    import base64
+    from tests.test_device import hello as device_hello
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), device_hello())
+    sent = []
+
+    def serve(msg):
+        sent.append(msg)
+        if msg["type"] == RUN_REQUEST_MSG:
+            # 模拟连接器的运行登记与文件存在
+            return None
+        return None
+
+    link = MemoryLink(serve=serve)
+    rt.link = link
+    rt._by_context["a/c"] = "run-1"
+    import threading
+
+    def responder():
+        for _ in range(100):
+            msg = next((m for m in sent if m["type"] == "file.fetch"), None)
+            if msg:
+                rt.on_message({"reply_to": msg["call_id"], "run_id": "",
+                               "data": base64.b64encode(b"report").decode()})
+                return
+            import time
+            time.sleep(0.01)
+
+    threading.Thread(target=responder, daemon=True).start()
+    assert rt.fetch_file("a/c", "out/report.md", timeout_s=5) == b"report"
+    assert rt.fetch_file("unknown", "x") is None
+
+
+def test_run_request_carries_materials_to_the_connector(tmp_path):
+    """服务器下发的材料随 run.request 到达连接器，并写进这一轮的工作目录。"""
+    from agentnet.device import RUN_REQUEST as RUN_REQ
+    from agentnet.device import DeviceRuntime, MemoryLink
+    from tests.test_device import hello as device_hello
+
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), device_hello())
+    c = Connector(ClaudeDriver(), tmp_path)
+    got = []
+
+    def serve(msg):
+        got.append(msg)
+        if msg["type"] == RUN_REQ:
+            c._start(msg)
+        return None
+
+    c._ws = None
+    c.send = lambda payload: got.append(payload)
+    link = MemoryLink(serve=serve)
+    rt.link = link
+    with c._send_lock:
+        pass
+    import base64
+    materials = [{"path": "group/brief.md", "data": base64.b64encode("目标：调研".encode()).decode()}]
+    # 直接走连接器入口，避免真实 WebSocket
+    c.send = lambda payload: None
+    c._start({"run_id": "run-m", "agent_id": "a", "context_id": "conv", "prompt": "p",
+              "workdir_ref": "a/conv", "authority": [], "tool_names": [], "materials": materials})
+    wd = c.workdir_of("a/conv")
+    import time
+    for _ in range(100):
+        if (wd / "group" / "brief.md").exists():
+            break
+        time.sleep(0.01)
+    assert (wd / "group" / "brief.md").read_text() == "目标：调研"
     c.close()

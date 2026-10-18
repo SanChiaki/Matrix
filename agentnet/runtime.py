@@ -76,6 +76,9 @@ class RunRequest:
     timeout_s: float = 900
     model: dict[str, str] | None = None  # {provider, model, reasoning_effort?}；None 用运行时默认
     approvals: ApprovalBridge | None = None
+    # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：
+    # [{"path": "group/x.md", "data": <bytes>}]
+    materials: list[dict[str, Any]] = field(default_factory=list)
 
 
 # 运行时错误分类（参照 Raft daemon 的 runtimeErrorDeliveryPolicy）：

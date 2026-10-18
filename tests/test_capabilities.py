@@ -5,7 +5,7 @@
 """
 from agentnet.engine import Network
 from agentnet.protocol import format_task_result
-from agentnet.runtime import ADVISORY, UNAVAILABLE, RuntimeCapabilities, ScriptedRuntime
+from agentnet.runtime import ADVISORY, ENFORCED, UNAVAILABLE, RuntimeCapabilities, ScriptedRuntime
 from tests.test_users import joint, users
 
 
@@ -128,3 +128,27 @@ def test_task_narrowing_is_shown_and_persisted(tmp_path):
     from agentnet.store import Store
     again = Store(tmp_path, seed=False)
     assert again.tasks[task.id].narrowed == task.narrowed
+
+
+def test_offline_device_uses_last_declared_capabilities(tmp_path):
+    """端侧离线：沿用最近一次握手声明的能力，不把"未知"当成"全都不行"（docs/device-runtimes.md §5）。"""
+    from agentnet.device import HELLO_OK, PROTOCOL, DeviceRuntime, MemoryLink, capabilities_from_hello
+    from tests.test_users import users
+
+    net = build(tmp_path)
+    alice = users(net, "alice@x.io")[0]
+    a = net.create_agent("Local", "端侧", [], ["web.research", "file.write"], actor=alice)
+    a.device_runtime = "dev-1"
+    # 从没连过：没有任何声明 -> 不可用（宁严勿松）
+    assert net.capabilities(a).effective(a.authority) == []
+
+    info = capabilities_from_hello({"type": HELLO_OK, "protocol": PROTOCOL,
+                                    "capabilities": {"enforcement": {"web.research": ENFORCED}}})
+    net.register_runtime("dev-1", DeviceRuntime(MemoryLink(serve=lambda m: None), info))
+    assert net.capabilities(a).effective(a.authority) == ["web.research"]
+    assert a.enforcement == {"web.research": ENFORCED}
+
+    # 断开后沿用最后一次声明
+    net.unregister_runtime("dev-1")
+    assert net.device_online(a) is False
+    assert net.capabilities(a).effective(a.authority) == ["web.research"]

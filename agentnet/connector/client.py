@@ -14,8 +14,10 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ..device import (APPROVAL_REQUEST, CANCEL, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST, RUN_RESULT,
-                      TOOL_CALL, DeviceError)
+import base64
+
+from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
+                      RUN_RESULT, TOOL_CALL, DeviceError)
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
 
@@ -27,6 +29,7 @@ class _Run:
         self.connector = connector
         self.run_id = run_id
         self.cancel = threading.Event()
+        self.workdir: Path | None = None
 
     def emit(self, event: dict[str, Any]) -> None:
         self.connector.send({"type": RUN_EVENT, "run_id": self.run_id, "event": event})
@@ -92,7 +95,9 @@ class Connector:
                     run = self._runs.get(str(msg.get("run_id", "")))
                     if run is not None:
                         run.cancel.set()
-                elif "reply_to" in msg:      # 工具 / 审批的回执
+                elif msg.get("type") == FILE_FETCH:
+                    self._fetch(msg)
+                elif "reply_to" in msg:      # 工具 / 审批 / 文件读取的回执
                     self._deliver(msg)
         except Exception as e:  # noqa: BLE001 —— 断线
             raise DeviceError(str(e)) from e
@@ -129,6 +134,35 @@ class Connector:
         finally:
             self._pending.pop(cid, None)
 
+    def _fetch(self, msg: dict[str, Any]) -> None:
+        """服务器要读工作目录里的一个文件（publish_file）。只允许工作目录内的相对路径。"""
+        reply: dict[str, Any] = {"reply_to": msg.get("call_id"), "run_id": ""}
+        try:
+            path = self._safe_path(self._root_for_fetch(msg), str(msg.get("path", "")))
+            reply["data"] = base64.b64encode(path.read_bytes()).decode()
+        except Exception as e:  # noqa: BLE001 —— 越界 / 不存在都回错误
+            reply["error"] = str(e)
+        self.send(reply)
+
+    def _root_for_fetch(self, msg: dict[str, Any]) -> Path:
+        """file.fetch 只属于某一次运行：按 run_id 找它的工作目录，找不到就不允许。"""
+        run = self._runs.get(str(msg.get("run_id", "")))
+        if run is None or run.workdir is None:
+            raise DeviceError("这次运行不在这台连接器上")
+        return run.workdir
+
+    @staticmethod
+    def _safe_path(root: Path, rel: str) -> Path:
+        parts = Path(rel).parts
+        if not rel or Path(rel).is_absolute() or ".." in parts:
+            raise DeviceError(f"非法的路径：{rel!r}")
+        p = (root / rel).resolve()
+        if root.resolve() not in p.parents:
+            raise DeviceError(f"非法的路径：{rel!r}")
+        if not p.is_file():
+            raise DeviceError(f"文件不存在：{rel}")
+        return p
+
     def _deliver(self, msg: dict[str, Any]) -> None:
         cid = str(msg.get("reply_to", ""))
         self._replies[cid] = msg
@@ -142,12 +176,29 @@ class Connector:
         run = _Run(self, run_id)
         self._runs[run_id] = run
         self.bridge.register(run_id, run.call_tool, run.ask_approval)
+        workdir = self.workdir_of(str(msg.get("workdir_ref", "")))
+        self._write_materials(workdir, list(msg.get("materials") or []))
         spec = RunSpec(
             run_id=run_id, agent_id=str(msg.get("agent_id", "")), context_id=str(msg.get("context_id", "")),
-            prompt=str(msg.get("prompt", "")), workdir=self.workdir_of(str(msg.get("workdir_ref", ""))),
+            prompt=str(msg.get("prompt", "")), workdir=workdir,
             authority=list(msg.get("authority") or []), tool_names=list(msg.get("tool_names") or []),
             session_id=msg.get("session_id"), model=msg.get("model"))
+        run.workdir = workdir
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
+
+    @staticmethod
+    def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
+        """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
+        import shutil
+        for top in ("group", "materials"):
+            shutil.rmtree(workdir / top, ignore_errors=True)
+        for item in materials:
+            rel = str(item.get("path", ""))
+            if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+                raise DeviceError(f"非法的材料路径：{rel!r}")
+            dest = workdir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(base64.b64decode(item.get("data") or ""))
 
     def workdir_of(self, ref: str) -> Path:
         """`workdir_ref` 是本机工作目录的相对引用（`<agent>/<context>`），拼到用户配置的根目录下。

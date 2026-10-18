@@ -66,6 +66,7 @@ class AgentIn(BaseModel):
     authority: list[str] = Field(default_factory=list)
     chat_enabled: bool = True
     model: ModelIn | None = None
+    device_runtime: str | None = None   # 绑定的设备 id；None = 平台云侧（默认运行时）
 
 
 class AgentPatch(BaseModel):
@@ -75,6 +76,7 @@ class AgentPatch(BaseModel):
     authority: list[str] | None = None
     chat_enabled: bool | None = None
     model: ModelIn | None = None  # 显式传 null 表示改回运行时默认模型
+    device_runtime: str | None = None
 
 
 class ProposalApprove(BaseModel):
