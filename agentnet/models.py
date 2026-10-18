@@ -52,6 +52,7 @@ class TaskStatus(StrEnum):
     COMPLETED = "completed"    # 委托方已接受
     FAILED = "failed"          # 执行失败；委托方可以 retry_task 续接原会话
     REJECTED = "rejected"      # 授权阶段被拒绝（不在群组、成环、越过深度等）
+    WAITING = "waiting"        # 端侧运行时不在线：不失败、不消耗重试，上线后继续（docs/device-runtimes.md §5）
 
 
 # 不会再变化的状态。FAILED 不在其中：它可以被续接。
@@ -70,6 +71,9 @@ class AgentNode:
     model: dict[str, str] | None = None
     # 绑定的运行时：None = 默认运行时（平台云侧）；非 None = 已注册的端侧运行时名（docs/device-runtimes.md）
     device_runtime: str | None = None
+    # 该运行时最近一次握手声明的强制能力（权限 -> enforced/advisory/unavailable）。
+    # 设备离线时用它，避免把"未知"当成"全都不行"而误收窄委托权限。
+    enforcement: dict[str, str] = field(default_factory=dict)
     created_by: str = "seed"             # seed | human | proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
