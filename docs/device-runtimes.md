@@ -149,15 +149,19 @@ class AgentRuntime(Protocol):
 
 ### 3.3 适配器能力现状（待逐条验证）
 
-| 权限 | dsh（云侧） | Claude Code | Codex |
+| 权限 | dsh | Claude Code | Codex |
 | --- | --- | --- | --- |
-| `web.research` | enforced（插件开关） | 待验证（工具白名单） | 待验证 |
-| `file.write` | enforced（沙箱） | 待验证（工具白名单 + 权限模式） | 待验证（沙箱策略） |
-| `shell.exec` | enforced（插件开关） | 待验证（Bash 白名单） | 可能只能 advisory |
+| `web.research` | enforced（插件开关） | enforced（工具白名单，未逐条验证） | advisory（exec 参数关不掉，按约定） |
+| `file.write` | enforced（沙箱） | enforced（工具白名单，未逐条验证） | **enforced**：`-s read-only` 拒绝写、`-s workspace-write` 允许写工作目录（本机实测） |
+| `shell.exec` | enforced（插件开关） | enforced（Bash 白名单，未逐条验证） | enforced（沙箱限制其写入范围，命令本身可执行） |
 | `delegate` | enforced（是否注入 MCP 工具） | enforced（同左） | enforced（同左） |
 
-> 上表除 dsh 外均**未经本机验证**。验证项见第 10 节：会话续接、审批上行、工具开关、
-> 文件访问是否经过客户端。
+> 验证进度（2026-10-18，本机）：
+> - **Codex**：沙箱行为已实测（只读时写 `/tmp` 被拒、`workspace-write` 写工作目录成功）；端到端跑通一轮对话。
+> - **Claude Code**：命令形态与 stream-json 解析有确定性测试；本机 `claude -p` 未登录，真实端到端停在
+>   “Not logged in”；工具白名单的实际阻断效果未逐条验证。
+> - **ACP 路线**（第 2.3 节的另一种驱动）尚未实现，仍是后续项。
+> - 审批上行：三家都还是 `approval: none`，工作目录以外的写只能被拒绝，不能转给所有者。
 
 ---
 
