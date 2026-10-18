@@ -264,3 +264,14 @@ def test_run_request_carries_materials_to_the_connector(tmp_path):
         time.sleep(0.01)
     assert (wd / "group" / "brief.md").read_text() == "目标：调研"
     c.close()
+
+
+def test_claude_reports_the_harness_reason_not_empty_stderr(tmp_path):
+    """harness 用 result 事件说明失败原因（如未登录）时，退出码 0 也要按失败处理并把原因带出来。"""
+    body = """
+print(json.dumps({"type":"system","subtype":"init","session_id":"s"}))
+print(json.dumps({"type":"result","session_id":"s","is_error":True,"result":"Not logged in"}))
+"""
+    d = ClaudeDriver(fake_bin(tmp_path, "claude", body))
+    out = d.run(spec(tmp_path), Ctx(), threading.Event())
+    assert not out.ok and "Not logged in" in out.error
