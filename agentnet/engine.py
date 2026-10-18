@@ -787,16 +787,44 @@ class Network:
             return False
         if isinstance(h, Seat):
             return not h.blocked and h.agent_id in self.store.agents
-        return h.status == TaskStatus.RUNNING
+        if h.status not in (TaskStatus.RUNNING, TaskStatus.WAITING):
+            return False
+        agent = self.store.agents.get(h.delegatee_id or "")
+        return agent is not None and self.runtime_for(agent) is not None
 
     def _kick(self, kind: str, cid: str) -> None:
         """收件箱有内容就跑一轮；同一上下文同时只跑一轮，运行中到达的内容等这一轮结束再送达。"""
+        if kind == "task":
+            with self._lock:
+                task = self.store.tasks.get(cid)
+                agent = self.store.agents.get(task.delegatee_id or "") if task is not None else None
+            if task is not None and agent is not None and not self.device_online(agent):
+                if task.status in (TaskStatus.RUNNING, TaskStatus.WAITING):
+                    self._wait_for_device(task)  # 端侧不在线：不调度、不失败、不消耗重试
+                return
+        if kind == "seat":
+            conv_id, _, agent_id = cid.partition("/")
+            with self._lock:
+                agent = self.store.agents.get(agent_id)
+                seat = self._holder("seat", cid)
+                conv = self.store.conversations.get(conv_id)
+            if agent is not None and seat is not None and conv is not None and self.runtime_for(agent) is None:
+                self._note_offline(conv, agent)  # 不在线：收件箱保留，只提醒一次，不调度
+                return
         with self._lock:
             if cid in self._running or not self._eligible(kind, cid):
                 return
             self._running.add(cid)
         self._refresh_conv(self._conv_id_of(kind, cid))
         self._pool.submit(self._round_safe, kind, cid)
+
+    def _note_offline(self, conv: Conversation, agent: AgentNode) -> None:
+        """端侧不在线：给所有者留一条排队说明，同样的说明不重复写。"""
+        text = f"{agent.name} 的端侧运行时 {agent.device_runtime} 未连接：消息已排队，等它上线后处理。"
+        if any(m.role == "system" and m.text == text for m in conv.messages[-3:]):
+            return
+        self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, text=text,
+                                   audience=[agent.owner_id] if agent.owner_id else []))
 
     def _round_safe(self, kind: str, cid: str) -> None:
         try:
@@ -843,7 +871,7 @@ class Network:
                 return
             if any(seat_id(conv.id, a) in self._running for a in conv.seats):
                 status = "thinking"
-            elif any(t.conversation_id == conv.id and t.status == TaskStatus.RUNNING
+            elif any(t.conversation_id == conv.id and t.status in (TaskStatus.RUNNING, TaskStatus.WAITING)
                      for t in self.store.tasks.values()):
                 status = "waiting"
             else:
@@ -884,8 +912,32 @@ class Network:
 
     # ================= 一轮：对话里的席位 =================
     def register_runtime(self, name: str, runtime: AgentRuntime) -> None:
-        """注册一个端侧运行时（连接器上线时调用）。同名覆盖：重连后以新的能力声明为准。"""
+        """注册一个端侧运行时（连接器上线时调用）。同名覆盖：重连后以新的能力声明为准。
+        上线即消费积压：绑定到这个运行时的等待中任务与席位重新调度（docs/device-runtimes.md §5）。"""
         self._runtimes[name] = runtime
+        caps = self._caps_of(runtime)
+        wake: list[tuple[str, str]] = []
+        with self._lock:
+            for a in self.store.agents.values():
+                if a.device_runtime == name:
+                    a.enforcement = dict(caps.enforcement)  # 记下最近一次声明，离线时沿用
+            self.store.save()
+            for t in self.store.tasks.values():
+                agent = self.store.agents.get(t.delegatee_id or "")
+                if agent is not None and agent.device_runtime == name and t.status == TaskStatus.WAITING:
+                    t.status, t.error = TaskStatus.RUNNING, None
+                    self.store.save()
+                    wake.append(("task", t.id))
+            for conv in self.store.conversations.values():
+                for agent_id, seat in conv.seats.items():
+                    agent = self.store.agents.get(agent_id)
+                    if agent is not None and agent.device_runtime == name and seat.inbox:
+                        wake.append(("seat", seat_id(conv.id, agent_id)))
+        for kind, cid in wake:
+            self.bus.emit("task.updated" if kind == "task" else "conversation.updated",
+                          **({"task": self.store.tasks[cid].to_dict()} if kind == "task"
+                             else {"conversation": self.store.conversations[cid.partition("/")[0]].to_dict(full=False)}))
+            self._kick(kind, cid)
 
     def unregister_runtime(self, name: str) -> None:
         self._runtimes.pop(name, None)
@@ -896,6 +948,10 @@ class Network:
             return self._runtimes.get(agent.device_runtime)
         return self.runtime
 
+    def device_online(self, agent: AgentNode | None) -> bool:
+        """端侧运行时是否在线。未绑定端侧的 Agent 视为在线（走默认运行时）。"""
+        return agent is None or not agent.device_runtime or agent.device_runtime in self._runtimes
+
     @staticmethod
     def _caps_of(runtime: AgentRuntime | None) -> RuntimeCapabilities:
         """运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。"""
@@ -905,7 +961,13 @@ class Network:
         return get() if callable(get) else RuntimeCapabilities.all_enforced(getattr(runtime, "name", "runtime"))
 
     def capabilities(self, agent: AgentNode | None = None) -> RuntimeCapabilities:
-        return self._caps_of(self.runtime_for(agent))
+        rt = self.runtime_for(agent)
+        if rt is not None:
+            return self._caps_of(rt)
+        if agent is not None and agent.enforcement:  # 端侧离线：沿用最近一次握手声明的能力
+            return RuntimeCapabilities(name=agent.device_runtime or "device", placement="device",
+                                       enforcement=dict(agent.enforcement))
+        return self._caps_of(None)
 
     def _effective(self, agent: AgentNode, authority: list[str]) -> tuple[list[str], dict[str, str]]:
         """有效权限 = 自身权限 ∩ 运行时能强制的部分；返回 (有效权限, 被收窄的权限与原因)。
@@ -996,6 +1058,9 @@ class Network:
             self._drain(task)
             self._fail_task(task, "执行者、委托方或群组已不存在")
             return
+        if self.runtime_for(agent) is None:  # 端侧不在线：等待，不是失败（不消耗重试）
+            self._wait_for_device(task)
+            return
         items = self._drain(task)
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
@@ -1027,7 +1092,10 @@ class Network:
             self.bus.emit("authority.violation", task_id=task.id, agent_id=agent.id, detail=v)
         if not res.ok:
             self._requeue(task, items)
-            self._fail_task(task, res.error or "运行失败")
+            if agent.device_runtime and res.error_class == "provider_connection":
+                self._wait_for_device(task)  # 连接在这一轮里断了：回到等待，上线后继续
+            else:
+                self._fail_task(task, res.error or "运行失败")
             return
         self._auto_accept(ctx)
         text = res.final_text.strip()
@@ -1071,6 +1139,14 @@ class Network:
             task.status, task.error, task.delivered_at = TaskStatus.IN_REVIEW, None, time.time()
         self._save_task(task)
         self._notify_delegator(task, "delivered")
+
+    def _wait_for_device(self, task: Task) -> None:
+        """端侧不可达：任务进入等待。委托方看到它在等设备，而不是失败；不通知、不消耗重试。"""
+        with self._lock:
+            changed = task.status != TaskStatus.WAITING or task.error is not None
+            task.status, task.error = TaskStatus.WAITING, None
+        if changed:
+            self._save_task(task)
 
     def _fail_task(self, task: Task, error: str) -> None:
         with self._lock:
@@ -1363,7 +1439,16 @@ class Network:
                                        text=f"{agent.name} 申请在工作目录以外操作，等 {self._email(ap.owner_id)} 批准："
                                             f"{_short(ap.reason, 200)}",
                                        audience=[ap.owner_id] if ap.owner_id else []))
-        if not done.wait(self.limits.approval_timeout_s):
+        if agent.device_runtime:  # 端侧：所有者的电脑可能不在，审批不因时间作废，只随断连结束（§5）
+            while not done.wait(5):
+                if self.runtime_for(agent) is None:
+                    with self._lock:
+                        if ap.status == "pending":
+                            ap.status, ap.note, ap.decided_at = "cancelled", "设备断连", time.time()
+                            self.store.save()
+                    self.bus.emit("approval.updated", approval=ap.to_dict())
+                    break
+        elif not done.wait(self.limits.approval_timeout_s):
             with self._lock:
                 if ap.status == "pending":
                     ap.status, ap.note, ap.decided_at = "cancelled", "等待超时", time.time()

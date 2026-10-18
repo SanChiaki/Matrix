@@ -176,6 +176,11 @@ class Store:
         for task in self.tasks.values():
             if task.status != TaskStatus.RUNNING:
                 continue
+            # 端侧任务：服务器重启不代表执行者失败，回到等待，端侧上线后继续（docs/device-runtimes.md §5）
+            delegatee = next((a for a in self.agents.values() if a.id == task.delegatee_id), None)
+            if delegatee is not None and delegatee.device_runtime:
+                task.status, task.error = TaskStatus.WAITING, None
+                continue
             # 委托方会在下一轮看到失败通知，可以 retry_task 续接原会话
             task.status, task.error = TaskStatus.FAILED, "服务重启，任务中断"
             conv = self.conversations.get(task.conversation_id)
