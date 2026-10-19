@@ -180,6 +180,7 @@ class FileIn(BaseModel):
 class HandoffApproveIn(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     agent_id: str | None = None
+    after: list[str] | None = None       # 等哪些交接完成后再发出；None = 沿用提交时的，[] = 立即发出
 
 
 class PromoteIn(BaseModel):
@@ -481,7 +482,7 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/handoffs/{handoff_id}/approve")
     def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
-        return network.approve_handoff(handoff_id, body.text, body.agent_id, actor=user.id).to_dict()
+        return network.approve_handoff(handoff_id, body.text, body.agent_id, body.after, actor=user.id).to_dict()
 
     @app.post("/api/handoffs/{handoff_id}/reject")
     def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:

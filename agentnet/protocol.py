@@ -75,7 +75,8 @@ TOOL_GUIDE: dict[str, str] = {
                      "（只发布别的方面要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
     "handoff": ("项目里需要另一个群组接着做时提交交接（group、agent、message：要做什么、依据哪些 `project/` 文件、交回什么），"
-                "人确认后以人的名义发进对方群聊。交给别的群组的产物先用 publish_file target=project 发布。"),
+                "人确认后以人的名义发进对方群聊。要等别的交接做完才能开始的，用 after 写上那些交接的 id，网络会在它们完成后再发出。"
+                "交给别的群组的产物先用 publish_file target=project 发布。"),
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",

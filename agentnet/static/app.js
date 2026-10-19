@@ -240,20 +240,39 @@ const project = (id) => S.snap?.projects?.find((p) => p.id === id);
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
 
 // 跨群组交接：Agent 提交，你确认（可以改内容）后以你的名义发进对方群聊
-const handoffItem = (h) => `<li class="todo-item handoff" data-ho="${esc(h.id)}">
+// all：同一项目里还没结束的交接，可以选作依赖（等它们完成后再发出）
+const hoLabel = (h) => `${h.id} · #${h.to_group_name} ${h.to_agent_name}`;
+const handoffItem = (h, all = []) => {
+  const peers = all.filter((x) => x.id !== h.id && x.project_id === h.project_id && !(x.after || []).includes(h.id));
+  if (h.status === "scheduled") return `<li class="todo-item handoff"><div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
+      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> <span class="pill status waiting">排队中</span></div>
+      <p class="hint">等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
+      <div class="actions"><button type="button" class="ghost sm" data-ho-now="${esc(h.id)}">现在就发出</button>
+        <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不发了</button></div></li>`;
+  return `<li class="todo-item handoff" data-ho="${esc(h.id)}">
     <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
       <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> ${pill("pending")}
       <span class="muted">${time(h.created_at)}</span></div>
     <label class="sr-only" for="ho-${esc(h.id)}">交接内容</label>
     <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
-    <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认并发出</button>
+    ${peers.length ? `<fieldset class="ho-after"><legend>等这些完成后再发出</legend>${peers.map((x) => `<label><input type="checkbox" data-ho-dep="${esc(h.id)}" value="${esc(x.id)}"
+      ${(h.after || []).includes(x.id) ? "checked" : ""}> ${esc(hoLabel(x))}</label>`).join("")}</fieldset>` : ""}
+    <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认</button>
       <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不采纳</button>
       <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div>
-    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}。</p></li>`;
+    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}；勾了依赖的，等它们完成（你验收）后自动发出。</p></li>`;
+};
 function bindHandoffs(box, after) {
   box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
     const id = b.dataset.hoOk; b.disabled = true;
-    try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body: { text: $(`#ho-${id}`).value } }); await after(); }
+    const deps = [...box.querySelectorAll(`[data-ho-dep="${id}"]`)];
+    const body = { text: $(`#ho-${id}`).value, ...(deps.length ? { after: deps.filter((c) => c.checked).map((c) => c.value) } : {}) };
+    try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body }); await after(); }
+    catch (e) { alert(e.message); b.disabled = false; }
+  }));
+  box.querySelectorAll("[data-ho-now]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await api(`/api/handoffs/${b.dataset.hoNow}/approve`, { method: "POST", body: { after: [] } }); await after(); }
     catch (e) { alert(e.message); b.disabled = false; }
   }));
   box.querySelectorAll("[data-ho-no]").forEach((b) => b.addEventListener("click", async () => {
@@ -330,12 +349,13 @@ function renderProjectOverview(d) {
 
 function handoffsHtml(hs) {
   if (!hs.length) return "";
-  const pending = hs.filter((h) => h.status === "pending"), done = hs.filter((h) => h.status !== "pending");
+  const open = hs.filter((h) => h.status === "pending" || h.status === "scheduled"), done = hs.filter((h) => !open.includes(h));
+  const live = hs.filter((h) => open.includes(h) || (h.status === "sent" && !h.returned_at));
   const row = (h) => `<li><b>${esc(h.from_agent_name)}</b> <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
-    ${h.status === "sent" ? `<a class="pill status completed" href="#${esc(h.to_conversation_id || "")}">已发出</a>` : '<span class="pill status rejected">未采纳</span>'}
+    ${h.status === "sent" ? `<a class="pill status ${h.returned_at ? "completed" : "running"}" href="#${esc(h.to_conversation_id || "")}">${h.returned_at ? "已完成" : "已发出"}</a>` : '<span class="pill status rejected">未采纳</span>'}
     <span class="muted">${time(h.decided_at || h.created_at)}</span><p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
-  return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${pending.length} 待确认</h3>
-    ${pending.length ? `<ul class="todo-list">${pending.map(handoffItem).join("")}</ul>` : ""}
+  return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${open.length} 待确认或排队</h3>
+    ${open.length ? `<ul class="todo-list">${open.map((h) => handoffItem(h, live)).join("")}</ul>` : ""}
     ${done.length ? `<details><summary>已处理 · ${done.length}</summary><ul class="refs">${done.map(row).join("")}</ul></details>` : ""}</section>`;
 }
 
@@ -467,7 +487,7 @@ function renderBoard() {
         <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button>
         <a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a></div>
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
-    ...(b.handoffs || []).map(handoffItem),
+    ...(b.handoffs || []).filter((h) => h.status === "pending" || h.status === "scheduled").map((h) => handoffItem(h, b.handoffs)),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>

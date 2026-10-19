@@ -329,7 +329,9 @@ class Handoff:
     to_group_id: str
     to_agent_id: str
     text: str
-    status: str = "pending"              # pending | sent | rejected
+    after: list[str] = field(default_factory=list)  # 依赖的交接：它们都完成（人验收）后才发出
+    status: str = "pending"              # pending | scheduled（已确认，等依赖完成）| sent | rejected
+    approved_by: str | None = None       # 谁确认的：以他的名义发出
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
     returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间

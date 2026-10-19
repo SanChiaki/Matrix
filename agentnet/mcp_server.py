@@ -169,6 +169,8 @@ TOOLS = [
                 "group": {"type": "string", "description": "目标群组的名称（同一项目里的其他群组）"},
                 "agent": {"type": "string", "description": "目标群组里接手的成员名称"},
                 "message": {"type": "string", "description": "交接内容：背景、要做什么、依据的文件（如 project/xxx）、交回什么"},
+                "after": {"type": "string",
+                          "description": "可选：要等哪些交接完成后再发出（交接 id，多个用逗号分隔），例如测试要等开发交付"},
             },
             "required": ["group", "agent", "message"],
             "additionalProperties": False,

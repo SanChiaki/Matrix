@@ -2031,14 +2031,21 @@ class Network:
         with self._lock:
             h = next((h for h in self.store.handoffs.values()
                       if h.status == "sent" and h.message_id == r.message_id and h.returned_at is None), None)
-            holder = self._holder(h.context_kind, h.context_id) if h else None
-            if h is None or holder is None:
+            if h is None:
                 return
+            holder = self._holder(h.context_kind, h.context_id)
             h.returned_at = time.time()
-            holder.inbox.append({"kind": "handoff_done", "handoff_id": h.id, "request_id": r.id})
+            if holder is not None:
+                holder.inbox.append({"kind": "handoff_done", "handoff_id": h.id, "request_id": r.id})
             self.store.save()
         self._handoff_event(h)
-        self._kick(h.context_kind, h.context_id)
+        if holder is not None:
+            self._kick(h.context_kind, h.context_id)
+        with self._lock:  # 等它的交接：依赖都完成了就发出
+            ready = [x for x in self.store.handoffs.values()
+                     if x.status == "scheduled" and h.id in x.after and self._deps_done(x)]
+        for x in ready:
+            self._send_handoff(x)
 
     def _who(self, user_id: str | None) -> str:
         """事件文本里的人：有邮箱写邮箱（两侧留空格），没有就写“下发的人”。"""
@@ -2205,14 +2212,42 @@ class Network:
             if target is None:
                 members = "、".join(self._name(m) for m in to.member_ids)
                 return f"「{args.get('agent', '')}」不是「{to.name}」的成员。成员：{members}", True
+            try:
+                after = self._handoff_deps(p.id, re.split(r"[\s,，、]+", str(args.get("after") or "").strip()))
+            except NetworkError as e:
+                return str(e), True
             h = Handoff(id=new_id("ho"), project_id=p.id, owner_id=p.owner_id, from_group_id=g.id,
                         from_agent_id=ctx.agent_id, context_kind=ctx.kind, context_id=ctx.id,
-                        conversation_id=ctx.conversation_id, to_group_id=to.id, to_agent_id=target.id, text=text)
+                        conversation_id=ctx.conversation_id, to_group_id=to.id, to_agent_id=target.id, text=text,
+                        after=after)
             self.store.handoffs[h.id] = h
             self.store.save()
         self._handoff_event(h)
-        return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等人确认。确认后以人的名义发进对方群聊；"
+        wait = f"；会等 {'、'.join(after)} 完成后再发出" if after else ""
+        return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等人确认{wait}。确认后以人的名义发进对方群聊；"
                 "结果会作为通知送给你，在那之前不要假设对方已经开始。"), False
+
+    def _handoff_deps(self, project_id: str, ids: list[str], me: str | None = None) -> list[str]:
+        """调用方持有锁。依赖的交接：同一项目里、没被拒绝、不成环。"""
+        out = []
+        for i in _dedup([x for x in ids if x]):
+            d = self.store.handoffs.get(i)
+            if d is None or d.project_id != project_id or d.status == "rejected" or i == me:
+                raise NetworkError(f"after 里的 {i} 不是这个项目里可以等待的交接")
+            seen, todo = set(), list(d.after)
+            while todo:  # 不成环：依赖链上不能回到自己
+                x = todo.pop()
+                if x == me:
+                    raise NetworkError(f"after 里的 {i} 反过来依赖这个交接，会互相等待")
+                if x not in seen and (dx := self.store.handoffs.get(x)) is not None:
+                    seen.add(x)
+                    todo += dx.after
+            out.append(i)
+        return out
+
+    def _deps_done(self, h: Handoff) -> bool:
+        """调用方持有锁。"""
+        return all((d := self.store.handoffs.get(i)) is not None and d.returned_at is not None for i in h.after)
 
     def _handoff(self, handoff_id: str, actor: str | None) -> Handoff:
         h = self.store.handoffs.get(handoff_id)
@@ -2220,11 +2255,12 @@ class Network:
         return h
 
     def approve_handoff(self, handoff_id: str, text: str | None = None, agent_id: str | None = None,
-                        actor: str | None = None) -> Handoff:
-        """项目所有者确认交接（可以改内容、换接手的成员）：以他的名义发进目标群聊并 @ 目标成员。"""
+                        after: list[str] | None = None, actor: str | None = None) -> Handoff:
+        """项目所有者确认交接（可以改内容、换接手的成员、改依赖）：依赖都完成了就以他的名义发进目标群聊并 @ 目标成员，
+        否则进入 scheduled，等依赖完成后由网络发出。对 scheduled 的交接再确认一次（after=[]）就是立即发出。"""
         with self._lock:
             h = self._handoff(handoff_id, actor)
-            if h.status != "pending":
+            if h.status not in ("pending", "scheduled"):
                 raise NetworkError(f"交接 {h.id} 已经处理过")
             to = self.store.groups.get(h.to_group_id)
             src = self.store.groups.get(h.from_group_id)
@@ -2236,24 +2272,51 @@ class Network:
             body = (text if text is not None else h.text).strip()
             if not body:
                 raise NetworkError("交接内容不能为空")
-            target = self._agent(target_id)
-            chat = self._group_chat(to)
-            origin = f"「{src.name}」的 {self._name(h.from_agent_id)}" if src else self._name(h.from_agent_id)
-        msg = self.send_message(chat.id, f"@{target.name} {body}\n\n（交接：来自{origin}，已由我确认）",
-                                mentions=[target.id], actor=actor or h.owner_id)
+            deps = self._handoff_deps(h.project_id, after, me=h.id) if after is not None else h.after
+            h.to_agent_id, h.text, h.after, h.approved_by = target_id, body, deps, actor or h.owner_id
+            h.decided_at = time.time()
+            ready = self._deps_done(h)
+            if not ready:
+                h.status = "scheduled"
+                self.store.save()
+        if ready:
+            self._send_handoff(h)
+        else:
+            self._handoff_event(h)
+        return h
+
+    def _send_handoff(self, h: Handoff) -> None:
+        """调用方不持有锁。以确认人的名义发进目标群聊并 @ 目标成员。"""
         with self._lock:
-            h.status, h.to_agent_id, h.text, h.message_id, h.decided_at = "sent", target.id, body, msg.id, time.time()
+            to = self.store.groups.get(h.to_group_id)
+            src = self.store.groups.get(h.from_group_id)
+            target = self.store.agents.get(h.to_agent_id)
+            if to is None or target is None or target.id not in to.member_ids:
+                h.status, h.note = "rejected", "目标群组或成员已不在，没有发出"
+                self.store.save()
+                ok = False
+            else:
+                ok = True
+                chat = self._group_chat(to)
+                origin = f"「{src.name}」的 {self._name(h.from_agent_id)}" if src else self._name(h.from_agent_id)
+                waited = f"，等 {'、'.join(h.after)} 完成后发出" if h.after else ""
+        if not ok:
+            self._handoff_event(h)
+            return
+        msg = self.send_message(chat.id, f"@{target.name} {h.text}\n\n（交接：来自{origin}，已由我确认{waited}）",
+                                mentions=[target.id], actor=h.approved_by or h.owner_id)
+        with self._lock:
+            h.status, h.message_id = "sent", msg.id
             holder = self._holder(h.context_kind, h.context_id)
             if holder is not None:  # 只放进收件箱、不唤醒：对方的进展不回到这里，下次被唤醒时顺带知道
                 holder.inbox.append({"kind": "handoff", "handoff_id": h.id})
             self.store.save()
         self._handoff_event(h)
-        return h
 
     def reject_handoff(self, handoff_id: str, note: str = "", actor: str | None = None) -> Handoff:
         with self._lock:
             h = self._handoff(handoff_id, actor)
-            if h.status != "pending":
+            if h.status not in ("pending", "scheduled"):
                 raise NetworkError(f"交接 {h.id} 已经处理过")
             h.status, h.note, h.decided_at = "rejected", note.strip()[:1000], time.time()
             holder = self._holder(h.context_kind, h.context_id)
@@ -2707,7 +2770,9 @@ class Network:
                            for x in g.suggestions if x.status == "pending"]
             projects = [{"id": p.id, "name": p.name, "workstreams": [asdict(w) for w in p.workstreams]}
                         for p in self.store.projects.values() if self.can_see_project(p, actor)]
-        handoffs = [h for h in self.handoffs(actor) if h["status"] == "pending"]
+        # 还没结束的交接：待确认、排队中、已发出但还没完成（可以作为别的交接的依赖）
+        handoffs = [h for h in self.handoffs(actor) if h["status"] in ("pending", "scheduled")
+                    or (h["status"] == "sent" and h["returned_at"] is None)]
         return {"requests": cards, "approvals": [a.to_dict() for a in self.pending_approvals(actor)],
                 "handoffs": handoffs, "projects": projects, "proposals": proposals, "ledger": busy, "invitations": invitations, "suggestions": suggestions}
 

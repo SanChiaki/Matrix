@@ -594,3 +594,5 @@ pre.cmd { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--border
 .workdir .files { margin: 4px 0 8px; max-height: 240px; overflow: auto; }
 .todo-item.handoff textarea { width: 100%; margin: 6px 0; font: inherit; }
 .handoffs .todo-list { list-style: none; padding: 0; }
+.ho-after { border: 0; padding: 0; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 13px; }
+.ho-after legend { padding: 0; margin-bottom: 2px; color: var(--muted, #888); }

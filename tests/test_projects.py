@@ -355,3 +355,55 @@ def test_handoff_goes_through_the_owner(tmp_path: Path):
     net.send_message(net.group_chat(og.id, actor=alice).id, "@Loner 在吗", actor=alice, background=False)
     assert runs[-1][0] == loner.id and not any(t.endswith("handoff") for t in runs[-1][2])
     assert any(t.endswith("handoff") for a, _, tools in runs if a == pm.id for t in tools)
+
+
+def test_handoff_waits_for_dependencies(tmp_path: Path):
+    """不变量 19：有依赖的交接确认后先排队（scheduled），依赖的交接完成（人验收）后才由网络以确认人的名义发出；依赖不能成环。"""
+    out: list[str] = []
+    plan: dict[str, list] = {}
+
+    def handler(call: ScriptCall) -> str:
+        for kw in plan.pop(call.agent_id, []):
+            out.append(call.tool("handoff", **kw))
+        if call.agent_id != pm.id and "@ 你" in call.prompt:
+            rid = re.search(r"req-[0-9a-f]{8}", call.tool("open_request", title="活", expected_outcome="产物")).group()
+            call.tool("deliver_request", request_id=rid, summary=f"{call.agent_id} 做完了")
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    pm, dev, qa, doc = (net.create_agent(n, n, [], [], actor=alice) for n in ("PM", "Dev", "QA", "Doc"))
+    p = net.create_project("tasky", actor=alice)
+    chats = {}
+    for name, a in (("产品组", pm), ("开发组", dev), ("测试组", qa), ("文档组", doc)):
+        g = net.create_group(name, "", [a.id], actor=alice)
+        net.assign_group(g.id, p.id, actor=alice)
+        chats[name] = net.group_chat(g.id, actor=alice)
+
+    plan[pm.id] = [dict(group="开发组", agent="Dev", message="实现"), dict(group="测试组", agent="QA", message="测", after="ho-nope")]
+    net.send_message(chats["产品组"].id, "@PM 分派", actor=alice, background=False)
+    assert "不是这个项目里可以等待的交接" in out[1]
+    h1 = next(iter(net.store.handoffs.values()))
+    plan[pm.id] = [dict(group="测试组", agent="QA", message="测", after=h1.id), dict(group="文档组", agent="Doc", message="写")]
+    net.send_message(chats["产品组"].id, "@PM 再分派", actor=alice, background=False)
+    h2, h3 = sorted((h for h in net.store.handoffs.values() if h.id != h1.id), key=lambda h: h.to_group_id != chats["测试组"].group_id)
+    assert h2.after == [h1.id] and h3.after == []
+
+    with pytest.raises(NetworkError, match="互相等待"):
+        net.approve_handoff(h1.id, after=[h2.id], actor=alice)
+    net.approve_handoff(h3.id, after=[h1.id, h2.id], actor=alice)  # 人在确认时加依赖
+    net.approve_handoff(h2.id, actor=alice)
+    assert (h2.status, h3.status) == ("scheduled", "scheduled") and not chats["测试组"].messages
+    net.approve_handoff(h1.id, actor=alice)
+    net.wait_quiet()
+    assert h1.status == "sent" and not chats["测试组"].messages  # 开发还没验收
+
+    def accept(agent):
+        r = next(r for r in net.store.requests.values() if r.agent_id == agent.id and r.status == "in_review")
+        net.review_request(r.id, True, actor=alice)
+        net.wait_quiet()
+    accept(dev)
+    assert h2.status == "sent" and h3.status == "scheduled"
+    m = next(m for m in chats["测试组"].messages if m.role == "user")
+    assert m.user_id == alice and m.mentions == [qa.id] and f"等 {h1.id} 完成后发出" in m.text
+    accept(qa)
+    assert h3.status == "sent" and any(m.role == "user" for m in chats["文档组"].messages)
