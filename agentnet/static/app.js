@@ -136,7 +136,10 @@ async function start() {
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
-  $("#device-new").addEventListener("click", () => renderDeviceDetail(true));
+  $("#device-new").addEventListener("click", () => {
+    if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
+    S.devicePanel = "new"; renderDeviceDetail();
+  });
   $("#group-new").addEventListener("click", () => { S.groupSel = null; renderGroupEditor(true); renderGroups(); });
   $("#group-quick").addEventListener("click", () => { S.groupSel = null; S.newGroup = true; location.hash = "groups"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
@@ -1421,6 +1424,10 @@ async function renderDevicesView() {
       <div class="card-foot"><span></span>${d.revoked ? "" : `<button type="button" class="danger sm" data-revoke="${esc(d.id)}">吊销</button>`}</div>
     </div></li>`;
   }).join("") || '<li class="empty">还没有设备。点“连接一台设备”，在要运行 Agent 的电脑上启动连接器。</li>';
+  $("#device-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
+    if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
+    S.devicePanel = null; S.deviceSel = b.dataset.id; renderDevicesView();
+  }));
   $("#device-list").querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirm("吊销后这台设备上的连接器会立即断开，绑在它上面的 Agent 进入等待。")) return;
     try { await api(`/api/devices/${b.dataset.revoke}`, { method: "DELETE" }); await reload(); }
@@ -1429,29 +1436,63 @@ async function renderDevicesView() {
   renderDeviceDetail();
 }
 
-function renderDeviceDetail(isNew = false) {
-  const box = $("#device-detail");
-  if (isNew) {
+// 侧边栏状态放在 S.devicePanel 里："new" = 签发表单，{ token, name, cmd } = 签发结果。
+// 签发后的 reload() 与 SSE 事件都会重渲染设备页；按状态还原，令牌一直保留到点“完成”。
+const connectCmd = (token) => {
+  const origin = location.origin.replace(/^http/, "ws");
+  return `uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect --url ${origin}/api/devices/connect --token ${token} --driver claude-code`;
+};
+
+function renderDeviceDetail() {
+  const box = $("#device-detail"), panel = S.devicePanel;
+  if (panel === "new") {
+    if (box.querySelector("#device-form")) return;  // 表单已在：不重绘，免得冲掉正在输入的名称
     box.innerHTML = `<h2 class="panel-title">连接一台设备</h2>
       <p class="muted">先给这台电脑起个名字，签发一个令牌，然后在它上面运行连接器。</p>
       <form class="editor" id="device-form">
         <div class="field"><label for="dv-name">设备名称</label><input id="dv-name" name="name" placeholder="我的笔记本" maxlength="80"></div>
         <p class="error" role="alert"></p>
-        <div class="actions"><button type="submit">签发令牌</button></div>
-      </form>
-      <div id="device-token"></div>`;
+        <div class="actions"><button type="submit">签发令牌</button><button type="button" class="ghost" id="dv-cancel">取消</button></div>
+      </form>`;
+    $("#dv-name").focus();
+    $("#dv-cancel").addEventListener("click", () => { S.devicePanel = null; renderDeviceDetail(); });
     $("#device-form").addEventListener("submit", async (e) => {
       e.preventDefault();
+      const btn = $("#device-form button[type=submit]");
+      btn.disabled = true;
       try {
         const d = await api("/api/devices", { method: "POST", body: { name: $("#dv-name").value.trim() } });
-        $("#device-form").hidden = true;
-        const origin = location.origin.replace(/^http/, "ws");
-        $("#device-token").innerHTML = `<div class="warn-box">令牌只显示这一次，请现在复制。</div>
-          <pre class="cmd">uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
-  --url ${esc(origin)}/api/devices/connect --token ${esc(d.token)} --driver claude-code</pre>
-          <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。本机需要先装好对应的 harness 并登录（claude / codex / dsh 在 PATH 里）。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
+        S.devicePanel = { token: d.token, name: d.name, cmd: connectCmd(d.token) };
+        S.deviceSel = d.id;
+        renderDeviceDetail();
         await reload();
-      } catch (err) { $(".error", $("#device-form")).textContent = err.message; }
+      } catch (err) { $(".error", $("#device-form")).textContent = err.message; btn.disabled = false; }
+    });
+    return;
+  }
+  if (panel && panel.token) {
+    if (box.querySelector("#device-cmd")) return;  // 已经显示：不重绘（保住选中状态与“已复制”提示）
+    box.innerHTML = `<h2 class="panel-title">${esc(panel.name)}</h2>
+      <div class="warn-box">令牌只显示这一次。关掉这个面板之后就再也看不到了，请现在复制。</div>
+      <p class="muted" style="margin-top:12px">在要运行 Agent 的电脑上执行：</p>
+      <pre class="cmd" id="device-cmd" tabindex="0">${esc(panel.cmd)}</pre>
+      <div class="actions"><button type="button" id="dv-copy">复制命令</button>
+        <button type="button" class="ghost" id="dv-done">已复制，完成</button></div>
+      <p class="hint" id="dv-copied" role="status"></p>
+      <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。本机需要先装好对应的 harness 并登录（claude / codex / dsh 在 PATH 里）。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
+    $("#dv-copy").addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(panel.cmd);
+        $("#dv-copied").textContent = "已复制到剪贴板。";
+      } catch {  // 剪贴板不可用（非安全上下文等）：选中文本，让人手动复制
+        const r = document.createRange(); r.selectNodeContents($("#device-cmd"));
+        const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+        $("#dv-copied").textContent = "无法自动复制，已选中命令，请按 ⌘C / Ctrl+C。";
+      }
+    });
+    $("#dv-done").addEventListener("click", () => {
+      if (!confirm("关掉后令牌不会再显示。确认已经复制好了？")) return;
+      S.devicePanel = null; renderDeviceDetail();
     });
     return;
   }

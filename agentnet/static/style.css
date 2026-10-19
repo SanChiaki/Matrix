@@ -534,6 +534,10 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 .suggestions li { padding: 10px 12px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); background: var(--accent-soft); margin-top: 8px; }
 .file-up { margin-top: 8px; display: inline-flex; cursor: pointer; }
 .warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(233, 178, 107, .08); color: var(--human); }
+/* 可复制的命令：长令牌在窄侧边栏里换行，不撑出容器 */
+pre.cmd { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); font-size: 12px; line-height: 1.55; white-space: pre-wrap; word-break: break-all;
+  user-select: all; }
 .hint.warn { color: var(--human); }
 .todo-item .actions { display: flex; gap: 6px; margin-left: auto; }
 
