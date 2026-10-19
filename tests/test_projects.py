@@ -296,6 +296,9 @@ def test_handoff_goes_through_the_owner(tmp_path: Path):
         runs.append((call.agent_id, call.prompt, call.tool_names))
         for kw in plan.pop(call.agent_id, []):
             plan.setdefault("out", []).append(call.tool("handoff", **kw))
+        if call.agent_id == eng.id and "先做 add/list" in call.prompt:
+            rid = re.search(r"req-[0-9a-f]{8}", call.tool("open_request", title="实现", expected_outcome="代码")).group()
+            call.tool("deliver_request", request_id=rid, summary="add/list 已实现")
         return "ok"
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
@@ -332,6 +335,12 @@ def test_handoff_goes_through_the_owner(tmp_path: Path):
     assert pchat.seats[pm.id].inbox and pchat.seats[pm.id].inbox[0]["kind"] == "handoff"
     with pytest.raises(NetworkError, match="已经处理过"):
         net.reject_handoff(h.id, actor=alice)
+    # 回路：交接引出的任务验收通过后，唤醒提交者并带上交付说明
+    r = next(r for r in net.store.requests.values() if r.agent_id == eng.id)
+    net.review_request(r.id, True, actor=alice)
+    net.wait_quiet()
+    assert runs[-1][0] == pm.id and "已完成，人已验收" in runs[-1][1] and "add/list 已实现" in runs[-1][1]
+    assert h.returned_at is not None
 
     # 拒绝：唤醒提交者，带上意见
     plan[pm.id] = [dict(group="开发组", agent="Eng", message="再做一个")]

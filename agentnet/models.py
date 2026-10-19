@@ -332,6 +332,7 @@ class Handoff:
     status: str = "pending"              # pending | sent | rejected
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
+    returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
 

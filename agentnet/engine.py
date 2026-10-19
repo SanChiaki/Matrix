@@ -28,7 +28,7 @@ from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUE
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
-                       format_delivery, format_failure, format_failure_notice, format_handoff_notice, format_ledger, format_open_requests, format_project,
+                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir, workdir
@@ -1289,13 +1289,19 @@ class Network:
                 if r is not None and r.status == "in_progress":
                     blocks.append(format_request_changes(r, self._who(r.requester_id).strip()))
                     wake.append(f"{self._who(r.requester_id).strip()} 退回了 {r.id}")
-            elif kind == "handoff":
+            elif kind in ("handoff", "handoff_done"):
                 h = self.store.handoffs.get(it["handoff_id"])
                 if h is None:
                     continue
                 to = self.store.groups.get(h.to_group_id)
-                blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id)))
-                wake.append(f"交接 {h.id} {'已发出' if h.status == 'sent' else '未采纳'}")
+                if kind == "handoff_done":
+                    r = self.store.requests.get(it["request_id"])
+                    blocks.append(format_handoff_done(h, to.name if to else "", self._name(r.agent_id if r else h.to_agent_id),
+                                                      r.summary if r else ""))
+                    wake.append(f"交接 {h.id} 已完成")
+                else:
+                    blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id)))
+                    wake.append(f"交接 {h.id} {'已发出' if h.status == 'sent' else '未采纳'}")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
                 if p is None:
@@ -2017,6 +2023,22 @@ class Network:
         if conv is not None and text:
             self._append(conv, Message(id=new_id("msg"), role="event", agent_id=r.agent_id, text=text))
         self.bus.emit("request.updated", conversation_id=r.conversation_id, request=r.to_dict())
+        if r.status == "completed":
+            self._handoff_returned(r)
+
+    def _handoff_returned(self, r: UserRequest) -> None:
+        """交接引出的用户任务验收通过：通知并唤醒提交交接的那一方，闭合交接的回路（不用人再转述一次）。"""
+        with self._lock:
+            h = next((h for h in self.store.handoffs.values()
+                      if h.status == "sent" and h.message_id == r.message_id and h.returned_at is None), None)
+            holder = self._holder(h.context_kind, h.context_id) if h else None
+            if h is None or holder is None:
+                return
+            h.returned_at = time.time()
+            holder.inbox.append({"kind": "handoff_done", "handoff_id": h.id, "request_id": r.id})
+            self.store.save()
+        self._handoff_event(h)
+        self._kick(h.context_kind, h.context_id)
 
     def _who(self, user_id: str | None) -> str:
         """事件文本里的人：有邮箱写邮箱（两侧留空格），没有就写“下发的人”。"""

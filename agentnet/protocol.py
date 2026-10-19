@@ -361,12 +361,18 @@ def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
 def format_handoff_notice(h: Handoff, group_name: str, agent_name: str) -> str:
     if h.status == "sent":
         text = [f"## 网络通知：你的交接 {h.id} 已由人确认，发给了「{group_name}」的 {agent_name}",
-                "对方的进展不会回到你这里；需要它的产物时，看项目文件（`project/`）。"]
+                "对方做完、人验收通过后会通知你；它的产物看项目文件（`project/`）。"]
     else:
         text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳"]
     if h.note:
         text.append(f"意见：{h.note}")
     return "\n".join(text)
+
+
+def format_handoff_done(h: Handoff, group_name: str, agent_name: str, summary: str) -> str:
+    return "\n".join([f"## 网络通知：你交接给「{group_name}」{agent_name} 的工作已完成，人已验收（{h.id}）",
+                      f"交接内容：{h.text[:300]}", f"对方的交付说明：{summary[:2000] or '（没有说明）'}",
+                      "产物看项目文件（`project/`）。接着做你这边等着它的工作。"])
 
 
 def format_proposal_notice(p: Proposal, agent_name: str) -> str:
