@@ -284,3 +284,65 @@ def test_projects_api(tmp_path: Path):
     assert ca.delete(f"/api/projects/{pid}/workstreams/{ws}").json()["workstreams"] == []
     assert ca.delete(f"/api/projects/{pid}").json() == {"ok": True}
     assert ca.get(f"/api/groups/{g.id}").json()["project_id"] is None
+
+
+def test_handoff_goes_through_the_owner(tmp_path: Path):
+    """不变量 19：Agent 不能直接跨群组委托或发言，只能向同一项目里的其他群组提交交接；项目所有者确认（可修改）后
+    以人的名义发进目标群聊并 @ 目标成员。没挂项目的群组没有这个工具。"""
+    runs: list[tuple[str, str, list[str]]] = []
+    plan: dict[str, list] = {}
+
+    def handler(call: ScriptCall) -> str:
+        runs.append((call.agent_id, call.prompt, call.tool_names))
+        for kw in plan.pop(call.agent_id, []):
+            plan.setdefault("out", []).append(call.tool("handoff", **kw))
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    pm = net.create_agent("PM", "pm", [], [], actor=alice)
+    eng = net.create_agent("Eng", "eng", [], [], actor=alice)
+    loner = net.create_agent("Loner", "x", [], [], actor=alice)
+    pg = net.create_group("产品组", "", [pm.id], actor=alice)
+    dg = net.create_group("开发组", "", [eng.id], actor=alice)
+    og = net.create_group("别的组", "", [loner.id], actor=alice)
+    p = net.create_project("tasky", actor=alice)
+    net.assign_group(pg.id, p.id, actor=alice)
+    net.assign_group(dg.id, p.id, actor=alice)
+    pchat, dchat = net.group_chat(pg.id, actor=alice), net.group_chat(dg.id, actor=alice)
+
+    plan[pm.id] = [dict(group="别的组", agent="Loner", message="x"), dict(group="开发组", agent="PM", message="x"),
+                   dict(group="产品组", agent="PM", message="x"),
+                   dict(group="开发组", agent="Eng", message="按 project/prd.md 实现")]
+    net.send_message(pchat.id, "@PM 定稿后交给开发组", actor=alice, background=False)
+    out = plan.pop("out")
+    assert "不是项目「tasky」里的其他群组" in out[0] and "不是「开发组」的成员" in out[1]
+    assert "不是项目「tasky」里的其他群组" in out[2] and "已提交交接" in out[3]
+    h = next(iter(net.store.handoffs.values()))
+    assert h.status == "pending" and not dchat.messages and all(a != eng.id for a, *_ in runs)  # 人确认之前什么都不发生
+
+    with pytest.raises(NetworkError, match="unknown handoff"):
+        net.approve_handoff(h.id, actor=bob)
+    pm_runs = sum(1 for a, *_ in runs if a == pm.id)
+    net.approve_handoff(h.id, text="按 project/prd.md 实现 v1，先做 add/list", actor=alice)
+    net.wait_quiet()
+    m = next(m for m in dchat.messages if m.role == "user")
+    assert m.user_id == alice and m.mentions == [eng.id] and "先做 add/list" in m.text and "来自「产品组」的 PM" in m.text
+    assert any(a == eng.id and "先做 add/list" in pr for a, pr, _ in runs)
+    assert sum(1 for a, *_ in runs if a == pm.id) == pm_runs  # 发出不唤醒提交者
+    assert pchat.seats[pm.id].inbox and pchat.seats[pm.id].inbox[0]["kind"] == "handoff"
+    with pytest.raises(NetworkError, match="已经处理过"):
+        net.reject_handoff(h.id, actor=alice)
+
+    # 拒绝：唤醒提交者，带上意见
+    plan[pm.id] = [dict(group="开发组", agent="Eng", message="再做一个")]
+    net.send_message(pchat.id, "@PM 再交一个", actor=alice, background=False)
+    h2 = next(x for x in net.store.handoffs.values() if x.id != h.id)
+    net.reject_handoff(h2.id, note="先别做", actor=alice)
+    net.wait_quiet()
+    assert "没有被采纳" in runs[-1][1] and "先别做" in runs[-1][1] and runs[-1][0] == pm.id
+    assert net.board(alice)["handoffs"] == [] and net.board(bob)["handoffs"] == []
+
+    # 没挂项目的群组：没有 handoff 工具
+    net.send_message(net.group_chat(og.id, actor=alice).id, "@Loner 在吗", actor=alice, background=False)
+    assert runs[-1][0] == loner.id and not any(t.endswith("handoff") for t in runs[-1][2])
+    assert any(t.endswith("handoff") for a, _, tools in runs if a == pm.id for t in tools)

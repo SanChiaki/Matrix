@@ -177,6 +177,11 @@ class FileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
+class HandoffApproveIn(BaseModel):
+    text: str | None = Field(default=None, max_length=4000)
+    agent_id: str | None = None
+
+
 class PromoteIn(BaseModel):
     group_id: str
     name: str = Field(min_length=1, max_length=120)
@@ -468,6 +473,19 @@ def create_app(network: Network) -> FastAPI:
     def remove_workstream(project_id: str, workstream_id: str, user: Me) -> dict:
         network.remove_workstream(project_id, workstream_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
+
+    # 跨群组交接：Agent 提交，项目所有者确认后以他的名义发进目标群聊（不变量 19）
+    @app.get("/api/handoffs")
+    def handoffs(user: Me) -> list:
+        return network.handoffs(actor=user.id)
+
+    @app.post("/api/handoffs/{handoff_id}/approve")
+    def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
+        return network.approve_handoff(handoff_id, body.text, body.agent_id, actor=user.id).to_dict()
+
+    @app.post("/api/handoffs/{handoff_id}/reject")
+    def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
+        return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
 
     # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
     @app.post("/api/projects/{project_id}/files")

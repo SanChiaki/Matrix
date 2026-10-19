@@ -225,7 +225,7 @@ function render() {
   $("#live").classList.toggle("busy", busy > 0);
   renderConvList();
   const todo = (S.snap.approvals || []).length + (S.snap.proposals || []).filter((p) => p.status === "pending").length
-    + (S.snap.invitations || []).length
+    + (S.snap.invitations || []).length + (S.snap.handoffs || []).length
     + S.snap.groups.filter(isHost).reduce((n, g) => n + (g.suggestions || []).filter((x) => x.status === "pending").length, 0);
   $("#todo-count").hidden = !todo;
   $("#todo-count").textContent = todo;
@@ -238,6 +238,31 @@ function render() {
 // 一个项目分几个方面，每个方面由若干内部群组承担；这里只汇总它们的用户任务，不让群组互通上下文。
 const project = (id) => S.snap?.projects?.find((p) => p.id === id);
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
+
+// 跨群组交接：Agent 提交，你确认（可以改内容）后以你的名义发进对方群聊
+const handoffItem = (h) => `<li class="todo-item handoff" data-ho="${esc(h.id)}">
+    <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
+      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> ${pill("pending")}
+      <span class="muted">${time(h.created_at)}</span></div>
+    <label class="sr-only" for="ho-${esc(h.id)}">交接内容</label>
+    <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
+    <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认并发出</button>
+      <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不采纳</button>
+      <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div>
+    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}。</p></li>`;
+function bindHandoffs(box, after) {
+  box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.hoOk; b.disabled = true;
+    try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body: { text: $(`#ho-${id}`).value } }); await after(); }
+    catch (e) { alert(e.message); b.disabled = false; }
+  }));
+  box.querySelectorAll("[data-ho-no]").forEach((b) => b.addEventListener("click", async () => {
+    const note = prompt("不采纳的理由（会告诉提交的 Agent，可以留空）", "");
+    if (note === null) return;
+    try { await api(`/api/handoffs/${b.dataset.hoNo}/reject`, { method: "POST", body: { note } }); await after(); }
+    catch (e) { alert(e.message); }
+  }));
+}
 
 async function renderProjectsView() {
   const ps = S.snap.projects || [];
@@ -266,7 +291,7 @@ async function renderProjectsView() {
   const id = S.projectSel;
   const d = await api(`/api/projects/${id}`).catch(() => null);
   if (!d || S.projectSel !== id || S.view !== "projects") return;
-  renderProjectOverview(d);
+  if (!$("#project-overview").contains(document.activeElement) || !document.activeElement.matches("textarea")) renderProjectOverview(d);
   // 正在编辑时不重绘侧栏（事件流会频繁触发刷新）
   if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea, select")) return;
   renderProjectDetail(box, d);
@@ -295,10 +320,23 @@ function renderProjectOverview(d) {
   }).join("");
   $("#project-overview").innerHTML = `<h2 class="section-title">${esc(d.name)}</h2>
     ${d.brief ? `<div class="brief md">${renderMarkdown(d.brief)}</div>` : ""}
-    <div class="board-cols ws-lanes">${html || '<p class="muted">先在右侧加几个方面，再把群组挂进来。</p>'}</div>`;
+    <div class="board-cols ws-lanes">${html || '<p class="muted">先在右侧加几个方面，再把群组挂进来。</p>'}</div>
+    ${handoffsHtml(d.handoffs || [])}`;
+  bindHandoffs($("#project-overview"), reload);
   $("#project-overview").querySelectorAll("[data-req]").forEach((a) => a.addEventListener("click", () => {
     S.reqSel = a.dataset.req; S.taskSel = null; S.boardProject = `p:${d.id}`;
   }));
+}
+
+function handoffsHtml(hs) {
+  if (!hs.length) return "";
+  const pending = hs.filter((h) => h.status === "pending"), done = hs.filter((h) => h.status !== "pending");
+  const row = (h) => `<li><b>${esc(h.from_agent_name)}</b> <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
+    ${h.status === "sent" ? `<a class="pill status completed" href="#${esc(h.to_conversation_id || "")}">已发出</a>` : '<span class="pill status rejected">未采纳</span>'}
+    <span class="muted">${time(h.decided_at || h.created_at)}</span><p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
+  return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${pending.length} 待确认</h3>
+    ${pending.length ? `<ul class="todo-list">${pending.map(handoffItem).join("")}</ul>` : ""}
+    ${done.length ? `<details><summary>已处理 · ${done.length}</summary><ul class="refs">${done.map(row).join("")}</ul></details>` : ""}</section>`;
 }
 
 function renderProjectForm(box, d = null) {
@@ -429,6 +467,7 @@ function renderBoard() {
         <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button>
         <a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a></div>
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
+    ...(b.handoffs || []).map(handoffItem),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
@@ -440,14 +479,18 @@ function renderBoard() {
       <a class="button sm" href="#g-${esc(x.group_id)}">去看看</a></li>`),
   ];
   $("#todo").hidden = !todo.length;
-  $("#todo-list").innerHTML = todo.join("");
-  $("#todo-list").querySelectorAll("[data-inv]").forEach((btn) => btn.addEventListener("click", async () => {
+  const editing = $("#todo-list").contains(document.activeElement) && document.activeElement.matches("textarea");
+  if (!editing) {  // 正在改交接内容时不重绘（事件流会频繁触发刷新）
+    $("#todo-list").innerHTML = todo.join("");
+    bindHandoffs($("#todo-list"), async () => { await loadBoard(); await reload(); });
+  }
+  if (!editing) $("#todo-list").querySelectorAll("[data-inv]").forEach((btn) => btn.addEventListener("click", async () => {
     btn.parentElement.querySelectorAll("button").forEach((x) => { x.disabled = true; });
     try { await api(`/api/groups/${btn.dataset.inv}/invitation`, { method: "POST", body: { accept: btn.dataset.ok === "1" } }); }
     catch (err) { alert(err.message); }
     await loadBoard(); await reload();
   }));
-  $("#todo-list").querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
+  if (!editing) $("#todo-list").querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
     btn.closest(".actions").querySelectorAll("button").forEach((x) => { x.disabled = true; });
     try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1" } }); }
     catch (err) { alert(err.message); }
@@ -574,7 +617,7 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "tool.call" || ev.type === "runtime.invoke") return;  // 已由 run.progress 覆盖
-  if (ev.type === "group.invited" && S.view === "board") loadBoard();
+  if ((ev.type === "group.invited" || ev.type === "handoff.updated") && S.view === "board") loadBoard();
   if (ev.type === "group.left" && d.user_id === S.me?.id && S.conv?.group_id === d.group_id) {
     S.convId = null; S.conv = null; location.hash = "groups";  // 自己退出 / 被移出：离开这个群聊
   }

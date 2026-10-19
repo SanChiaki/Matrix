@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
-                     PROJECT_FILES, AgentNode, Conversation, Decision, Group, KnowledgeItem, Message, Project, Proposal, Task,
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
+                     PROJECT_FILES, AgentNode, Conversation, Decision, Group, Handoff, KnowledgeItem, Message, Project, Proposal, Task,
                      UserRequest)
 
 
@@ -74,6 +74,8 @@ TOOL_GUIDE: dict[str, str] = {
                      "群组属于某个项目时，target=project 发布到项目，项目里所有群组此后在 `./project/` 读到"
                      "（只发布别的方面要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
+    "handoff": ("项目里需要另一个群组接着做时提交交接（group、agent、message：要做什么、依据哪些 `project/` 文件、交回什么），"
+                "人确认后以人的名义发进对方群聊。交给别的群组的产物先用 publish_file target=project 发布。"),
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
@@ -95,7 +97,7 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
              "规则和内部群组相同。"] if group.kind == "joint" else []
     return archive + [
         "", f"## 协作：你所在的群组「{group.name}」",
-        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items() if name not in ARCHIVE_TOOLS + REQUEST_TOOLS),
+        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items() if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + PROJECT_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -186,7 +188,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
     parts = [f"## 项目背景（「{p.name}」）",
              f"群组「{g.name}」是这个项目的一部分" + (f"，负责「{mine.name}」方面。" if mine else "，还没有分到具体方面。")
-             + "其他方面由别的群组负责：它们的成员不在你的群组里，你不能委托给他们，需要别的方面配合时在回复里告诉用户。"]
+             + "其他方面由别的群组负责：它们的成员不在你的群组里，你不能委托给他们。"
+             f"需要别的方面接着做时，用 `{MCP_PREFIX}handoff` 提交交接（{TOOL_GUIDE['handoff']}）"]
     if p.brief:
         parts += ["### 项目 Brief", p.brief]
     if lanes:
@@ -353,6 +356,17 @@ def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
         (f"可以用 retry_task 续接原会话（还能续接 {left} 次），或换一个成员重新委托，或亲自处理。" if left
          else "续接次数已用完：换一个成员重新委托，或亲自处理。"),
     ])
+
+
+def format_handoff_notice(h: Handoff, group_name: str, agent_name: str) -> str:
+    if h.status == "sent":
+        text = [f"## 网络通知：你的交接 {h.id} 已由人确认，发给了「{group_name}」的 {agent_name}",
+                "对方的进展不会回到你这里；需要它的产物时，看项目文件（`project/`）。"]
+    else:
+        text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳"]
+    if h.note:
+        text.append(f"意见：{h.note}")
+    return "\n".join(text)
 
 
 def format_proposal_notice(p: Proposal, agent_name: str) -> str:
