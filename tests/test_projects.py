@@ -440,10 +440,15 @@ def test_handoff_replaces_and_shows_open_handoffs(tmp_path: Path):
     plan[dev.id] = [dict(group="测试组", agent="QA", message="按交付说明测 1.1.0（含夹具说明）")]
     net.send_message(chats["开发组"].id, "@Dev 交给测试", actor=alice, background=False)
     assert old.id in prompts[dev.id][-1] and "待人确认" in prompts[dev.id][-1]
+    net.publish_project_file(p.id, "prd.md", b"v1", actor=alice)
+    net.publish_project_file(p.id, "prd.md", b"v2", actor=alice)
+    assert "prd.md" in net._recent_files(p)[0] and "第 2 版" in net._recent_files(p)[0]
     assert "已有进行中的交接" in out[-1] and old.id in out[-1]
     new = next(h for h in net.store.handoffs.values() if h.id not in (old.id, doc_h.id))
     with pytest.raises(NetworkError, match="不是可以替换的交接"):
         net.approve_handoff(new.id, replaces=doc_h.id + "x", actor=alice)
+    with pytest.raises(NetworkError, match="互相等待"):  # 文档在等旧的；新的不能反过来等文档
+        net.approve_handoff(new.id, replaces=old.id, after=[doc_h.id], actor=alice)
     net.approve_handoff(new.id, replaces=old.id, actor=alice)
     net.wait_quiet()
     assert old.status == "superseded" and doc_h.after == [new.id] and new.status == "sent"

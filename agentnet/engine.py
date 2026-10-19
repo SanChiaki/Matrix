@@ -2155,7 +2155,34 @@ class Network:
                     + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "") + f"：{_short(_first_line(h.text), 80)}"
                     for h in sorted(self.store.handoffs.values(), key=lambda h: h.created_at)
                     if h.project_id == p.id and self._handoff_open(h)][-12:]
-        return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs)
+        return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs, self._recent_files(p))
+
+    def _recent_files(self, p: Project, n: int = 6) -> list[str]:
+        """调用方持有锁。最近发布 / 更新的项目文件（谁、什么时候）：别的方面改了你依赖的文件时，你能看出来。"""
+        import json
+        log = self.store.project_dir(p.id).parent / "log.jsonl"
+        if not log.is_file():
+            return []
+        seen: dict[str, dict[str, Any]] = {}
+        for line in log.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("action") == "file.publish" and e.get("file"):
+                prev = seen.pop(e["file"], {})  # 重新插入：按最后一次发布排序
+                seen[e["file"]] = {**e, "n": prev.get("n", 0) + 1}
+        present = {f["name"] for f in self.project_files(p)}
+        out = []
+        for name, e in list(seen.items())[::-1]:
+            if name not in present:
+                continue
+            who = self._name(e["by_agent"]) if e.get("by_agent") else self._email(e.get("by_user"))
+            when = time.strftime("%m-%d %H:%M", time.localtime(e["ts"]))
+            out.append(f"- {name}：{when} {who} " + ("发布" if e["n"] == 1 else f"更新（第 {e['n']} 版）"))
+            if len(out) >= n:
+                break
+        return out
 
     def _group_name(self, group_id: str) -> str:
         g = self.store.groups.get(group_id)
@@ -2302,6 +2329,17 @@ class Network:
             old = self.store.handoffs.get(old_id or "")
             if old_id and (old is None or old.project_id != h.project_id or old.status not in ("pending", "scheduled")):
                 raise NetworkError(f"{old_id} 不是可以替换的交接（只能替换还没发出的）")
+            if old is not None:  # 等旧的那些会改为等这条：这条自己不能（间接）等它们
+                waiting, todo = set(), [old.id]
+                while todo:
+                    x = todo.pop()
+                    for y in self.store.handoffs.values():
+                        if x in y.after and y.id not in waiting:
+                            waiting.add(y.id)
+                            todo.append(y.id)
+                loop = waiting & (set(deps) - {old.id})
+                if loop:
+                    raise NetworkError(f"替换后会互相等待：{'、'.join(sorted(loop))} 在等 {old.id}")
             h.to_agent_id, h.text, h.after, h.approved_by = target_id, body, deps, actor or h.owner_id
             h.replaces, h.decided_at = old_id or None, time.time()
             if old is not None:  # 旧的作废；等旧的改为等这条

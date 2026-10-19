@@ -184,7 +184,7 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
 
 
 def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str],
-                   handoffs: list[str] | None = None) -> str:
+                   handoffs: list[str] | None = None, recent: list[str] | None = None) -> str:
     """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
     和群组档案一样只是背景，不附带“先读”之类的指令。"""
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
@@ -201,6 +201,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
     if files:
         parts += [f"### 项目文件（`./{PROJECT_FILES}/`，只读，项目里所有群组都看得到）", "、".join(files[:40])
                   + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    if recent:
+        parts += ["最近发布 / 更新：", *recent]
     if handoffs:
         parts += ["### 进行中的交接（提交前先看有没有同样的；要补充或替换已有的，用 replaces 写上它的 id）", *handoffs]
     return "\n".join(parts)
