@@ -107,6 +107,8 @@ def test_api_flow(tmp_path: Path):
                                       "capabilities": ["finance"], "authority": ["web.research"]}).json()
     assert c.post("/api/agents", json={"name": "Finance Agent", "description": "dup"}).status_code == 409
     assert c.post("/api/agents", json={"name": "Bad Agent", "description": "xx", "authority": ["root"]}).status_code == 409
+    assert c.post("/api/agents", json={"name": "Long Agent", "description": "长" * 2001}).status_code == 422
+    assert c.patch(f"/api/agents/{new['id']}", json={"description": "长" * 2000}).status_code == 200
     assert c.patch(f"/api/agents/{new['id']}", json={"authority": ["web.research", "file.write"]}).json()["authority"] \
         == ["web.research", "file.write"]
     m = {"provider": "hi-code-claude", "model": "claude-opus-5-5"}

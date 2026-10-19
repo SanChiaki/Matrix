@@ -734,6 +734,26 @@ def test_propose_agent_approved_joins_group(tmp_path: Path):
         net.approve_proposal(p.id)
 
 
+def test_propose_agent_description_limit(tmp_path: Path):
+    """描述超过上限的提议直接退回给 Agent 压缩，不生成一个人原样批准不了的提议。"""
+    from agentnet.models import DESCRIPTION_LIMIT
+    out: dict[str, str] = {}
+
+    def handler(call: ScriptCall) -> str:
+        if "（@ 你）" in call.prompt:
+            out["long"] = call.tool("propose_agent", name="Legal Agent", description="长" * (DESCRIPTION_LIMIT + 1),
+                                    reason="缺人")
+            out["ok"] = call.tool("propose_agent", name="Legal Agent", description="长" * DESCRIPTION_LIMIT,
+                                  reason="缺人")
+        return "收到"
+
+    net = Network(ScriptedRuntime(handler), tmp_path)
+    a, b, g = pair(net)
+    talk(net, a, g, "需要合规意见")
+    assert "太长" in out["long"] and "等人审核" in out["ok"]
+    assert len(net.store.proposals) == 1
+
+
 def test_propose_agent_rejected_notifies(tmp_path: Path):
     out: dict[str, str] = {}
     net = Network(ScriptedRuntime(_proposer(out)), tmp_path)

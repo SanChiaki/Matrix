@@ -27,7 +27,7 @@ Matrix 的目标不是"平台托管一批 Agent"，而是**让 Agent 按我们�
 | 委托授权 | 网络计算 | 网络计算 |
 | 审批 | 所有者 | 所有者 |
 | 执行 | 服务器上的 dsh | 用户电脑上的 harness |
-| 私有目录 | 服务器 `agents/<id>/` | 用户电脑上的目录 |
+| 私有目录 | 服务器 `agents/<id>/` | 用户电脑上的 `<root>/.homes/<id>/` |
 
 网络的核心对象——Seat、Task、UserRequest、Approval、KnowledgeItem、群组成员——**都保持不变**。
 位置只影响两件事：**权限能不能被强制执行**，以及**能不能连通**。
@@ -185,8 +185,12 @@ class AgentRuntime(Protocol):
 
 要点：
 
-- **私有目录不经过网络**。端侧 Agent 的 `agents/<id>/` 就在所有者机器上，网络不读、不注入、
-  也不做三方合并——并发写入的冲突处理交给 harness 自己或所有者。
+- **私有目录不经过网络**。端侧 Agent 的私有目录在所有者机器上的 `<root>/.homes/<agent>/`，网络不读、不注入。
+  服务器只在 `run.request.home` 里说明这一轮怎么挂载：`rw`（有效权限含 `file.write`）、`ro`（没有则只读，
+  运行里的改动丢弃）、`null`（联合群组里所有者没打开）。连接器按和云侧相同的语义（`agentnet/homedir.py`）
+  拷进工作目录的 `agent-home/`、运行后按文件三方合并写回，冲突另存 `*.conflict-*`。
+  工作目录引用不能以 `.` 开头，碰不到 `.homes/`；`file.fetch` 不回传 `agent-home/` 与 `group/` 里的文件（含指向它们的符号链接）。
+  Agent 从云侧改绑到端侧时，服务器上原来的 `agents/<id>/` 不会迁移过去。
 - **群组文件是只读副本**，和云侧语义一致：运行里的改动丢弃，发布只走 `publish_file`。
 - **`publish_file` 在端侧要多一步上传**：文件出现在端侧工作目录，经连接器回传服务器后才进群组档案。
   只允许发布工作目录里的文件（不含 `materials/`、`group/`、`agent-home/`），与云侧规则一致。

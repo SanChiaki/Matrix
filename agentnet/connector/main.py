@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--url", required=True, help="wss://<服务器>/api/devices/connect")
     p.add_argument("--token", required=True, help="设备令牌（POST /api/devices 签发）")
     p.add_argument("--driver", choices=sorted(DRIVERS), default="claude-code")
-    p.add_argument("--workroot", default=str(Path.home() / ".matrix"), help="本机工作目录根")
+    p.add_argument("--workroot", default=str(Path.home() / ".matrix"), help="本机工作目录根（Agent 私有目录在其下的 .homes/）")
     p.add_argument("--bin", default=None, help="harness 可执行文件路径（默认按名称查找）")
     args = p.parse_args(argv)
     run(args.url, args.token, args.driver, Path(args.workroot), args.bin)
