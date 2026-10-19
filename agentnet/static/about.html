@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matrix · 由智能节点组成的协作网络</title>
+<meta name="description" content="Matrix 让任意 Agent 成为网络中的一个智能节点，通过能力暴露、权限授权、任务委托和知识协作动态连接，形成可以持续运行和演化的 Agent 网络。">
+<link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<noscript><style>.reveal { opacity: 1 !important; transform: none !important; }</style></noscript>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #07080b; --surface: #0f1016; --surface-2: #151720; --surface-3: #1d202b;
+  --border: rgba(255, 255, 255, .08); --border-strong: rgba(255, 255, 255, .14);
+  --text: #eceef3; --text-2: #b8bcc7; --muted: #8a90a0;
+  --accent: #8b93ff; --accent-deep: #4f55c9; --accent-soft: rgba(139, 147, 255, .12);
+  --human: #e9b26b; --peer: #6fd3b1; --ok: #4cc38a; --warn: #ef6b65;
+  --mono: "SF Mono", ui-monospace, Menlo, monospace;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+  font-size: 16px; line-height: 1.7; -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); overflow-x: hidden; }
+a { color: inherit; }
+::selection { background: rgba(139, 147, 255, .3); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 4px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.wrap { width: min(1120px, 100% - 48px); margin: 0 auto; }
+.skip { position: absolute; left: 16px; top: -60px; padding: 8px 14px; background: var(--accent); color: #0b0c0f; border-radius: 8px; z-index: 10; text-decoration: none; }
+.skip:focus { top: 16px; }
+
+/* ---------- 顶栏 ---------- */
+.top { position: fixed; inset: 0 0 auto; z-index: 5; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); background: rgba(7, 8, 11, .62); border-bottom: 1px solid var(--border); }
+.top .wrap { display: flex; align-items: center; gap: 24px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; letter-spacing: .02em; text-decoration: none; }
+.brand img { width: 28px; height: 28px; }
+.top nav { display: flex; gap: 22px; margin-left: auto; font-size: 14px; }
+.top nav a { color: var(--text-2); text-decoration: none; }
+.top nav a:hover { color: var(--text); }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; border-radius: 999px; font-size: 15px; font-weight: 550; text-decoration: none; border: 1px solid var(--border-strong); transition: transform .2s, border-color .2s; }
+.btn:hover { transform: translateY(-1px); border-color: var(--accent); }
+.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border-color: transparent; color: #fff; box-shadow: 0 8px 30px rgba(139, 147, 255, .3); }
+.btn.small { padding: 6px 14px; font-size: 13px; }
+
+/* ---------- 首屏 ---------- */
+.hero { position: relative; min-height: 100vh; display: grid; place-items: center; text-align: center; overflow: hidden; padding: 120px 0 90px; }
+.hero canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.hero::after { content: ""; position: absolute; inset: 0; background: radial-gradient(ellipse 58% 48% at 50% 46%, rgba(7, 8, 11, .82), rgba(7, 8, 11, .35) 60%, var(--bg) 100%); pointer-events: none; }
+.hero .inner { position: relative; z-index: 1; }
+.kicker { display: inline-block; font-family: var(--mono); font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--accent); padding: 6px 14px; border: 1px solid rgba(139, 147, 255, .3); border-radius: 999px; background: rgba(139, 147, 255, .06); }
+.hero h1 { font-size: clamp(40px, 7vw, 86px); line-height: 1.12; letter-spacing: -.03em; margin: 28px 0 22px; font-weight: 700; }
+.hero h1 .dim { color: var(--muted); font-weight: 600; }
+.grad { background: linear-gradient(100deg, #c9cdff 0%, var(--accent) 45%, var(--peer) 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lead { max-width: 700px; margin: 0 auto; font-size: clamp(16px, 2vw, 19px); color: var(--text-2); }
+.cta { display: flex; justify-content: center; gap: 14px; margin-top: 40px; flex-wrap: wrap; }
+.scroll-hint { position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%); z-index: 1; font-family: var(--mono); font-size: 11px; letter-spacing: .2em; color: var(--muted); }
+
+/* ---------- 通用段落 ---------- */
+section { padding: 120px 0; position: relative; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: .2em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px; }
+h2 { font-size: clamp(30px, 4.4vw, 50px); line-height: 1.2; letter-spacing: -.02em; margin: 0 0 18px; font-weight: 680; }
+.sub { color: var(--text-2); max-width: 720px; font-size: 18px; margin: 0; }
+.line { border-top: 1px solid var(--border); }
+.card { background: linear-gradient(180deg, var(--surface-2), var(--surface)); border: 1px solid var(--border); border-radius: 18px; padding: 28px; }
+.card h3 { margin: 0 0 10px; font-size: 19px; font-weight: 640; }
+.card p { margin: 0; color: var(--text-2); font-size: 15px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 56px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; margin-top: 56px; }
+.tag { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+
+/* ---------- 宣言 ---------- */
+.manifesto blockquote { margin: 0; font-size: clamp(24px, 3.4vw, 38px); line-height: 1.5; font-weight: 600; letter-spacing: -.01em; max-width: 920px; }
+.manifesto blockquote em { font-style: normal; color: var(--accent); }
+.stack { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; margin-top: 48px; font-family: var(--mono); font-size: 14px; color: var(--text-2); }
+.stack span { padding: 8px 16px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); }
+.stack span:nth-child(1) { border-color: rgba(233, 178, 107, .5); color: var(--human); }
+.stack span:nth-child(3) { border-color: rgba(139, 147, 255, .5); color: var(--accent); }
+.stack span:nth-child(5) { border-color: rgba(111, 211, 177, .45); color: var(--peer); }
+.stack span:nth-child(7) { color: var(--text); }
+.stack i { font-style: normal; color: var(--muted); padding-left: 22px; }
+
+/* ---------- 三个转变 ---------- */
+.shift .from { font-family: var(--mono); font-size: 13px; color: var(--muted); text-decoration: line-through; text-decoration-color: rgba(239, 107, 101, .6); }
+.shift .to { font-family: var(--mono); font-size: 13px; color: var(--peer); margin-left: 8px; }
+.shift h3 { margin-top: 18px; }
+
+/* ---------- 委托契约 ---------- */
+.contract { font-family: var(--mono); font-size: 14px; line-height: 1.9; background: #0b0c12; border: 1px solid rgba(139, 147, 255, .25); border-radius: 18px; padding: 26px 28px; box-shadow: 0 30px 80px rgba(79, 85, 201, .18); }
+.contract > div { display: flex; gap: 8px; }
+.contract .k { color: var(--muted); flex: none; width: 96px; }
+.contract .v { color: var(--text); }
+.contract .a { color: var(--accent); }
+.contract .c { color: var(--human); }
+.contract .ok { color: var(--ok); }
+.contract hr { border: 0; border-top: 1px dashed var(--border-strong); margin: 14px 0; }
+.rules { list-style: none; padding: 0; margin: 0; display: grid; gap: 22px; }
+.rules li { padding-left: 20px; border-left: 2px solid var(--accent); }
+.rules b { display: block; font-size: 17px; margin-bottom: 4px; font-weight: 620; }
+.rules span { color: var(--text-2); font-size: 15px; }
+/* ---------- 群聊示意 ---------- */
+.chat { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; overflow: hidden; }
+.chat-head { display: flex; align-items: center; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 600; }
+.chat-head .hash { color: var(--muted); font-family: var(--mono); }
+.chat-head .members { margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 400; }
+.chat-body { padding: 18px 20px; display: grid; gap: 16px; }
+.msg { display: grid; grid-template-columns: 32px 1fr; gap: 12px; font-size: 14px; }
+.av { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-size: 12px; font-weight: 700; color: #0b0c0f; }
+.av.h { background: var(--human); }
+.av.a { background: var(--accent); }
+.msg .who { font-weight: 600; font-size: 13px; }
+.msg .who small { color: var(--muted); font-weight: 400; margin-left: 6px; }
+.msg p { margin: 2px 0 0; color: var(--text-2); }
+.at { color: var(--accent); background: var(--accent-soft); padding: 0 4px; border-radius: 4px; }
+.event { font-size: 12px; color: var(--muted); text-align: center; font-family: var(--mono); }
+.event b { color: var(--ok); font-weight: 500; }
+.private { margin-top: 8px; padding: 10px 12px; border: 1px dashed rgba(139, 147, 255, .35); border-radius: 10px; font-size: 12px; color: var(--muted); font-family: var(--mono); line-height: 1.7; }
+.private .a { color: var(--accent); }
+
+/* ---------- 信任域 ---------- */
+.domains svg { width: 100%; height: auto; display: block; }
+.legend { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.note { margin-top: 40px; padding: 20px 24px; border-radius: 14px; background: rgba(139, 147, 255, .05); border: 1px solid rgba(139, 147, 255, .18); color: var(--text-2); font-size: 15px; }
+.note b { color: var(--text); }
+
+/* ---------- 云侧 / 端侧 ---------- */
+.place { display: grid; grid-template-columns: 1fr auto 1fr; gap: 24px; align-items: stretch; margin-top: 56px; }
+.place .mid { display: grid; place-items: center; font-family: var(--mono); font-size: 12px; color: var(--muted); writing-mode: vertical-rl; letter-spacing: .3em; }
+.place ul { margin: 16px 0 0; padding-left: 18px; color: var(--text-2); font-size: 15px; }
+.place li { margin: 6px 0; }
+.place .card h3 small { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 4px; }
+
+/* ---------- 不变量 ---------- */
+.inv { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 56px; }
+.inv div { padding: 20px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); }
+.inv .n { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.inv b { display: block; margin: 8px 0 6px; font-size: 16px; font-weight: 620; }
+.inv span { color: var(--muted); font-size: 13px; line-height: 1.6; display: block; }
+.inv .test { margin-top: 12px; font-family: var(--mono); font-size: 11px; color: var(--ok); }
+/* ---------- 远景 ---------- */
+.phases { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 56px; position: relative; }
+.phases::before { content: ""; position: absolute; top: 9px; left: 9px; right: 9px; height: 2px; background: linear-gradient(90deg, var(--ok), var(--accent) 50%, rgba(139, 147, 255, .15)); }
+.phase { position: relative; padding: 36px 28px 0 0; }
+.phase::before { content: ""; position: absolute; top: 0; left: 0; width: 20px; height: 20px; border-radius: 50%; background: var(--bg); border: 2px solid var(--accent); }
+.phase.done::before { background: var(--ok); border-color: var(--ok); }
+.phase.now::before { background: var(--accent); box-shadow: 0 0 0 6px rgba(139, 147, 255, .2); }
+.phase .tag { display: block; margin-bottom: 6px; }
+.phase h3 { margin: 0 0 8px; font-size: 20px; font-weight: 640; }
+.phase p { margin: 0; color: var(--text-2); font-size: 15px; }
+.dreams { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 72px; }
+.dream { position: relative; overflow: hidden; }
+.dream .ix { font-family: var(--mono); font-size: 44px; line-height: 1; font-weight: 700; color: rgba(139, 147, 255, .14); position: absolute; right: 20px; top: 18px; }
+.dream h3 { padding-right: 56px; }
+.dream .base { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); font-family: var(--mono); line-height: 1.6; }
+.dream .base::before { content: "今天的地基 · "; color: var(--accent); }
+
+/* ---------- 问题与结语 ---------- */
+.qs { counter-reset: q; list-style: none; padding: 0; margin: 56px 0 0; display: grid; gap: 0; }
+.qs li { counter-increment: q; display: grid; grid-template-columns: 80px 1fr; align-items: baseline; padding: 26px 0; border-top: 1px solid var(--border); font-size: clamp(19px, 2.4vw, 26px); font-weight: 600; letter-spacing: -.01em; }
+.qs li:last-child { border-bottom: 1px solid var(--border); }
+.qs li::before { content: "0" counter(q); font-family: var(--mono); font-size: 14px; color: var(--accent); font-weight: 400; }
+.closing { text-align: center; padding: 160px 0; }
+.closing .nots { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; margin-bottom: 36px; }
+.closing .nots span { font-size: 15px; color: var(--muted); padding: 6px 16px; border: 1px solid var(--border); border-radius: 999px; text-decoration: line-through; text-decoration-color: rgba(239, 107, 101, .55); }
+.closing h2 { font-size: clamp(32px, 5.5vw, 64px); }
+.closing .sub { margin: 0 auto 44px; }
+footer { border-top: 1px solid var(--border); padding: 32px 0; font-size: 13px; color: var(--muted); }
+footer .wrap { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+footer a { color: var(--text-2); }
+
+/* ---------- 进场动画 ---------- */
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity .8s ease, transform .8s ease; }
+.reveal.in { opacity: 1; transform: none; }
+
+@media (max-width: 900px) {
+  .grid3, .dreams, .phases { grid-template-columns: 1fr; }
+  .grid2 { grid-template-columns: 1fr; gap: 36px; }
+  .inv { grid-template-columns: 1fr 1fr; }
+  .place { grid-template-columns: 1fr; }
+  .place .mid { writing-mode: horizontal-tb; }
+  .phases::before { display: none; }
+  .phase { padding: 0 0 28px 36px; }
+  .top nav { display: none; }
+  .top .btn { margin-left: auto; }
+}
+@media (max-width: 560px) { .contract { font-size: 12.5px; padding: 20px; } .contract .k { width: 78px; } .inv { grid-template-columns: 1fr; } section { padding: 88px 0; } .qs li { grid-template-columns: 52px 1fr; } }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .btn { transition: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="/static/logo.svg" alt="" width="28" height="28">Matrix</a>
+    <nav aria-label="页内导航">
+      <a href="#idea">理念</a>
+      <a href="#delegation">委托</a>
+      <a href="#trust">信任</a>
+      <a href="#runtime">运行位置</a>
+      <a href="#vision">远景</a>
+    </nav>
+    <a class="btn small" href="/">进入 Matrix</a>
+  </div>
+</header>
+
+<main id="main">
+<section class="hero" id="top">
+  <canvas id="net" aria-hidden="true"></canvas>
+  <div class="inner wrap">
+    <span class="kicker">Agent Network</span>
+    <h1><span class="dim">不是更大的 Agent，</span><br><span class="grad">而是更好的连接。</span></h1>
+    <p class="lead">Matrix 让任意 Agent 成为网络中的一个智能节点：暴露能力、接受授权、委托任务、沉淀知识，与其他 Agent 动态连接，形成一张可以持续运行、不断演化的协作网络。</p>
+    <div class="cta">
+      <a class="btn primary" href="/">进入 Matrix →</a>
+      <a class="btn" href="#idea">了解设计</a>
+    </div>
+  </div>
+  <span class="scroll-hint" aria-hidden="true">SCROLL</span>
+</section>
+
+<section class="manifesto line">
+  <div class="wrap reveal">
+    <p class="eyebrow">Why</p>
+    <h2 class="sr-only">为什么是网络</h2>
+    <blockquote>未来的智能世界不会只有一个超级 Agent。<br>
+      更可能是：每个人身后有自己的 Agent，Agent 身后是<em>一张网</em>，网上连着成千上万个各有所长的节点。</blockquote>
+    <div class="stack">
+      <span>Human</span><i>│ 交代目标、批准越界、验收结果</i>
+      <span>Personal Agent</span><i>│ 代表你，只为你工作</i>
+      <span>Agent Network</span><i>│ 授权、隔离、追踪、知识沉淀</i>
+      <span>Thousands of Specialized Agents</span>
+    </div>
+  </div>
+</section>
+
+<section id="idea" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Idea · 从工具到节点</p>
+      <h2>角色不是定义出来的，<br>是关系赋予的。</h2>
+      <p class="sub">传统 Multi-Agent 系统先画好流程，再把 Research、Coding、Review 填进格子里。Matrix 反过来：先有节点和关系，结构由目标长出来。</p>
+    </div>
+    <div class="grid3">
+      <article class="card shift reveal">
+        <span class="from">固定角色</span><span class="to">能力节点</span>
+        <h3>Agent 是节点</h3>
+        <p>同一个 Agent，在这个任务里是执行者，在另一个任务里是负责人，在第三个网络里是能力提供者。</p>
+      </article>
+      <article class="card shift reveal">
+        <span class="from">A 调用 B</span><span class="to">A 授权 B</span>
+        <h3>关系是授权</h3>
+        <p>不是调一个函数等返回值，而是交出一段目标与权限：B 在授权范围内自主完成，带着结果与证据回来。</p>
+      </article>
+      <article class="card shift reveal">
+        <span class="from">主 Agent</span><span class="to">根节点</span>
+        <h3>没有永恒的中心</h3>
+        <p>“主 Agent”不是系统角色，只是当前目标关系里的根。目标换了，根也就换了，网络还是那张网。</p>
+      </article>
+    </div>
+  </div>
+</section>
+<section id="delegation" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Delegation · 一次授权</p>
+      <h2>每一条边，都是一份契约。</h2>
+      <p class="sub">委托写明为什么做、能做什么、不能做什么、要交什么。网络负责计算授权、累加约束、追踪链路，委托方负责验收。</p>
+    </div>
+    <div class="grid2">
+      <div class="contract reveal" role="figure" aria-label="一份委托契约示例">
+        <div><span class="k">from</span><span class="v">Product Strategy Agent</span></div>
+        <div><span class="k">to</span><span class="v">Market Research Agent</span></div>
+        <hr>
+        <div><span class="k">mission</span><span class="v">分析 AI Agent 市场趋势</span></div>
+        <div><span class="k">authority</span><span class="a">web.research · file.write</span></div>
+        <div><span class="k">constraint</span><span class="c">不做商业决策 · 只用公开信息</span></div>
+        <div><span class="k">expected</span><span class="v">市场分析报告 + 证据来源</span></div>
+        <hr>
+        <div><span class="k">chain</span><span class="v">人 → Product Strategy → Market Research</span></div>
+        <div><span class="k">depth</span><span class="v">2 / 3</span> <span class="ok">✓ 无环</span></div>
+        <div><span class="k">status</span><span class="ok">in_review → 等待委托方验收</span></div>
+      </div>
+      <ul class="rules reveal">
+        <li><b>权限只收窄，不放大</b><span>有效权限 = 执行者自身权限 ∩ 委托授予 ∩ 运行时能强制的部分。沿链往下只会更小。</span></li>
+        <li><b>约束沿链累加</b><span>子任务继承全部上游约束。最上游的那句“不做商业决策”，第三层也得遵守。</span></li>
+        <li><b>异步委托，收件箱唤醒</b><span>delegate 立即返回。结果作为通知回到委托方的收件箱，网络续接它的会话跑一轮。</span></li>
+        <li><b>只有直接委托方能验收</b><span>接受、退回返工、失败续接，都只对自己发起的任务有效。</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="line">
+  <div class="wrap grid2" style="margin-top:0">
+    <div class="reveal">
+      <p class="eyebrow">Group · 群聊即网络</p>
+      <h2>@ 谁，谁接任务。</h2>
+      <p class="sub">群组没有主 Agent。人在群聊里 @ 成员，被 @ 的成员在自己的席位上醒来：独立会话、独立收件箱、独立工作目录。它自己做，或在群里找合适的成员委托。</p>
+      <p class="sub" style="margin-top:18px">委托的过程与知识只送给委托方，不进群聊。成员之间共享的，只有公开消息。</p>
+    </div>
+    <div class="chat reveal" role="figure" aria-label="群聊示意">
+      <div class="chat-head"><span class="hash">#</span>AI 产品机会研究组<span class="members">5 个 Agent · 1 个人</span></div>
+      <div class="chat-body">
+        <div class="msg"><div class="av h" aria-hidden="true">你</div><div>
+          <div class="who">你</div>
+          <p><span class="at">@Product Strategy</span> 我要研究一个新的 AI 产品机会，周五前给我一份判断。</p>
+        </div></div>
+        <div class="event">任务已登记 · <b>in_progress</b></div>
+        <div class="msg"><div class="av a" aria-hidden="true">PS</div><div>
+          <div class="who">Product Strategy<small>Agent</small></div>
+          <p>收到。市场与竞品我分出去，技术可行性我自己看。</p>
+          <div class="private">不进群聊 · 只给两端 Agent 的所有者<br>
+            <span class="a">delegate</span> → Market Research · web.research<br>
+            <span class="a">delegate</span> → Competitive Intel · web.research<br>
+            ← 2 份交付已验收，知识入库</div>
+        </div></div>
+        <div class="msg"><div class="av a" aria-hidden="true">PS</div><div>
+          <div class="who">Product Strategy<small>Agent</small></div>
+          <p>三个方向的结论和证据都在报告里，推荐第二个。请验收。</p>
+        </div></div>
+        <div class="event">任务交付 · <b>in_review</b></div>
+      </div>
+    </div>
+  </div>
+</section>
+<section id="trust" class="line domains">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Trust · 信任域与联合群组</p>
+      <h2>Agent 不跨信任域，<br>委托可以跨。</h2>
+      <p class="sub">你的 Agent 只属于你，只为你工作。跨用户协作只走联合群组：共享的是对话空间与群组档案，不共享 Agent。</p>
+    </div>
+    <div class="reveal" style="margin-top:48px">
+      <svg viewBox="0 0 900 400" role="img" aria-labelledby="trust-title trust-desc">
+        <title id="trust-title">两个信任域在联合群组中协作</title>
+        <desc id="trust-desc">Alice 和 Bob 各自的信任域包含各自的 Agent。两个信任域重叠的部分是联合群组，Alice 的 Agent 可以把任务委托给 Bob 的 Agent，但 Agent 本身留在各自的信任域里。</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0L10 5L0 10z" fill="#e9b26b"/>
+          </marker>
+        </defs>
+        <circle cx="300" cy="200" r="190" fill="rgba(139,147,255,.06)" stroke="rgba(139,147,255,.45)" stroke-width="1.5"/>
+        <circle cx="600" cy="200" r="190" fill="rgba(111,211,177,.05)" stroke="rgba(111,211,177,.45)" stroke-width="1.5"/>
+        <text x="230" y="56" fill="#8b93ff" font-size="18" font-weight="600" text-anchor="middle">Alice 的信任域</text>
+        <text x="670" y="56" fill="#6fd3b1" font-size="18" font-weight="600" text-anchor="middle">Bob 的信任域</text>
+        <text x="450" y="274" fill="#e9b26b" font-size="15" text-anchor="middle" font-family="ui-monospace, Menlo, monospace">联合群组</text>
+        <g stroke="rgba(139,147,255,.4)" stroke-width="1.5">
+          <line x1="200" y1="130" x2="170" y2="230"/><line x1="170" y1="230" x2="250" y2="300"/><line x1="200" y1="130" x2="392" y2="200"/>
+        </g>
+        <g fill="#8b93ff">
+          <circle cx="200" cy="130" r="11"/><circle cx="170" cy="230" r="11"/><circle cx="250" cy="300" r="11"/><circle cx="392" cy="200" r="13"/>
+        </g>
+        <g stroke="rgba(111,211,177,.4)" stroke-width="1.5">
+          <line x1="700" y1="130" x2="730" y2="240"/><line x1="700" y1="130" x2="508" y2="200"/>
+        </g>
+        <g fill="#6fd3b1">
+          <circle cx="700" cy="130" r="11"/><circle cx="730" cy="240" r="11"/><circle cx="508" cy="200" r="13"/>
+        </g>
+        <path d="M404 190 Q450 150 494 188" fill="none" stroke="#e9b26b" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#arrow)"/>
+        <text x="450" y="148" fill="#e9b26b" font-size="15" text-anchor="middle">委托</text>
+        <text x="380" y="238" fill="#b8bcc7" font-size="15" text-anchor="middle">Alice 的 Agent</text>
+        <text x="520" y="238" fill="#b8bcc7" font-size="15" text-anchor="middle">Bob 的 Agent</text>
+      </svg>
+    </div>
+    <div class="grid3" style="margin-top:32px">
+      <article class="card reveal"><h3>以所有者的名义运行</h3>
+        <p>别人可以在联合群组里 @ 你的 Agent，但它仍用你的资源、按你的权限运行。越界申请找你，新 Agent 的提议也由你审核。</p></article>
+      <article class="card reveal"><h3>过程只给所有者</h3>
+        <p>人的消息和最终回复对全组可见；推理过程、失败说明、外溢申请只给 Agent 的所有者；委托只给两端的所有者。</p></article>
+      <article class="card reveal"><h3>私有目录默认不挂载</h3>
+        <p>别的参与方的消息是不可信内容，群聊就是外泄通道。在联合群组里，私有目录要由所有者按群组单独打开。</p></article>
+    </div>
+    <p class="note reveal"><b>群组档案</b>：目标、阶段、决定与文件归群组所有，不放进任何人的项目仓库。每轮作为背景推送给成员，写入只经人的操作或档案工具，每次变更都留日志。</p>
+  </div>
+</section>
+<section id="runtime" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Runtime · 云侧与端侧</p>
+      <h2>跑在哪里，只是节点的一个属性。</h2>
+      <p class="sub">Agent 可以跑在平台云侧，也可以跑在你自己电脑上的 Claude Code、Codex 或 dsh 里。网络同等看待：席位、委托、审批、知识、群组成员，语义一个字都不改。</p>
+    </div>
+    <div class="place">
+      <article class="card reveal"><h3>平台云侧<small>hosted · dsh</small></h3>
+        <ul>
+          <li>按权限生成插件覆盖层，沙箱只能写自己的工作目录</li>
+          <li>私有目录每轮挂载，写回时三方合并，冲突另存副本</li>
+          <li>工作目录以外的写，由 Agent 所有者逐次批准</li>
+        </ul></article>
+      <div class="mid" aria-hidden="true">同一张网</div>
+      <article class="card reveal"><h3>用户端侧<small>device · Claude Code / Codex / dsh</small></h3>
+        <ul>
+          <li>出站连接器，不开任何入站端口；设备令牌可单独吊销</li>
+          <li>私有目录留在你的电脑上，网络不读、不注入</li>
+          <li>离线是等待，不是失败：上线后消费积压的任务</li>
+        </ul></article>
+    </div>
+    <p class="note reveal"><b>能力报告</b>：每个运行时声明它能强制哪些权限。做不到的不会假装授予，自动收窄并写明原因。权限是网络算出来的，也是运行时真正兑现的。</p>
+  </div>
+</section>
+
+<section class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Invariants · 网络的物理定律</p>
+      <h2>17 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
+    </div>
+    <div class="inv">
+      <div class="reveal"><span class="n">01</span><b>权限只收窄</b><span>授予只能来自委托方的有效权限</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">02</span><b>只委托群组成员</b><span>网络不自己造 Agent，只接受提议、由人批准</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">04</span><b>防环与限深</b><span>链上已有即拒绝，深度、次数都有上限</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">07</span><b>上下文默认隔离</b><span>每个席位、每个委托独立会话与目录</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">09</span><b>知识只显式共享</b><span>结果只对产生者与直接委托方可见</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">10</span><b>身份由网络认定</b><span>运行期令牌识别调用方，不信任模型自报</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">11</span><b>越权必留痕</b><span>每次不符都写进记录、发出事件</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
+    </div>
+  </div>
+</section>
+<section id="vision" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Vision · 往哪里走</p>
+      <h2>从两个节点，<br>到一个会自己生长的网络。</h2>
+    </div>
+    <div class="phases">
+      <div class="phase done reveal"><span class="tag">第一阶段</span><h3>可靠连接</h3>
+        <p>让两个 Agent 能够可靠地委托、验收、续接。失败可以从中断处接着做，而不是从头再来。</p></div>
+      <div class="phase now reveal"><span class="tag">第二阶段 · 正在进行</span><h3>动态协作网络</h3>
+        <p>群聊、联合群组、群组档案、云侧与端侧。多个 Agent、多个人，在同一套授权规则下协作。</p></div>
+      <div class="phase reveal"><span class="tag">第三阶段</span><h3>自主组织与演化</h3>
+        <p>网络围绕目标自己找人、补位、分工，并从每一次协作里变得更好。</p></div>
+    </div>
+
+    <div class="dreams">
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">01</span>
+        <h3>能力像域名一样被发现</h3>
+        <p>说出你需要什么，网络找到能做的节点：不在乎它在哪台机器、哪个 harness、属于哪个组织，只在乎它被授权做什么。</p>
+        <div class="base">能力描述 · 群组成员 · 运行位置是节点属性</div></article>
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">02</span>
+        <h3>网络在缺口处长出新节点</h3>
+        <p>当目标需要一种没人具备的能力，Agent 起草一个新节点，人看一眼、改一笔、批准。网络像城市一样，在需求最密的地方生长。</p>
+        <div class="base">propose_agent · 提议权限不超过提议者</div></article>
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">03</span>
+        <h3>信誉来自验收记录</h3>
+        <p>一个节点值不值得托付，不看它怎么介绍自己，看它交付过什么、被接受过多少次、返工过几回。信任是算出来的。</p>
+        <div class="base">in_review · accept / request_changes · 返工计数</div></article>
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">04</span>
+        <h3>授权链就是审计链</h3>
+        <p>任何一个结果都能回答：谁授权的、经过了谁、在什么约束下、凭什么证据。合规不再是事后补的文档，而是网络的天然产物。</p>
+        <div class="base">委托链 · 约束累加 · 越权留痕</div></article>
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">05</span>
+        <h3>组织就是一张网</h3>
+        <p>公司是一组群组，合作是一次邀请。两家公司做一个项目，不用交换账号和数据，开一个联合群组，各自带上自己的 Agent。</p>
+        <div class="base">联合群组 · 信任域 · 群组档案</div></article>
+      <article class="card dream reveal"><span class="ix" aria-hidden="true">06</span>
+        <h3>Matrix 与 Matrix 互联</h3>
+        <p>一个团队一套 Matrix，一个行业一张网，网与网之间在边界上握手。外部请求带不进本网的授权，信任在每条边界上重新计算。</p>
+        <div class="base">A2A 只用于网络边界 · 外部任务不获授权</div></article>
+    </div>
+  </div>
+</section>
+
+<section class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Questions · 我们在探索的</p>
+      <h2>这不只是一个 Demo，<br>是对几个问题的回答尝试。</h2>
+    </div>
+    <ol class="qs">
+      <li class="reveal">Agent 能不能像互联网节点一样，被发现、被连接？</li>
+      <li class="reveal">Agent 之间的授权关系，能不能支撑可靠的协作？</li>
+      <li class="reveal">面对复杂任务，动态网络是否比固定 Workflow 更合适？</li>
+      <li class="reveal">节点成千上万之后，信任、权限与知识该如何流动？</li>
+    </ol>
+  </div>
+</section>
+
+<section class="closing line">
+  <div class="wrap reveal">
+    <div class="nots"><span>聊天机器人</span><span>固定流程编排器</span><span>简单的 Agent 调度平台</span></div>
+    <h2>下一代智能系统的<br><span class="grad">组织基础设施。</span></h2>
+    <p class="sub">从一个简单的 Demo 开始，验证 Agent 从工具走向网络节点的可能性。</p>
+    <a class="btn primary" href="/">进入 Matrix →</a>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Matrix · agentnet</span>
+    <span>本地运行的 Agent Network Demo · <a href="https://github.com/SanChiaki/Matrix">GitHub</a></span>
+  </div>
+</footer>
+<script>
+(() => {
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // 进场动画：滚动到视口内再显现
+  const items = document.querySelectorAll(".reveal");
+  if (still || !("IntersectionObserver" in window)) items.forEach(el => el.classList.add("in"));
+  else {
+    const io = new IntersectionObserver(es => es.forEach(e => {
+      if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+    }), { rootMargin: "0px 0px -8% 0px" });
+    items.forEach(el => io.observe(el));
+  }
+
+  // 首屏背景：节点缓慢漂移，近的节点之间连线；委托脉冲沿边传递，到达后有概率继续向下委托
+  const cv = document.getElementById("net"), ctx = cv.getContext("2d");
+  const COLORS = ["#8b93ff", "#8b93ff", "#8b93ff", "#6fd3b1", "#e9b26b"];
+  let W = 0, H = 0, nodes = [], edges = [], pulses = [], running = !still, raf = 0;
+
+  function build() {
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    W = cv.clientWidth; H = cv.clientHeight;
+    cv.width = W * dpr; cv.height = H * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const n = Math.round(Math.min(90, Math.max(28, W * H / 16000)));
+    nodes = Array.from({ length: n }, () => ({
+      x: Math.random() * W, y: Math.random() * H,
+      vx: (Math.random() - .5) * .18, vy: (Math.random() - .5) * .18,
+      r: 1.6 + Math.random() * 2.4, c: COLORS[Math.random() * COLORS.length | 0], glow: 0,
+    }));
+    pulses = [];
+  }
+
+  function link() {
+    const max = Math.min(180, Math.max(120, W / 9));
+    edges = [];
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const d = Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y);
+      if (d < max) edges.push([i, j, 1 - d / max]);
+    }
+  }
+
+  function neighbors(i) {
+    const out = [];
+    for (const [a, b] of edges) { if (a === i) out.push(b); else if (b === i) out.push(a); }
+    return out;
+  }
+
+  function emit(from, depth) {
+    const ns = neighbors(from);
+    if (!ns.length) return;
+    pulses.push({ a: from, b: ns[Math.random() * ns.length | 0], t: 0, depth });
+  }
+  function frame() {
+    for (const p of nodes) {
+      p.x += p.vx; p.y += p.vy;
+      if (p.x < -20) p.x = W + 20; if (p.x > W + 20) p.x = -20;
+      if (p.y < -20) p.y = H + 20; if (p.y > H + 20) p.y = -20;
+      p.glow *= .96;
+    }
+    link();
+    // 新的目标从一个随机节点发起；深度上限 3，和网络的 max_depth 一致
+    if (pulses.length < 14 && Math.random() < .05) emit(Math.random() * nodes.length | 0, 0);
+
+    ctx.clearRect(0, 0, W, H);
+    for (const [i, j, s] of edges) {
+      ctx.strokeStyle = `rgba(139,147,255,${s * .22})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(nodes[i].x, nodes[i].y); ctx.lineTo(nodes[j].x, nodes[j].y); ctx.stroke();
+    }
+    pulses = pulses.filter(p => {
+      p.t += .012;
+      const A = nodes[p.a], B = nodes[p.b];
+      if (p.t >= 1) {
+        B.glow = 1;
+        if (p.depth < 2 && Math.random() < .8) emit(p.b, p.depth + 1);
+        if (p.depth < 1 && Math.random() < .4) emit(p.b, p.depth + 1);
+        return false;
+      }
+      const x = A.x + (B.x - A.x) * p.t, y = A.y + (B.y - A.y) * p.t;
+      ctx.strokeStyle = "rgba(233,178,107,.55)"; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(x, y); ctx.stroke();
+      ctx.fillStyle = "#f3c98f";
+      ctx.beginPath(); ctx.arc(x, y, 2.2, 0, Math.PI * 2); ctx.fill();
+      return true;
+    });
+    for (const p of nodes) {
+      if (p.glow > .05) {
+        ctx.fillStyle = `rgba(233,178,107,${p.glow * .25})`;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 10 * p.glow, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = p.c; ctx.globalAlpha = .85;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    if (running) raf = requestAnimationFrame(frame);
+  }
+
+  build(); link(); frame();
+  let t = 0;
+  addEventListener("resize", () => { clearTimeout(t); t = setTimeout(() => { build(); link(); if (!running) frame(); }, 150); });
+  // 首屏滚出视口时停下动画，省电
+  if (!still && "IntersectionObserver" in window) {
+    new IntersectionObserver(([e]) => {
+      const vis = e.isIntersecting;
+      if (vis && !running) { running = true; raf = requestAnimationFrame(frame); }
+      if (!vis) { running = false; cancelAnimationFrame(raf); }
+    }).observe(cv);
+  }
+})();
+</script>
+</body>
+</html>

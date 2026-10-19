@@ -237,6 +237,11 @@ def create_app(network: Network) -> FastAPI:
     def index() -> FileResponse:
         return FileResponse(STATIC / "index.html")
 
+    @app.get("/about")
+    def about() -> FileResponse:
+        """产品简介页：静态内容，不需要登录。"""
+        return FileResponse(STATIC / "about.html")
+
     @app.get("/api/info")
     def info() -> dict:
         return {"runtime": network.runtime.name, "limits": network.limits.__dict__,

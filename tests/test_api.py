@@ -92,6 +92,7 @@ def test_api_flow(tmp_path: Path):
 
     assert c.get("/").status_code == 200
     assert c.get("/static/app.js").status_code == 200
+    assert "Matrix" in c.get("/about").text  # 简介页不需要登录
     assert c.get("/api/info").json()["runtime"] == "scripted"
     assert c.get("/api/network").status_code == 401  # 没登录
     me = login(c)
