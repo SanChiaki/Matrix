@@ -6,6 +6,9 @@
 <title>Matrix</title>
 <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
 <link rel="stylesheet" href="/static/style.css">
+<!-- 在首次绘制前定主题，避免闪一下深色：用户选过的优先，否则跟随系统 -->
+<script>document.documentElement.dataset.theme = localStorage.getItem("theme")
+  || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
 </head>
 <body>
 <!-- 登录 / 注册 / 首个 Agent 引导：未就绪时盖住整个应用 -->
@@ -72,7 +75,12 @@
   <div class="rail-foot">
     <span id="live" class="status-line" aria-live="polite"></span>
     <span id="runtime"></span>
-    <span class="me"><span id="me-email"></span><button type="button" class="link" id="logout">退出</button></span>
+    <span class="me"><span id="me-email"></span>
+      <button type="button" class="ghost icon sm theme-toggle" id="theme-toggle">
+        <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>
+        <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg>
+      </button>
+      <button type="button" class="link" id="logout">退出</button></span>
   </div>
 </aside>
 
