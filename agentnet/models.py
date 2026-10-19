@@ -45,6 +45,8 @@ PROJECT_FILES = "project"  # 项目文件在挂载群组的工作目录里的挂
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
 # 用户任务工具：席位（群聊、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
+# 项目工具：群组挂在项目里时才有，不需要 delegate。跨群组只能提交交接，由人确认后发出（docs/projects.md）。
+PROJECT_TOOLS = ("handoff",)
 
 
 class TaskStatus(StrEnum):
@@ -309,6 +311,33 @@ class Task:
             for k in ("result", "evidence", "prompt", "inbox"):
                 d.pop(k)
         return d
+
+
+@dataclass
+class Handoff:
+    """跨群组交接：项目里一个群组的 Agent 请另一个群组接着做（docs/projects.md）。Agent 不能直接跨群组委托或发言：
+    交接由人（项目所有者）确认、可修改后，以人的名义发进目标群聊并 @ 目标成员（不变量 19）。"""
+
+    id: str
+    project_id: str
+    owner_id: str | None                 # 由谁确认：项目所有者
+    from_group_id: str
+    from_agent_id: str
+    context_kind: str                    # seat | task：处理结果通知谁
+    context_id: str
+    conversation_id: str
+    to_group_id: str
+    to_agent_id: str
+    text: str
+    status: str = "pending"              # pending | sent | rejected
+    note: str = ""                       # 人的意见（拒绝理由）
+    message_id: str | None = None        # 发出的消息
+    returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间
+    created_at: float = field(default_factory=time.time)
+    decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass

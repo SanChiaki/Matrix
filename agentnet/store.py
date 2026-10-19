@@ -13,7 +13,7 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
-from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Device, Group, KnowledgeItem,
+from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Device, Group, Handoff, KnowledgeItem,
                      Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus, User, UserRequest, Workstream, new_id,
                      seat_id)
 
@@ -98,6 +98,7 @@ class Store:
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
         self.projects: dict[str, Project] = {}  # 项目：目标与汇总层（docs/projects.md）
+        self.handoffs: dict[str, Handoff] = {}  # 跨群组交接（项目内，人确认）
         if self.path.exists():
             self._load()
         else:
@@ -153,6 +154,7 @@ class Store:
                 "requests": [r.to_dict() for r in self.requests.values()],
                 "devices": [asdict(d) for d in self.devices.values()],
                 "projects": [p.to_dict() for p in self.projects.values()],
+                "handoffs": [h.to_dict() for h in self.handoffs.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -207,6 +209,8 @@ class Store:
             self.knowledge[item.key] = item
         for p in raw.get("proposals", []):
             self.proposals[p["id"]] = Proposal(**_known(Proposal, p))
+        for h in raw.get("handoffs", []):
+            self.handoffs[h["id"]] = Handoff(**_known(Handoff, h))
         for u in raw.get("users", []):
             self.users[u["id"]] = User(**_known(User, u))
         self.sessions = {t: s for t, s in (raw.get("sessions") or {}).items() if s.get("user_id") in self.users}

@@ -150,12 +150,27 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "工作目录里的相对路径"},
+                "path": {"type": "string", "description": "工作目录里的相对路径；是目录时打成一个 zip 发布"},
                 "name": {"type": "string", "description": "可选：在档案里的文件名"},
                 "target": {"type": "string", "enum": ["group", "project"],
                            "description": "可选：group（默认，群组档案）或 project（群组所属项目的文件）"},
             },
             "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "handoff",
+        "description": ("项目里需要别的方面（另一个群组）接着做时，提交一次交接：写清要对方做什么、依据哪些项目文件、"
+                        "交回什么。由人确认（可能修改）后，以人的名义发进对方群聊并 @ 对方成员；你不能直接跨群组委托。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group": {"type": "string", "description": "目标群组的名称（同一项目里的其他群组）"},
+                "agent": {"type": "string", "description": "目标群组里接手的成员名称"},
+                "message": {"type": "string", "description": "交接内容：背景、要做什么、依据的文件（如 project/xxx）、交回什么"},
+            },
+            "required": ["group", "agent", "message"],
             "additionalProperties": False,
         },
     },

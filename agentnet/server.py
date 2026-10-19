@@ -177,6 +177,11 @@ class FileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
+class HandoffApproveIn(BaseModel):
+    text: str | None = Field(default=None, max_length=4000)
+    agent_id: str | None = None
+
+
 class PromoteIn(BaseModel):
     group_id: str
     name: str = Field(min_length=1, max_length=120)
@@ -469,6 +474,19 @@ def create_app(network: Network) -> FastAPI:
         network.remove_workstream(project_id, workstream_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
+    # 跨群组交接：Agent 提交，项目所有者确认后以他的名义发进目标群聊（不变量 19）
+    @app.get("/api/handoffs")
+    def handoffs(user: Me) -> list:
+        return network.handoffs(actor=user.id)
+
+    @app.post("/api/handoffs/{handoff_id}/approve")
+    def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
+        return network.approve_handoff(handoff_id, body.text, body.agent_id, actor=user.id).to_dict()
+
+    @app.post("/api/handoffs/{handoff_id}/reject")
+    def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
+        return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
+
     # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
     @app.post("/api/projects/{project_id}/files")
     def publish_project_file(project_id: str, body: FileIn, user: Me) -> dict:
@@ -560,6 +578,27 @@ def create_app(network: Network) -> FastAPI:
     @app.get("/api/tasks/{task_id}")
     def task(task_id: str, user: Me) -> dict:
         return network.task_detail(task_id, actor=user.id)
+
+    # ---- 工作目录（只读）：Agent 的所有者看产物 ----
+    def _download(path) -> FileResponse:
+        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.get("/api/tasks/{task_id}/files")
+    def task_files(task_id: str, user: Me) -> dict:
+        return network.workdir_files("task", task_id, actor=user.id)
+
+    @app.get("/api/tasks/{task_id}/files/{path:path}")
+    def task_file(task_id: str, path: str, user: Me) -> FileResponse:
+        return _download(network.workdir_file("task", task_id, path, actor=user.id))
+
+    @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files")
+    def seat_files(conv_id: str, agent_id: str, user: Me) -> dict:
+        return network.workdir_files("seat", f"{conv_id}/{agent_id}", actor=user.id)
+
+    @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files/{path:path}")
+    def seat_file(conv_id: str, agent_id: str, path: str, user: Me) -> FileResponse:
+        return _download(network.workdir_file("seat", f"{conv_id}/{agent_id}", path, actor=user.id))
 
     @app.post("/api/tasks/{task_id}/retry")
     def retry(task_id: str, body: NoteIn, user: Me) -> dict:
