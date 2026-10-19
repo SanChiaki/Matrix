@@ -329,7 +329,10 @@ class Handoff:
     to_group_id: str
     to_agent_id: str
     text: str
-    status: str = "pending"              # pending | sent | rejected
+    after: list[str] = field(default_factory=list)  # 依赖的交接：它们都完成（人验收）后才发出
+    replaces: str | None = None          # 要替换的交接：确认这条时旧的作废，依赖它的改为依赖这条
+    status: str = "pending"              # pending | scheduled（已确认，等依赖完成）| sent | rejected | superseded
+    approved_by: str | None = None       # 谁确认的：以他的名义发出
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
     returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间
@@ -387,6 +390,7 @@ class Project:
     description: str = ""
     brief: str = ""                      # 目标、范围、成功标准、当前阶段：推送给挂载群组的席位与任务
     workstreams: list[Workstream] = field(default_factory=list)
+    decisions: list[Decision] = field(default_factory=list)  # 项目级决定：只有所有者记录，推送给所有挂载群组
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)

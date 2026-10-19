@@ -240,20 +240,48 @@ const project = (id) => S.snap?.projects?.find((p) => p.id === id);
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
 
 // 跨群组交接：Agent 提交，你确认（可以改内容）后以你的名义发进对方群聊
-const handoffItem = (h) => `<li class="todo-item handoff" data-ho="${esc(h.id)}">
+// all：同一项目里还没结束的交接，可以选作依赖（等它们完成后再发出）
+const hoLabel = (h) => `${h.id} · #${h.to_group_name} ${h.to_agent_name}`;
+const handoffItem = (h, all = []) => {
+  const peers = all.filter((x) => x.id !== h.id && x.project_id === h.project_id && !(x.after || []).includes(h.id));
+  // 同一个目标群组里还没发出的交接：可能重复，可以选择替换掉
+  const rivals = all.filter((x) => x.id !== h.id && x.to_group_id === h.to_group_id && (x.status === "pending" || x.status === "scheduled"));
+  const gone = (h.after || []).filter((i) => !all.some((x) => x.id === i));  // 依赖已不在进行中（未采纳等）
+  if (h.status === "scheduled") return `<li class="todo-item handoff"><div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
+      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> <span class="pill status waiting">排队中</span></div>
+      <p class="hint">等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
+      ${gone.length ? `<p class="warn">依赖 ${gone.map(esc).join("、")} 已不在进行中（可能没被采纳），这条不会自动发出。</p>` : ""}
+      <div class="actions"><button type="button" class="ghost sm" data-ho-now="${esc(h.id)}">现在就发出</button>
+        <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不发了</button></div></li>`;
+  return `<li class="todo-item handoff" data-ho="${esc(h.id)}">
     <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
       <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> ${pill("pending")}
       <span class="muted">${time(h.created_at)}</span></div>
     <label class="sr-only" for="ho-${esc(h.id)}">交接内容</label>
     <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
-    <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认并发出</button>
+    ${peers.length ? `<fieldset class="ho-after"><legend>等这些完成后再发出</legend>${peers.map((x) => `<label><input type="checkbox" data-ho-dep="${esc(h.id)}" value="${esc(x.id)}"
+      ${(h.after || []).includes(x.id) ? "checked" : ""}> ${esc(hoLabel(x))}</label>`).join("")}</fieldset>` : ""}
+    ${rivals.length ? `<p class="warn">#${esc(h.to_group_name)} 已有还没发出的交接：${rivals.map((x) => `${esc(x.id)}（${esc(x.from_agent_name)}）`).join("、")}，可能重复。</p>
+      <label class="ho-replace">确认时替换：<select data-ho-rep="${esc(h.id)}"><option value="">不替换</option>${rivals.map((x) =>
+        `<option value="${esc(x.id)}" ${h.replaces === x.id ? "selected" : ""}>${esc(hoLabel(x))}</option>`).join("")}</select></label>` : ""}
+    <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认</button>
       <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不采纳</button>
       <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div>
-    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}。</p></li>`;
+    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}；勾了依赖的，等它们完成（你验收）后自动发出。</p></li>`;
+};
 function bindHandoffs(box, after) {
   box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
     const id = b.dataset.hoOk; b.disabled = true;
-    try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body: { text: $(`#ho-${id}`).value } }); await after(); }
+    const deps = [...box.querySelectorAll(`[data-ho-dep="${id}"]`)];
+    const rep = box.querySelector(`[data-ho-rep="${id}"]`);
+    const body = { text: $(`#ho-${id}`).value, ...(deps.length ? { after: deps.filter((c) => c.checked).map((c) => c.value) } : {}),
+      ...(rep ? { replaces: rep.value || "" } : {}) };
+    try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body }); await after(); }
+    catch (e) { alert(e.message); b.disabled = false; }
+  }));
+  box.querySelectorAll("[data-ho-now]").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true;
+    try { await api(`/api/handoffs/${b.dataset.hoNow}/approve`, { method: "POST", body: { after: [] } }); await after(); }
     catch (e) { alert(e.message); b.disabled = false; }
   }));
   box.querySelectorAll("[data-ho-no]").forEach((b) => b.addEventListener("click", async () => {
@@ -330,12 +358,13 @@ function renderProjectOverview(d) {
 
 function handoffsHtml(hs) {
   if (!hs.length) return "";
-  const pending = hs.filter((h) => h.status === "pending"), done = hs.filter((h) => h.status !== "pending");
+  const open = hs.filter((h) => h.status === "pending" || h.status === "scheduled"), done = hs.filter((h) => !open.includes(h));
+  const live = hs.filter((h) => open.includes(h) || (h.status === "sent" && !h.returned_at));
   const row = (h) => `<li><b>${esc(h.from_agent_name)}</b> <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
-    ${h.status === "sent" ? `<a class="pill status completed" href="#${esc(h.to_conversation_id || "")}">已发出</a>` : '<span class="pill status rejected">未采纳</span>'}
+    ${h.status === "sent" ? `<a class="pill status ${h.returned_at ? "completed" : "running"}" href="#${esc(h.to_conversation_id || "")}">${h.returned_at ? "已完成" : "已发出"}</a>` : '<span class="pill status rejected">未采纳</span>'}
     <span class="muted">${time(h.decided_at || h.created_at)}</span><p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
-  return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${pending.length} 待确认</h3>
-    ${pending.length ? `<ul class="todo-list">${pending.map(handoffItem).join("")}</ul>` : ""}
+  return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${open.length} 待确认或排队</h3>
+    ${open.length ? `<ul class="todo-list">${open.map((h) => handoffItem(h, live)).join("")}</ul>` : ""}
     ${done.length ? `<details><summary>已处理 · ${done.length}</summary><ul class="refs">${done.map(row).join("")}</ul></details>` : ""}</section>`;
 }
 
@@ -375,6 +404,14 @@ function renderProjectDetail(box, d) {
       <form id="ws-form" class="stack"><label for="ws-name" class="sr-only">方面名称</label><input id="ws-name" required maxlength="80" placeholder="例如：市场调研">
         <label for="ws-desc" class="sr-only">说明</label><input id="ws-desc" maxlength="500" placeholder="说明（可选）"><button type="submit">添加方面</button></form>
     </section>
+    <section class="archive-sec" aria-labelledby="pj-dec"><h3 id="pj-dec">项目决定 · ${d.decisions.filter((x) => x.status === "active").length}</h3>
+      <ul class="decisions">${d.decisions.filter((x) => x.status === "active").map((x) => `<li><span>${esc(x.text)}</span>
+        ${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}<button type="button" class="link" data-rmdec="${esc(x.id)}">撤销</button></li>`).join("")
+        || '<li class="empty">还没有项目决定</li>'}</ul>
+      <form id="pdec-form" class="stack"><label for="pdec-text" class="sr-only">新决定</label><input id="pdec-text" required maxlength="2000" placeholder="对整个项目拍板的事">
+        <label for="pdec-reason" class="sr-only">理由</label><input id="pdec-reason" maxlength="2000" placeholder="理由（可选）"><button type="submit">记录</button></form>
+      <p class="hint">推送给所有挂载群组；和群组里的决定冲突时以项目决定为准。</p>
+    </section>
     <section class="archive-sec" aria-labelledby="pj-groups"><h3 id="pj-groups">承担的群组 · ${d.groups.length}</h3>
       <ul class="refs">${d.groups.map((g) => `<li><a href="#g-${esc(g.id)}"><b>#${esc(g.name)}</b></a>
         <label class="sr-only" for="gws-${esc(g.id)}">${esc(g.name)} 承担的方面</label>
@@ -408,6 +445,11 @@ function renderProjectDetail(box, d) {
     call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
   $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
     call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
+  $("#pdec-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/projects/${d.id}/decisions`, { method: "POST", body: { text: $("#pdec-text").value, reason: $("#pdec-reason").value } }); });
+  box.querySelectorAll("[data-rmdec]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("撤销这个项目决定？之后不再推送给各群组。")) call(`/api/projects/${d.id}/decisions/${b.dataset.rmdec}`, { method: "DELETE" });
+  }));
   box.querySelectorAll("[data-rmpf]").forEach((b) => b.addEventListener("click", () => {
     if (confirm(`删除项目文件 ${b.dataset.rmpf}？`)) call(`/api/projects/${d.id}/files/${encodeURIComponent(b.dataset.rmpf)}`, { method: "DELETE" });
   }));
@@ -467,7 +509,7 @@ function renderBoard() {
         <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button>
         <a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a></div>
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
-    ...(b.handoffs || []).map(handoffItem),
+    ...(b.handoffs || []).filter((h) => h.status === "pending" || h.status === "scheduled").map((h) => handoffItem(h, b.handoffs)),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>

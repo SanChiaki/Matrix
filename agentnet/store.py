@@ -226,6 +226,7 @@ class Store:
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
         for pj in raw.get("projects", []):
             pj["workstreams"] = [Workstream(**_known(Workstream, w)) for w in pj.get("workstreams") or []]
+            pj["decisions"] = [Decision(**_known(Decision, d)) for d in pj.get("decisions") or []]
             self.projects[pj["id"]] = Project(**_known(Project, pj))
         self._one_trust_domain()
 

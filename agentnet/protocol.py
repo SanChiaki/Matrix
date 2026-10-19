@@ -75,7 +75,9 @@ TOOL_GUIDE: dict[str, str] = {
                      "（只发布别的方面要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
     "handoff": ("项目里需要另一个群组接着做时提交交接（group、agent、message：要做什么、依据哪些 `project/` 文件、交回什么），"
-                "人确认后以人的名义发进对方群聊。交给别的群组的产物先用 publish_file target=project 发布。"),
+                "人确认后以人的名义发进对方群聊；对方做完、人验收后网络会唤醒你（不用再让对方回头找你）。"
+                "要等别的交接做完才能开始的，用 after 写上那些交接的 id，网络会在它们完成后再发出。"
+                "交给别的群组的产物先用 publish_file target=project 发布。"),
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
@@ -182,7 +184,9 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
     return "\n".join(parts) if len(parts) > 1 else ""
 
 
-def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str]) -> str:
+def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str],
+                   handoffs: list[str] | None = None, recent: list[str] | None = None,
+                   decisions: list[str] | None = None) -> str:
     """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
     和群组档案一样只是背景，不附带“先读”之类的指令。"""
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
@@ -192,6 +196,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
              f"需要别的方面接着做时，用 `{MCP_PREFIX}handoff` 提交交接（{TOOL_GUIDE['handoff']}）"]
     if p.brief:
         parts += ["### 项目 Brief", p.brief]
+    if decisions:
+        parts += ["### 项目决定（项目所有者定的，所有方面都按这些执行；和群组里的决定冲突时以这里为准）", *decisions]
     if lanes:
         parts += ["### 方面与承担的群组",
                   *(f"- {name}：{'、'.join(gs) or '（还没有群组）'}" + (f" —— {note}" if note else "")
@@ -199,6 +205,10 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
     if files:
         parts += [f"### 项目文件（`./{PROJECT_FILES}/`，只读，项目里所有群组都看得到）", "、".join(files[:40])
                   + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    if recent:
+        parts += ["最近发布 / 更新：", *recent]
+    if handoffs:
+        parts += ["### 进行中的交接（提交前先看有没有同样的；要补充或替换已有的，用 replaces 写上它的 id）", *handoffs]
     return "\n".join(parts)
 
 
@@ -362,6 +372,8 @@ def format_handoff_notice(h: Handoff, group_name: str, agent_name: str) -> str:
     if h.status == "sent":
         text = [f"## 网络通知：你的交接 {h.id} 已由人确认，发给了「{group_name}」的 {agent_name}",
                 "对方做完、人验收通过后会通知你；它的产物看项目文件（`project/`）。"]
+    elif h.status == "superseded":
+        text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 被另一条交接取代，不会发出"]
     else:
         text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳"]
     if h.note:

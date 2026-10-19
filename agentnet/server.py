@@ -180,6 +180,8 @@ class FileIn(BaseModel):
 class HandoffApproveIn(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     agent_id: str | None = None
+    after: list[str] | None = None       # 等哪些交接完成后再发出；None = 沿用提交时的，[] = 立即发出
+    replaces: str | None = None          # 替换一条还没发出的交接（旧的作废，等旧的改为等这条）
 
 
 class PromoteIn(BaseModel):
@@ -481,11 +483,21 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/handoffs/{handoff_id}/approve")
     def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
-        return network.approve_handoff(handoff_id, body.text, body.agent_id, actor=user.id).to_dict()
+        return network.approve_handoff(handoff_id, body.text, body.agent_id, body.after, body.replaces, actor=user.id).to_dict()
 
     @app.post("/api/handoffs/{handoff_id}/reject")
     def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
         return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
+
+    @app.post("/api/projects/{project_id}/decisions")
+    def record_project_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:
+        network.record_project_decision(project_id, body.text, body.reason, body.supersedes, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/decisions/{decision_id}")
+    def revoke_project_decision(project_id: str, decision_id: str, user: Me) -> dict:
+        network.revoke_project_decision(project_id, decision_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
     # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
     @app.post("/api/projects/{project_id}/files")

@@ -355,3 +355,121 @@ def test_handoff_goes_through_the_owner(tmp_path: Path):
     net.send_message(net.group_chat(og.id, actor=alice).id, "@Loner 在吗", actor=alice, background=False)
     assert runs[-1][0] == loner.id and not any(t.endswith("handoff") for t in runs[-1][2])
     assert any(t.endswith("handoff") for a, _, tools in runs if a == pm.id for t in tools)
+
+
+def test_handoff_waits_for_dependencies(tmp_path: Path):
+    """不变量 19：有依赖的交接确认后先排队（scheduled），依赖的交接完成（人验收）后才由网络以确认人的名义发出；依赖不能成环。"""
+    out: list[str] = []
+    plan: dict[str, list] = {}
+
+    def handler(call: ScriptCall) -> str:
+        for kw in plan.pop(call.agent_id, []):
+            out.append(call.tool("handoff", **kw))
+        if call.agent_id != pm.id and "@ 你" in call.prompt:
+            rid = re.search(r"req-[0-9a-f]{8}", call.tool("open_request", title="活", expected_outcome="产物")).group()
+            call.tool("deliver_request", request_id=rid, summary=f"{call.agent_id} 做完了")
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    pm, dev, qa, doc = (net.create_agent(n, n, [], [], actor=alice) for n in ("PM", "Dev", "QA", "Doc"))
+    p = net.create_project("tasky", actor=alice)
+    chats = {}
+    for name, a in (("产品组", pm), ("开发组", dev), ("测试组", qa), ("文档组", doc)):
+        g = net.create_group(name, "", [a.id], actor=alice)
+        net.assign_group(g.id, p.id, actor=alice)
+        chats[name] = net.group_chat(g.id, actor=alice)
+
+    plan[pm.id] = [dict(group="开发组", agent="Dev", message="实现"), dict(group="测试组", agent="QA", message="测", after="ho-nope")]
+    net.send_message(chats["产品组"].id, "@PM 分派", actor=alice, background=False)
+    assert "不是这个项目里可以等待的交接" in out[1]
+    h1 = next(iter(net.store.handoffs.values()))
+    plan[pm.id] = [dict(group="测试组", agent="QA", message="测", after=h1.id), dict(group="文档组", agent="Doc", message="写")]
+    net.send_message(chats["产品组"].id, "@PM 再分派", actor=alice, background=False)
+    h2, h3 = sorted((h for h in net.store.handoffs.values() if h.id != h1.id), key=lambda h: h.to_group_id != chats["测试组"].group_id)
+    assert h2.after == [h1.id] and h3.after == []
+
+    with pytest.raises(NetworkError, match="互相等待"):
+        net.approve_handoff(h1.id, after=[h2.id], actor=alice)
+    net.approve_handoff(h3.id, after=[h1.id, h2.id], actor=alice)  # 人在确认时加依赖
+    net.approve_handoff(h2.id, actor=alice)
+    assert (h2.status, h3.status) == ("scheduled", "scheduled") and not chats["测试组"].messages
+    net.approve_handoff(h1.id, actor=alice)
+    net.wait_quiet()
+    assert h1.status == "sent" and not chats["测试组"].messages  # 开发还没验收
+
+    def accept(agent):
+        r = next(r for r in net.store.requests.values() if r.agent_id == agent.id and r.status == "in_review")
+        net.review_request(r.id, True, actor=alice)
+        net.wait_quiet()
+    accept(dev)
+    assert h2.status == "sent" and h3.status == "scheduled"
+    m = next(m for m in chats["测试组"].messages if m.role == "user")
+    assert m.user_id == alice and m.mentions == [qa.id] and f"等 {h1.id} 完成后发出" in m.text
+    accept(qa)
+    assert h3.status == "sent" and any(m.role == "user" for m in chats["文档组"].messages)
+
+
+def test_handoff_replaces_and_shows_open_handoffs(tmp_path: Path):
+    """不变量 19：进行中的交接写进项目背景；给同一群组重复提交时提醒；确认替换后旧的作废、等旧的改为等新的。"""
+    out: list[str] = []
+    prompts: dict[str, list[str]] = {}
+    plan: dict[str, list] = {}
+
+    def handler(call: ScriptCall) -> str:
+        prompts.setdefault(call.agent_id, []).append(call.prompt)
+        for kw in plan.pop(call.agent_id, []):
+            out.append(call.tool("handoff", **kw))
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    pm, dev, qa, doc = (net.create_agent(n, n, [], [], actor=alice) for n in ("PM", "Dev", "QA", "Doc"))
+    p = net.create_project("tasky", actor=alice)
+    chats = {}
+    for name, a in (("产品组", pm), ("开发组", dev), ("测试组", qa), ("文档组", doc)):
+        g = net.create_group(name, "", [a.id], actor=alice)
+        net.assign_group(g.id, p.id, actor=alice)
+        chats[name] = net.group_chat(g.id, actor=alice)
+    plan[pm.id] = [dict(group="测试组", agent="QA", message="测 v1.1")]
+    net.send_message(chats["产品组"].id, "@PM 分派", actor=alice, background=False)
+    old = next(iter(net.store.handoffs.values()))
+    plan[pm.id] = [dict(group="文档组", agent="Doc", message="写文档", after=old.id)]
+    net.send_message(chats["产品组"].id, "@PM 文档", actor=alice, background=False)
+    doc_h = next(h for h in net.store.handoffs.values() if h.id != old.id)
+
+    # 开发组的 Dev 被 @ 时，项目背景里能看到进行中的交接
+    plan[dev.id] = [dict(group="测试组", agent="QA", message="按交付说明测 1.1.0（含夹具说明）")]
+    net.send_message(chats["开发组"].id, "@Dev 交给测试", actor=alice, background=False)
+    assert old.id in prompts[dev.id][-1] and "待人确认" in prompts[dev.id][-1]
+    net.publish_project_file(p.id, "prd.md", b"v1", actor=alice)
+    net.publish_project_file(p.id, "prd.md", b"v2", actor=alice)
+    assert "prd.md" in net._recent_files(p)[0] and "第 2 版" in net._recent_files(p)[0]
+    assert "已有进行中的交接" in out[-1] and old.id in out[-1]
+    new = next(h for h in net.store.handoffs.values() if h.id not in (old.id, doc_h.id))
+    with pytest.raises(NetworkError, match="不是可以替换的交接"):
+        net.approve_handoff(new.id, replaces=doc_h.id + "x", actor=alice)
+    with pytest.raises(NetworkError, match="互相等待"):  # 文档在等旧的；新的不能反过来等文档
+        net.approve_handoff(new.id, replaces=old.id, after=[doc_h.id], actor=alice)
+    net.approve_handoff(new.id, replaces=old.id, actor=alice)
+    net.wait_quiet()
+    assert old.status == "superseded" and doc_h.after == [new.id] and new.status == "sent"
+    assert pm.id in {a for a in prompts} and any(it["kind"] == "handoff" for it in chats["产品组"].seats[pm.id].inbox)
+    # 被替换后，项目背景里不再列旧的
+    net.send_message(chats["开发组"].id, "@Dev 再看看", actor=alice, background=False)
+    assert old.id not in prompts[dev.id][-1].split("进行中的交接")[-1]
+
+
+def test_project_decisions_pushed_to_attached_groups(tmp_path: Path):
+    """不变量 18：项目决定只由所有者记录，推送给挂载群组（被取代的不再推送）；持久化。"""
+    prompts: list[str] = []
+    net, alice, bob, a, g, p, research, proto = setup(tmp_path, prompts)
+    net.assign_group(g.id, p.id, research.id, actor=alice)
+    d1 = net.record_project_decision(p.id, "错误文案按 PRD §5.3 逐字对齐", reason="文档以 PRD 为准", actor=alice)
+    with pytest.raises(NetworkError, match="unknown project"):
+        net.record_project_decision(p.id, "偷偷定", actor=bob)
+    chat = net.group_chat(g.id, actor=alice)
+    net.send_message(chat.id, "@A 写", actor=alice, background=False)
+    assert "项目决定" in prompts[-1] and "逐字对齐" in prompts[-1]
+    net.record_project_decision(p.id, "v1.1.1 修复后再发布文档", supersedes=d1.id, actor=alice)
+    net.send_message(chat.id, "@A 再写", actor=alice, background=False)
+    assert "v1.1.1 修复后再发布文档" in prompts[-1] and "逐字对齐" not in prompts[-1]
+    assert [d.status for d in Store(tmp_path, seed=False).projects[p.id].decisions] == ["superseded", "active"]
