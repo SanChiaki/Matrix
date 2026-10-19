@@ -145,12 +145,15 @@ TOOLS = [
     {
         "name": "publish_file",
         "description": ("把当前工作目录里的一个文件发布进群组档案（同名覆盖）。群组所有成员此后都能在 ./group/ 读到。"
-                        "只发布与群组工作有关、验收过的内容。"),
+                        "群组属于某个项目时，target=project 发布到项目文件，项目里所有群组此后都能在 ./project/ 读到。"
+                        "只发布与工作有关、验收过的内容。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "工作目录里的相对路径"},
                 "name": {"type": "string", "description": "可选：在档案里的文件名"},
+                "target": {"type": "string", "enum": ["group", "project"],
+                           "description": "可选：group（默认，群组档案）或 project（群组所属项目的文件）"},
             },
             "required": ["path"],
             "additionalProperties": False,

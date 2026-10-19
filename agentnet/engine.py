@@ -24,11 +24,11 @@ from typing import Any
 
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT,
-                     GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
+                     GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, PROJECT_FILES, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
                      Delegation, Group, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
-                       format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
+                       format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir
@@ -1019,6 +1019,9 @@ class Network:
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
             archive_rev = group.archive_rev if group else -1
             archive = self._archive_text(group) if group and seat.archive_seen != archive_rev else ""
+            project_key = self._project_key(group)
+            if project_key and seat.project_seen != project_key:
+                archive = "\n\n".join(filter(None, [self._project_text(group), archive]))
         joint = bool(group and group.kind == "joint")
         transcript = format_transcript(fresh, agent.id, self._name, self._email if joint else None)
         notices, wake = self._render_inbox(items, ctx)
@@ -1043,6 +1046,7 @@ class Network:
                 seat.seen = upto
                 seat.known = _dedup(seat.known + [k.key for k in shared])
                 seat.archive_seen = archive_rev
+                seat.project_seen = project_key
             self._auto_accept(ctx)
             self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id,
                                        text=res.final_text.strip() or "（空回复）", task_ids=ctx.created,
@@ -1095,6 +1099,9 @@ class Network:
         with self._lock:
             archive_rev = g.archive_rev
             archive = self._archive_text(g) if task.archive_seen != archive_rev else ""
+            project_key = self._project_key(g)
+            if project_key and task.project_seen != project_key:
+                archive = "\n\n".join(filter(None, [self._project_text(g), archive]))
         if task.dsh_session_id is None:  # 第一次运行（或在拿到会话之前就失败了）：发完整委托
             knowledge = self.visible_knowledge(ctx)
             task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
@@ -1107,6 +1114,7 @@ class Network:
         if res.ok:
             with self._lock:
                 task.archive_seen = archive_rev
+                task.project_seen = project_key
         self._live.pop(task.id, None)
         violations = _violations(res.tool_calls, ctx.authority)
         with self._lock:
@@ -1260,6 +1268,7 @@ class Network:
                 res = res2
         finally:
             shutil.rmtree(workdir / GROUP_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
+            shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)
             if before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx.id)
                 if conflicts:
@@ -1269,12 +1278,16 @@ class Network:
         return res
 
     def _mount_group_files(self, ctx: ExecContext, workdir: Path) -> None:
-        """群组档案的文件区拷进工作目录的 group/（每轮刷新）。发布只能经 publish_file。"""
-        mount = workdir / GROUP_FILES
-        shutil.rmtree(mount, ignore_errors=True)
+        """群组档案的文件区拷进工作目录的 group/（每轮刷新）；群组挂在项目里时，项目文件拷进 project/
+        （不变量 18：只到挂载群组）。发布只能经 publish_file。"""
+        for name in (GROUP_FILES, PROJECT_FILES):
+            shutil.rmtree(workdir / name, ignore_errors=True)
         g = self.store.groups.get(ctx.group_id or "")
         if g is not None:
-            shutil.copytree(self.store.group_dir(g.id), mount, symlinks=False)
+            shutil.copytree(self.store.group_dir(g.id), workdir / GROUP_FILES, symlinks=False)
+            p = self._project_of(g)
+            if p is not None:
+                shutil.copytree(self.store.project_dir(p.id), workdir / PROJECT_FILES, symlinks=False)
 
     def _archive_text(self, g: Group) -> str:
         """调用方持有锁。"""
@@ -1340,16 +1353,19 @@ class Network:
         return out
 
     def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
-        """端侧运行时每轮要收到的只读材料：群组档案文件（运行时当只读副本用）。
+        """端侧运行时每轮要收到的只读材料：群组档案文件、群组所属项目的文件（运行时当只读副本用）。
         私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
         g = self.store.groups.get(ctx.group_id or "")
         out: list[dict[str, Any]] = []
         if g is None:
             return out
-        d = self.store.group_dir(g.id)
-        for p in sorted(d.iterdir()):
-            if p.is_file() and p.stat().st_size <= 2_000_000:
-                out.append({"path": f"{GROUP_FILES}/{p.name}", "data": p.read_bytes()})
+        dirs = [(GROUP_FILES, self.store.group_dir(g.id))]
+        if (pj := self._project_of(g)) is not None:
+            dirs.append((PROJECT_FILES, self.store.project_dir(pj.id)))
+        for mount, d in dirs:
+            for p in sorted(d.iterdir()):
+                if p.is_file() and p.stat().st_size <= 2_000_000:
+                    out.append({"path": f"{mount}/{p.name}", "data": p.read_bytes()})
         return out
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
@@ -1531,13 +1547,29 @@ class Network:
         return "\n".join(format_decision(d, self._name, self._email) for d in ds), False
 
     def _tool_publish_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
-        """发布当前工作目录里的一个文件（不是 group/ 或 agent-home/ 下的）。"""
+        """发布当前工作目录里的一个文件（不是 group/、project/ 或 agent-home/ 下的）。
+        target=project：发布到群组所属项目的文件区，项目里所有群组都读得到（不变量 18）。"""
         g = self._require_group(ctx, delegate=False)
         holder = self._holder(ctx.kind, ctx.id)
         rel = str(args.get("path", "")).strip()
         top = Path(rel).parts[0] if Path(rel).parts else ""
-        if not rel or top in (GROUP_FILES, HOME_DIR) or Path(rel).is_absolute() or ".." in Path(rel).parts:
-            return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/ 与 {HOME_DIR}/）", True
+        if not rel or top in (GROUP_FILES, PROJECT_FILES, HOME_DIR) or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            return (f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/、{PROJECT_FILES}/ 与 {HOME_DIR}/）",
+                    True)
+        target = str(args.get("target") or "group").strip()
+        if target not in ("group", "project"):
+            return "target 只能是 group 或 project", True
+        project = self._project_of(g) if target == "project" else None
+        if target == "project" and project is None:
+            return f"群组「{g.name}」不属于任何项目，只能发布到群组档案（target=group）", True
+
+        def publish(fname: str, content: bytes) -> str:
+            if project is not None:
+                name = self.publish_project_file(project.id, fname, content, agent_id=ctx.agent_id, source=ctx.id,
+                                                 group_id=g.id)
+                return f"已发布到项目「{project.name}」：{PROJECT_FILES}/{name}。项目里所有群组此后都能读到。"
+            name = self.publish_file(g.id, fname, content, agent_id=ctx.agent_id, source=ctx.id)
+            return f"已发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。"
         agent = self.store.agents.get(ctx.agent_id)
         if agent is not None and agent.device_runtime:
             # 端侧：工作目录在用户电脑上，向连接器要文件（越界由连接器再挡一次）
@@ -1545,16 +1577,12 @@ class Network:
                 if self._device_of_context(ctx.id) is not None else None
             if content is None:
                 return f"找不到 {rel}：端侧运行时未连接，或文件不在工作目录里", True
-            name = self.publish_file(g.id, str(args.get("name", "")).strip() or Path(rel).name, content,
-                                     agent_id=ctx.agent_id, source=ctx.id)
-            return f"已从端侧发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。", False
+            return "（端侧）" + publish(str(args.get("name", "")).strip() or Path(rel).name, content), False
         root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
         src = (root / rel).resolve()
         if root.resolve() not in src.parents or not src.is_file():
-            return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/ 与 {HOME_DIR}/）", True
-        name = self.publish_file(g.id, str(args.get("name", "")).strip() or src.name, src.read_bytes(),
-                                 agent_id=ctx.agent_id, source=ctx.id)
-        return f"已发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。", False
+            return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/、{PROJECT_FILES}/ 与 {HOME_DIR}/）", True
+        return publish(str(args.get("name", "")).strip() or src.name, src.read_bytes()), False
 
     def _tool_propose_brief(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_group(ctx, delegate=False)
@@ -1996,9 +2024,100 @@ class Network:
                 "workstream_name": w.name if w else None}
 
     # ================= 项目 =================
-    # 目标与汇总层（docs/projects.md）：只有一个所有者，汇总挂载群组里的用户任务，不流动上下文——
-    # 群组、委托、知识、可见性的规则都不因项目改变。第一阶段 Agent 不知道项目存在：提示词、群聊里都不出现。
+    # 目标与汇总层（docs/projects.md）：只有一个所有者，汇总挂载群组里的用户任务。群组、委托、知识、可见性的规则
+    # 都不因项目改变：项目不打通群聊、不让跨群组委托。流向 Agent 的只有两样（不变量 18，只到挂载群组）：
+    # 项目背景（名称、brief、方面与承担的群组，按版本推送）和项目文件（只读挂载到 project/，写入只走 publish_file
+    # target=project 或人的操作，记入 projects/<id>/log.jsonl）。
     # 只有内部群组能挂进项目，而且群组与项目必须是同一个所有者（不跨信任域，不变量 16）。
+    def _project_of(self, g: Group | None) -> Project | None:
+        """群组所属的项目（只认内部群组：联合群组即使有残留的归属也不推送）。"""
+        if g is None or g.kind != "internal" or not g.project_id:
+            return None
+        p = self.store.projects.get(g.project_id)
+        return p if p is not None and p.owner_id == g.owner_id else None
+
+    def _project_key(self, g: Group | None) -> str:
+        """调用方持有锁。项目背景的版本：项目、它的版本、群组承担的方面任何一个变了都要重新推送。"""
+        p = self._project_of(g)
+        return f"{p.id}:{p.archive_rev}:{g.workstream_id or ''}" if p is not None else ""
+
+    def _project_text(self, g: Group) -> str:
+        """调用方持有锁。"""
+        p = self._project_of(g)
+        if p is None:
+            return ""
+        attached = [x for x in self.store.groups.values() if x.project_id == p.id and self._project_of(x) is p]
+        lanes = [(w.name, w.description, [x.name for x in attached if x.workstream_id == w.id]) for w in p.workstreams]
+        loose = [x.name for x in attached if x.workstream_id is None or not any(w.id == x.workstream_id for w in p.workstreams)]
+        if loose:
+            lanes.append(("未分方面", "", loose))
+        return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)])
+
+    def _project_changed(self, p: Project, action: str, by_user: str | None = None, by_agent: str | None = None,
+                         **detail: Any) -> None:
+        """调用方持有锁。推送给 Agent 的部分变了：版本 +1，记日志。"""
+        import json
+        p.archive_rev += 1
+        p.updated_at = time.time()
+        entry = {"ts": time.time(), "action": action, "by_user": by_user, "by_agent": by_agent, **detail}
+        log = self.store.project_dir(p.id).parent / "log.jsonl"
+        with log.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def project_files(self, p: Project) -> list[dict[str, Any]]:
+        d = self.store.project_dir(p.id)
+        return [{"name": f.name, "size": f.stat().st_size, "updated_at": f.stat().st_mtime}
+                for f in sorted(d.iterdir()) if f.is_file()]
+
+    def publish_project_file(self, project_id: str, name: str, content: bytes, actor: str | None = None,
+                             agent_id: str | None = None, source: str | None = None,
+                             group_id: str | None = None) -> str:
+        """把一份文件发布进项目（同名覆盖）。Agent 经 publish_file target=project，只能发到自己群组所属的项目；
+        Agent 发布的会在来源群组的群聊里记一条事件。返回文件名。"""
+        fname = _safe_filename(name)
+        if len(content) > GROUP_FILE_LIMIT:
+            raise NetworkError(f"文件太大：最多 {GROUP_FILE_LIMIT // 1000} KB")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            (self.store.project_dir(p.id) / fname).write_bytes(content)
+            self._project_changed(p, "file.publish", by_user=actor, by_agent=agent_id, file=fname, size=len(content),
+                                  source=source, group=group_id)
+            g = self.store.groups.get(group_id or "")
+            if g is not None and agent_id:
+                self._people_event(g, f"{self._name(agent_id)} 把 {fname} 发布到了项目「{p.name}」")
+            self.store.save()
+        self._project_event(p)
+        if g is not None and agent_id:
+            self._emit_group_chat(g)
+        return fname
+
+    def promote_file(self, project_id: str, group_id: str, name: str, actor: str | None = None) -> str:
+        """人把一个群组档案文件提升为项目文件（拷贝，群组里的原件不动）。群组必须挂在这个项目里。"""
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            g = self.hosted_group(group_id, actor)
+            if self._project_of(g) is not p:
+                raise NetworkError(f"群组「{g.name}」不在项目「{p.name}」里")
+            src = self.group_file(g.id, name, actor)
+            content = src.read_bytes()
+        return self.publish_project_file(p.id, src.name, content, actor=actor, source=f"group:{g.id}")
+
+    def delete_project_file(self, project_id: str, name: str, actor: str | None = None) -> None:
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            path = self.store.project_dir(p.id) / _safe_filename(name)
+            self._check(path.is_file(), f"file {name}")
+            path.unlink()
+            self._project_changed(p, "file.delete", by_user=actor, file=path.name)
+            self.store.save()
+        self._project_event(p)
+
+    def project_file(self, project_id: str, name: str, actor: str | None = None) -> Path:
+        p = self.visible_project(project_id, actor)
+        path = self.store.project_dir(p.id) / _safe_filename(name)
+        self._check(path.is_file(), f"file {name}")
+        return path
+
     def can_see_project(self, p: Project, actor: str | None) -> bool:
         return actor is None or p.owner_id in (None, actor)
 
@@ -2041,7 +2160,9 @@ class Network:
                 p.description = description.strip()[:500]
             if brief is not None:
                 p.brief = brief.strip()
-            p.updated_at = time.time()
+            self._project_changed(p, "project.update", by_user=actor,
+                                  fields=[k for k, v in (("name", name), ("description", description), ("brief", brief))
+                                          if v is not None])
             self.store.save()
         self._project_event(p)
         return p
@@ -2070,7 +2191,7 @@ class Network:
             p = self.visible_project(project_id, actor)
             w = Workstream(id=new_id("ws"), name=name.strip()[:80], description=description.strip()[:500])
             p.workstreams.append(w)
-            p.updated_at = time.time()
+            self._project_changed(p, "workstream.add", by_user=actor, workstream=w.id)
             self.store.save()
         self._project_event(p)
         return w
@@ -2086,7 +2207,7 @@ class Network:
                 w.name = name.strip()[:80]
             if description is not None:
                 w.description = description.strip()[:500]
-            p.updated_at = time.time()
+            self._project_changed(p, "workstream.update", by_user=actor, workstream=w.id)
             self.store.save()
         self._project_event(p)
         return w
@@ -2103,7 +2224,7 @@ class Network:
             for r in self.store.requests.values():
                 if r.workstream_id == w.id:
                     r.workstream_id = None
-            p.updated_at = time.time()
+            self._project_changed(p, "workstream.remove", by_user=actor, workstream=w.id)
             self.store.save()
         self._project_event(p)
         for g in groups:
@@ -2133,6 +2254,8 @@ class Network:
             for r in self.store.requests.values():
                 if conv is not None and r.conversation_id == conv.id and r.status in ("in_progress", "in_review"):
                     r.project_id, r.workstream_id = g.project_id, g.workstream_id
+            for pj in {x.id: x for x in (old, p) if x is not None}.values():  # 两边的“方面与承担的群组”都变了
+                self._project_changed(pj, "group.assign", by_user=actor, group=g.id, workstream=g.workstream_id)
             self.store.save()
         self.bus.emit("group.updated", group=g.to_dict())
         for pj in {x.id: x for x in (old, p) if x is not None}.values():
@@ -2194,7 +2317,8 @@ class Network:
                       for g in self.store.groups.values() if g.project_id == p.id and self.can_see_group(g, actor)]
             reqs = sorted((r for r in self.store.requests.values()
                            if r.project_id == p.id and self.can_see_request(r, actor)), key=lambda r: -r.created_at)
-            return {**self.project_summary(p, actor), "groups": groups, "requests": [self.request_card(r) for r in reqs]}
+            return {**self.project_summary(p, actor), "groups": groups, "requests": [self.request_card(r) for r in reqs],
+                    "files": self.project_files(p)}
 
     # ================= 人：续接 =================
     def resume_conversation(self, conv_id: str, agent_id: str | None = None, note: str = "",

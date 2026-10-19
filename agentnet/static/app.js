@@ -308,7 +308,7 @@ function renderProjectForm(box, d = null) {
       <div class="field"><label for="pf-desc">描述</label><textarea id="pf-desc" name="description" rows="2" maxlength="500">${esc(d?.description || "")}</textarea></div>
       <div class="field"><label for="pf-brief">Brief</label><textarea id="pf-brief" name="brief" rows="5" maxlength="4000"
         placeholder="目标、范围、成功标准、当前阶段">${esc(d?.brief || "")}</textarea>
-        <p class="hint">现在只给你自己看，不会推送给 Agent。</p></div>
+        <p class="hint">会作为背景推送给挂载群组里的 Agent（只在改动后推送一次）。</p></div>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${d ? "保存" : "创建"}</button>${d ? "" : '<button type="button" class="ghost" id="pf-cancel">取消</button>'}</div>
     </form>`;
@@ -348,6 +348,13 @@ function renderProjectDetail(box, d) {
         <button type="submit">挂进项目</button></form>` : '<p class="hint">没有可以挂进来的群组：一个群组最多属于一个项目，联合群组暂时不能挂。</p>'}
       <p class="hint">群组挂进来以后，它里面新登记的任务自动归到这个项目；换方面时，未结束的任务跟着走。</p>
     </section>
+    <section class="archive-sec" aria-labelledby="pj-files"><h3 id="pj-files">项目文件 · ${d.files.length}</h3>
+      <ul class="files">${d.files.map((x) => `<li><a href="/api/projects/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
+        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span><button type="button" class="link" data-rmpf="${esc(x.name)}">删除</button></li>`).join("")
+        || '<li class="empty">还没有项目文件</li>'}</ul>
+      <label class="button ghost sm file-up">上传文本文件<input type="file" id="pf-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
+      <p class="hint">项目文件以只读方式出现在所有挂载群组的工作目录 <code>project/</code> 下。Agent 可以用 publish_file（target=project）发布；群组档案里的文件也可以在群组档案页提升到项目。</p>
+    </section>
     <div class="actions"><button type="button" class="danger" id="pj-del">删除项目</button></div>
     <p class="error" role="alert" id="pj-err"></p>`);
   const err = (e) => { $("#pj-err", box).textContent = e.message; };
@@ -363,6 +370,15 @@ function renderProjectDetail(box, d) {
     call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
   $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
     call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
+  box.querySelectorAll("[data-rmpf]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm(`删除项目文件 ${b.dataset.rmpf}？`)) call(`/api/projects/${d.id}/files/${encodeURIComponent(b.dataset.rmpf)}`, { method: "DELETE" });
+  }));
+  $("#pf-up", box).addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (file.size > 200_000) { err(new Error("文件太大：最多 200 KB")); return; }
+    call(`/api/projects/${d.id}/files`, { method: "POST", body: { name: file.name, content: await file.text() } });
+  });
   $("#pj-del", box).addEventListener("click", async () => {
     if (!confirm(`删除项目 ${d.name}？群组和任务都还在，只是不再属于这个项目。`)) return;
     try { await api(`/api/projects/${d.id}`, { method: "DELETE" }); S.projectSel = null; await reload(); } catch (e) { err(e); }
@@ -1251,7 +1267,7 @@ async function renderArchive() {
     </section>
     <section class="archive-sec" aria-labelledby="ar-files"><h3 id="ar-files">文件 · ${d.files.length}</h3>
       <ul class="files">${d.files.map((x) => `<li><a href="/api/groups/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
-        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span>${host ? `<button type="button" class="link" data-rmfile="${esc(x.name)}">删除</button>` : ""}</li>`).join("")
+        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span>${host && d.project_id ? `<button type="button" class="link" data-promote="${esc(x.name)}">提升到项目</button>` : ""}${host ? `<button type="button" class="link" data-rmfile="${esc(x.name)}">删除</button>` : ""}</li>`).join("")
         || '<li class="empty">还没有文件。Agent 可以用 publish_file 发布，你也可以上传文本文件。</li>'}</ul>
       <label class="button ghost sm file-up">上传文本文件<input type="file" id="file-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
     </section>
@@ -1276,6 +1292,8 @@ async function renderArchive() {
   box.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", () => {
     if (confirm("撤销这个决定？之后不再推送给成员。")) call(`/api/groups/${gid}/decisions/${b.dataset.revoke}`, { method: "DELETE" });
   }));
+  box.querySelectorAll("[data-promote]").forEach((b) => b.addEventListener("click", () =>
+    call(`/api/projects/${d.project_id}/files/promote`, { method: "POST", body: { group_id: gid, name: b.dataset.promote } })));
   box.querySelectorAll("[data-rmfile]").forEach((b) => b.addEventListener("click", () => {
     if (confirm(`删除文件 ${b.dataset.rmfile}？`)) call(`/api/groups/${gid}/files/${encodeURIComponent(b.dataset.rmfile)}`, { method: "DELETE" });
   }));
