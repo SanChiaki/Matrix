@@ -5,6 +5,11 @@
 项目方向与设计理念见 [CHARTER.md](CHARTER.md)（行动纲领原文）。本文件讲"当前代码怎么做"，
 CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 CHARTER 的方向为准。
 
+竞品与相关项目的调研不在本仓库：它们在一个私有调研仓库里，检出在本仓库**旁边**（`../matrix-research`，
+没有就跳过）。本仓库里写“参照 X”的地方带一个引用 `research: <笔记>#<锚点>`，指向那里的 `products/<笔记>.md`
+或 `topics/<笔记>.md` 中的 `<a id="锚点">`。要了解某个设计从哪里学来、当时为什么这么定，按引用去读；
+调研仓库在手边时，动相关设计之前先读对应笔记。**调研内容不要抄进本仓库**（本仓库公开），只写结论与引用。
+
 ## 项目描述
 
 **Matrix**（代码包名 `agentnet`）：一个本地运行的 Agent Network（Agent 协作网络）Demo。人在群聊里 @ Agent 交代任务（或和单个 Agent 私聊）；被 @ 的 Agent 自己做，或通过网络工具（MCP）把子任务委托给同组成员，网络负责授权、隔离、追踪与知识沉淀。
@@ -19,8 +24,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | --- | --- |
 | User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据 |
 | Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（provider / model / reasoning_effort，空则用运行时默认）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
-| Group（群组） | 成员集合，**没有主 Agent**。`internal`（内部群组）：只有所有者，成员只能是所有者自己的 Agent。`joint`（联合群组，参照 Raft 的 joint channel）：主持人（`owner_id`）邀请用户，接受后成为参与者（`participants`），每人只能加入自己的 Agent。创建后不能转换类型。委托只能发给同组成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准。每个群组带一份**群组档案**（见下） |
-| Conversation | 参照 Raft 的频道与 DM：`group`（群聊）**每个群组一个**，建群组即有，人在消息里 **@ 谁，谁接任务**；`dm`（私聊）**每个 Agent 一个**，只有它的所有者能开，第一次打开时创建，不用 @，不能委托。群组 / Agent 删除后对应对话归档为只读。消息的 `audience` 限定谁看得到这条（如席位失败说明、外溢申请），`private_to` 限定谁看得到它的过程（`steps` / `wake`） |
+| Group（群组） | 成员集合，**没有主 Agent**。`internal`（内部群组）：只有所有者，成员只能是所有者自己的 Agent。`joint`（联合群组，参照 Raft 的 joint channel，research: raft#joint-channel）：主持人（`owner_id`）邀请用户，接受后成为参与者（`participants`），每人只能加入自己的 Agent。创建后不能转换类型。委托只能发给同组成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准。每个群组带一份**群组档案**（见下） |
+| Conversation | 参照 Raft 的频道与 DM（research: raft#channels-dm）：`group`（群聊）**每个群组一个**，建群组即有，人在消息里 **@ 谁，谁接任务**；`dm`（私聊）**每个 Agent 一个**，只有它的所有者能开，第一次打开时创建，不用 @，不能委托。群组 / Agent 删除后对应对话归档为只读。消息的 `audience` 限定谁看得到这条（如席位失败说明、外溢申请），`private_to` 限定谁看得到它的过程（`steps` / `wake`） |
 | Approval | Agent 想在工作目录以外操作时向**它的所有者**发起的一次性申请（pending / allowed / rejected / cancelled） |
 | Seat（席位） | 一个 Agent 在一个对话里的执行上下文，id 为 `对话/Agent`：独立 DSH 会话、收件箱、工作目录 `conversations/<conv>/<agent>/`。第一次被 @ 时创建 |
 | Task（委托） | Agent ↔ Agent 的一次授权：mission / authority / constraints / expected_outcome / share；带收件箱。`owners` 是两端 Agent 的所有者，只有他们看得到这个委托 |
@@ -31,7 +36,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 ### 群聊：被 @ 的成员接任务
 
-参照 Raft（botiverse/raft）的频道模型：
+参照 Raft（botiverse/raft）的频道模型（research: raft#channels-dm）：
 
 - 人发的消息里 @ 到的群组成员（`@名称`，长名字优先匹配；或 API 的 `mentions`）被唤醒，在自己的席位上处理。它自己做，或在群组里找合适的成员委托。一条消息可以 @ 多个成员，各自的席位并行处理。
 - 没 @ 任何人的消息留在群聊里，不唤醒任何人；只能 @ 群组成员。
@@ -47,7 +52,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 ### 联合群组：跨用户协作只走这里
 
-参照 Raft 的 joint channel：**Agent 不跨信任域，委托可以跨**。共享的是对话空间（群聊 + 群组档案），不共享 Agent。
+参照 Raft 的 joint channel（research: raft#joint-channel）：**Agent 不跨信任域，委托可以跨**。共享的是对话空间（群聊 + 群组档案），不共享 Agent。
 
 - 主持人按邮箱邀请（`POST /api/groups/<id>/invitations`），对方在“待我处理”里接受或拒绝。接受前只看得到群组名、描述、主持人。
 - 每个参与者只能加减自己的 Agent；主持人能移出任何 Agent 与参与者。参与者退出 / 被移出时他的 Agent 一并移出（已接下的任务照常完成），
@@ -61,7 +66,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 ### 群组档案：群组的上下文不放进项目仓库
 
 - Brief 与仍然有效的决定作为背景推送给席位与委托任务（执行者是群成员，档案是群组的公开内容，不违反不变量 9）；只在档案版本变化时重新推送。
-  提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作）。
+  提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作；research: raft#rfc-070-session-recycle）。
 - 档案工具 `record_decision` / `list_decisions` / `publish_file` / `propose_brief` 群组成员都有，**不需要 `delegate`**；
   用户任务工具 `open_request` / `deliver_request` / `accept_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`AGENTNET_TOOLS`），网络端再按执行上下文检查一次。
 - `publish_file` 只能发布当前工作目录里的文件（不含 `group/` 与 `agent-home/`）；`group/` 是只读副本，运行里的改动丢弃。
@@ -100,7 +105,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
-参照 Raft 的 inbox + wake 模型：
+参照 Raft 的 inbox + wake 模型（research: raft#inbox-wake）：
 
 - `delegate` **立即返回**任务 id，不阻塞。每个执行上下文（席位、任务）有一个收件箱；收件箱有内容且没在运行时，网络续接它的会话跑一轮。同一上下文同时只跑一轮，运行中到达的内容等这一轮结束再送达。
 - 任务状态：`running → in_review → completed`，另有 `failed`（可续接）、`rejected`（授权阶段被拒）。交付进入 `in_review`，交付通知送进委托方收件箱；委托方 `accept_task` 或 `request_changes`（执行者在原会话返工）。送达那一轮结束仍未处理的交付视为接受（`auto_accepted`）。
@@ -198,10 +203,12 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
    （DeepSeek 下数组参数里的长中文容易写成裸文本，导致 `MALFORMED_RESPONSE`）。
 6. 状态结构有变化时保证 `Store._load` 能读旧的 `state.json`（`store._known` 会丢弃未知字段、缺失字段取默认值）。
 7. 每条网络不变量都要有测试，测试 docstring 写“不变量 N”；`test_invariants_have_tests` 在新增不变量却没写测试时变红。
-8. 规则反复靠记忆失效时，把它挪进代码或测试（参照 Raft 的 structural enforcement）：一条规则如果违反了也没有任何信号，
+8. 规则反复靠记忆失效时，把它挪进代码或测试（参照 Raft 的 structural enforcement，research: raft#structural-enforcement）：一条规则如果违反了也没有任何信号，
    就要么加一个能变红的检查，要么写明为什么接受这个风险。
 9. 不要提交 `.agentnet/` 下的运行数据；那里可能包含真实研究结果与会话记录。
 10. 依赖使用精确或下限版本，经 `uv add` 写入 `pyproject.toml` 与 `uv.lock`。
+11. 设计借鉴了别的产品时写“参照 X”并带 `research: <笔记>#<锚点>`（见文首），调研笔记里没有的先补笔记。
+    `test_research_refs_resolve` 在调研仓库就位时检查每个引用都能找到对应的笔记与锚点，不在时跳过。
 
 ### 三、安全边界
 
