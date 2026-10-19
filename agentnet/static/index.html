@@ -47,6 +47,8 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="3.5" cy="8" r="2"/><circle cx="12.5" cy="3.5" r="2"/><circle cx="12.5" cy="12.5" r="2"/><path d="M5.3 7.1 10.7 4.4M5.3 8.9l5.4 2.7"/></svg>网络</button>
     <button type="button" class="tab" data-view="agents" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="4" width="11" height="9" rx="2.5"/><path d="M8 4V1.8M5.8 8.2h.01M10.2 8.2h.01"/></svg>Agent</button>
+    <button type="button" class="tab" data-view="projects" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4.5c0-.8.7-1.5 1.5-1.5h3l1.5 1.5h4.5c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-9c-.8 0-1.5-.7-1.5-1.5z"/></svg>项目</button>
     <button type="button" class="tab" data-view="board" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.5" width="3.6" height="11" rx="1"/><rect x="6.2" y="2.5" width="3.6" height="7" rx="1"/><rect x="10.6" y="2.5" width="3.6" height="9" rx="1"/></svg>看板<span id="todo-count" class="count" hidden></span></button>
     <button type="button" class="tab" data-view="devices" aria-pressed="false">
@@ -108,6 +110,8 @@
       <div class="view-head">
         <div><h1>看板</h1><p>你交代给 Agent 的任务：有交付目标的事由接手的 Agent 登记，交付后由你验收。闲聊不算任务；Agent 之间的委托在任务详情里看。最上面是等你处理的事。</p></div>
         <div class="board-filter">
+          <label for="board-project" class="sr-only">按项目筛选</label>
+          <select id="board-project"></select>
           <label for="board-agent" class="sr-only">按 Agent 筛选</label>
           <select id="board-agent"></select>
         </div>
@@ -125,6 +129,18 @@
     <aside id="board-detail" class="side" aria-live="polite"></aside>
   </section>
 
+  <section id="view-projects" class="view" hidden aria-label="项目">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>项目</h1><p>一件大事拆成几个方面，分别由不同的群组承担。项目只汇总进展，不让群组之间互通上下文；Agent 现在还不知道项目的存在。只有你看得到自己的项目。</p></div>
+        <button type="button" id="project-new">新建项目</button>
+      </div>
+      <ul id="project-list" class="cards"></ul>
+      <div id="project-overview"></div>
+    </div>
+    <aside id="project-detail" class="side" aria-live="polite"></aside>
+  </section>
+
   <section id="view-agents" class="view" hidden aria-label="Agent 管理">
     <div class="pane">
       <div class="view-head">
@@ -139,7 +155,7 @@
   <section id="view-groups" class="view" hidden aria-label="群组管理">
     <div class="pane">
       <div class="view-head">
-        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。内部群组只有你和你的 Agent；联合群组邀请别人带着他们的 Agent 一起协作。每个群组有自己的档案：brief、决定、文件、项目引用。</p></div>
+        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。内部群组只有你和你的 Agent；联合群组邀请别人带着他们的 Agent 一起协作。每个群组有自己的档案：brief、决定、文件、资源引用；内部群组可以挂进你的项目。</p></div>
         <button type="button" id="group-new">新建群组</button>
       </div>
       <ul id="group-list" class="cards"></ul>

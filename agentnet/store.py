@@ -14,7 +14,8 @@ from typing import Any
 from dataclasses import asdict, fields
 
 from .models import (AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Device, Group, KnowledgeItem,
-                     Message, ProjectRef, Proposal, Seat, Task, TaskStatus, User, UserRequest, new_id, seat_id)
+                     Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus, User, UserRequest, Workstream, new_id,
+                     seat_id)
 
 
 def _known(cls: type, d: dict[str, Any]) -> dict[str, Any]:
@@ -96,6 +97,7 @@ class Store:
         self.approvals: dict[str, Approval] = {}
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
+        self.projects: dict[str, Project] = {}  # 项目：目标与汇总层（docs/projects.md）
         if self.path.exists():
             self._load()
         else:
@@ -144,6 +146,7 @@ class Store:
                 "approvals": [a.to_dict() for a in self.approvals.values()],
                 "requests": [r.to_dict() for r in self.requests.values()],
                 "devices": [asdict(d) for d in self.devices.values()],
+                "projects": [p.to_dict() for p in self.projects.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -156,7 +159,8 @@ class Store:
             self.agents[a["id"]] = AgentNode(**_known(AgentNode, a))
         for g in raw.get("groups", []):
             g["decisions"] = [Decision(**_known(Decision, d)) for d in g.get("decisions") or []]
-            g["projects"] = [ProjectRef(**_known(ProjectRef, r)) for r in g.get("projects") or []]
+            # 旧版的“项目引用”（projects）改名为资源引用（refs）：“项目”现在是另一个概念
+            g["refs"] = [ResourceRef(**_known(ResourceRef, r)) for r in g.get("refs") or g.get("projects") or []]
             g["suggestions"] = [BriefSuggestion(**_known(BriefSuggestion, x)) for x in g.get("suggestions") or []]
             self.groups[g["id"]] = Group(**_known(Group, g))
         for c in raw.get("conversations", []):
@@ -210,6 +214,9 @@ class Store:
             self.devices[d["id"]] = Device(**_known(Device, d))
         for r in raw.get("requests", []):
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
+        for pj in raw.get("projects", []):
+            pj["workstreams"] = [Workstream(**_known(Workstream, w)) for w in pj.get("workstreams") or []]
+            self.projects[pj["id"]] = Project(**_known(Project, pj))
         self._one_trust_domain()
 
     def _one_trust_domain(self) -> None:

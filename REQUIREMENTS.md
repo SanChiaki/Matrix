@@ -66,3 +66,9 @@
 | 37 | 云侧与端侧运行时：用户本地 harness 接入，网络中同等看待 | 🟡 | 方向已定为**平台云侧（内置 dsh）+ 用户端侧（Claude Code / Codex 等）**，位置是节点属性，不改 Seat / Task / 审批 / 知识 / 群组语义。设计见 [docs/device-runtimes.md](docs/device-runtimes.md)。**已实现**：运行时能力报告与三项交集（#38）、连接器协议 `agentnet/device.py`（握手与能力校验、`run.request` / `run.event` / `run.result`、工具与审批回执、超时取消）、`DeviceRuntime`、按 Agent 选运行时（`Agent.device_runtime`、`Network.register_runtime` / `runtime_for`）、端侧离线按传输错误处理。**已实现**：设备令牌（一个用户多条，只存 sha256，可单独吊销）与 `/api/devices/connect`（出站 WebSocket，令牌走 query，握手校验能力）。**已实现**：连接器本体 `matrix-connect`（`agentnet/connector/`）：出站 WebSocket 与退避重连、本机桥把 `/internal/tools` 与 `/internal/approval` 转回网络、工作目录边界（拒绝绝对路径与 `..`）、dsh / Claude Code / Codex 三个驱动（Claude Code 用工具白名单，Codex 用 `-s read-only|workspace-write`，dsh 复用云侧覆盖层与沙箱）。已用本机 dsh、Codex、Claude Code 三个驱动跑通真实端到端（Claude Code 含 `--resume` 的第二轮）。**端侧其余部分已实现**：材料下发（`run.request.materials`）与 `publish_file` 回传（`file.fetch`）、设备管理页与Agent 运行位置选择、`TaskStatus.WAITING` 与重启 / 审批的端侧语义（#39）。**未实现**：云侧读隔离（#34） |
 | 38 | 运行时能力报告与权限自动收窄 | 🟡 | `runtime.RuntimeCapabilities`（`enforced` / `advisory` / `unavailable`）+ `AgentRuntime.capabilities()`；`Network._effective` 把席位有效权限交运行时能力，委托授权再交执行者的能力（三项交集），做不到的记进 `Task.narrowed` 与委托结果，不算"未授予"。Agent 详情返回 `effective_authority` 与逐项等级。**现状**：只有 dsh 一个运行时（全部 `enforced`），`ScriptedRuntime` 可注入收窄的能力表用于测试；端侧适配器接入后才真正生效 |
 | 39 | 端侧可达性：等待而不是失败；重启与审批语义区分位置 | ✅ | 任务新增 `WAITING`：端侧不在线时不调度、不判失败、不消耗重试，对话保持 `waiting`；端侧席位只给所有者写一条“已排队”说明；`Network.register_runtime` 上线即唤醒该设备的等待任务。`Store._load` 按 `delegatee.device_runtime` 区分重启语义（端侧回 `WAITING`）。端侧审批不按时间作废，只在设备断连时结束。离线期间沿用最近一次握手声明的能力（`Agent.enforcement`），避免误收窄 |
+
+## 六、项目
+
+| # | 需求 | 状态 | 核心思路 |
+|---|---|---|---|
+| 40 | 项目维度：一件事下有不同方面的任务，由不同群组 / Agent 承载 | 🟡 | 见 `docs/projects.md`。项目是目标与汇总层，不是超级群组：只汇总挂载群组里的用户任务，不流动上下文。**第一阶段已实现**：Project（一个所有者、brief、方面）、内部群组挂项目与方面、任务归属由网络按群组认定、私聊任务手动归类、项目页按方面分栏、看板按项目 / 方面筛选；原“项目引用”改名为资源引用（`refs`）。**还没有**：项目背景推送给 Agent（第二阶段）、联合群组挂项目与跨群组任务提议（第三阶段） |

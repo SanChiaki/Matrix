@@ -139,10 +139,37 @@ class DecisionRecordIn(BaseModel):
     supersedes: str | None = None
 
 
-class ProjectIn(BaseModel):
+class RefIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     location: str = Field(min_length=1, max_length=500)
     note: str = Field("", max_length=500)
+
+
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field("", max_length=500)
+    brief: str = Field("", max_length=4000)
+
+
+class ProjectPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=80)
+    description: str | None = Field(None, max_length=500)
+    brief: str | None = Field(None, max_length=4000)
+
+
+class WorkstreamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field("", max_length=500)
+
+
+class WorkstreamPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=80)
+    description: str | None = Field(None, max_length=500)
+
+
+class AssignIn(BaseModel):
+    project_id: str | None = None        # None = 移出项目
+    workstream_id: str | None = None
 
 
 class FileIn(BaseModel):
@@ -383,15 +410,59 @@ def create_app(network: Network) -> FastAPI:
         network.revoke_decision(group_id, decision_id, actor=user.id)
         return network.group_detail(group_id, actor=user.id)
 
-    @app.post("/api/groups/{group_id}/projects")
-    def add_project(group_id: str, body: ProjectIn, user: Me) -> dict:
-        network.add_project(group_id, body.name, body.location, body.note, actor=user.id)
+    @app.post("/api/groups/{group_id}/refs")
+    def add_ref(group_id: str, body: RefIn, user: Me) -> dict:
+        network.add_ref(group_id, body.name, body.location, body.note, actor=user.id)
         return network.group_detail(group_id, actor=user.id)
 
-    @app.delete("/api/groups/{group_id}/projects/{project_id}")
-    def remove_project(group_id: str, project_id: str, user: Me) -> dict:
-        network.remove_project(group_id, project_id, actor=user.id)
+    @app.delete("/api/groups/{group_id}/refs/{ref_id}")
+    def remove_ref(group_id: str, ref_id: str, user: Me) -> dict:
+        network.remove_ref(group_id, ref_id, actor=user.id)
         return network.group_detail(group_id, actor=user.id)
+
+    @app.put("/api/groups/{group_id}/project")
+    def assign_group(group_id: str, body: AssignIn, user: Me) -> dict:
+        network.assign_group(group_id, body.project_id, body.workstream_id, actor=user.id)
+        return network.group_detail(group_id, actor=user.id)
+
+    # ---- 项目（docs/projects.md）：目标与汇总层，只有所有者看得到 ----
+    @app.get("/api/projects")
+    def list_projects(user: Me) -> list[dict]:
+        return network.projects(user.id)
+
+    @app.post("/api/projects")
+    def create_project(body: ProjectIn, user: Me) -> dict:
+        p = network.create_project(body.name, body.description, body.brief, actor=user.id)
+        return network.project_detail(p.id, actor=user.id)
+
+    @app.get("/api/projects/{project_id}")
+    def project_detail(project_id: str, user: Me) -> dict:
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.patch("/api/projects/{project_id}")
+    def update_project(project_id: str, body: ProjectPatch, user: Me) -> dict:
+        network.update_project(project_id, actor=user.id, **body.model_dump(exclude_unset=True))
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}")
+    def delete_project(project_id: str, user: Me) -> dict:
+        network.delete_project(project_id, actor=user.id)
+        return {"ok": True}
+
+    @app.post("/api/projects/{project_id}/workstreams")
+    def add_workstream(project_id: str, body: WorkstreamIn, user: Me) -> dict:
+        network.add_workstream(project_id, body.name, body.description, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.patch("/api/projects/{project_id}/workstreams/{workstream_id}")
+    def update_workstream(project_id: str, workstream_id: str, body: WorkstreamPatch, user: Me) -> dict:
+        network.update_workstream(project_id, workstream_id, actor=user.id, **body.model_dump(exclude_unset=True))
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/workstreams/{workstream_id}")
+    def remove_workstream(project_id: str, workstream_id: str, user: Me) -> dict:
+        network.remove_workstream(project_id, workstream_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
     @app.post("/api/groups/{group_id}/files")
     def publish_file(group_id: str, body: FileIn, user: Me) -> dict:
@@ -446,6 +517,11 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/requests/{request_id}/review")
     def review_request(request_id: str, body: ReviewIn, user: Me) -> dict:
         network.review_request(request_id, body.accept, body.feedback, actor=user.id)
+        return network.request_detail(request_id, actor=user.id)
+
+    @app.put("/api/requests/{request_id}/project")
+    def assign_request(request_id: str, body: AssignIn, user: Me) -> dict:
+        network.assign_request(request_id, body.project_id, body.workstream_id, actor=user.id)
         return network.request_detail(request_id, actor=user.id)
 
     @app.post("/api/requests/{request_id}/cancel")

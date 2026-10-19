@@ -117,8 +117,8 @@ class Decision:
 
 
 @dataclass
-class ProjectRef:
-    """群组引用的项目（仓库、路径、文档）。只是指针，不授予任何访问权限。"""
+class ResourceRef:
+    """群组引用的资源（仓库、路径、文档）。只是指针，不授予任何访问权限。旧版叫“项目引用”（Group.projects）。"""
 
     id: str
     name: str
@@ -158,10 +158,12 @@ class Group:
     brief: str = ""                      # 目标、范围、成功标准、当前阶段：每轮推送给所有成员
     brief_updated_at: float | None = None
     decisions: list[Decision] = field(default_factory=list)
-    projects: list[ProjectRef] = field(default_factory=list)
+    refs: list[ResourceRef] = field(default_factory=list)
     suggestions: list[BriefSuggestion] = field(default_factory=list)
     home_enabled: list[str] = field(default_factory=list)  # 联合群组里由所有者打开了私有目录挂载的 Agent
-    archive_rev: int = 0                 # 档案（brief / 决定 / 文件 / 项目）每变一次 +1；席位与任务据此判断要不要重新推送
+    project_id: str | None = None        # 所属项目（最多一个，docs/projects.md）
+    workstream_id: str | None = None     # 在项目里承担的方面
+    archive_rev: int = 0                 # 档案（brief / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 
     @property
@@ -334,6 +336,33 @@ class Proposal:
 
 
 @dataclass
+class Workstream:
+    """项目里的一个方面（市场调研、原型开发……），可以由多个群组承担。"""
+
+    id: str
+    name: str
+    description: str = ""
+
+
+@dataclass
+class Project:
+    """项目：目标与汇总层（docs/projects.md）。只有一个所有者；汇总挂载群组里的用户任务，不流动上下文——
+    群组、委托、知识、可见性的规则都不因项目改变。"""
+
+    id: str
+    name: str
+    owner_id: str | None = None
+    description: str = ""
+    brief: str = ""                      # 目标、范围、成功标准、当前阶段（第一阶段只给人看，不推送给 Agent）
+    workstreams: list[Workstream] = field(default_factory=list)
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class UserRequest:
     """人交代给 Agent 的一件事（看板上的一张卡）。由接任务的 Agent 认定（open_request）：闲聊、问答不算，
     有交付目标的才算。来源消息与下发人由网络从对话里认定，不信任模型自报。Agent 之间的委托（Task）不在这里。"""
@@ -348,6 +377,8 @@ class UserRequest:
     status: str = "in_progress"          # in_progress | in_review | completed | cancelled
     summary: str = ""                    # 交付说明（Agent 写）
     task_ids: list[str] = field(default_factory=list)  # 为它发起的委托（只在详情里展示）
+    project_id: str | None = None        # 所属项目：由网络按所在群组认定，私聊里的由人归类
+    workstream_id: str | None = None
     revisions: int = 0                   # 被下发人退回修改的次数
     feedback: str = ""                   # 最近一次退回的意见
     created_at: float = field(default_factory=time.time)

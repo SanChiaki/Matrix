@@ -158,7 +158,7 @@ def format_decision(d: Decision, name: Callable[[str | None], str], email: Calla
 
 def format_archive(g: Group, active: list[Decision], files: list[str], name: Callable[[str | None], str],
                    email: Callable[[str | None], str]) -> str:
-    """群组档案的推送部分：brief、最近的有效决定、文件与项目的指针。作为背景，不附带任何“先读档案”的指令。"""
+    """群组档案的推送部分：brief、最近的有效决定、文件与资源的指针。作为背景，不附带任何“先读档案”的指令。"""
     parts = [f"## 群组档案（「{g.name}」）"]
     if g.brief:
         parts += ["### Brief", g.brief]
@@ -170,9 +170,9 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
     if files:
         parts += [f"### 文件（`./{GROUP_FILES}/`，只读）", "、".join(files[:40])
                   + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
-    if g.projects:
-        parts += ["### 相关项目（只是引用，不代表你能访问）",
-                  *(f"- {p.name}：{p.location}" + (f" —— {p.note}" if p.note else "") for p in g.projects)]
+    if g.refs:
+        parts += ["### 相关资源（只是引用，不代表你能访问）",
+                  *(f"- {r.name}：{r.location}" + (f" —— {r.note}" if r.note else "") for r in g.refs)]
     return "\n".join(parts) if len(parts) > 1 else ""
 
 

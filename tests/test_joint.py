@@ -240,7 +240,7 @@ def test_home_not_mounted_in_joint_group_by_default(tmp_path: Path):
 
 
 # ================= 群组档案 =================
-def test_archive_brief_decisions_projects_pushed_to_seats_and_tasks(tmp_path: Path):
+def test_archive_brief_decisions_refs_pushed_to_seats_and_tasks(tmp_path: Path):
     prompts: dict[str, list[str]] = {}
 
     def handler(call: ScriptCall) -> str:
@@ -261,7 +261,7 @@ def test_archive_brief_decisions_projects_pushed_to_seats_and_tasks(tmp_path: Pa
     b = net.create_agent("B", "b", [], [], actor=alice)
     g = net.create_group("G", "", [a.id, b.id], actor=alice)
     net.set_brief(g.id, "目标：评估出海机会。范围：亚洲。", actor=alice)
-    net.add_project(g.id, "前端仓库", "~/code/web", "只读参考", actor=alice)
+    net.add_ref(g.id, "前端仓库", "~/code/web", "只读参考", actor=alice)
     net.publish_file(g.id, "背景.md", "背景资料".encode(), actor=alice)
     chat = net.group_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 开始", background=False, actor=alice)
@@ -284,7 +284,7 @@ def test_archive_brief_decisions_projects_pushed_to_seats_and_tasks(tmp_path: Pa
     assert "改做韩国市场" in latest and "只做日本市场" not in latest
     # 档案文件只读：运行里改了也不会保存
     log = (tmp_path / "groups" / g.id / "log.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(x)["action"] for x in log][:3] == ["brief.set", "project.add", "file.publish"]
+    assert [json.loads(x)["action"] for x in log][:3] == ["brief.set", "ref.add", "file.publish"]
 
 
 def test_archive_writes_only_through_network(tmp_path: Path):
@@ -343,12 +343,12 @@ def test_brief_host_only_suggestions(tmp_path: Path):
     net.decide_suggestion(g.id, gg.suggestions[1].id, True, actor=alice)
     net.decide_suggestion(g.id, gg.suggestions[0].id, False, actor=alice)
     assert gg.brief == "新的目标：只做 B2B" and [s.status for s in gg.suggestions] == ["rejected", "accepted"]
-    # 参与者能记录、撤销决定（人可以撤销 Agent 记录的）；项目引用只有主持人
+    # 参与者能记录、撤销决定（人可以撤销 Agent 记录的）；资源引用只有主持人
     d = net.record_decision(g.id, "周五前交付", actor=bob)
     net.revoke_decision(g.id, d.id, actor=alice)
     assert d.status == "revoked"
     with pytest.raises(NetworkError, match="主持人"):
-        net.add_project(g.id, "P", "~/p", actor=bob)
+        net.add_ref(g.id, "P", "~/p", actor=bob)
 
 
 def test_archive_api(tmp_path: Path):
