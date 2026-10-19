@@ -2152,7 +2152,9 @@ class Network:
             lanes.append(("未分方面", "", loose))
         handoffs = [f"- {h.id}：{self._group_name(h.from_group_id)} 的 {self._name(h.from_agent_id)} → "
                     f"{self._group_name(h.to_group_id)} 的 {self._name(h.to_agent_id)}，{HANDOFF_CN.get(h.status, h.status)}"
-                    + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "") + f"：{_short(_first_line(h.text), 80)}"
+                    + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "")
+                    + (f"（完成后网络会通知 {self._name(h.from_agent_id)}）" if h.status in ("scheduled", "sent") else "")
+                    + f"：{_short(_first_line(h.text), 80)}"
                     for h in sorted(self.store.handoffs.values(), key=lambda h: h.created_at)
                     if h.project_id == p.id and self._handoff_open(h)][-12:]
         active = [d for d in p.decisions if d.status == "active"][-DECISIONS_PUSHED:]
