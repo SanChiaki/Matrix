@@ -126,6 +126,26 @@ async function init() {
   catch { showGate(S.info.has_users ? "login" : "register"); }
 }
 
+// 浅色 / 深色：初始值在 index.html 的 <head> 里定（避免闪烁）。用户点过就记住；没点过就跟着系统变。
+function initTheme() {
+  const btn = $("#theme-toggle"), root = document.documentElement;
+  const paint = () => {
+    const label = root.dataset.theme === "light" ? "切换到深色模式" : "切换到浅色模式";
+    btn.setAttribute("aria-label", label); btn.title = label;
+  };
+  btn.addEventListener("click", () => {
+    root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
+    localStorage.setItem("theme", root.dataset.theme);
+    paint();
+  });
+  matchMedia("(prefers-color-scheme: light)").addEventListener("change", (e) => {
+    if (localStorage.getItem("theme")) return;
+    root.dataset.theme = e.matches ? "light" : "dark";
+    paint();
+  });
+  paint();
+}
+
 async function start() {
   const info = S.info;
   S.defaultModel = info.default_model;
@@ -143,6 +163,7 @@ async function start() {
   $("#group-new").addEventListener("click", () => { S.groupSel = null; renderGroupEditor(true); renderGroups(); });
   $("#group-quick").addEventListener("click", () => { S.groupSel = null; S.newGroup = true; location.hash = "groups"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
+  initTheme();
   $("#tab-task").addEventListener("click", () => sideTab("task"));
   $("#tab-archive").addEventListener("click", () => sideTab("archive"));
   bindComposer();
@@ -456,10 +477,10 @@ function renderGraph() {
   svg.innerHTML = "";
   const pos = layout(svg);
   const defs = el("defs", {}, svg);
-  [["arrow", "#4a4f60"], ["arrow-active", "#8b93ff"], ["arrow-sel", "#ffffff"]].forEach(([id, c]) => {
+  [["arrow", "--edge"], ["arrow-active", "--running"], ["arrow-sel", "--select"]].forEach(([id, c]) => {
     const m = el("marker", { id, viewBox: "0 0 10 10", refX: 10, refY: 5, markerWidth: 6, markerHeight: 6,
       markerUnits: "userSpaceOnUse", orient: "auto-start-reverse" }, defs);
-    el("path", { d: "M0,0 L10,5 L0,10 z", fill: c }, m);
+    el("path", { d: "M0,0 L10,5 L0,10 z", style: `fill: var(${c})` }, m);
   });
   const edges = el("g", {}, svg), nodes = el("g", {}, svg);
 
@@ -1128,6 +1149,8 @@ function renderMembers() {
     catch (e) { err(e); }
   });
   box.querySelectorAll(".rm").forEach((b) => b.addEventListener("click", async () => {
+    const a = agent(b.dataset.id);
+    if (!confirm(`把 ${a?.name || "这个 Agent"} 移出 ${g.name}？它手上已经接下的任务会照常完成，之后不能再被 @、被委托。`)) return;
     try { await api(`/api/groups/${g.id}/members/${b.dataset.id}`, { method: "DELETE" }); await reload(); } catch (e) { err(e); }
   }));
   $(".add-member", box)?.addEventListener("submit", async (e) => {
