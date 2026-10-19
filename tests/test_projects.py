@@ -123,15 +123,126 @@ def test_delete_workstream_and_project_clear_links(tmp_path: Path):
     assert g.id in net.store.groups and r.id in net.store.requests  # 群组与任务本身不动
 
 
-def test_agents_do_not_see_projects(tmp_path: Path):
-    """第一阶段 Agent 不知道项目存在：席位的提示词里没有项目名称、brief、方面，群聊里也不写事件。"""
-    prompts: list[str] = []
-    net, alice, bob, a, g, p, research, proto = setup(tmp_path, prompts)
+def test_project_context_only_to_attached_groups(tmp_path: Path):
+    """不变量 18：项目背景与项目文件只推送 / 挂载给挂载群组；私聊、未挂载的群组拿不到；只在版本变化时重新推送。"""
+    seen: list[tuple[str, str, bool]] = []  # (上下文, 提示词, 工作目录里有没有 project/spec.md)
+
+    def handler(call: ScriptCall) -> str:
+        seen.append((call.context_id, call.prompt, (Path(call.cwd) / "project" / "spec.md").is_file()))
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    b = net.create_agent("B", "b", [], [], actor=alice)
+    g = net.create_group("调研组", "", [a.id], actor=alice)
+    g2 = net.create_group("闲聊组", "", [b.id], actor=alice)
+    p = net.create_project("新产品上线", brief="目标：Q4 上线", actor=alice)
+    research = net.add_workstream(p.id, "市场调研", actor=alice)
+    net.add_workstream(p.id, "原型开发", actor=alice)
     net.assign_group(g.id, p.id, research.id, actor=alice)
+    net.publish_project_file(p.id, "spec.md", b"# spec", actor=alice)
+
     chat = net.group_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 写", actor=alice, background=False)
-    assert prompts and not any(x in prompts[0] for x in ("新产品上线", "Q4 上线", "市场调研"))
-    assert not any("新产品上线" in m.text for m in chat.messages)
+    _, prompt, mounted = seen[-1]
+    assert "Q4 上线" in prompt and "负责「市场调研」" in prompt and "spec.md" in prompt and mounted
+    assert not (tmp_path / chat.seats[a.id].workdir / "project").exists()  # 只读副本运行后丢弃
+
+    for conv, who in ((net.group_chat(g2.id, actor=alice), "@B 写"), (net.direct_chat(a.id, actor=alice), "写")):
+        net.send_message(conv.id, who, actor=alice, background=False)
+        _, prompt, mounted = seen[-1]
+        assert "Q4 上线" not in prompt and "新产品上线" not in prompt and not mounted
+
+    net.send_message(chat.id, "@A 再写", actor=alice, background=False)  # 没有变化：不重复推送
+    assert "Q4 上线" not in seen[-1][1] and seen[-1][2]
+    net.update_project(p.id, brief="目标：Q1 上线", actor=alice)
+    net.send_message(chat.id, "@A 又写", actor=alice, background=False)
+    assert "Q1 上线" in seen[-1][1]
+    assert not any("新产品上线" in m.text for m in chat.messages)  # 人的项目操作不写进群聊
+
+    net.assign_group(g.id, None, actor=alice)  # 移出项目：之后不再挂载
+    net.send_message(chat.id, "@A 最后一次", actor=alice, background=False)
+    assert not seen[-1][2]
+
+
+def test_agent_publishes_to_project(tmp_path: Path):
+    """不变量 18：publish_file target=project 只能发到自己群组所属的项目；别的挂载群组的委托任务读得到。"""
+    def handler(call: ScriptCall) -> str:
+        if call.context_id.startswith("task-"):
+            assert (Path(call.cwd) / "project" / "prd.md").read_text() == "# PRD"
+            assert "负责「工程」" in call.prompt
+            return "done"
+        if call.agent_id == pm.id:
+            Path(call.cwd, "prd.md").write_text("# PRD")
+            out = call.tool("publish_file", path="prd.md", target="project")
+            assert "已发布到项目" in out, out
+            assert "不能" not in call.tool("publish_file", path="prd.md")  # 默认仍是群组档案
+            return "published"
+        if call.agent_id == lead.id:
+            call.tool("delegate", agent="Eng", mission="按 project/prd.md 实现", expected_outcome="代码")
+            return "delegated"
+        return "ok"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    pm = net.create_agent("PM", "pm", [], ["file.write"], actor=alice)
+    lead = net.create_agent("Lead", "lead", [], ["delegate"], actor=alice)
+    eng = net.create_agent("Eng", "eng", [], [], actor=alice)
+    loner = net.create_agent("Loner", "x", [], ["file.write"], actor=alice)
+    pg = net.create_group("产品组", "", [pm.id], actor=alice)
+    dg = net.create_group("开发组", "", [lead.id, eng.id], actor=alice)
+    lg = net.create_group("别的组", "", [loner.id], actor=alice)
+    p = net.create_project("tasky", actor=alice)
+    need = net.add_workstream(p.id, "需求", actor=alice)
+    eng_ws = net.add_workstream(p.id, "工程", actor=alice)
+    net.assign_group(pg.id, p.id, need.id, actor=alice)
+    net.assign_group(dg.id, p.id, eng_ws.id, actor=alice)
+
+    pchat = net.group_chat(pg.id, actor=alice)
+    net.send_message(pchat.id, "@PM 写 PRD 发到项目", actor=alice, background=False)
+    assert [f["name"] for f in net.project_detail(p.id, actor=alice)["files"]] == ["prd.md"]
+    assert any("发布到了项目「tasky」" in m.text for m in pchat.messages)
+    assert (tmp_path / "projects" / p.id / "log.jsonl").read_text().count("file.publish") == 1
+
+    net.send_message(net.group_chat(dg.id, actor=alice).id, "@Lead 实现", actor=alice, background=False)
+    net.wait_quiet()
+    t = next(t for t in net.store.tasks.values() if t.delegatee_id == eng.id)
+    assert t.status.value == "completed" and t.result["report"] == "done", (t.status, t.error)
+
+    # 不在项目里的群组：target=project 被拒
+    holder = []
+    def lone(call: ScriptCall) -> str:
+        Path(call.cwd, "x.md").write_text("x")
+        holder.append(call.tool("publish_file", path="x.md", target="project"))
+        holder.append(call.tool("publish_file", path="project/x.md"))
+        return "ok"
+    net.runtime.handler = lone
+    net.send_message(net.group_chat(lg.id, actor=alice).id, "@Loner 发", actor=alice, background=False)
+    assert "不属于任何项目" in holder[0] and "找不到" in holder[1]
+
+
+def test_project_files_api(tmp_path: Path):
+    """项目文件：所有者上传、从挂载群组提升、下载（附件）、删除；别人 404。"""
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    g = net.create_group("G", "", [a.id], actor=alice)
+    g2 = net.create_group("G2", "", [a.id], actor=alice)
+    ca, cb = client(net, "alice@x.io"), client(net, "bob@x.io")
+    pid = ca.post("/api/projects", json={"name": "上线"}).json()["id"]
+    ca.put(f"/api/groups/{g.id}/project", json={"project_id": pid})
+    ca.post(f"/api/groups/{g.id}/files", json={"name": "prd.md", "content": "# PRD"})
+    ca.post(f"/api/groups/{g2.id}/files", json={"name": "other.md", "content": "x"})
+    d = ca.post(f"/api/projects/{pid}/files/promote", json={"group_id": g.id, "name": "prd.md"}).json()
+    assert [f["name"] for f in d["files"]] == ["prd.md"]
+    r = ca.post(f"/api/projects/{pid}/files/promote", json={"group_id": g2.id, "name": "other.md"})
+    assert r.status_code == 409 and "不在项目" in r.json()["detail"]
+    d = ca.post(f"/api/projects/{pid}/files", json={"name": "../plan.md", "content": "plan"}).json()
+    assert sorted(f["name"] for f in d["files"]) == ["plan.md", "prd.md"]
+    r = ca.get(f"/api/projects/{pid}/files/prd.md")
+    assert r.text == "# PRD" and "attachment" in r.headers["content-disposition"]
+    assert cb.get(f"/api/projects/{pid}/files/prd.md").status_code == 404
+    assert cb.post(f"/api/projects/{pid}/files", json={"name": "x", "content": "x"}).status_code == 404
+    assert [f["name"] for f in ca.delete(f"/api/projects/{pid}/files/plan.md").json()["files"]] == ["prd.md"]
 
 
 def test_projects_persist_and_old_project_refs_migrate(tmp_path: Path):

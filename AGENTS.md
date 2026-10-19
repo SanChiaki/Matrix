@@ -67,8 +67,11 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - `Project`：一个所有者、brief、方面（`workstreams`）。内部群组挂进项目并承担一个方面（`Group.project_id` / `workstream_id`，
   一个群组最多属于一个项目）；群组与项目必须同一个所有者，**联合群组暂时不能挂**。
-- **项目汇总工作，不流动上下文**：群组、委托、知识、可见性规则都不因项目改变。第一阶段 Agent 不知道项目存在：
-  提示词与群聊里都不出现项目（`test_agents_do_not_see_projects`）。
+- **项目汇总工作，不打通群组**：群组、委托、知识、可见性规则都不因项目改变（不跨群组委托、群聊不互通）。
+  流向 Agent 的只有两样，**只到挂载群组**（不变量 18）：项目背景（名称、brief、方面与承担的群组、“你所在群组负责 X 方面”，
+  `format_project`，按 `Project.archive_rev` + 方面推送，`Seat/Task.project_seen`）和项目文件（`projects/<id>/files/`，
+  每轮只读拷进工作目录的 `project/`，端侧随 `materials` 下发；写入只经 `publish_file target=project`、人上传或把群组文件提升到项目，
+  记入 `projects/<id>/log.jsonl`）。人对项目的操作不写进群聊；Agent 发布到项目时在来源群聊记一条事件。
 - 用户任务的项目归属由网络按所在群组认定（`open_request` 时），不让模型填；群组换方面 / 移出时未结束的任务跟着改，
   已结束的保留历史。私聊里的任务由下发的人手动归类（`assign_request`），联合群组里的任务不能归类。
 - 项目只有所有者看得到（无权限按 404）；`project.*` 事件只推给所有者（`event_view`）。
@@ -79,7 +82,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作；research: raft#rfc-070-session-recycle）。
 - 档案工具 `record_decision` / `list_decisions` / `publish_file` / `propose_brief` 群组成员都有，**不需要 `delegate`**；
   用户任务工具 `open_request` / `deliver_request` / `accept_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`AGENTNET_TOOLS`），网络端再按执行上下文检查一次。
-- `publish_file` 只能发布当前工作目录里的文件（不含 `group/` 与 `agent-home/`）；`group/` 是只读副本，运行里的改动丢弃。
+- `publish_file` 只能发布当前工作目录里的文件（不含 `group/`、`project/` 与 `agent-home/`）；`group/` 是只读副本，运行里的改动丢弃。
 - Brief 主持人直接改，其他参与者与 Agent 用 `propose_brief` / “建议修改”提建议，主持人采纳或拒绝。brief 超过 14 天没确认，UI 提醒主持人复核。
 - 联合群组的档案对所有参与者可见：写进去就等于对所有参与方公开（工具描述与提示词里写明）。
 
@@ -203,6 +206,8 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
     联合群组里私有目录默认不挂载，工作台账不列出别处工作的细节。
 17. **群组档案只走网络**：写入只能经人的操作或档案工具，变更追加到 `groups/<id>/log.jsonl`，公开变化写进群聊；运行时拿到的是只读副本。
     推送部分有预算（brief ≤4000 字，最近 12 条有效决定）。
+18. **项目推送只到挂载群组**：项目背景与项目文件只推送 / 挂载给挂载在这个项目里的（内部）群组的席位与委托任务；
+    私聊、未挂载的群组、联合群组拿不到。项目只有一个所有者、挂载群组与项目同一个所有者，所以不跨信任域。
 
 ### 二、工作方式
 

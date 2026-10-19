@@ -39,6 +39,7 @@ MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
 AGENT_HOME = "agent-home"  # Agent 私有目录在每次运行的工作目录里的挂载名
 GROUP_FILES = "group"      # 群组档案的文件区在工作目录里的挂载名（只读副本，运行后丢弃）
+PROJECT_FILES = "project"  # 项目文件在挂载群组的工作目录里的挂载名（只读副本，运行后丢弃）
 
 # 群组档案工具：群组成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
@@ -208,6 +209,7 @@ class Seat:
     delegations: int = 0                 # 自最近一次被 @ 以来发起的委托数
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
     archive_seen: int = -1               # 已经送达过的群组档案版本（Group.archive_rev）
+    project_seen: str = ""               # 已经送达过的项目背景（项目 id:版本:方面；见 Network._project_key）
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, Any]:
@@ -294,6 +296,7 @@ class Task:
     delegations: int = 0                 # 执行者在这个任务里发起的委托数
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
     archive_seen: int = -1               # 已经送达过的群组档案版本
+    project_seen: str = ""               # 已经送达过的项目背景
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
     finished_at: float | None = None
@@ -353,8 +356,9 @@ class Project:
     name: str
     owner_id: str | None = None
     description: str = ""
-    brief: str = ""                      # 目标、范围、成功标准、当前阶段（第一阶段只给人看，不推送给 Agent）
+    brief: str = ""                      # 目标、范围、成功标准、当前阶段：推送给挂载群组的席位与任务
     workstreams: list[Workstream] = field(default_factory=list)
+    archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 

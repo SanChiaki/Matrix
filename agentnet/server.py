@@ -177,6 +177,11 @@ class FileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
+class PromoteIn(BaseModel):
+    group_id: str
+    name: str = Field(min_length=1, max_length=120)
+
+
 class GroupPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=80)
     description: str | None = Field(None, max_length=500)
@@ -462,6 +467,28 @@ def create_app(network: Network) -> FastAPI:
     @app.delete("/api/projects/{project_id}/workstreams/{workstream_id}")
     def remove_workstream(project_id: str, workstream_id: str, user: Me) -> dict:
         network.remove_workstream(project_id, workstream_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
+    @app.post("/api/projects/{project_id}/files")
+    def publish_project_file(project_id: str, body: FileIn, user: Me) -> dict:
+        network.publish_project_file(project_id, body.name, body.content.encode("utf-8"), actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/files/promote")
+    def promote_file(project_id: str, body: PromoteIn, user: Me) -> dict:
+        network.promote_file(project_id, body.group_id, body.name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.get("/api/projects/{project_id}/files/{name}")
+    def read_project_file(project_id: str, name: str, user: Me) -> FileResponse:
+        path = network.project_file(project_id, name, actor=user.id)
+        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.delete("/api/projects/{project_id}/files/{name}")
+    def delete_project_file(project_id: str, name: str, user: Me) -> dict:
+        network.delete_project_file(project_id, name, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.post("/api/groups/{group_id}/files")

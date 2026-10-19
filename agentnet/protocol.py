@@ -9,7 +9,8 @@ from __future__ import annotations
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
-                     AgentNode, Conversation, Decision, Group, KnowledgeItem, Message, Proposal, Task, UserRequest)
+                     PROJECT_FILES, AgentNode, Conversation, Decision, Group, KnowledgeItem, Message, Project, Proposal, Task,
+                     UserRequest)
 
 
 def authority_lines(authority: list[str]) -> str:
@@ -69,7 +70,9 @@ TOOL_GUIDE: dict[str, str] = {
     "propose_agent": "群组里没有合适的成员时，提议新建一个 Agent（权限不超出你的有效权限），由人审核；批准后才能委托它。",
     "record_decision": "把群组里定下来的事记进群组档案（内容、理由；可写 supersedes 取代旧决定）。所有成员此后都会看到。",
     "list_decisions": "查看群组档案里的全部决定（include_inactive 包含已取代 / 撤销的）。",
-    "publish_file": "把当前工作目录里的一个文件发布进群组档案，所有成员此后在 `./group/` 读到。",
+    "publish_file": ("把当前工作目录里的一个文件发布进群组档案，所有成员此后在 `./group/` 读到；"
+                     "群组属于某个项目时，target=project 发布到项目，项目里所有群组此后在 `./project/` 读到"
+                     "（只发布别的方面要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
@@ -81,7 +84,7 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
     archive = [
         "", f"## 群组档案：「{group.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
-        f"- `./{GROUP_FILES}/` 是群组档案文件的只读副本，改动不会保存。",
+        f"- `./{GROUP_FILES}/` 是群组档案文件的只读副本，改动不会保存；`./{PROJECT_FILES}/`（群组属于项目时）同理。",
     ]
     if group.kind == "joint":
         archive.append("- 这是联合群组：写进档案的内容、你在群聊里的回复，所有参与方（不同的人）都看得到。"
@@ -174,6 +177,25 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
         parts += ["### 相关资源（只是引用，不代表你能访问）",
                   *(f"- {r.name}：{r.location}" + (f" —— {r.note}" if r.note else "") for r in g.refs)]
     return "\n".join(parts) if len(parts) > 1 else ""
+
+
+def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str]) -> str:
+    """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
+    和群组档案一样只是背景，不附带“先读”之类的指令。"""
+    mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
+    parts = [f"## 项目背景（「{p.name}」）",
+             f"群组「{g.name}」是这个项目的一部分" + (f"，负责「{mine.name}」方面。" if mine else "，还没有分到具体方面。")
+             + "其他方面由别的群组负责：它们的成员不在你的群组里，你不能委托给他们，需要别的方面配合时在回复里告诉用户。"]
+    if p.brief:
+        parts += ["### 项目 Brief", p.brief]
+    if lanes:
+        parts += ["### 方面与承担的群组",
+                  *(f"- {name}：{'、'.join(gs) or '（还没有群组）'}" + (f" —— {note}" if note else "")
+                    for name, note, gs in lanes)]
+    if files:
+        parts += [f"### 项目文件（`./{PROJECT_FILES}/`，只读，项目里所有群组都看得到）", "、".join(files[:40])
+                  + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    return "\n".join(parts)
 
 
 def build_seat_prompt(agent: AgentNode, conv: Conversation, group: Group | None, can_delegate: bool,

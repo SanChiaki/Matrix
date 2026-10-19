@@ -120,6 +120,12 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def project_dir(self, project_id: str) -> Path:
+        """项目文件区：只有网络写入（publish_file target=project、人上传），挂载群组的运行时只读挂载。"""
+        d = self.root / "projects" / project_id / "files"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def agent_dir(self, agent_id: str) -> Path:
         """Agent 的持久私有目录：跨对话、跨任务保留，内容由 Agent 自己决定，网络不读。"""
         d = self.root / "agents" / agent_id
