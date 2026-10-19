@@ -244,9 +244,13 @@ const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
 const hoLabel = (h) => `${h.id} · #${h.to_group_name} ${h.to_agent_name}`;
 const handoffItem = (h, all = []) => {
   const peers = all.filter((x) => x.id !== h.id && x.project_id === h.project_id && !(x.after || []).includes(h.id));
+  // 同一个目标群组里还没发出的交接：可能重复，可以选择替换掉
+  const rivals = all.filter((x) => x.id !== h.id && x.to_group_id === h.to_group_id && (x.status === "pending" || x.status === "scheduled"));
+  const gone = (h.after || []).filter((i) => !all.some((x) => x.id === i));  // 依赖已不在进行中（未采纳等）
   if (h.status === "scheduled") return `<li class="todo-item handoff"><div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
       <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> <span class="pill status waiting">排队中</span></div>
       <p class="hint">等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
+      ${gone.length ? `<p class="warn">依赖 ${gone.map(esc).join("、")} 已不在进行中（可能没被采纳），这条不会自动发出。</p>` : ""}
       <div class="actions"><button type="button" class="ghost sm" data-ho-now="${esc(h.id)}">现在就发出</button>
         <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不发了</button></div></li>`;
   return `<li class="todo-item handoff" data-ho="${esc(h.id)}">
@@ -257,6 +261,9 @@ const handoffItem = (h, all = []) => {
     <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
     ${peers.length ? `<fieldset class="ho-after"><legend>等这些完成后再发出</legend>${peers.map((x) => `<label><input type="checkbox" data-ho-dep="${esc(h.id)}" value="${esc(x.id)}"
       ${(h.after || []).includes(x.id) ? "checked" : ""}> ${esc(hoLabel(x))}</label>`).join("")}</fieldset>` : ""}
+    ${rivals.length ? `<p class="warn">#${esc(h.to_group_name)} 已有还没发出的交接：${rivals.map((x) => `${esc(x.id)}（${esc(x.from_agent_name)}）`).join("、")}，可能重复。</p>
+      <label class="ho-replace">确认时替换：<select data-ho-rep="${esc(h.id)}"><option value="">不替换</option>${rivals.map((x) =>
+        `<option value="${esc(x.id)}" ${h.replaces === x.id ? "selected" : ""}>${esc(hoLabel(x))}</option>`).join("")}</select></label>` : ""}
     <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认</button>
       <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不采纳</button>
       <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div>
@@ -266,7 +273,9 @@ function bindHandoffs(box, after) {
   box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
     const id = b.dataset.hoOk; b.disabled = true;
     const deps = [...box.querySelectorAll(`[data-ho-dep="${id}"]`)];
-    const body = { text: $(`#ho-${id}`).value, ...(deps.length ? { after: deps.filter((c) => c.checked).map((c) => c.value) } : {}) };
+    const rep = box.querySelector(`[data-ho-rep="${id}"]`);
+    const body = { text: $(`#ho-${id}`).value, ...(deps.length ? { after: deps.filter((c) => c.checked).map((c) => c.value) } : {}),
+      ...(rep ? { replaces: rep.value || "" } : {}) };
     try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body }); await after(); }
     catch (e) { alert(e.message); b.disabled = false; }
   }));

@@ -183,7 +183,8 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
     return "\n".join(parts) if len(parts) > 1 else ""
 
 
-def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str]) -> str:
+def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str],
+                   handoffs: list[str] | None = None) -> str:
     """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
     和群组档案一样只是背景，不附带“先读”之类的指令。"""
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
@@ -200,6 +201,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
     if files:
         parts += [f"### 项目文件（`./{PROJECT_FILES}/`，只读，项目里所有群组都看得到）", "、".join(files[:40])
                   + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    if handoffs:
+        parts += ["### 进行中的交接（提交前先看有没有同样的；要补充或替换已有的，用 replaces 写上它的 id）", *handoffs]
     return "\n".join(parts)
 
 
@@ -363,6 +366,8 @@ def format_handoff_notice(h: Handoff, group_name: str, agent_name: str) -> str:
     if h.status == "sent":
         text = [f"## 网络通知：你的交接 {h.id} 已由人确认，发给了「{group_name}」的 {agent_name}",
                 "对方做完、人验收通过后会通知你；它的产物看项目文件（`project/`）。"]
+    elif h.status == "superseded":
+        text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 被另一条交接取代，不会发出"]
     else:
         text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳"]
     if h.note:

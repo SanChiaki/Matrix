@@ -171,6 +171,8 @@ TOOLS = [
                 "message": {"type": "string", "description": "交接内容：背景、要做什么、依据的文件（如 project/xxx）、交回什么"},
                 "after": {"type": "string",
                           "description": "可选：要等哪些交接完成后再发出（交接 id，多个用逗号分隔），例如测试要等开发交付"},
+                "replaces": {"type": "string",
+                             "description": "可选：替换一个还没完成的、发给同一群组的交接（id）；人确认后旧的作废，等旧的交接改为等这条"},
             },
             "required": ["group", "agent", "message"],
             "additionalProperties": False,

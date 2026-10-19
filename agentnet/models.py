@@ -330,7 +330,8 @@ class Handoff:
     to_agent_id: str
     text: str
     after: list[str] = field(default_factory=list)  # 依赖的交接：它们都完成（人验收）后才发出
-    status: str = "pending"              # pending | scheduled（已确认，等依赖完成）| sent | rejected
+    replaces: str | None = None          # 要替换的交接：确认这条时旧的作废，依赖它的改为依赖这条
+    status: str = "pending"              # pending | scheduled（已确认，等依赖完成）| sent | rejected | superseded
     approved_by: str | None = None       # 谁确认的：以他的名义发出
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
