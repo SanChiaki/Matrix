@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -948,6 +949,26 @@ def test_invariants_have_tests():
     tests = "".join(p.read_text(encoding="utf-8") for p in (root / "tests").glob("test_*.py"))
     covered = {int(n) for tag in re.findall(r"不变量 ([\d、]+)", tests) for n in tag.split("、") if n}
     assert declared and declared <= covered, f"没有测试标注的不变量：{sorted(declared - covered)}"
+
+
+def test_research_refs_resolve():
+    """文档与代码里的 `research: <笔记>#<锚点>` 都要能在旁边的私有调研仓库里找到；调研仓库不在（CI、别人克隆）时跳过。"""
+    root = Path(__file__).parent.parent
+    research = Path(os.environ.get("MATRIX_RESEARCH_DIR", root.parent / "matrix-research"))
+    if not (research / "products").is_dir():
+        pytest.skip(f"调研仓库不在 {research}")
+    files = [root / n for n in ("AGENTS.md", "CHARTER.md", "REQUIREMENTS.md")]
+    files += [*(root / "docs").glob("**/*.md"), *(root / "agentnet").glob("**/*.py")]
+    refs = {(f.name, note, anchor) for f in files if f.is_file()
+            for note, anchor in re.findall(r"research: ([\w-]+)#([\w-]+)", f.read_text(encoding="utf-8"))}
+    assert refs, "没有找到任何 research 引用"
+    broken = []
+    for src, note, anchor in sorted(refs):
+        doc = next((p for p in (research / "products" / f"{note}.md", research / "topics" / f"{note}.md")
+                    if p.is_file()), None)
+        if doc is None or f'<a id="{anchor}"></a>' not in doc.read_text(encoding="utf-8"):
+            broken.append(f"{src}: research: {note}#{anchor}")
+    assert not broken, f"找不到的调研引用：{broken}"
 
 
 def test_authorities_registered_everywhere():
