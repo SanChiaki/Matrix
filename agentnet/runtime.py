@@ -79,6 +79,8 @@ class RunRequest:
     # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：
     # [{"path": "group/x.md", "data": <bytes>}]
     materials: list[dict[str, Any]] = field(default_factory=list)
+    # 私有目录（端侧运行时用；云侧由 _run 直接挂载）："rw" 挂载并写回，"ro" 只挂载不写回，None 不挂载
+    home: str | None = None
 
 
 # 运行时错误分类（参照 Raft daemon 的 runtimeErrorDeliveryPolicy）：

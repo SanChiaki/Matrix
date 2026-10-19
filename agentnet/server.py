@@ -25,9 +25,9 @@ import uvicorn
 from pydantic import BaseModel, Field
 
 from . import auth
-from .device import HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
+from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
-from .models import User
+from .models import DESCRIPTION_LIMIT, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
@@ -61,7 +61,7 @@ class ModelIn(BaseModel):
 
 class AgentIn(BaseModel):
     name: str = Field(min_length=2, max_length=80)
-    description: str = Field(min_length=2, max_length=500)
+    description: str = Field(min_length=2, max_length=DESCRIPTION_LIMIT)
     capabilities: list[str] = Field(default_factory=list, max_length=10)
     authority: list[str] = Field(default_factory=list)
     chat_enabled: bool = True
@@ -71,7 +71,7 @@ class AgentIn(BaseModel):
 
 class AgentPatch(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=80)
-    description: str | None = Field(None, min_length=2, max_length=500)
+    description: str | None = Field(None, min_length=2, max_length=DESCRIPTION_LIMIT)
     capabilities: list[str] | None = None
     authority: list[str] | None = None
     chat_enabled: bool | None = None
@@ -81,7 +81,7 @@ class AgentPatch(BaseModel):
 
 class ProposalApprove(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=80)
-    description: str | None = Field(None, min_length=2, max_length=500)
+    description: str | None = Field(None, min_length=2, max_length=DESCRIPTION_LIMIT)
     capabilities: list[str] | None = Field(None, max_length=10)
     authority: list[str] | None = None
     model: ModelIn | None = None
@@ -543,9 +543,27 @@ def create_app(network: Network) -> FastAPI:
             dev.last_seen_at = time.time()
             store.save()
         network.bus.emit("device.connected", device_id=dev.id, runtime=info.runtime)
+        pending: set[asyncio.Task] = set()
+
+        async def answer(msg: dict) -> None:
+            """工具调用 / 审批放到线程里处理：审批要等人，publish_file 还要经这条连接回读文件，
+            在接收循环里同步处理会卡住整条连接甚至死锁。"""
+            reply = await asyncio.to_thread(rt.on_message, msg)
+            if reply is not None:
+                try:
+                    await ws.send_json(reply)
+                except (WebSocketDisconnect, RuntimeError):
+                    pass
+
         try:
             while True:
-                reply = rt.on_message(await ws.receive_json())
+                msg = await ws.receive_json()
+                if msg.get("type") in BLOCKING:
+                    task = asyncio.create_task(answer(msg))
+                    pending.add(task)
+                    task.add_done_callback(pending.discard)
+                    continue
+                reply = rt.on_message(msg)
                 if reply is not None:
                     await ws.send_json(reply)
         except (WebSocketDisconnect, RuntimeError):

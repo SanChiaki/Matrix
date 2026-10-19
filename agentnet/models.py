@@ -96,6 +96,7 @@ class AgentNode:
 
 GROUP_KINDS = ("internal", "joint")
 BRIEF_LIMIT = 4000          # Brief 每轮推送给所有成员，字符上限
+DESCRIPTION_LIMIT = 2000    # Agent 描述上限：写进它自己每轮的提示词，也出现在 list_members 里供委托方挑人
 DECISIONS_PUSHED = 12       # 每轮推送的最近有效决定条数；更早的用 list_decisions 查
 GROUP_FILE_LIMIT = 200_000  # 发布到群组档案的单个文件上限（字节）
 

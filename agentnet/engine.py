@@ -23,15 +23,17 @@ from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, GROUP_FILE_LIMIT,
-                     GROUP_FILES, GROUP_KINDS, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
+from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT,
+                     GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
                      Delegation, Group, KnowledgeItem, Message, ProjectRef, Proposal, Seat, Task, TaskStatus,
                      UserRequest, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
                        format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
+from . import homedir
 from .device import DeviceRuntime
+from .homedir import HomeMount
 from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
 from .store import Store
 
@@ -1234,17 +1236,25 @@ class Network:
         others, hidden = self._ledger_for(ctx)
         if others or hidden:  # 工作台账：同时在做的其他工作（联合群组里不列出别处的细节）
             prompt = f"{prompt}\n\n{format_ledger(others, hidden)}"
-        self._mount_group_files(ctx, workdir)
-        before = self._mount_home(agent, workdir) if mount_home else None
+        home: str | None = None   # 端侧：私有目录交给连接器挂载（rw / ro），None 表示不挂载
+        before = None
+        if agent.device_runtime:  # 工作目录在用户电脑上：群组文件随 run.request 下发，服务器这边不挂载
+            if mount_home:
+                home = "rw" if "file.write" in ctx.authority else "ro"
+        else:
+            self._mount_group_files(ctx, workdir)
+            before = self._mount_home(agent, workdir) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
+        invoke = lambda p: self._invoke(ctx, agent, p, workdir, holder.dsh_session_id, timeout_s,  # noqa: E731
+                                        on_session, home=home)
         try:
-            res = self._invoke(ctx, agent, prompt, workdir, holder.dsh_session_id, timeout_s, on_session)
+            res = invoke(prompt)
             holder.dsh_session_id = res.session_id or holder.dsh_session_id
             if res.retryable:
                 self.bus.emit("run.retry", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
                               error_class=res.error_class, error=_short(res.error, 300))
                 again = retry_prompt(None, res.error) if holder.dsh_session_id else prompt
-                res2 = self._invoke(ctx, agent, again, workdir, holder.dsh_session_id, timeout_s, on_session)
+                res2 = invoke(again)
                 holder.dsh_session_id = res2.session_id or holder.dsh_session_id
                 res2.tool_calls = res.tool_calls + res2.tool_calls
                 res = res2
@@ -1283,36 +1293,15 @@ class Network:
     def agent_home(self, agent_id: str) -> Path:
         return self.store.agent_dir(agent_id)
 
+    # 端侧 Agent 的私有目录在所有者电脑上，由连接器按同样的语义挂载与写回（homedir.py），服务器不碰。
     def _mount_home(self, agent: AgentNode, workdir: Path) -> HomeMount:
-        mount, home = workdir / HOME_DIR, self.agent_home(agent.id)
         with self._home_lock(agent.id):
-            shutil.rmtree(mount, ignore_errors=True)
-            shutil.copytree(home, mount, symlinks=False)
-            return HomeMount(base=_fingerprint(mount), home=_fingerprint(home))
+            return homedir.mount(self.agent_home(agent.id), workdir / HOME_DIR)
 
     def _sync_home(self, agent: AgentNode, workdir: Path, before: HomeMount, ctx_id: str = "") -> list[str]:
         """写回；返回产生的冲突副本（相对路径）。"""
-        mount, home = workdir / HOME_DIR, self.agent_home(agent.id)
-        if not mount.is_dir():
-            return []
-        conflicts: list[str] = []
         with self._home_lock(agent.id):
-            after, now = _fingerprint(mount), _fingerprint(home)
-            for rel, fp in after.items():
-                if before.base.get(rel) == fp:
-                    continue  # 这次运行没改
-                dest = rel
-                if now.get(rel) != before.home.get(rel):  # 别的运行在这期间也改过（或删过 / 新建过）
-                    p = Path(rel)
-                    dest = str(p.with_name(f"{p.stem}.conflict-{_safe(ctx_id)[-24:]}{p.suffix}"))
-                    conflicts.append(dest)
-                (home / dest).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(mount / rel, home / dest)
-            for rel in before.base.keys() - after.keys():
-                if now.get(rel) == before.home.get(rel):  # 别人没动过才删
-                    (home / rel).unlink(missing_ok=True)
-            shutil.rmtree(mount, ignore_errors=True)
-        return conflicts
+            return homedir.sync_back(self.agent_home(agent.id), workdir / HOME_DIR, before, ctx_id)
 
     def _home_lock(self, agent_id: str) -> threading.Lock:
         with self._lock:
@@ -1364,7 +1353,7 @@ class Network:
         return out
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
-                timeout_s: float, on_session: Any = None) -> RunResult:
+                timeout_s: float, on_session: Any = None, home: str | None = None) -> RunResult:
         token = secrets.token_urlsafe(18)
         tools = None
         if ctx.tools:  # 席位有用户任务工具；群组里有档案工具；协作工具（委托等）另外要求 delegate
@@ -1423,7 +1412,7 @@ class Network:
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=agent.model,
-                                              approvals=approvals, materials=materials))
+                                              approvals=approvals, materials=materials, home=home))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -1753,6 +1742,8 @@ class Network:
         authority = _as_list(args.get("authority"))
         if len(name) < 2 or len(description) < 2 or not reason:
             return "name、description、reason 都不能为空", True
+        if len(description) > DESCRIPTION_LIMIT:
+            return f"description 太长（{len(description)} 字），请压缩到 {DESCRIPTION_LIMIT} 字以内", True
         unknown = [a for a in authority if a not in AUTHORITIES]
         if unknown:
             return f"未知权限：{', '.join(unknown)}", True
@@ -2374,12 +2365,6 @@ UPDATABLE_AGENT_FIELDS = ("name", "description", "capabilities", "authority", "c
 APPROVAL_CN = {"allowed": "批准", "rejected": "拒绝", "cancelled": "作废", "pending": "待审批"}
 
 
-@dataclass
-class HomeMount:
-    base: dict[str, tuple[int, int]]   # 挂载时拷进工作目录的版本
-    home: dict[str, tuple[int, int]]   # 挂载时 home 里的版本（写回时据此判断期间有没有别的运行改过）
-
-
 def _safe_filename(name: str) -> str:
     """群组档案里的文件名：只取最后一段，去掉路径分隔与隐藏前缀，防止写到档案目录以外。"""
     base = Path(str(name or "").replace("\\", "/")).name.strip().lstrip(".")
@@ -2387,15 +2372,6 @@ def _safe_filename(name: str) -> str:
     if not clean:
         raise NetworkError("文件名无效")
     return clean
-
-
-def _fingerprint(root: Path) -> dict[str, tuple[int, int]]:
-    out = {}
-    for p in root.rglob("*"):
-        if p.is_file() and not p.is_symlink():
-            st = p.stat()
-            out[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns)
-    return out
 
 
 def _clean_model(v: dict[str, Any] | None) -> dict[str, str] | None:

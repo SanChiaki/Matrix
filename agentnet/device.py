@@ -30,8 +30,9 @@ from .runtime import (ENFORCED, RunRequest, RunResult, RuntimeCapabilities)
 # ---- 消息（服务器 → 连接器）----
 HELLO = "hello"                    # {protocol, token, runtime}
 RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation_id, session_id, workdir_ref,
-                                   #  prompt, authority, tool_names, model, materials}
+                                   #  prompt, authority, tool_names, model, materials, home}
                                    #  materials: [{path, data(base64)}] —— 群组文件与委托材料的只读副本
+                                   #  home: "rw" | "ro" | null —— 私有目录怎么挂载；目录本身在连接器本机，不经过网络
 CANCEL = "cancel"                  # {run_id}
 SHUTDOWN = "shutdown"
 
@@ -44,6 +45,7 @@ APPROVAL_REQUEST = "approval.request"  # {run_id, call_id, tool, reason}
 FILE_FETCH = "file.fetch"          # {run_id, call_id, path} —— 服务器要读端侧工作目录里的文件（publish_file）
 
 PROTOCOL = 1
+BLOCKING = (TOOL_CALL, APPROVAL_REQUEST)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
 
 
 class DeviceError(RuntimeError):
@@ -83,6 +85,7 @@ class DeviceRuntime:
         self._runs: dict[str, threading.Event] = {}
         self._results: dict[str, dict[str, Any]] = {}
         self._by_context: dict[str, str] = {}          # 执行上下文 id -> 正在跑的 run_id
+        self._reqs: dict[str, RunRequest] = {}         # run_id -> 这一轮的请求（工具 / 审批 / 事件回调都按它找）
         self._fetches: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self._lock = threading.Lock()
         self._seq = 0
@@ -96,6 +99,7 @@ class DeviceRuntime:
         done = threading.Event()
         with self._lock:
             self._runs[run_id] = done
+            self._reqs[run_id] = req
             self._by_context[req.context_id] = run_id
         payload = {
             "type": RUN_REQUEST, "run_id": run_id,
@@ -104,6 +108,7 @@ class DeviceRuntime:
             "prompt": req.prompt, "authority": list(req.authority),
             "tool_names": list(req.tools.names or []) if req.tools else [],
             "model": req.model, "materials": list(getattr(req, "materials", None) or []),
+            "home": getattr(req, "home", None),
         }
         try:
             self.link.send(payload)
@@ -113,6 +118,7 @@ class DeviceRuntime:
         finally:
             with self._lock:
                 self._runs.pop(run_id, None)
+                self._reqs.pop(run_id, None)
                 if self._by_context.get(req.context_id) == run_id:
                     self._by_context.pop(req.context_id, None)
         if not replied:
@@ -139,9 +145,20 @@ class DeviceRuntime:
     def on_message(self, msg: dict[str, Any], *, on_tool: Callable[[str, dict[str, Any]], tuple[str, bool]] | None = None,
                    on_approval: Callable[[str, str], str] | None = None,
                    on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any] | None:
-        """处理一条来自连接器的消息；需要回执时返回回执。"""
+        """处理一条来自连接器的消息；需要回执时返回回执。
+
+        回调不传时用这一轮 RunRequest 自带的（tools / approvals / on_event）：它们绑定的是网络为这一轮签发的
+        执行上下文令牌，所以连接器只能以“这台设备上正在跑的某一轮”的身份调用，run_id 不认识就拒绝（不变量 10）。
+        tool.call / approval.request 可能阻塞很久（审批等人、publish_file 还要回读文件），
+        传输层要在别的线程里调用这里（见 BLOCKING）。"""
         kind = msg.get("type")
         run_id = str(msg.get("run_id", ""))
+        with self._lock:
+            req = self._reqs.get(run_id)
+        if req is not None:
+            on_tool = on_tool or (req.tools.handler if req.tools else None)
+            on_approval = on_approval or (req.approvals.handler if req.approvals else None)
+            on_event = on_event or req.on_event
         if kind == RUN_EVENT:
             if on_event is not None:
                 on_event(msg.get("event") or {})

@@ -90,7 +90,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   审批上行进入现有 Approval 记录，由 Agent 的所有者决定。
 - **有效权限要再交运行时强制执行能力**：只有该 harness 能强制的权限才进入有效权限，
   只能靠提示词约定的按 `advisory` 记账、自动收窄，并在委托详情里写明原因。
-- 私有目录在端侧就留在用户电脑上，网络不读、不注入、不做写回合并；群组文件按轮下发只读副本。
+- 私有目录在端侧就留在用户电脑上（`<root>/.homes/<agent>/`），网络不读、不注入；服务器只在 `run.request.home`
+  里说明挂载方式（`rw` / `ro` / 不挂载），连接器按与云侧相同的语义（`agentnet/homedir.py`）挂载与写回。群组文件按轮下发只读副本。
 - **端侧不可达是等待，不是失败**：任务进入 `WAITING`，不消耗重试，无限等；对话状态仍是 `waiting`；
   端侧席位只给所有者写一条“已排队”说明。上线后（`register_runtime`）唤醒该设备上等待中的任务，消费积压。
   离线期间按最近一次握手声明的能力计算有效权限（`Agent.enforcement`），不把“未知”当成“全都不行”。
@@ -127,6 +128,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动 |
+| `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
 | `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
 | `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |

@@ -144,3 +144,47 @@ def test_agent_binds_only_to_own_device(tmp_path):
         assert "不存在或属于别人" in str(e)
     else:  # pragma: no cover
         raise AssertionError("吊销的设备不能绑定")
+
+
+def test_connected_device_can_use_network_tools_events_and_approvals(tmp_path):
+    """真实 /api/devices/connect：连接器发来的工具调用、过程事件、审批申请都要交给这一轮的执行上下文处理
+    （不变量 10：身份按执行上下文认定）。审批等人决定期间，同一条连接上的其他消息照常处理。"""
+    import time
+    net = build(tmp_path)
+    alice = next(u.id for u in net.store.users.values() if u.email == "alice@x.io")
+    c = client(net, "alice@x.io")
+    token = c.post("/api/devices", json={"name": "笔记本"}).json()["token"]
+    with c.websocket_connect(f"/api/devices/connect?token={token}") as ws:
+        ws.receive_json()
+        ws.send_json(hello())
+        dev = auth.device_of(net.store, token)
+        for _ in range(100):
+            if dev.id in net._runtimes:
+                break
+            time.sleep(0.01)
+        a = net.create_agent("L", "端侧", [], ["web.research"], actor=alice, device_runtime=dev.id)
+        dm = net.direct_chat(a.id, actor=alice)
+        net.send_message(dm.id, "整理一份周报", actor=alice)  # 后台运行：run.request 发到这条连接上
+        run = ws.receive_json()
+        assert run["type"] == "run.request" and "open_request" in run["tool_names"]
+        rid = run["run_id"]
+        ws.send_json({"type": "approval.request", "run_id": rid, "call_id": "a1", "tool": "write", "reason": "写外面"})
+        ws.send_json({"type": "run.event", "run_id": rid, "event": {"type": "tool_call", "tool": "Read", "input": {}}})
+        ws.send_json({"type": "tool.call", "run_id": rid, "call_id": "c1", "name": "open_request",
+                      "args": {"title": "周报", "expected_outcome": "一份周报"}})
+        reply = ws.receive_json()  # 审批还没决定，工具回执先到
+        assert reply["reply_to"] == "c1" and reply["is_error"] is False, reply
+        assert any(r.title == "周报" for r in net.store.requests.values())
+        for _ in range(100):
+            pending = [ap for ap in net.store.approvals.values() if ap.status == "pending"]
+            if pending:
+                break
+            time.sleep(0.01)
+        net.decide_approval(pending[0].id, False, actor=alice)
+        assert ws.receive_json() == {"reply_to": "a1", "outcome": "rejected"}
+        ws.send_json({"type": "tool.call", "run_id": "run-nope", "call_id": "c2", "name": "open_request", "args": {}})
+        assert ws.receive_json()["is_error"] is True  # 不是这台设备上正在跑的一轮：拒绝
+        ws.send_json({"type": "run.result", "run_id": rid, "session_id": "s", "final_text": "好的"})
+        net.wait_quiet()
+    msg = net.store.conversations[dm.id].messages[-1]
+    assert msg.text == "好的" and any(s.get("tool") == "Read" for s in msg.steps), msg.steps

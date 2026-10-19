@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import shutil
+import sys
 import threading
 import uuid
 from pathlib import Path
@@ -16,10 +18,14 @@ from typing import Any
 
 import base64
 
+from .. import homedir
 from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
+from ..models import AGENT_HOME, GROUP_FILES
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
+
+HOMES = ".homes"   # 私有目录在根目录下的位置：<root>/.homes/<agent>/。工作目录引用不能以 . 开头，碰不到这里
 
 
 class _Run:
@@ -30,6 +36,7 @@ class _Run:
         self.run_id = run_id
         self.cancel = threading.Event()
         self.workdir: Path | None = None
+        self.home: str | None = None      # run.request 的 home："rw" | "ro" | None
 
     def emit(self, event: dict[str, Any]) -> None:
         self.connector.send({"type": RUN_EVENT, "run_id": self.run_id, "event": event})
@@ -58,6 +65,8 @@ class Connector:
         self._replies: dict[str, dict[str, Any]] = {}
         self._runs: dict[str, _Run] = {}
         self._ids = itertools.count(1)
+        self._lock = threading.Lock()
+        self._home_locks: dict[str, threading.Lock] = {}  # 同一 Agent 的并行运行：挂载与写回按 Agent 串行
 
     # ---- 生命周期 ----
     def connect(self, url: str, token: str, *, hello_timeout: float = 20.0) -> None:
@@ -138,7 +147,11 @@ class Connector:
         """服务器要读工作目录里的一个文件（publish_file）。只允许工作目录内的相对路径。"""
         reply: dict[str, Any] = {"reply_to": msg.get("call_id"), "run_id": ""}
         try:
-            path = self._safe_path(self._root_for_fetch(msg), str(msg.get("path", "")))
+            root = self._root_for_fetch(msg)
+            path = self._safe_path(root, str(msg.get("path", "")))
+            for top in (AGENT_HOME, GROUP_FILES):  # 私有目录不经过网络；group/ 是下发的副本，不能当成产物回传
+                if (root / top).resolve() in (path, *path.parents):
+                    raise DeviceError(f"不能发布 {top}/ 里的文件")
             reply["data"] = base64.b64encode(path.read_bytes()).decode()
         except Exception as e:  # noqa: BLE001 —— 越界 / 不存在都回错误
             reply["error"] = str(e)
@@ -184,17 +197,17 @@ class Connector:
             authority=list(msg.get("authority") or []), tool_names=list(msg.get("tool_names") or []),
             session_id=msg.get("session_id"), model=msg.get("model"))
         run.workdir = workdir
+        run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
 
     @staticmethod
     def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
         """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        import shutil
         for top in ("group", "materials"):
             shutil.rmtree(workdir / top, ignore_errors=True)
         for item in materials:
             rel = str(item.get("path", ""))
-            if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts or Path(rel).parts[0] == AGENT_HOME:
                 raise DeviceError(f"非法的材料路径：{rel!r}")
             dest = workdir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -204,19 +217,55 @@ class Connector:
         """`workdir_ref` 是本机工作目录的相对引用（`<agent>/<context>`），拼到用户配置的根目录下。
         必须拒绝绝对路径与 `..`：这个字符串来自网络，不能让它写到根目录以外。"""
         raw = ref.split("/")
-        if not ref or any(p in ("..", "") or Path(p).is_absolute() or "\\" in p for p in raw):
+        # 以 . 开头的段一律拒绝（`.` 本身除外）：私有目录在 <root>/.homes/ 下，工作目录不能落进去
+        if not ref or any(p in ("..", "") or (p.startswith(".") and p != ".") or Path(p).is_absolute()
+                          or "\\" in p for p in raw):
             raise DeviceError(f"非法的工作目录引用：{ref!r}")
         parts = [p for p in raw if p != "."]
         if not parts:
             raise DeviceError(f"非法的工作目录引用：{ref!r}")
         return self.workroot.joinpath(*parts)
 
+    def home_of(self, agent_id: str) -> Path:
+        """Agent 的私有目录：留在本机，跨对话、跨任务保留，网络不读（docs/device-runtimes.md 第 4 节）。"""
+        if not agent_id or agent_id.startswith(".") or any(c in agent_id for c in "/\\") or Path(agent_id).is_absolute():
+            raise DeviceError(f"非法的 Agent id：{agent_id!r}")
+        return self.workroot / HOMES / agent_id
+
+    def _home_lock(self, agent_id: str) -> threading.Lock:
+        with self._lock:
+            return self._home_locks.setdefault(agent_id, threading.Lock())
+
+    def _mount_home(self, run: _Run, spec: RunSpec) -> homedir.HomeMount | None:
+        """按 run.request 的 home 挂载私有目录；不挂载时清掉上一次可能残留的副本。"""
+        dest = spec.workdir / AGENT_HOME
+        if run.home is None:
+            shutil.rmtree(dest, ignore_errors=True)
+            return None
+        with self._home_lock(spec.agent_id):
+            return homedir.mount(self.home_of(spec.agent_id), dest)
+
+    def _unmount_home(self, run: _Run, spec: RunSpec, before: homedir.HomeMount | None) -> None:
+        """rw：三方合并写回；ro：丢弃这次运行里的改动。"""
+        dest = spec.workdir / AGENT_HOME
+        with self._home_lock(spec.agent_id):
+            if before is not None and run.home == "rw":
+                homedir.sync_back(self.home_of(spec.agent_id), dest, before, spec.context_id)
+            shutil.rmtree(dest, ignore_errors=True)
+
     def _execute(self, run: _Run, spec: RunSpec) -> None:
+        before = None
         try:
+            spec.workdir.mkdir(parents=True, exist_ok=True)
+            before = self._mount_home(run, spec)
             outcome = self.driver.run(spec, run, run.cancel)
         except Exception as e:  # noqa: BLE001 —— 驱动异常等价于运行时失败
             outcome = RunOutcome(ok=False, error=f"runtime error: {e!r}")
         finally:
+            try:
+                self._unmount_home(run, spec, before)
+            except Exception as e:  # noqa: BLE001 —— 写回失败不能吞掉这一轮的结果，只在本机提示
+                print(f"私有目录写回失败（{spec.agent_id}）：{e}", file=sys.stderr, flush=True)
             self.bridge.unregister(run.run_id)
             self._runs.pop(run.run_id, None)
         self.send({"type": RUN_RESULT, "run_id": run.run_id, "session_id": outcome.session_id,

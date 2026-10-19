@@ -621,7 +621,7 @@ function renderAgentEditor(isNew = false) {
     <form class="editor" id="agent-form">
       <div class="field"><label for="af-name">名称</label><input id="af-name" name="name" required minlength="2" value="${esc(x.name)}"></div>
       <div class="field"><label for="af-desc">描述</label>
-        <textarea id="af-desc" name="description" rows="3" required minlength="2">${esc(x.description)}</textarea>
+        <textarea id="af-desc" name="description" rows="3" required minlength="2" maxlength="2000">${esc(x.description)}</textarea>
         <p class="hint">会出现在 list_members 里，供其他 Agent 判断能不能委托。</p></div>
       <div class="field"><label for="af-caps">能力</label><input id="af-caps" name="capabilities" value="${esc(x.capabilities.join(", "))}">
         <p class="hint">逗号分隔。</p></div>
@@ -950,7 +950,7 @@ function proposalCard(p) {
       <div class="who"><b>${esc(aname(p.proposer_id))}</b> 提议新建 Agent ${pill("pending")}</div>
       <p class="muted">${esc(p.reason)}</p>
       <div class="field"><label for="pp-name-${esc(p.id)}">名称</label><input id="pp-name-${esc(p.id)}" name="name" value="${esc(p.name)}" required minlength="2"></div>
-      <div class="field"><label for="pp-desc-${esc(p.id)}">描述</label><textarea id="pp-desc-${esc(p.id)}" name="description" rows="2" required minlength="2">${esc(p.description)}</textarea></div>
+      <div class="field"><label for="pp-desc-${esc(p.id)}">描述</label><textarea id="pp-desc-${esc(p.id)}" name="description" rows="2" required minlength="2" maxlength="2000">${esc(p.description)}</textarea></div>
       <div class="field"><label for="pp-caps-${esc(p.id)}">能力</label><input id="pp-caps-${esc(p.id)}" name="capabilities" value="${esc(p.capabilities.join(", "))}"></div>
       <fieldset class="checks"><legend>权限 · 不能超出提议者的有效权限</legend>${boxes || '<span class="muted">提议者没有可授予的权限</span>'}</fieldset>
       <div class="field"><label for="pp-note-${esc(p.id)}">审核意见（会告诉提议者）</label><input id="pp-note-${esc(p.id)}" name="note"></div>
