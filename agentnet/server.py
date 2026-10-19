@@ -561,6 +561,27 @@ def create_app(network: Network) -> FastAPI:
     def task(task_id: str, user: Me) -> dict:
         return network.task_detail(task_id, actor=user.id)
 
+    # ---- 工作目录（只读）：Agent 的所有者看产物 ----
+    def _download(path) -> FileResponse:
+        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.get("/api/tasks/{task_id}/files")
+    def task_files(task_id: str, user: Me) -> dict:
+        return network.workdir_files("task", task_id, actor=user.id)
+
+    @app.get("/api/tasks/{task_id}/files/{path:path}")
+    def task_file(task_id: str, path: str, user: Me) -> FileResponse:
+        return _download(network.workdir_file("task", task_id, path, actor=user.id))
+
+    @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files")
+    def seat_files(conv_id: str, agent_id: str, user: Me) -> dict:
+        return network.workdir_files("seat", f"{conv_id}/{agent_id}", actor=user.id)
+
+    @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files/{path:path}")
+    def seat_file(conv_id: str, agent_id: str, path: str, user: Me) -> FileResponse:
+        return _download(network.workdir_file("seat", f"{conv_id}/{agent_id}", path, actor=user.id))
+
     @app.post("/api/tasks/{task_id}/retry")
     def retry(task_id: str, body: NoteIn, user: Me) -> dict:
         return network.retry_task(task_id, body.note, actor=user.id).to_dict()

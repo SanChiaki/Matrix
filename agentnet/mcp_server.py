@@ -150,7 +150,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "工作目录里的相对路径"},
+                "path": {"type": "string", "description": "工作目录里的相对路径；是目录时打成一个 zip 发布"},
                 "name": {"type": "string", "description": "可选：在档案里的文件名"},
                 "target": {"type": "string", "enum": ["group", "project"],
                            "description": "可选：group（默认，群组档案）或 project（群组所属项目的文件）"},

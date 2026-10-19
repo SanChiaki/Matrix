@@ -70,7 +70,7 @@ TOOL_GUIDE: dict[str, str] = {
     "propose_agent": "群组里没有合适的成员时，提议新建一个 Agent（权限不超出你的有效权限），由人审核；批准后才能委托它。",
     "record_decision": "把群组里定下来的事记进群组档案（内容、理由；可写 supersedes 取代旧决定）。所有成员此后都会看到。",
     "list_decisions": "查看群组档案里的全部决定（include_inactive 包含已取代 / 撤销的）。",
-    "publish_file": ("把当前工作目录里的一个文件发布进群组档案，所有成员此后在 `./group/` 读到；"
+    "publish_file": ("把当前工作目录里的一个文件（或一个目录，打成 zip）发布进群组档案，所有成员此后在 `./group/` 读到；"
                      "群组属于某个项目时，target=project 发布到项目，项目里所有群组此后在 `./project/` 读到"
                      "（只发布别的方面要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改群组 brief（写完整的新 brief 和理由），主持人决定。",
@@ -101,6 +101,7 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
         "委托是异步的：",
         "- 一次工具调用只发一个委托，发完一个再发下一个；不需要也不要在同一条消息里并行发多个。",
         "- 发完委托就可以结束这一轮：简短说明你委托了什么、在等什么。不要空等，也不要猜测结果。",
+        "- 对方交付时，它工作目录里的产物会拷进你工作目录的 `deliveries/<任务 id>/`。",
         "- 成员交付或失败时，网络会在新的一轮里把结果作为通知送给你。届时逐个验收：满意就 accept_task，"
         "需要修改就 request_changes；这一轮结束时仍未处理的交付视为接受。",
         "- 先判断自己能不能做：在你能力范围内的直接做；只把确实需要别的能力的部分委托给合适的成员，不要为了分工而分工。",
@@ -283,6 +284,8 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, group:
         *_writing(),
         "", "## 交付",
         "- 第一行写一句话结论，然后是正文（精炼，800 字以内），最后列出证据来源（URL / 文件 / 子任务 id）。",
+        "- 你在工作目录里写的文件会在交付时整体拷给委托方（`deliveries/<任务 id>/`），不用把文件内容贴进回复；"
+        "草稿与临时文件放在 `tmp/` 下或删掉，它们不随交付。",
         "- 工具调用控制在 6 次以内；无法确认的内容要标注。",
     ]
     if can_delegate:
@@ -331,6 +334,12 @@ def format_delivery(task: Task, agent_name: str) -> str:
     if task.violations:
         head.append("越权记录：" + "；".join(task.violations))
     head.append(f"结果知识 `{r.get('knowledge_key')}`；接受后可在后续委托的 share 中引用。")
+    files = r.get("files") or []
+    if files:
+        shown = "、".join(files[:30]) + (f" 等 {len(files)} 个" if len(files) > 30 else "")
+        head.append(f"产物：已拷进你工作目录的 `{r.get('files_dir')}/`（{shown}），是你自己的副本，可以直接用、改、发布。")
+    if r.get("files_note"):
+        head.append(f"产物说明：{r['files_note']}")
     return "\n".join(head + ["", str(r.get("report", ""))[:6000],
                              "", f"用 accept_task 接受，或用 request_changes 写明要改什么（task_id: {task.id}）。"])
 

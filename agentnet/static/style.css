@@ -588,3 +588,7 @@ pre.cmd { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--border
 #gp-form { margin-top: 20px; }
 #gp-form h3 { margin-bottom: 8px; }
 .board-filter { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 工作目录（只读）：自己的 Agent 写出来的文件 */
+.workdir summary { cursor: pointer; padding: 2px 0; }
+.workdir .files { margin: 4px 0 8px; max-height: 240px; overflow: auto; }

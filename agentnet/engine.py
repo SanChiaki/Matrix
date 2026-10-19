@@ -31,7 +31,8 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
-from . import homedir
+from . import homedir, workdir
+from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
@@ -1169,9 +1170,66 @@ class Network:
                                                       content=text, group_id=g.id, owner_task_id=task.id,
                                                       visible_to=visible)
             task.result = {"summary": _first_line(text)[:200], "report": text, "knowledge_key": key}
+            dst = self._delivery_dir(task)
+        task.result.update(self._hand_over(task, agent, dst))
+        with self._lock:
             task.status, task.error, task.delivered_at = TaskStatus.IN_REVIEW, None, time.time()
         self._save_task(task)
         self._notify_delegator(task, "delivered")
+
+    # 委托产物：执行者工作目录里自己写出来的文件，交付时快照进委托方工作目录的 deliveries/<task_id>/。
+    # 只给直接委托方（不变量 7、9）；之前委托方只能越过沙箱直接读别人的任务目录（沙箱只管写不管读）。
+    def _delivery_dir(self, task: Task) -> Path | None:
+        """调用方持有锁。委托方的工作目录（云侧）下的 deliveries/<task_id>/；委托方在端侧时 None。"""
+        delegator = self.store.agents.get(task.delegator_id)
+        if delegator is None or delegator.device_runtime:
+            return None
+        if task.parent_task_id:
+            return self.store.task_dir(task.parent_task_id) / DELIVERIES / task.id
+        conv = self.store.conversations.get(task.conversation_id)
+        seat = conv.seats.get(task.delegator_id) if conv else None
+        return self.store.root / seat.workdir / DELIVERIES / task.id if seat else None
+
+    def _hand_over(self, task: Task, agent: AgentNode, dst: Path | None) -> dict[str, Any]:
+        """调用方不持有锁。返回记进 task.result 的产物说明。"""
+        if agent.device_runtime:
+            return {"files": [], "files_note": "执行者在端侧：产物留在它的设备上，需要的文件请它用 publish_file 发布"}
+        if dst is None:
+            return {"files": [], "files_note": "委托方在端侧：产物没有放进它的工作目录，可在任务详情里下载"}
+        files, skipped = workdir.snapshot(self.store.task_dir(task.id), dst)
+        out: dict[str, Any] = {"files": files, "files_dir": f"{DELIVERIES}/{task.id}"}
+        if skipped:
+            out["files_note"] = f"另有 {skipped} 个文件超出上限（{workdir.MAX_FILES} 个 / {workdir.MAX_BYTES // 1_000_000} MB）没有拷贝"
+        return out
+
+    # 人看工作目录：Agent 的所有者浏览、下载它的席位与任务工作目录里的产物（只读，口径同委托产物）。
+    # 席位只给 Agent 的所有者（联合群组里过程只给所有者，不变量 13）；任务给两端的所有者（与委托产物的去向一致）。
+    def _workdir_of(self, kind: str, ref: str, actor: str | None) -> Path | None:
+        """kind=seat：ref 是“对话/Agent”；kind=task：ref 是任务 id。端侧执行时返回 None（目录在用户电脑上）。"""
+        with self._lock:
+            if kind == "task":
+                t = self.visible_task(ref, actor)
+                a = self.store.agents.get(t.delegatee_id or "")
+                return None if a is not None and a.device_runtime else self.store.task_dir(t.id)
+            conv_id, _, agent_id = ref.partition("/")
+            conv = self.visible_conv(conv_id, actor)
+            a = self.store.agents.get(agent_id)
+            seat = conv.seats.get(agent_id)
+            self._check(seat is not None and a is not None and (actor is None or a.owner_id in (None, actor)),
+                        f"seat {ref}")
+            return None if a.device_runtime else self.store.root / seat.workdir
+
+    def workdir_files(self, kind: str, ref: str, actor: str | None = None) -> dict[str, Any]:
+        root = self._workdir_of(kind, ref, actor)
+        if root is None:
+            return {"files": [], "note": "在端侧运行：工作目录在所有者的电脑上"}
+        return {"files": workdir.listing(root)}
+
+    def workdir_file(self, kind: str, ref: str, path: str, actor: str | None = None) -> Path:
+        root = self._workdir_of(kind, ref, actor)
+        f = workdir.resolve(root, path) if root is not None else None
+        self._check(f is not None, f"file {path}")
+        return f
 
     def _wait_for_device(self, task: Task) -> None:
         """端侧不可达：任务进入等待。委托方看到它在等设备，而不是失败；不通知、不消耗重试。"""
@@ -1580,8 +1638,11 @@ class Network:
             return "（端侧）" + publish(str(args.get("name", "")).strip() or Path(rel).name, content), False
         root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
         src = (root / rel).resolve()
-        if root.resolve() not in src.parents or not src.is_file():
+        if root.resolve() not in src.parents or not (src.is_file() or src.is_dir()):
             return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/、{PROJECT_FILES}/ 与 {HOME_DIR}/）", True
+        if src.is_dir():  # 多文件交付物：打成一个 zip（缓存、依赖目录不打进去）
+            name = str(args.get("name", "")).strip() or f"{src.name}.zip"
+            return publish(name if name.endswith(".zip") else f"{name}.zip", workdir.pack(src)), False
         return publish(str(args.get("name", "")).strip() or src.name, src.read_bytes()), False
 
     def _tool_propose_brief(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:

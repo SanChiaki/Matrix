@@ -1309,6 +1309,28 @@ async function renderArchive() {
 }
 
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。
+// 自己的 Agent 在这个对话里的席位工作目录：展开时再加载
+const workdirsHtml = (c) => {
+  const mine = Object.keys(c.seats || {}).map(agent).filter((a) => a && a.mine);
+  const open = S.wdOpen || new Set();
+  return mine.length ? `<h3>工作目录</h3>${mine.map((a) => {
+    const base = `/api/conversations/${c.id}/seats/${a.id}/files`, cached = S.wdCache?.[base];
+    return `<details class="workdir" data-wd="${esc(a.id)}" ${open.has(base) ? "open" : ""}><summary>${esc(a.name)}</summary>
+    <div class="wd-body">${cached ? filesHtml(base, cached) : '<span class="muted">加载中…</span>'}</div></details>`;
+  }).join("")}` : "";
+};
+function bindWorkdirs(box, c) {
+  S.wdOpen ||= new Set(); S.wdCache ||= {};
+  const load = async (d) => {
+    const base = `/api/conversations/${c.id}/seats/${d.dataset.wd}/files`;
+    if (!d.open) { S.wdOpen.delete(base); return; }
+    S.wdOpen.add(base);
+    S.wdCache[base] = await api(base).catch((e) => ({ files: [], note: e.message }));
+    $(".wd-body", d).innerHTML = filesHtml(base, S.wdCache[base]);
+  };
+  box.querySelectorAll("[data-wd]").forEach((d) => { d.addEventListener("toggle", () => load(d)); });
+}
+
 function renderMembers() {
   const box = $("#members-panel"), c = S.conv;
   if (!c || c.missing || c.loading || c.failed) { box.innerHTML = ""; return; }
@@ -1317,9 +1339,10 @@ function renderMembers() {
       <span class="s">${whose ? `${esc(whose)} · ` : ""}${esc(a.capabilities.join(" · ") || a.description)}</span></span>${extra}</li>`;
   if (c.kind === "dm") {
     const a = agent(c.agent_id);
-    box.innerHTML = a ? `<ul class="member-list">${row(a)}</ul>
+    box.innerHTML = a ? `${workdirsHtml(c)}<ul class="member-list">${row(a)}</ul>
       <dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${esc(modelLabel(effectiveModel(a)) || "运行时默认")}</dd></dl>
       <p class="hint">私聊里它只能自己完成，不能委托。要让它和别的成员协作，在群聊里 @ 它。</p>` : placeholder("这个 Agent 已删除。");
+    bindWorkdirs(box, c);
     return;
   }
   const g = group(c.group_id);
@@ -1342,7 +1365,9 @@ function renderMembers() {
     <p class="error" role="alert"></p>
     ${joint ? `<p class="hint">联合群组：主持人 ${esc(g.host_email || "")}。每个 Agent 只代表它的所有者，委托只给两端的所有者看，运行过程只给 Agent 的所有者看。</p>
       ${host ? "" : '<p><button type="button" class="ghost sm" id="leave-group">退出群组</button></p>'}` : ""}
-    <p class="hint">移出群组不会打断它手上已经接下的任务，只是之后不能再被 @、被委托。</p>`;
+    <p class="hint">移出群组不会打断它手上已经接下的任务，只是之后不能再被 @、被委托。</p>
+    ${workdirsHtml(c)}`;
+  bindWorkdirs(box, c);
   const err = (e) => { $(".error", box).textContent = e.message; };
   box.querySelectorAll("[data-home]").forEach((cb) => cb.addEventListener("change", async () => {
     if (cb.checked && !confirm("在联合群组里挂载私有目录：它能读到你积累的笔记，其他参与方的消息可能诱导它带出来。确定打开？")) { cb.checked = false; return; }
@@ -1500,13 +1525,18 @@ function delegBtn(t, child) {
     <span class="mission">${esc(t.delegation.mission)}</span></button>`;
 }
 
+// 工作目录（只读）：Agent 的所有者看它写出来的文件；运行时文件、缓存、只读副本不列
+const filesHtml = (base, d) => d.note ? `<p class="hint">${esc(d.note)}</p>`
+  : `<ul class="files">${d.files.map((f) => `<li><a href="${esc(base)}/${f.path.split("/").map(encodeURIComponent).join("/")}" download>${esc(f.path)}</a>
+      <span class="muted">${(f.size / 1024).toFixed(1)} KB</span></li>`).join("") || '<li class="empty">还没有文件</li>'}</ul>`;
+
 async function renderTask(target) {
   // 对话侧栏或看板侧栏：看板里点卡片时传入看板的详情框
   // 看板里委托详情嵌在用户任务详情里（#req-task），不再占用整个看板侧栏
   const box = target || (S.view === "board" ? $("#req-task") : $("#task-detail")), id = S.taskSel;
   if (!box) return;
   if (!id) { box.innerHTML = placeholder("点击对话里的委托，查看授权、约束、实时过程与结果。"); return; }
-  const t = await api(`/api/tasks/${id}`).catch(() => null);
+  const [t, wd] = await Promise.all([api(`/api/tasks/${id}`).catch(() => null), api(`/api/tasks/${id}/files`).catch(() => null)]);
   if (!t || S.taskSel !== id) return;
   const keep = box.scrollTop;
   const d = t.delegation;
@@ -1528,6 +1558,8 @@ async function renderTask(target) {
     ${t.notes.length ? `<h3>进展说明</h3>${t.notes.map((n) => `<div class="md note">${renderMarkdown(n)}</div>`).join("")}` : ""}
     ${t.status === "running" ? `<h3>实时过程</h3>${stepsHtml(t.live || [], true) || '<span class="typing" aria-label="处理中"><i></i><i></i><i></i></span>'}` : ""}
     ${t.result ? `<h3>交付结果</h3><div class="md report">${renderMarkdown(t.result.report)}</div>` : ""}
+    ${wd ? `<h3>执行者工作目录 · ${wd.files.length}</h3>${filesHtml(`/api/tasks/${t.id}/files`, wd)}
+      ${t.result?.files?.length ? `<p class="hint">交付时已拷给委托方：<code>${esc(t.result.files_dir)}/</code></p>` : ""}` : ""}
     ${t.evidence.length ? `<h3>工具调用证据（${t.evidence.length}）</h3><pre>${esc(t.evidence.map((e) => `${e.status} ${e.tool} ${e.input}`).join("\n"))}</pre>` : ""}
     <details><summary>执行者收到的提示词</summary><pre>${esc(t.prompt)}</pre></details>`;
   box.scrollTop = keep;
