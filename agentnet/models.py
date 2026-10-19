@@ -390,6 +390,7 @@ class Project:
     description: str = ""
     brief: str = ""                      # 目标、范围、成功标准、当前阶段：推送给挂载群组的席位与任务
     workstreams: list[Workstream] = field(default_factory=list)
+    decisions: list[Decision] = field(default_factory=list)  # 项目级决定：只有所有者记录，推送给所有挂载群组
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)

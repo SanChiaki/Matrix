@@ -184,7 +184,8 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
 
 
 def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str],
-                   handoffs: list[str] | None = None, recent: list[str] | None = None) -> str:
+                   handoffs: list[str] | None = None, recent: list[str] | None = None,
+                   decisions: list[str] | None = None) -> str:
     """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
     和群组档案一样只是背景，不附带“先读”之类的指令。"""
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
@@ -194,6 +195,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
              f"需要别的方面接着做时，用 `{MCP_PREFIX}handoff` 提交交接（{TOOL_GUIDE['handoff']}）"]
     if p.brief:
         parts += ["### 项目 Brief", p.brief]
+    if decisions:
+        parts += ["### 项目决定（项目所有者定的，所有方面都按这些执行；和群组里的决定冲突时以这里为准）", *decisions]
     if lanes:
         parts += ["### 方面与承担的群组",
                   *(f"- {name}：{'、'.join(gs) or '（还没有群组）'}" + (f" —— {note}" if note else "")

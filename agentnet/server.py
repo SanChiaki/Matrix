@@ -489,6 +489,16 @@ def create_app(network: Network) -> FastAPI:
     def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
         return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
 
+    @app.post("/api/projects/{project_id}/decisions")
+    def record_project_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:
+        network.record_project_decision(project_id, body.text, body.reason, body.supersedes, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/decisions/{decision_id}")
+    def revoke_project_decision(project_id: str, decision_id: str, user: Me) -> dict:
+        network.revoke_project_decision(project_id, decision_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
     # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
     @app.post("/api/projects/{project_id}/files")
     def publish_project_file(project_id: str, body: FileIn, user: Me) -> dict:

@@ -456,3 +456,20 @@ def test_handoff_replaces_and_shows_open_handoffs(tmp_path: Path):
     # 被替换后，项目背景里不再列旧的
     net.send_message(chats["开发组"].id, "@Dev 再看看", actor=alice, background=False)
     assert old.id not in prompts[dev.id][-1].split("进行中的交接")[-1]
+
+
+def test_project_decisions_pushed_to_attached_groups(tmp_path: Path):
+    """不变量 18：项目决定只由所有者记录，推送给挂载群组（被取代的不再推送）；持久化。"""
+    prompts: list[str] = []
+    net, alice, bob, a, g, p, research, proto = setup(tmp_path, prompts)
+    net.assign_group(g.id, p.id, research.id, actor=alice)
+    d1 = net.record_project_decision(p.id, "错误文案按 PRD §5.3 逐字对齐", reason="文档以 PRD 为准", actor=alice)
+    with pytest.raises(NetworkError, match="unknown project"):
+        net.record_project_decision(p.id, "偷偷定", actor=bob)
+    chat = net.group_chat(g.id, actor=alice)
+    net.send_message(chat.id, "@A 写", actor=alice, background=False)
+    assert "项目决定" in prompts[-1] and "逐字对齐" in prompts[-1]
+    net.record_project_decision(p.id, "v1.1.1 修复后再发布文档", supersedes=d1.id, actor=alice)
+    net.send_message(chat.id, "@A 再写", actor=alice, background=False)
+    assert "v1.1.1 修复后再发布文档" in prompts[-1] and "逐字对齐" not in prompts[-1]
+    assert [d.status for d in Store(tmp_path, seed=False).projects[p.id].decisions] == ["superseded", "active"]

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT,
+from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DECISIONS_PUSHED, DESCRIPTION_LIMIT,
                      GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, PROJECT_FILES, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
@@ -2155,7 +2155,9 @@ class Network:
                     + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "") + f"：{_short(_first_line(h.text), 80)}"
                     for h in sorted(self.store.handoffs.values(), key=lambda h: h.created_at)
                     if h.project_id == p.id and self._handoff_open(h)][-12:]
-        return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs, self._recent_files(p))
+        active = [d for d in p.decisions if d.status == "active"][-DECISIONS_PUSHED:]
+        return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs, self._recent_files(p),
+                              [format_decision(d, self._name, self._email) for d in active])
 
     def _recent_files(self, p: Project, n: int = 6) -> list[str]:
         """调用方持有锁。最近发布 / 更新的项目文件（谁、什么时候）：别的方面改了你依赖的文件时，你能看出来。"""
@@ -2433,6 +2435,38 @@ class Network:
         p = self.store.projects.get(h.project_id)
         if p is not None:
             self._project_event(p)
+
+    # ---- 项目决定：只有所有者记录（人对整个项目拍板），推送给所有挂载群组 ----
+    def record_project_decision(self, project_id: str, text: str, reason: str = "", supersedes: str | None = None,
+                                actor: str | None = None) -> Decision:
+        text = text.strip()
+        if not text:
+            raise NetworkError("决定不能为空")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            if supersedes:
+                old = next((d for d in p.decisions if d.id == supersedes and d.status == "active"), None)
+                if old is None:
+                    raise NetworkError(f"没有仍然有效的决定 {supersedes}")
+                old.status = "superseded"
+            d = Decision(id=new_id("dec"), text=text[:2000], reason=reason.strip()[:2000], supersedes=supersedes,
+                         by_user=actor or p.owner_id)
+            p.decisions.append(d)
+            self._project_changed(p, "decision.record", by_user=actor, decision=d.id, supersedes=supersedes)
+            self.store.save()
+        self._project_event(p)
+        return d
+
+    def revoke_project_decision(self, project_id: str, decision_id: str, actor: str | None = None) -> Project:
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            d = next((x for x in p.decisions if x.id == decision_id and x.status == "active"), None)
+            self._check(d is not None, f"decision {decision_id}")
+            d.status = "revoked"
+            self._project_changed(p, "decision.revoke", by_user=actor, decision=d.id)
+            self.store.save()
+        self._project_event(p)
+        return p
 
     def promote_file(self, project_id: str, group_id: str, name: str, actor: str | None = None) -> str:
         """人把一个群组档案文件提升为项目文件（拷贝，群组里的原件不动）。群组必须挂在这个项目里。"""

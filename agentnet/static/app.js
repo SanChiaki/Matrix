@@ -404,6 +404,14 @@ function renderProjectDetail(box, d) {
       <form id="ws-form" class="stack"><label for="ws-name" class="sr-only">方面名称</label><input id="ws-name" required maxlength="80" placeholder="例如：市场调研">
         <label for="ws-desc" class="sr-only">说明</label><input id="ws-desc" maxlength="500" placeholder="说明（可选）"><button type="submit">添加方面</button></form>
     </section>
+    <section class="archive-sec" aria-labelledby="pj-dec"><h3 id="pj-dec">项目决定 · ${d.decisions.filter((x) => x.status === "active").length}</h3>
+      <ul class="decisions">${d.decisions.filter((x) => x.status === "active").map((x) => `<li><span>${esc(x.text)}</span>
+        ${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}<button type="button" class="link" data-rmdec="${esc(x.id)}">撤销</button></li>`).join("")
+        || '<li class="empty">还没有项目决定</li>'}</ul>
+      <form id="pdec-form" class="stack"><label for="pdec-text" class="sr-only">新决定</label><input id="pdec-text" required maxlength="2000" placeholder="对整个项目拍板的事">
+        <label for="pdec-reason" class="sr-only">理由</label><input id="pdec-reason" maxlength="2000" placeholder="理由（可选）"><button type="submit">记录</button></form>
+      <p class="hint">推送给所有挂载群组；和群组里的决定冲突时以项目决定为准。</p>
+    </section>
     <section class="archive-sec" aria-labelledby="pj-groups"><h3 id="pj-groups">承担的群组 · ${d.groups.length}</h3>
       <ul class="refs">${d.groups.map((g) => `<li><a href="#g-${esc(g.id)}"><b>#${esc(g.name)}</b></a>
         <label class="sr-only" for="gws-${esc(g.id)}">${esc(g.name)} 承担的方面</label>
@@ -437,6 +445,11 @@ function renderProjectDetail(box, d) {
     call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
   $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
     call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
+  $("#pdec-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/projects/${d.id}/decisions`, { method: "POST", body: { text: $("#pdec-text").value, reason: $("#pdec-reason").value } }); });
+  box.querySelectorAll("[data-rmdec]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("撤销这个项目决定？之后不再推送给各群组。")) call(`/api/projects/${d.id}/decisions/${b.dataset.rmdec}`, { method: "DELETE" });
+  }));
   box.querySelectorAll("[data-rmpf]").forEach((b) => b.addEventListener("click", () => {
     if (confirm(`删除项目文件 ${b.dataset.rmpf}？`)) call(`/api/projects/${d.id}/files/${encodeURIComponent(b.dataset.rmpf)}`, { method: "DELETE" });
   }));
