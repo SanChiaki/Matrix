@@ -25,8 +25,8 @@ from typing import Any
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT,
                      GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
-                     Delegation, Group, KnowledgeItem, Message, ProjectRef, Proposal, Seat, Task, TaskStatus,
-                     UserRequest, new_id, seat_id)
+                     Delegation, Group, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
+                     UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
                        format_delivery, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
@@ -163,7 +163,7 @@ class Network:
         return g
 
     def hosted_group(self, group_id: str, actor: str | None) -> Group:
-        """只有所有者 / 主持人能做的操作（改名、brief、项目、邀请、删除）。"""
+        """只有所有者 / 主持人能做的操作（改名、brief、资源引用、挂项目、邀请、删除）。"""
         g = self.visible_group(group_id, actor)
         if actor is not None and g.owner_id not in (None, actor):
             raise NetworkError("只有主持人能这样做")
@@ -463,7 +463,7 @@ class Network:
 
     # ================= 群组档案 =================
     # 群组的工作档案，归群组所有、不放进任何项目仓库：brief（每轮推送）、决定（推送仍然有效的）、
-    # 文件（只读挂载到工作目录的 group/）、项目引用（只是指针）。写入只走人的操作或网络工具，记入 log.jsonl（不变量 17）。
+    # 文件（只读挂载到工作目录的 group/）、资源引用（只是指针）。写入只走人的操作或网络工具，记入 log.jsonl（不变量 17）。
     # 联合群组的档案对所有参与者可见：写进去就等于对所有参与方公开。
     def _archive_changed(self, g: Group, action: str, by_user: str | None = None, by_agent: str | None = None,
                          **detail: Any) -> None:
@@ -563,27 +563,27 @@ class Network:
         self._archive_saved(g, f"{self._email(actor)} 撤销了决定 {d.id}")
         return g
 
-    def add_project(self, group_id: str, name: str, location: str, note: str = "",
-                    actor: str | None = None) -> ProjectRef:
+    def add_ref(self, group_id: str, name: str, location: str, note: str = "",
+                actor: str | None = None) -> ResourceRef:
         if not name.strip() or not location.strip():
-            raise NetworkError("项目名称与位置不能为空")
+            raise NetworkError("资源名称与位置不能为空")
         with self._lock:
             g = self.hosted_group(group_id, actor)
-            ref = ProjectRef(id=new_id("proj"), name=name.strip()[:120], location=location.strip()[:500],
-                             note=note.strip()[:500])
-            g.projects.append(ref)
-            self._archive_changed(g, "project.add", by_user=actor, project=ref.id)
-        self._archive_saved(g, f"主持人引用了项目「{ref.name}」")
+            ref = ResourceRef(id=new_id("ref"), name=name.strip()[:120], location=location.strip()[:500],
+                              note=note.strip()[:500])
+            g.refs.append(ref)
+            self._archive_changed(g, "ref.add", by_user=actor, ref=ref.id)
+        self._archive_saved(g, f"主持人引用了资源「{ref.name}」")
         return ref
 
-    def remove_project(self, group_id: str, project_id: str, actor: str | None = None) -> Group:
+    def remove_ref(self, group_id: str, ref_id: str, actor: str | None = None) -> Group:
         with self._lock:
             g = self.hosted_group(group_id, actor)
-            ref = next((r for r in g.projects if r.id == project_id), None)
-            self._check(ref is not None, f"project {project_id}")
-            g.projects.remove(ref)
-            self._archive_changed(g, "project.remove", by_user=actor, project=ref.id)
-        self._archive_saved(g, f"主持人移除了项目引用「{ref.name}」")
+            ref = next((r for r in g.refs if r.id == ref_id), None)
+            self._check(ref is not None, f"ref {ref_id}")
+            g.refs.remove(ref)
+            self._archive_changed(g, "ref.remove", by_user=actor, ref=ref.id)
+        self._archive_saved(g, f"主持人移除了资源引用「{ref.name}」")
         return g
 
     def publish_file(self, group_id: str, name: str, content: bytes, actor: str | None = None,
@@ -1856,9 +1856,12 @@ class Network:
                         if r.message_id == src.id and r.agent_id == ctx.agent_id), None)
             if dup is not None:
                 return f"这条消息已经登记为任务 {dup.id}", True
+            g = self.store.groups.get(conv.group_id or "") if conv else None
             r = UserRequest(id=new_id("req"), conversation_id=ctx.conversation_id, agent_id=ctx.agent_id,
                             requester_id=src.user_id or (conv.owner_id if conv else None), message_id=src.id,
-                            title=title[:120], expected_outcome=outcome[:1000])
+                            title=title[:120], expected_outcome=outcome[:1000],
+                            # 项目归属由网络按所在群组认定，模型不知道也不填（docs/projects.md）
+                            project_id=g.project_id if g else None, workstream_id=g.workstream_id if g else None)
             self.store.requests[r.id] = r
             self.store.save()
         self._request_event(r, f"{self._name(r.agent_id)} 接下了「{r.title}」")
@@ -1985,9 +1988,213 @@ class Network:
     def request_card(self, r: UserRequest) -> dict[str, Any]:
         """调用方持有锁。"""
         conv = self.store.conversations.get(r.conversation_id)
+        p = self.store.projects.get(r.project_id or "")
+        w = next((w for w in p.workstreams if w.id == r.workstream_id), None) if p else None
         return {**r.to_dict(), "agent_name": self._name(r.agent_id), "requester": self._email(r.requester_id),
                 "conversation_title": conv.title if conv else "", "conversation_kind": conv.kind if conv else "",
-                "delegations": len(r.task_ids)}
+                "delegations": len(r.task_ids), "project_name": p.name if p else None,
+                "workstream_name": w.name if w else None}
+
+    # ================= 项目 =================
+    # 目标与汇总层（docs/projects.md）：只有一个所有者，汇总挂载群组里的用户任务，不流动上下文——
+    # 群组、委托、知识、可见性的规则都不因项目改变。第一阶段 Agent 不知道项目存在：提示词、群聊里都不出现。
+    # 只有内部群组能挂进项目，而且群组与项目必须是同一个所有者（不跨信任域，不变量 16）。
+    def can_see_project(self, p: Project, actor: str | None) -> bool:
+        return actor is None or p.owner_id in (None, actor)
+
+    def visible_project(self, project_id: str, actor: str | None) -> Project:
+        p = self.store.projects.get(project_id)
+        self._check(p is not None and self.can_see_project(p, actor), f"project {project_id}")
+        return p
+
+    def _workstream(self, p: Project, workstream_id: str) -> Workstream:
+        w = next((w for w in p.workstreams if w.id == workstream_id), None)
+        self._check(w is not None, f"workstream {workstream_id}")
+        return w
+
+    def create_project(self, name: str, description: str = "", brief: str = "",
+                       actor: str | None = None) -> Project:
+        name, brief = name.strip(), brief.strip()
+        if not name:
+            raise NetworkError("项目名称不能为空")
+        if len(brief) > BRIEF_LIMIT:
+            raise NetworkError(f"brief 最多 {BRIEF_LIMIT} 字")
+        with self._lock:
+            p = Project(id=new_id("prj"), name=name[:80], owner_id=actor, description=description.strip()[:500],
+                        brief=brief)
+            self.store.projects[p.id] = p
+            self.store.save()
+        self._project_event(p)
+        return p
+
+    def update_project(self, project_id: str, name: str | None = None, description: str | None = None,
+                       brief: str | None = None, actor: str | None = None) -> Project:
+        if name is not None and not name.strip():
+            raise NetworkError("项目名称不能为空")
+        if brief is not None and len(brief.strip()) > BRIEF_LIMIT:
+            raise NetworkError(f"brief 最多 {BRIEF_LIMIT} 字")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            if name is not None:
+                p.name = name.strip()[:80]
+            if description is not None:
+                p.description = description.strip()[:500]
+            if brief is not None:
+                p.brief = brief.strip()
+            p.updated_at = time.time()
+            self.store.save()
+        self._project_event(p)
+        return p
+
+    def delete_project(self, project_id: str, actor: str | None = None) -> None:
+        """群组与任务本身不动，只清空它们的项目归属。"""
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            groups = [g for g in self.store.groups.values() if g.project_id == p.id]
+            for g in groups:
+                g.project_id = g.workstream_id = None
+            for r in self.store.requests.values():
+                if r.project_id == p.id:
+                    r.project_id = r.workstream_id = None
+            del self.store.projects[p.id]
+            self.store.save()
+        self.bus.emit("project.deleted", project_id=p.id, owner_id=p.owner_id)
+        for g in groups:
+            self.bus.emit("group.updated", group=g.to_dict())
+
+    def add_workstream(self, project_id: str, name: str, description: str = "",
+                       actor: str | None = None) -> Workstream:
+        if not name.strip():
+            raise NetworkError("方面名称不能为空")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            w = Workstream(id=new_id("ws"), name=name.strip()[:80], description=description.strip()[:500])
+            p.workstreams.append(w)
+            p.updated_at = time.time()
+            self.store.save()
+        self._project_event(p)
+        return w
+
+    def update_workstream(self, project_id: str, workstream_id: str, name: str | None = None,
+                          description: str | None = None, actor: str | None = None) -> Workstream:
+        if name is not None and not name.strip():
+            raise NetworkError("方面名称不能为空")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            w = self._workstream(p, workstream_id)
+            if name is not None:
+                w.name = name.strip()[:80]
+            if description is not None:
+                w.description = description.strip()[:500]
+            p.updated_at = time.time()
+            self.store.save()
+        self._project_event(p)
+        return w
+
+    def remove_workstream(self, project_id: str, workstream_id: str, actor: str | None = None) -> Project:
+        """引用它的群组、任务回到“未分方面”，仍在项目里。"""
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            w = self._workstream(p, workstream_id)
+            p.workstreams.remove(w)
+            groups = [g for g in self.store.groups.values() if g.workstream_id == w.id]
+            for g in groups:
+                g.workstream_id = None
+            for r in self.store.requests.values():
+                if r.workstream_id == w.id:
+                    r.workstream_id = None
+            p.updated_at = time.time()
+            self.store.save()
+        self._project_event(p)
+        for g in groups:
+            self.bus.emit("group.updated", group=g.to_dict())
+        return p
+
+    def assign_group(self, group_id: str, project_id: str | None, workstream_id: str | None = None,
+                     actor: str | None = None) -> Group:
+        """把群组挂进项目 / 换方面 / 移出（project_id=None）。群组里未结束的任务跟着改，已结束的保留当时的归属。"""
+        with self._lock:
+            g = self.hosted_group(group_id, actor)
+            old = self.store.projects.get(g.project_id or "")
+            p = None
+            if project_id:
+                p = self.visible_project(project_id, actor)
+                if g.kind != "internal":
+                    raise NetworkError("联合群组暂时不能挂进项目：项目信息对其他参与方露出多少还没定（docs/projects.md）")
+                if g.owner_id != p.owner_id:
+                    raise NetworkError("群组和项目不是同一个所有者")
+                if workstream_id:
+                    self._workstream(p, workstream_id)
+            elif workstream_id:
+                raise NetworkError("不在项目里的群组不能指定方面")
+            g.project_id = p.id if p else None
+            g.workstream_id = (workstream_id or None) if p else None
+            conv = self._group_chat_of(g.id)
+            for r in self.store.requests.values():
+                if conv is not None and r.conversation_id == conv.id and r.status in ("in_progress", "in_review"):
+                    r.project_id, r.workstream_id = g.project_id, g.workstream_id
+            self.store.save()
+        self.bus.emit("group.updated", group=g.to_dict())
+        for pj in {x.id: x for x in (old, p) if x is not None}.values():
+            self._project_event(pj)
+        return g
+
+    def assign_request(self, request_id: str, project_id: str | None, workstream_id: str | None = None,
+                       actor: str | None = None) -> UserRequest:
+        """手动归类一张任务卡（主要是私聊里的）。只能归到自己的项目；联合群组里的任务不能归类（别的参与方也看得到这张卡）。"""
+        with self._lock:
+            r = self._request(request_id, actor)
+            conv = self.store.conversations.get(r.conversation_id)
+            g = self.store.groups.get(conv.group_id or "") if conv else None
+            if g is not None and g.kind != "internal":
+                raise NetworkError("联合群组里的任务暂时不能归到项目")
+            p = None
+            if project_id:
+                p = self.visible_project(project_id, actor)
+                a = self.store.agents.get(r.agent_id)
+                if a is not None and a.owner_id != p.owner_id:
+                    raise NetworkError("接任务的 Agent 和项目不是同一个所有者")
+                if workstream_id:
+                    self._workstream(p, workstream_id)
+            elif workstream_id:
+                raise NetworkError("不在项目里的任务不能指定方面")
+            old = self.store.projects.get(r.project_id or "")
+            r.project_id = p.id if p else None
+            r.workstream_id = (workstream_id or None) if p else None
+            self.store.save()
+        self._request_event(r)
+        for pj in {x.id: x for x in (old, p) if x is not None}.values():
+            self._project_event(pj)
+        return r
+
+    def _project_event(self, p: Project) -> None:
+        """调用方不持有锁。项目事件只推给所有者（event_view）。"""
+        with self._lock:
+            summary = self.project_summary(p, None)
+        self.bus.emit("project.updated", project=summary, owner_id=p.owner_id)
+
+    def project_summary(self, p: Project, actor: str | None) -> dict[str, Any]:
+        """调用方持有锁。列表里的项目：方面、挂载群组数、按状态的任务计数（只算 actor 看得到的）。"""
+        reqs = [r for r in self.store.requests.values() if r.project_id == p.id and self.can_see_request(r, actor)]
+        counts = {s: sum(1 for r in reqs if r.status == s) for s in ("in_progress", "in_review", "completed", "cancelled")}
+        return {**p.to_dict(), "group_count": sum(1 for g in self.store.groups.values() if g.project_id == p.id),
+                "request_counts": counts}
+
+    def projects(self, actor: str | None = None) -> list[dict[str, Any]]:
+        with self._lock:
+            return [self.project_summary(p, actor) for p in sorted(self.store.projects.values(), key=lambda p: -p.updated_at)
+                    if self.can_see_project(p, actor)]
+
+    def project_detail(self, project_id: str, actor: str | None = None) -> dict[str, Any]:
+        """项目页：挂载的群组、按方面汇总的任务。任务按现有可见性过滤，项目不让人看到本来看不到的东西。"""
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            groups = [{"id": g.id, "name": g.name, "kind": g.kind, "workstream_id": g.workstream_id,
+                       "member_count": len(g.member_ids)}
+                      for g in self.store.groups.values() if g.project_id == p.id and self.can_see_group(g, actor)]
+            reqs = sorted((r for r in self.store.requests.values()
+                           if r.project_id == p.id and self.can_see_request(r, actor)), key=lambda r: -r.created_at)
+            return {**self.project_summary(p, actor), "groups": groups, "requests": [self.request_card(r) for r in reqs]}
 
     # ================= 人：续接 =================
     def resume_conversation(self, conv_id: str, agent_id: str | None = None, note: str = "",
@@ -2152,6 +2359,8 @@ class Network:
                 "invitations": [self.invitation_view(g) for g in self.store.groups.values()
                                 if actor is not None and actor in g.invited],
                 "approvals": [ap.to_dict() for ap in self.pending_approvals(actor)],
+                "projects": [self.project_summary(p, actor) for p in self.store.projects.values()
+                             if self.can_see_project(p, actor)],
                 "authorities": AUTHORITIES,
                 "seq": self.bus.last_seq,
             }
@@ -2172,8 +2381,10 @@ class Network:
             suggestions = [{"group_id": g.id, "group_name": g.name, **asdict(x)} for g in self.store.groups.values()
                            if g.owner_id in (None, actor) or actor is None
                            for x in g.suggestions if x.status == "pending"]
+            projects = [{"id": p.id, "name": p.name, "workstreams": [asdict(w) for w in p.workstreams]}
+                        for p in self.store.projects.values() if self.can_see_project(p, actor)]
         return {"requests": cards, "approvals": [a.to_dict() for a in self.pending_approvals(actor)],
-                "proposals": proposals, "ledger": busy, "invitations": invitations, "suggestions": suggestions}
+                "projects": projects, "proposals": proposals, "ledger": busy, "invitations": invitations, "suggestions": suggestions}
 
     def conversation_detail(self, conv_id: str, actor: str | None = None) -> dict[str, Any]:
         """联合群组里按人过滤：委托只给两端所有者；过程、唤醒摘要、失败说明、审批只给 Agent 的所有者。"""
@@ -2254,6 +2465,13 @@ class Network:
         with self._lock:
             if ev_type == "group.invited":
                 return data if data.get("user_id") == actor else None
+            if ev_type in ("project.updated", "project.deleted"):  # 项目只有所有者看得到
+                if data.get("owner_id") not in (None, actor):
+                    return None
+                if ev_type == "project.updated":
+                    p = self.store.projects.get(data["project"]["id"])
+                    return {**data, "project": self.project_summary(p, actor)} if p else data
+                return data
             if ev_type == "group.left":  # 退出的人据此从界面上移除群组
                 g = self.store.groups.get(data.get("group_id", ""))
                 return data if data.get("user_id") == actor or (g and self.can_see_group(g, actor)) else None

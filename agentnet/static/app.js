@@ -152,6 +152,8 @@ async function start() {
   $("#runtime").textContent = `Runtime · ${info.runtime}`;
   if (info.default_model) $("#runtime").title = `未单独配置模型的 Agent 使用：${modelLabel(info.default_model)}`;
   $("#board-agent").addEventListener("change", () => { S.boardAgent = $("#board-agent").value; renderBoard(); });
+  $("#board-project").addEventListener("change", () => { S.boardProject = $("#board-project").value; renderBoard(); });
+  $("#project-new").addEventListener("click", () => { S.projectSel = null; S.projectNew = true; renderProjectsView(); });
   // 走 URL 而不是直接 show()：否则切回对话页时 URL 还停在 "#network"，
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
@@ -177,7 +179,7 @@ async function start() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "board", "agents", "groups", "devices"];
+  const PLAIN = ["network", "projects", "board", "agents", "groups", "devices"];
   // 参照 Raft：#g-<群组> 打开群组的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   const m = hash.match(/^(g|dm)-(.+)$/);
   if (m) {
@@ -228,8 +230,143 @@ function render() {
   $("#todo-count").hidden = !todo;
   $("#todo-count").textContent = todo;
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
-  ({ network: renderGraph, board: loadBoard, agents: renderAgentsView, groups: renderGroupsView, chats: renderChats,
-     devices: renderDevicesView })[S.view]();
+  ({ network: renderGraph, projects: renderProjectsView, board: loadBoard, agents: renderAgentsView, groups: renderGroupsView,
+     chats: renderChats, devices: renderDevicesView })[S.view]();
+}
+
+// ---------- 项目（docs/projects.md）：目标与汇总层 ----------
+// 一个项目分几个方面，每个方面由若干内部群组承担；这里只汇总它们的用户任务，不让群组互通上下文。
+const project = (id) => S.snap?.projects?.find((p) => p.id === id);
+const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
+
+async function renderProjectsView() {
+  const ps = S.snap.projects || [];
+  if (S.projectSel && !project(S.projectSel)) S.projectSel = null;
+  $("#project-list").innerHTML = ps.map((pj) => {
+    const c = pj.request_counts || {};
+    return `<li class="${S.projectSel === pj.id ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-id="${esc(pj.id)}" aria-label="查看项目 ${esc(pj.name)}">
+        <div class="card-head"><span class="name">${esc(pj.name)}</span><span class="pill">${pj.group_count} 个群组</span></div>
+        <p class="card-desc">${esc(pj.description || pj.brief || "没有描述")}</p>
+        <div class="card-meta">${tags(pj.workstreams.map((w) => w.name))}</div>
+      </button>
+      <div class="card-foot"><span class="muted">进行中 ${c.in_progress || 0} · 待验收 ${c.in_review || 0} · 已完成 ${c.completed || 0}</span></div>
+    </div></li>`;
+  }).join("") || '<li class="empty">还没有项目。新建一个，把相关的群组挂进来。</li>';
+  $("#project-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
+    S.projectSel = b.dataset.id; S.projectNew = false; renderProjectsView();
+  }));
+  const box = $("#project-detail");
+  if (S.projectNew) { renderProjectForm(box); $("#project-overview").innerHTML = ""; return; }
+  if (!S.projectSel) {
+    $("#project-overview").innerHTML = "";
+    box.innerHTML = placeholder("选择一个项目，或新建。");
+    return;
+  }
+  const id = S.projectSel;
+  const d = await api(`/api/projects/${id}`).catch(() => null);
+  if (!d || S.projectSel !== id || S.view !== "projects") return;
+  renderProjectOverview(d);
+  // 正在编辑时不重绘侧栏（事件流会频繁触发刷新）
+  if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea, select")) return;
+  renderProjectDetail(box, d);
+}
+
+// 主区：按方面分栏，列出承担的群组和它们的任务
+function renderProjectOverview(d) {
+  const lanes = [...d.workstreams.map((w) => ({ id: w.id, name: w.name, note: w.description })),
+    { id: null, name: "未分方面", note: "" }];
+  const card = (r) => `<li><a class="task-card" href="#board" data-req="${esc(r.id)}">
+      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span>${reqPill(r.status)}</span>
+      <span class="mission">${esc(r.title)}</span>
+      <span class="meta"><span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span></span></a></li>`;
+  const html = lanes.map((ln) => {
+    const groups = d.groups.filter((g) => (g.workstream_id || null) === ln.id);
+    const reqs = d.requests.filter((r) => (r.workstream_id || null) === ln.id);
+    if (ln.id === null && !groups.length && !reqs.length) return "";
+    const open = reqs.filter(REQ_OPEN), done = reqs.filter((r) => !REQ_OPEN(r));
+    return `<section class="board-col ws-lane" aria-label="${esc(ln.name)}">
+      <h3>${esc(ln.name)}<span class="count">${open.length} 进行中</span></h3>
+      ${ln.note ? `<p class="hint">${esc(ln.note)}</p>` : ""}
+      <p class="ws-groups">${groups.map((g) => `<a class="tag" href="#g-${esc(g.id)}">#${esc(g.name)}</a>`).join("") || '<span class="muted">还没有群组承担</span>'}</p>
+      <ul>${open.map(card).join("") || '<li class="empty">没有进行中的任务</li>'}</ul>
+      ${done.length ? `<details><summary>已结束 · ${done.length}</summary><ul>${done.map(card).join("")}</ul></details>` : ""}
+    </section>`;
+  }).join("");
+  $("#project-overview").innerHTML = `<h2 class="section-title">${esc(d.name)}</h2>
+    ${d.brief ? `<div class="brief md">${renderMarkdown(d.brief)}</div>` : ""}
+    <div class="board-cols ws-lanes">${html || '<p class="muted">先在右侧加几个方面，再把群组挂进来。</p>'}</div>`;
+  $("#project-overview").querySelectorAll("[data-req]").forEach((a) => a.addEventListener("click", () => {
+    S.reqSel = a.dataset.req; S.taskSel = null; S.boardProject = `p:${d.id}`;
+  }));
+}
+
+function renderProjectForm(box, d = null) {
+  box.innerHTML = `<h2 class="panel-title">${d ? "编辑项目" : "新建项目"}</h2>
+    <form class="editor" id="project-form">
+      <div class="field"><label for="pf-name">名称</label><input id="pf-name" name="name" required maxlength="80" value="${esc(d?.name || "")}"></div>
+      <div class="field"><label for="pf-desc">描述</label><textarea id="pf-desc" name="description" rows="2" maxlength="500">${esc(d?.description || "")}</textarea></div>
+      <div class="field"><label for="pf-brief">Brief</label><textarea id="pf-brief" name="brief" rows="5" maxlength="4000"
+        placeholder="目标、范围、成功标准、当前阶段">${esc(d?.brief || "")}</textarea>
+        <p class="hint">现在只给你自己看，不会推送给 Agent。</p></div>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">${d ? "保存" : "创建"}</button>${d ? "" : '<button type="button" class="ghost" id="pf-cancel">取消</button>'}</div>
+    </form>`;
+  const f = $("#project-form", box);
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = { name: f.name.value.trim(), description: f.description.value.trim(), brief: f.brief.value.trim() };
+    try {
+      const r = await api(d ? `/api/projects/${d.id}` : "/api/projects", { method: d ? "PATCH" : "POST", body });
+      S.projectSel = r.id; S.projectNew = false; document.activeElement?.blur(); await reload();
+    } catch (err) { $(".error", f).textContent = err.message; }
+  });
+  $("#pf-cancel", box)?.addEventListener("click", () => { S.projectNew = false; renderProjectsView(); });
+}
+
+function renderProjectDetail(box, d) {
+  // 只有内部群组、而且是自己主持的，才能挂进项目（docs/projects.md §4）
+  const free = S.snap.groups.filter((g) => g.kind === "internal" && isHost(g) && !g.project_id);
+  const wsOpts = (cur) => `<option value="">未分方面</option>` + d.workstreams.map((w) =>
+    `<option value="${esc(w.id)}" ${cur === w.id ? "selected" : ""}>${esc(w.name)}</option>`).join("");
+  renderProjectForm(box, d);
+  box.insertAdjacentHTML("beforeend", `
+    <section class="archive-sec" aria-labelledby="pj-ws"><h3 id="pj-ws">方面 · ${d.workstreams.length}</h3>
+      <ul class="refs">${d.workstreams.map((w) => `<li><b>${esc(w.name)}</b>${w.description ? `<span class="muted"> · ${esc(w.description)}</span>` : ""}
+        <button type="button" class="link" data-rmws="${esc(w.id)}">删除</button></li>`).join("") || '<li class="empty">还没有方面</li>'}</ul>
+      <form id="ws-form" class="stack"><label for="ws-name" class="sr-only">方面名称</label><input id="ws-name" required maxlength="80" placeholder="例如：市场调研">
+        <label for="ws-desc" class="sr-only">说明</label><input id="ws-desc" maxlength="500" placeholder="说明（可选）"><button type="submit">添加方面</button></form>
+    </section>
+    <section class="archive-sec" aria-labelledby="pj-groups"><h3 id="pj-groups">承担的群组 · ${d.groups.length}</h3>
+      <ul class="refs">${d.groups.map((g) => `<li><a href="#g-${esc(g.id)}"><b>#${esc(g.name)}</b></a>
+        <label class="sr-only" for="gws-${esc(g.id)}">${esc(g.name)} 承担的方面</label>
+        <select id="gws-${esc(g.id)}" data-gws="${esc(g.id)}">${wsOpts(g.workstream_id)}</select>
+        <button type="button" class="link" data-unlink="${esc(g.id)}">移出</button></li>`).join("") || '<li class="empty">还没有群组</li>'}</ul>
+      ${free.length ? `<form id="link-form" class="stack"><label for="link-group" class="sr-only">要挂进来的群组</label>
+        <select id="link-group">${free.map((g) => `<option value="${esc(g.id)}">#${esc(g.name)}</option>`).join("")}</select>
+        <label for="link-ws" class="sr-only">承担的方面</label><select id="link-ws">${wsOpts(null)}</select>
+        <button type="submit">挂进项目</button></form>` : '<p class="hint">没有可以挂进来的群组：一个群组最多属于一个项目，联合群组暂时不能挂。</p>'}
+      <p class="hint">群组挂进来以后，它里面新登记的任务自动归到这个项目；换方面时，未结束的任务跟着走。</p>
+    </section>
+    <div class="actions"><button type="button" class="danger" id="pj-del">删除项目</button></div>
+    <p class="error" role="alert" id="pj-err"></p>`);
+  const err = (e) => { $("#pj-err", box).textContent = e.message; };
+  const call = async (path, opts) => { try { await api(path, opts); document.activeElement?.blur(); await reload(); } catch (e) { err(e); } };
+  $("#ws-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/projects/${d.id}/workstreams`, { method: "POST", body: { name: $("#ws-name").value, description: $("#ws-desc").value } }); });
+  box.querySelectorAll("[data-rmws]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("删除这个方面？承担它的群组和任务仍在项目里，只是回到“未分方面”。")) call(`/api/projects/${d.id}/workstreams/${b.dataset.rmws}`, { method: "DELETE" });
+  }));
+  box.querySelectorAll("[data-gws]").forEach((sel) => sel.addEventListener("change", () =>
+    call(`/api/groups/${sel.dataset.gws}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: sel.value || null } })));
+  box.querySelectorAll("[data-unlink]").forEach((b) => b.addEventListener("click", () =>
+    call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
+  $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
+  $("#pj-del", box).addEventListener("click", async () => {
+    if (!confirm(`删除项目 ${d.name}？群组和任务都还在，只是不再属于这个项目。`)) return;
+    try { await api(`/api/projects/${d.id}`, { method: "DELETE" }); S.projectSel = null; await reload(); } catch (e) { err(e); }
+  });
 }
 
 // ---------- 看板（参照 Raft task board） ----------
@@ -256,7 +393,15 @@ function renderBoard() {
   const sel = $("#board-agent"), want = S.boardAgent || "";
   sel.innerHTML = `<option value="">全部 Agent</option>` + ids.map((id) => `<option value="${esc(id)}">${esc(aname(id))}</option>`).join("");
   sel.value = ids.includes(want) ? want : "";
-  const reqs = b.requests.filter((r) => !sel.value || r.agent_id === sel.value);
+  // 筛选：项目 / 方面（p:<项目>、w:<方面>、none = 不属于项目）
+  const psel = $("#board-project"), pwant = S.boardProject || "";
+  const popts = [["", "全部项目"], ...(b.projects || []).flatMap((pj) => [[`p:${pj.id}`, pj.name],
+    ...pj.workstreams.map((w) => [`w:${w.id}`, `${pj.name} · ${w.name}`])]), ["none", "不属于项目"]];
+  psel.innerHTML = popts.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  psel.value = popts.some(([v]) => v === pwant) ? pwant : "";
+  const inProject = (r) => !psel.value || (psel.value === "none" ? !r.project_id
+    : psel.value.startsWith("p:") ? r.project_id === psel.value.slice(2) : r.workstream_id === psel.value.slice(2));
+  const reqs = b.requests.filter((r) => (!sel.value || r.agent_id === sel.value) && inProject(r));
 
   // 待我处理：工作区外溢申请（我是 Agent 所有者）+ 我对话里的 Agent 提议
   const todo = [
@@ -296,7 +441,8 @@ function renderBoard() {
   const card = (r) => `<li><button type="button" class="task-card ${S.reqSel === r.id ? "selected" : ""}" data-id="${esc(r.id)}">
       <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span></span>
       <span class="mission">${esc(r.title)}</span>
-      <span class="meta"><span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span>
+      <span class="meta">${r.project_name ? `<span class="proj">${esc(r.project_name)}${r.workstream_name ? ` · ${esc(r.workstream_name)}` : ""}</span>` : ""}
+        <span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span>
         ${r.requester_id && r.requester_id !== S.me?.id ? `<span>${esc(r.requester)} 下发</span>` : ""}
         ${r.delegations ? `<span>委托 ${r.delegations}</span>` : ""}${r.revisions ? `<span>退回 ${r.revisions}</span>` : ""}</span>
     </button></li>`;
@@ -316,6 +462,18 @@ function renderBoard() {
     <span class="muted">同时在做 ${items.length} 件：</span>${items.map((it) => `<span class="tag">${esc(it.kind === "task" ? `委托：${it.what}` : it.what)}${it.user ? ` · ${esc(it.user)}` : ""}</span>`).join("")}</li>`).join("");
   if (S.reqSel && reqs.some((r) => r.id === S.reqSel)) renderRequest($("#board-detail"));
   else $("#board-detail").innerHTML = placeholder("点一张任务卡片，查看交付、验收，以及 Agent 为它发起的委托。");
+}
+
+// 任务的项目归属：群聊里的跟随群组；私聊里的由下发的人手动归类
+function reqProjectField(r, mine) {
+  const label = r.project_name ? `${esc(r.project_name)}${r.workstream_name ? ` · ${esc(r.workstream_name)}` : ""}` : "";
+  if (r.conversation_kind !== "dm" || !mine || !(S.snap.projects || []).length)
+    return label ? `<p class="muted">项目：${label}${r.conversation_kind === "dm" ? "" : "（跟随群组）"}</p>` : "";
+  const cur = `${r.project_id || ""}:${r.workstream_id || ""}`;
+  const opts = [[":", "不属于项目"], ...S.snap.projects.flatMap((pj) => [[`${pj.id}:`, pj.name],
+    ...pj.workstreams.map((w) => [`${pj.id}:${w.id}`, `${pj.name} · ${w.name}`])])];
+  return `<div class="field"><label for="req-proj">项目</label><select id="req-proj">${opts.map(([v, t]) =>
+    `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></div>`;
 }
 
 // 用户任务详情：交代了什么、交付了什么、验收；为它发起的委托点开看（复用委托详情）
@@ -339,6 +497,7 @@ async function renderRequest(box = $("#board-detail")) {
       <div class="actions"><button type="submit" class="ghost">退回修改</button></div></form>`
       : r.status === "in_review" ? `<p class="hint">等 ${esc(r.requester)} 验收。</p>` : ""}
     ${(r.status === "in_progress" || r.status === "in_review") && mine ? '<p><button type="button" class="link" id="req-cancel">取消这个任务</button></p>' : ""}
+    ${reqProjectField(r, mine)}
     <div class="actions"><a class="button ghost sm" href="#${esc(r.conversation_id)}">打开对话</a></div>
     ${r.tasks.length ? `<h3>为它发起的委托 · ${r.tasks.length}</h3><div class="delegs">${r.tasks.map((t) => delegBtn(t, !!t.parent_task_id)).join("")}</div>
       <div id="req-task"></div>` : ""}
@@ -348,6 +507,11 @@ async function renderRequest(box = $("#board-detail")) {
     try { await api(`/api/requests/${id}/review`, { method: "POST", body: { accept, feedback: accept ? "" : $("#req-feedback").value } }); await loadBoard(); }
     catch (e) { err(e); }
   };
+  $("#req-proj", box)?.addEventListener("change", async (e) => {
+    const [pid, ws] = (e.target.value || ":").split(":");
+    try { await api(`/api/requests/${id}/project`, { method: "PUT", body: { project_id: pid || null, workstream_id: ws || null } }); await loadBoard(); }
+    catch (e2) { err(e2); }
+  });
   $("#req-accept", box)?.addEventListener("click", () => review(true));
   $("#req-review", box)?.addEventListener("submit", (e) => { e.preventDefault(); review(false); });
   $("#req-cancel", box)?.addEventListener("click", async () => {
@@ -753,7 +917,8 @@ function renderGroupEditor(isNew = false) {
       <div class="actions"><button type="submit">${g ? "保存" : "创建"}</button>
         ${g ? '<button type="button" class="ghost" id="gf-chat">进入群聊</button><button type="button" class="danger" id="gf-del">删除群组</button>' : ""}</div>
     </form>
-    ${g?.kind === "joint" ? '<div id="gf-people"></div>' : ""}`;
+    ${g?.kind === "joint" ? '<div id="gf-people"></div>' : ""}
+    ${g?.kind === "internal" ? groupProjectForm(g) : ""}`;
   const f = $("#group-form");
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -772,6 +937,29 @@ function renderGroupEditor(isNew = false) {
     catch (err) { $(".error", f).textContent = err.message; }
   });
   if (g?.kind === "joint") renderPeople($("#gf-people"), g);
+  $("#gp-form")?.addEventListener("change", async (e) => {
+    const pf = $("#gp-form"), pid = pf.project.value || null;
+    if (e.target === pf.project) pf.workstream.value = "";
+    try {
+      await api(`/api/groups/${g.id}/project`, { method: "PUT", body: { project_id: pid, workstream_id: pid ? pf.workstream.value || null : null } });
+      await reload();
+    } catch (err) { $(".error", pf).textContent = err.message; }
+  });
+}
+
+// 内部群组挂进自己的项目、选承担的方面（docs/projects.md）
+function groupProjectForm(g) {
+  const ps = S.snap.projects || [];
+  if (!ps.length && !g.project_id) return `<p class="hint">想把它和别的群组放进同一件事里汇总？先去「项目」页新建项目。</p>`;
+  const cur = project(g.project_id);
+  return `<form id="gp-form" class="editor" aria-label="所属项目"><h3>所属项目</h3>
+    <div class="field"><label for="gp-project">项目</label><select id="gp-project" name="project">
+      <option value="">不属于项目</option>${ps.map((pj) => `<option value="${esc(pj.id)}" ${pj.id === g.project_id ? "selected" : ""}>${esc(pj.name)}</option>`).join("")}</select></div>
+    ${cur ? `<div class="field"><label for="gp-ws">承担的方面</label><select id="gp-ws" name="workstream"><option value="">未分方面</option>
+      ${cur.workstreams.map((w) => `<option value="${esc(w.id)}" ${w.id === g.workstream_id ? "selected" : ""}>${esc(w.name)}</option>`).join("")}</select></div>`
+      : '<input type="hidden" name="workstream" value="">'}
+    <p class="hint">只影响汇总：群组里新登记的任务归到这个项目。Agent 不会因此看到别的群组的任何内容。</p>
+    <p class="error" role="alert"></p></form>`;
 }
 
 // 联合群组的参与者：主持人邀请、撤回、移出
@@ -1012,8 +1200,8 @@ function sideTab(which) {
   if (which === "archive") renderArchive();
 }
 
-// ---------- 群组档案：brief、决定、文件、项目引用 ----------
-// 归群组所有，不放进任何项目仓库。brief 和仍然有效的决定每轮推送给成员；文件只读挂载；项目只是引用。
+// ---------- 群组档案：brief、决定、文件、资源引用 ----------
+// 归群组所有，不放进任何项目仓库。brief 和仍然有效的决定每轮推送给成员；文件只读挂载；资源只是引用。
 const BRIEF_STALE_DAYS = 14;
 
 async function renderArchive() {
@@ -1067,12 +1255,12 @@ async function renderArchive() {
         || '<li class="empty">还没有文件。Agent 可以用 publish_file 发布，你也可以上传文本文件。</li>'}</ul>
       <label class="button ghost sm file-up">上传文本文件<input type="file" id="file-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
     </section>
-    <section class="archive-sec" aria-labelledby="ar-proj"><h3 id="ar-proj">项目引用</h3>
-      <ul class="projects">${d.projects.map((x) => `<li><b>${esc(x.name)}</b> <code>${esc(x.location)}</code>${x.note ? `<span class="muted"> · ${esc(x.note)}</span>` : ""}
-        ${host ? `<button type="button" class="link" data-rmproj="${esc(x.id)}">移除</button>` : ""}</li>`).join("") || '<li class="empty">还没有引用项目</li>'}</ul>
-      ${host ? `<form id="project-form" class="stack"><label for="pj-name" class="sr-only">项目名称</label><input id="pj-name" required placeholder="名称">
-        <label for="pj-loc" class="sr-only">位置</label><input id="pj-loc" required placeholder="路径或 URL">
-        <label for="pj-note" class="sr-only">说明</label><input id="pj-note" placeholder="说明（可选）"><button type="submit">添加</button></form>` : ""}
+    <section class="archive-sec" aria-labelledby="ar-refs"><h3 id="ar-refs">相关资源</h3>
+      <ul class="refs">${d.refs.map((x) => `<li><b>${esc(x.name)}</b> <code>${esc(x.location)}</code>${x.note ? `<span class="muted"> · ${esc(x.note)}</span>` : ""}
+        ${host ? `<button type="button" class="link" data-rmref="${esc(x.id)}">移除</button>` : ""}</li>`).join("") || '<li class="empty">还没有引用资源（仓库、路径、文档）</li>'}</ul>
+      ${host ? `<form id="ref-form" class="stack"><label for="rf-name" class="sr-only">资源名称</label><input id="rf-name" required placeholder="名称">
+        <label for="rf-loc" class="sr-only">位置</label><input id="rf-loc" required placeholder="路径或 URL">
+        <label for="rf-note" class="sr-only">说明</label><input id="rf-note" placeholder="说明（可选）"><button type="submit">添加</button></form>` : ""}
       <p class="hint">引用只是指针，不授予任何访问权限：Agent 能不能读某个仓库，仍由它自身的权限决定。</p>
     </section>
     <p class="error" role="alert"></p>`;
@@ -1097,9 +1285,9 @@ async function renderArchive() {
     if (file.size > 200_000) { err(new Error("文件太大：最多 200 KB")); return; }
     call(`/api/groups/${gid}/files`, { method: "POST", body: { name: file.name, content: await file.text() } });
   });
-  $("#project-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
-    call(`/api/groups/${gid}/projects`, { method: "POST", body: { name: $("#pj-name").value, location: $("#pj-loc").value, note: $("#pj-note").value } }); });
-  box.querySelectorAll("[data-rmproj]").forEach((b) => b.addEventListener("click", () => call(`/api/groups/${gid}/projects/${b.dataset.rmproj}`, { method: "DELETE" })));
+  $("#ref-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/groups/${gid}/refs`, { method: "POST", body: { name: $("#rf-name").value, location: $("#rf-loc").value, note: $("#rf-note").value } }); });
+  box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => call(`/api/groups/${gid}/refs/${b.dataset.rmref}`, { method: "DELETE" })));
 }
 
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。

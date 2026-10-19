@@ -541,12 +541,12 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 .archive-sec .md.brief { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
 .archive-sec details { margin-top: 8px; }
 .archive-sec details summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }
-.decisions, .files, .projects, .suggestions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.decisions, .files, .refs, .suggestions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .decisions li { padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; }
 .decisions li.superseded, .decisions li.revoked { opacity: .6; }
 .decisions li.superseded > div:first-child, .decisions li.revoked > div:first-child { text-decoration: line-through; }
 .decisions .meta { margin-top: 4px; font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
-.files li, .projects li { font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.files li, .refs li { font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .suggestions li { padding: 10px 12px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); background: var(--accent-soft); margin-top: 8px; }
 .file-up { margin-top: 8px; display: inline-flex; cursor: pointer; }
 .warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--human) 8%, transparent); color: var(--human); }
@@ -572,3 +572,19 @@ pre.cmd { margin: 8px 0 12px; padding: 10px 12px; border: 1px solid var(--border
 .theme-toggle { margin-left: auto; border-color: transparent; }
 .theme-toggle .moon, :root[data-theme="light"] .theme-toggle .sun { display: none; }
 :root[data-theme="light"] .theme-toggle .moon { display: block; }
+/* 项目：按方面分栏的汇总 */
+#project-overview { margin-top: 24px; }
+#project-overview .section-title { font-size: 16px; margin: 0 0 8px; }
+#project-overview > .brief { padding: 10px 12px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); font-size: 13px; }
+.ws-lanes { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.ws-lane .hint { margin: -4px 0 8px; }
+.ws-groups { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; font-size: 12px; }
+.ws-groups a.tag { text-decoration: none; }
+.ws-lane details { margin-top: 8px; font-size: 12px; }
+.ws-lane details ul { margin-top: 8px; }
+.ws-lane .task-card .route { align-items: center; }
+.task-card .meta .proj { color: var(--text-2); }
+.archive-sec .refs li select { width: auto; font-size: 12px; padding: 2px 6px; }
+#gp-form { margin-top: 20px; }
+#gp-form h3 { margin-bottom: 8px; }
+.board-filter { display: flex; gap: 8px; flex-wrap: wrap; }

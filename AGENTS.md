@@ -32,7 +32,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | KnowledgeItem | 任务结果沉淀为知识，key 形如 `<task_id>:result` |
 | UserRequest（用户任务） | 人交代给 Agent 的一件**有交付目标**的事，看板上的一张卡。由接任务的 Agent 判断并登记（`open_request`）：闲聊、问答不算。来源消息与下发人由网络从这一轮送达的 @ 它的消息里认定，不信任模型自报。`in_progress → in_review → completed`（或 `cancelled`）；交付（`deliver_request`）前它为此发起的委托必须都有结果；下发人验收或退回（原会话返工）。为它发起的委托记在 `task_ids`，只在任务详情里展示 |
 | Proposal | Agent 提议新建的 Agent，由**提议者 Agent 的所有者**审核（`owner_id`），新 Agent 归他；`max_authority` 记录提议者当时的有效权限 |
-| 群组档案 | 归群组所有：`brief`（目标、范围、成功标准、当前阶段，≤4000 字，**每轮推送**）、`decisions`（有效 / 被取代 / 撤销，推送最近的有效决定）、文件（`groups/<id>/files/`，每轮只读拷进工作目录的 `group/`，运行后丢弃改动）、`projects`（项目引用，只是指针，不授予访问权限）、`suggestions`（brief 修改建议）。`archive_rev` 每变一次 +1，席位 / 任务只在版本变化时重新推送 |
+| 群组档案 | 归群组所有：`brief`（目标、范围、成功标准、当前阶段，≤4000 字，**每轮推送**）、`decisions`（有效 / 被取代 / 撤销，推送最近的有效决定）、文件（`groups/<id>/files/`，每轮只读拷进工作目录的 `group/`，运行后丢弃改动）、`refs`（资源引用：仓库 / 路径 / 文档，只是指针，不授予访问权限；旧版叫 `projects`）、`suggestions`（brief 修改建议）。`archive_rev` 每变一次 +1，席位 / 任务只在版本变化时重新推送 |
 
 ### 群聊：被 @ 的成员接任务
 
@@ -56,12 +56,22 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - 主持人按邮箱邀请（`POST /api/groups/<id>/invitations`），对方在“待我处理”里接受或拒绝。接受前只看得到群组名、描述、主持人。
 - 每个参与者只能加减自己的 Agent；主持人能移出任何 Agent 与参与者。参与者退出 / 被移出时他的 Agent 一并移出（已接下的任务照常完成），
-  之后看不到群组与群聊。主持人不能退出，只能删除。改名、brief、项目引用、清空群聊、删除群组只有主持人能做。
+  之后看不到群组与群聊。主持人不能退出，只能删除。改名、brief、资源引用、清空群聊、删除群组只有主持人能做。
 - 任何参与者能 @ 任何成员。被 @ 的 Agent 仍**以它的所有者的名义、用所有者的资源**运行：外溢审批找它的所有者，提议由它的所有者审核。
 - 可见性（不变量 13）：人的消息、Agent 的最终回复、成员与档案事件对所有参与者可见；Agent 回复的过程（`steps` / `wake`）、运行中的进度、
   席位失败说明、外溢申请只给这个 Agent 的所有者；委托（详情、看板、事件）只给两端 Agent 的所有者（`Task.owners`）。
 - 私有目录默认**不挂载**（其他参与方的消息是不可信内容，群聊是外泄通道），所有者可以按（Agent, 群组）打开（`home_enabled`）。
 - 工作台账在联合群组里只列同一群组的条目，其余只给数量（不变量 16）。
+
+### 项目：目标与汇总层（设计见 [docs/projects.md](docs/projects.md)）
+
+- `Project`：一个所有者、brief、方面（`workstreams`）。内部群组挂进项目并承担一个方面（`Group.project_id` / `workstream_id`，
+  一个群组最多属于一个项目）；群组与项目必须同一个所有者，**联合群组暂时不能挂**。
+- **项目汇总工作，不流动上下文**：群组、委托、知识、可见性规则都不因项目改变。第一阶段 Agent 不知道项目存在：
+  提示词与群聊里都不出现项目（`test_agents_do_not_see_projects`）。
+- 用户任务的项目归属由网络按所在群组认定（`open_request` 时），不让模型填；群组换方面 / 移出时未结束的任务跟着改，
+  已结束的保留历史。私聊里的任务由下发的人手动归类（`assign_request`），联合群组里的任务不能归类。
+- 项目只有所有者看得到（无权限按 404）；`project.*` 事件只推给所有者（`event_view`）。
 
 ### 群组档案：群组的上下文不放进项目仓库
 
@@ -134,9 +144,10 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `agentnet/static/` | 单页前端（原生 JS） |
-| `tests/` | `test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案） |
+| `tests/` | `test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案）、`test_projects.py`（项目） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
+| `docs/projects.md` | 项目：目标与汇总层的设计与分阶段计划 |
 
 ### 常用命令
 
