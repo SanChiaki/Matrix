@@ -28,7 +28,7 @@ from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, AUTONOMY, LEAD_TOOLS
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
-                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_review, format_handoff_notice, format_ledger, format_open_requests, format_project,
+                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_review, format_request_review, format_handoff_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir, workdir
@@ -72,6 +72,7 @@ class ExecContext:
     in_project: bool = False        # 所在群组挂在项目里：有项目工具（handoff）
     lead: bool = False              # 项目负责人在它统筹的群聊席位里：有负责人工具（review_handoff）
     reviews: list[str] = field(default_factory=list)  # 这一轮送达的待确认交接（本轮结束仍未处理即转给人）
+    request_reviews: list[str] = field(default_factory=list)  # 这一轮送达的待负责人验收的用户任务（同上）
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -1293,8 +1294,11 @@ class Network:
             elif kind == "request_changes":
                 r = self.store.requests.get(it["request_id"])
                 if r is not None and r.status == "in_progress":
-                    blocks.append(format_request_changes(r, self._who(r.requester_id).strip()))
-                    wake.append(f"{self._who(r.requester_id).strip()} 退回了 {r.id}")
+                    p = self.store.projects.get(r.project_id or "")
+                    who = (f"项目负责人 {self._name(p.lead_agent_id)}" if r.reviewer == "lead" and p and p.lead_agent_id
+                           else self._who(r.requester_id).strip())
+                    blocks.append(format_request_changes(r, who))
+                    wake.append(f"{who} 退回了 {r.id}")
             elif kind == "handoff_review":
                 with self._lock:
                     h = self.store.handoffs.get(it["handoff_id"])
@@ -1309,6 +1313,17 @@ class Network:
                                                         others))
                 ctx.reviews.append(h.id)
                 wake.append(f"待确认的交接 {h.id}")
+            elif kind == "request_review":
+                with self._lock:
+                    r = self.store.requests.get(it["request_id"])
+                    if r is None or not ctx.lead or self._request_awaiting(r) != "lead":
+                        continue
+                    h = self._request_handoff(r)
+                    blocks.append(format_request_review(r, self._name(r.agent_id), self._group_name(
+                                                            getattr(self.store.conversations.get(r.conversation_id), "group_id", "") or ""),
+                                                        h.text if h else "", self.limits.max_revisions - r.lead_returns))
+                ctx.request_reviews.append(r.id)
+                wake.append(f"待验收的 {r.id}")
             elif kind in ("handoff", "handoff_done"):
                 h = self.store.handoffs.get(it["handoff_id"])
                 if h is None:
@@ -2007,9 +2022,13 @@ class Network:
             if running:
                 return f"还有委托没有回报（{', '.join(running)}）：等它们交付或失败后再交付", True
             r.status, r.summary, r.delivered_at = "in_review", summary[:4000], time.time()
+            lead = self._route_request(r)
             self.store.save()
-        self._request_event(r, f"{self._name(r.agent_id)} 完成了「{r.title}」，等{self._who(r.requester_id)}验收")
-        return f"已交付 {r.id}，等下发的人验收；要修改会通知你。", False
+        who = f"项目负责人 {self._name(lead)} " if lead else self._who(r.requester_id)
+        self._request_event(r, f"{self._name(r.agent_id)} 完成了「{r.title}」，等{who}验收")
+        if lead:
+            self._kick_lead(self.store.projects[r.project_id])
+        return f"已交付 {r.id}，等{'项目负责人' if lead else '下发的人'}验收；要修改会通知你。", False
 
     def _tool_accept_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         rid = str(args.get("request_id", "")).strip()
@@ -2101,6 +2120,8 @@ class Network:
                 if not feedback:
                     raise NetworkError("退回时写明要改什么")
                 r.status, r.revisions, r.feedback, r.delivered_at = "in_progress", r.revisions + 1, feedback[:2000], None
+                if actor is not None:  # 人亲自退回：之后的验收归人，不再交给负责人
+                    r.reviewer, r.escalation = "owner", "下发的人接手了验收"
                 seat = self._seat(self._conv(r.conversation_id), r.agent_id)
                 if seat.blocked:
                     self._unblock(seat)
@@ -2141,6 +2162,8 @@ class Network:
         return {**r.to_dict(), "agent_name": self._name(r.agent_id), "requester": self._email(r.requester_id),
                 "conversation_title": conv.title if conv else "", "conversation_kind": conv.kind if conv else "",
                 "delegations": len(r.task_ids), "project_name": p.name if p else None,
+                "awaiting": self._request_awaiting(r),
+                "reviewed_by_agent_name": self._name(r.reviewed_by_agent) if r.reviewed_by_agent else None,
                 "workstream_name": w.name if w else None}
 
     # ================= 项目 =================
@@ -2329,7 +2352,7 @@ class Network:
     # ---- 负责人统筹：项目负责人 Agent 代所有者确认交接，网络强制边界，超出就转给人（不变量 19、20）----
     def _lead_of(self, p: Project | None) -> tuple[str, Group] | None:
         """调用方持有锁。打开了负责人统筹、负责人仍在一个挂载群组里：(负责人 id, 它统筹的群组)。"""
-        if p is None or p.autonomy != "lead" or not p.lead_agent_id:
+        if p is None or p.autonomy not in ("lead", "lead_accept") or not p.lead_agent_id:
             return None
         g = self.store.groups.get(p.lead_group_id or "")
         if g is None or self._project_of(g) is not p or p.lead_agent_id not in g.member_ids \
@@ -2410,17 +2433,98 @@ class Network:
 
     def _unreviewed(self, ctx: ExecContext) -> None:
         """这一轮送达、负责人却没处理的交接：转给人，不无限挂着（参照 _auto_accept 的“送达即处理”）。"""
-        left = []
+        left, reqs = [], []
         with self._lock:
             for hid in ctx.reviews:
                 h = self.store.handoffs.get(hid)
                 if h is not None and self._awaiting(h) == "lead":
                     self._escalate(h, "项目负责人这一轮没有处理")
                     left.append(h)
-            if left:
+            for rid in ctx.request_reviews:
+                r = self.store.requests.get(rid)
+                if r is not None and self._request_awaiting(r) == "lead":
+                    r.reviewer, r.escalation = "owner", "项目负责人这一轮没有验收"
+                    reqs.append(r)
+            if left or reqs:
                 self.store.save()
         for h in left:
             self._handoff_event(h)
+        for r in reqs:
+            self._request_event(r, f"「{r.title}」转给{self._who(r.requester_id)}验收：项目负责人这一轮没有处理")
+
+    def _request_handoff(self, r: UserRequest) -> Handoff | None:
+        """调用方持有锁。引出这个用户任务的交接（交接发出的那条消息就是任务的来源消息）。"""
+        return next((h for h in self.store.handoffs.values() if h.status == "sent" and h.message_id == r.message_id), None)
+
+    def _request_awaiting(self, r: UserRequest) -> str | None:
+        """调用方持有锁。已交付的任务待谁验收：lead / owner。负责人验收关了或负责人不在了，回到人。"""
+        if r.status != "in_review":
+            return None
+        p = self.store.projects.get(r.project_id or "")
+        if r.reviewer == "lead" and p is not None and p.autonomy == "lead_accept" and self._lead_of(p) is not None:
+            return "lead"
+        return "owner"
+
+    def _route_request(self, r: UserRequest) -> str | None:
+        """调用方持有锁。交付时决定谁验收：负责人确认的交接引出的、不是负责人自己做的任务交给负责人（lead_accept）；
+        其余照旧归下发的人。返回负责人 id（交给了负责人）或 None。"""
+        p = self.store.projects.get(r.project_id or "")
+        lead = self._lead_of(p) if p is not None and p.autonomy == "lead_accept" else None
+        h = self._request_handoff(r)
+        if lead is None or h is None or not h.approved_by_agent or r.agent_id == lead[0] or r.reviewer != "lead" and r.escalation:
+            return None
+        if r.lead_returns >= self.limits.max_revisions:
+            r.reviewer, r.escalation = "owner", f"项目负责人已经退回 {r.lead_returns} 次"
+            return None
+        seat = self._lead_seat(p)
+        if seat is None or seat.blocked:
+            r.reviewer, r.escalation = "owner", "项目负责人的席位出错暂停了"
+            return None
+        r.reviewer, r.escalation = "lead", ""
+        seat.inbox.append({"kind": "request_review", "request_id": r.id})
+        return lead[0]
+
+    def _tool_review_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        if not ctx.lead:
+            return "只有项目负责人在它统筹的群聊里能验收", True
+        rid = str(args.get("request_id", "")).strip()
+        decision = str(args.get("decision", "")).strip().lower()
+        feedback = str(args.get("feedback") or "").strip()
+        with self._lock:
+            r = self.store.requests.get(rid)
+            g = self.store.groups.get(ctx.group_id or "")
+            p = self._project_of(g)
+            if r is None or p is None or r.project_id != p.id or self._request_awaiting(r) != "lead":
+                return f"{rid} 不是等你验收的任务（可能已经处理、转给了人，或不在这个项目里）", True
+            if decision not in ("accept", "changes", "escalate"):
+                return "decision 只能是 accept、changes 或 escalate", True
+            if decision == "changes" and not feedback:
+                return "退回时在 feedback 里写明要改什么", True
+            running = [t for t in r.task_ids if (t2 := self.store.tasks.get(t)) and t2.status == TaskStatus.RUNNING]
+            if decision == "accept" and running:
+                return f"还有委托没有回报（{', '.join(running)}）：等它们交付或失败后再验收", True
+            lead = self._name(ctx.agent_id)
+            if decision == "accept":
+                self._complete_request(r, None)
+                r.reviewed_by_agent = ctx.agent_id
+                text = f"项目负责人 {lead} 验收了「{r.title}」"
+            elif decision == "escalate":
+                r.reviewer, r.escalation = "owner", f"项目负责人转给人：{feedback or '没有写原因'}"
+                text = f"项目负责人 {lead} 把「{r.title}」转给{self._who(r.requester_id)}验收"
+            else:
+                r.status, r.revisions, r.feedback, r.delivered_at = "in_progress", r.revisions + 1, feedback[:2000], None
+                r.lead_returns += 1
+                seat = self._seat(self._conv(r.conversation_id), r.agent_id)
+                if seat.blocked:
+                    self._unblock(seat)
+                seat.inbox.append({"kind": "request_changes", "request_id": r.id})
+                text = f"项目负责人 {lead} 退回了「{r.title}」：{_short(feedback, 80)}"
+            self.store.save()
+        self._request_event(r, text)
+        if decision == "changes":
+            self._kick("seat", seat_id(r.conversation_id, r.agent_id))
+        return {"accept": f"已验收 {r.id}。", "escalate": f"已把 {r.id} 转给人验收。",
+                "changes": f"已退回 {r.id}，对方会在原会话里返工后重新交付。"}[decision], False
 
     def _tool_review_handoff(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         if not ctx.lead:
@@ -2488,16 +2592,27 @@ class Network:
                 raise NetworkError("打开负责人统筹前先指定项目负责人")
             before = (p.lead_agent_id, p.lead_group_id, p.autonomy)
             p.lead_agent_id, p.lead_group_id, p.autonomy = agent_id or None, g.id if g else None, autonomy
-            moved = []
+            moved, reqs, routed = [], [], []
             if before != (p.lead_agent_id, p.lead_group_id, p.autonomy):
                 for h in self.store.handoffs.values():
                     if h.project_id == p.id and h.status == "pending" and h.reviewer == "lead":
                         self._escalate(h, "项目负责人或统筹方式改了，转给人确认")
                         moved.append(h)
+                for r in self.store.requests.values():
+                    if r.project_id == p.id and r.status == "in_review" and r.reviewer == "lead":
+                        r.reviewer, r.escalation = "owner", "项目负责人或统筹方式改了，转给人验收"
+                        reqs.append(r)
+                    elif r.project_id == p.id and r.status == "in_review" and autonomy == "lead_accept" \
+                            and not r.escalation and self._route_request(r):
+                        routed.append(r)  # 打开负责人验收时，已经在等验收、符合条件的交给负责人
                 self._project_changed(p, "project.lead", by_user=actor, lead=p.lead_agent_id, autonomy=autonomy)
             self.store.save()
         for h in moved:
             self._handoff_event(h)
+        for r in reqs + routed:
+            self._request_event(r)
+        if routed:
+            self._kick_lead(p)
         self._project_event(p)
         return p
 
@@ -3302,6 +3417,7 @@ TOOL_HANDLERS = {
     "propose_brief": Network._tool_propose_brief,
     "handoff": Network._tool_handoff,
     "review_handoff": Network._tool_review_handoff,
+    "review_request": Network._tool_review_request,
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
     "accept_request": Network._tool_accept_request,

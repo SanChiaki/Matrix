@@ -199,6 +199,22 @@ TOOLS = [
         },
     },
     {
+        "name": "review_request",
+        "description": ("项目负责人验收一个由它确认的交接引出的、已交付的任务：验收、退回（写明要改什么）或交给人。"
+                        "验收后等它完成的交接会自动发出。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "任务 id（req-…）"},
+                "decision": {"type": "string", "enum": ["accept", "changes", "escalate"],
+                             "description": "accept 验收；changes 退回返工；escalate 交给人验收"},
+                "feedback": {"type": "string", "description": "退回时要改什么；交给人时的理由"},
+            },
+            "required": ["request_id", "decision"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_brief",
         "description": "建议修改群组 brief（目标、范围、成功标准、当前阶段）。写完整的新 brief；主持人采纳后才生效。",
         "inputSchema": {

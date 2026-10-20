@@ -163,3 +163,88 @@ def test_project_lead_api(tmp_path: Path):
     # 负责人离开它统筹的群组：统筹失效，交接回到人
     net.update_group(next(g for g in net.store.groups.values() if g.name == "产品组").id, member_ids=[], actor=alice)
     assert not ca.get(f"/api/projects/{p.id}").json()["lead_active"]
+
+
+
+def test_lead_accepts_requests_from_its_handoffs(tmp_path: Path):
+    """不变量 20、10：打开 lead_accept 后，负责人确认的交接引出的、不是它自己做的任务交付后由负责人验收（身份由网络认定），
+    验收后等它的交接自动发出；负责人退回有上限，超了转给人；负责人一轮没处理、人亲自退回后验收归人；
+    开工任务与负责人自己做的仍归人验收；改回只确认交接时，等负责人验收的转给人。"""
+    runs: list[tuple[str, str, list[str]]] = []
+    plan: dict[str, list] = {}
+    lead_says: list[tuple[str, str]] = []
+
+    def handler(call: ScriptCall) -> str:
+        runs.append((call.agent_id, call.prompt, call.tool_names))
+        last = ""
+        for name, kw in plan.pop(call.agent_id, []):
+            if kw.get("after") == "$prev":  # 依赖同一轮里上一条交接
+                kw = {**kw, "after": re.search(r"ho-[0-9a-f]{8}", last).group()}
+            last = call.tool(name, **kw)
+        if call.agent_id == pm.id and "待你确认的交接" in call.prompt:
+            hid = re.search(r"待你确认的交接 (ho-[0-9a-f]{8})", call.prompt).group(1)
+            call.tool("review_handoff", handoff_id=hid, decision="confirm")
+        if call.agent_id == pm.id and "待你验收的任务" in call.prompt and lead_says:
+            rid = re.search(r"待你验收的任务 (req-[0-9a-f]{8})", call.prompt).group(1)
+            decision, fb = lead_says.pop(0)
+            if decision == "switch":  # 所有者在负责人验收之前改回只确认交接
+                net.set_project_lead(p.id, pm.id, "lead", actor=alice)
+            else:
+                call.tool("review_request", request_id=rid, decision=decision, feedback=fb)
+        if "（@ 你）" in call.prompt or "退回了" in call.prompt:  # 被 @ 就登记并交付；被退回就重新交付
+            mine = [r for r in net.store.requests.values() if r.agent_id == call.agent_id and r.status == "in_progress"]
+            rid = mine[-1].id if mine else re.search(r"req-[0-9a-f]{8}", call.tool(
+                "open_request", title="做事", expected_outcome="结果")).group()
+            call.tool("deliver_request", request_id=rid, summary="做完了")
+        return "ok"
+    net, alice, bob, pm, eng, qa, p, chats = build(tmp_path, handler, Limits(lead_pair=10))
+    net.set_project_lead(p.id, pm.id, "lead_accept", actor=alice)
+
+    def kickoff(text: str, lead: list[tuple[str, str]], qa_after: bool = False) -> tuple:
+        plan[pm.id] = [("handoff", dict(group="开发组", agent="Eng", message=text))]
+        if qa_after:
+            plan[pm.id].append(("handoff", dict(group="测试组", agent="QA", message=f"验收 {text}", after="$prev")))
+        lead_says[:] = lead
+        net.send_message(chats["产品组"].id, f"@PM {text}", actor=alice, background=False)
+        net.wait_quiet()
+        h = next(x for x in net.store.handoffs.values() if x.text == text)
+        return h, next(r for r in net.store.requests.values() if r.message_id == h.message_id)
+
+    # 负责人退回一次、再验收；验收后等它的测试交接自动发出。人只发了开工那一条消息
+    h, dev = kickoff("实现 v2", [("changes", "补测试"), ("accept", "")], qa_after=True)
+    assert dev.status == "completed" and dev.reviewed_by_agent == pm.id and dev.reviewed_by is None and dev.lead_returns == 1
+    assert any("项目负责人 PM 退回了" in pr for a, pr, _ in runs if a == eng.id)
+    h_qa = next(x for x in net.store.handoffs.values() if x.text == "验收 实现 v2")
+    assert h.returned_at is not None and h_qa.status == "sent" and any(a == qa.id for a, *_ in runs)
+    assert any(m.role == "event" and "项目负责人 PM 验收了" in m.text for m in chats["开发组"].messages)
+    start = next(r for r in net.store.requests.values() if r.agent_id == pm.id)
+    assert start.status == "in_review" and start.reviewer == "owner"  # 开工任务归人
+    r_qa = next(r for r in net.store.requests.values() if r.agent_id == qa.id)  # 送到负责人，它这一轮没说话：转给人
+    assert r_qa.status == "in_review" and "没有验收" in r_qa.escalation
+    assert all("mcp__agentnet__review_request" not in t for a, _, t in runs if a != pm.id)
+    assert {r["id"]: r["awaiting"] for r in net.board(alice)["requests"]}[start.id] == "owner"
+
+    # 退回上限：超了转给人
+    net.limits.max_revisions = 1
+    _, dev = kickoff("实现 v3", [("changes", "再改"), ("accept", "")])
+    assert dev.status == "in_review" and dev.reviewer == "owner" and "已经退回 1 次" in dev.escalation
+    net.limits.max_revisions = 3
+
+    # 负责人一轮没处理：转给人；人亲自退回后，重新交付也归人
+    _, dev = kickoff("实现 v4", [])
+    assert dev.reviewer == "owner" and "没有验收" in dev.escalation
+    net.review_request(dev.id, False, "人来看", actor=alice)
+    net.wait_quiet()
+    assert dev.status == "in_review" and dev.reviewer == "owner" and "接手" in dev.escalation
+
+    # 负责人自己做的（别的组交接给它）：归人验收
+    plan[eng.id] = [("handoff", dict(group="产品组", agent="PM", message="澄清需求"))]
+    net.send_message(chats["开发组"].id, "@Eng 有疑问找 PM", actor=alice, background=False)
+    net.wait_quiet()
+    h = next(x for x in net.store.handoffs.values() if x.text == "澄清需求")
+    mine = next(r for r in net.store.requests.values() if r.message_id == h.message_id)
+    assert mine.agent_id == pm.id and mine.status == "in_review" and mine.reviewer == "owner"
+
+    # 改回只确认交接：等负责人验收的转给人
+    _, dev = kickoff("实现 v5", [("switch", "")])
+    assert dev.reviewer == "owner" and "统筹方式改了" in dev.escalation

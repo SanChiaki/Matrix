@@ -48,8 +48,10 @@ REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 # 项目工具：群组挂在项目里时才有，不需要 delegate。跨群组只能提交交接，由人确认后发出（docs/projects.md）。
 PROJECT_TOOLS = ("handoff",)
 # 负责人工具：项目打开“负责人统筹”时，只有项目负责人 Agent 在它自己群聊的席位里有（不变量 19、20）。
-LEAD_TOOLS = ("review_handoff",)
-AUTONOMY = ("manual", "lead")  # 交接由谁确认：manual 人（项目所有者）；lead 项目负责人 Agent，超出边界时转给人
+LEAD_TOOLS = ("review_handoff", "review_request")
+# 负责人统筹的档位：manual 交接由人（项目所有者）确认；lead 交接由项目负责人 Agent 确认；
+# lead_accept 再加上：负责人确认的交接引出的用户任务也由负责人验收。超出边界时都转给人。
+AUTONOMY = ("manual", "lead", "lead_accept")
 
 
 class TaskStatus(StrEnum):
@@ -399,7 +401,7 @@ class Project:
     decisions: list[Decision] = field(default_factory=list)  # 项目级决定：只有所有者记录，推送给所有挂载群组
     lead_agent_id: str | None = None     # 项目负责人：挂载群组里的一个成员
     lead_group_id: str | None = None     # 负责人在哪个群组的群聊席位里统筹
-    autonomy: str = "manual"             # manual | lead：交接由人确认，还是由负责人确认（见 AUTONOMY）
+    autonomy: str = "manual"             # manual | lead | lead_accept（见 AUTONOMY）
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -431,6 +433,10 @@ class UserRequest:
     delivered_at: float | None = None
     finished_at: float | None = None
     reviewed_by: str | None = None       # 验收的人（网络认定）
+    reviewed_by_agent: str | None = None  # 项目负责人验收的：记下是哪个 Agent（不变量 20）
+    reviewer: str = "owner"              # 交付后待谁验收：owner（下发的人）| lead（项目负责人）
+    escalation: str = ""                 # 转回给人验收的原因
+    lead_returns: int = 0                # 被负责人退回的次数（有上限，超了转给人）
     accepted_by_message_id: str | None = None  # 代验收依据；看板操作无消息
 
     def to_dict(self) -> dict[str, Any]:

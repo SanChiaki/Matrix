@@ -81,6 +81,8 @@ TOOL_GUIDE: dict[str, str] = {
     "review_handoff": ("项目负责人处理一条待确认的交接（handoff_id；decision=confirm 确认、decline 不采纳、escalate 交给人）。"
                        "确认时可以改 message、换 agent、改 after、写 replaces；不采纳或交给人时写 note（会告诉提交者 / 人）。"
                        "确认后以项目所有者的名义发进对方群聊。"),
+    "review_request": ("项目负责人验收一个由它确认的交接引出的任务（request_id；decision=accept 验收、changes 退回、escalate 交给人；"
+                       "退回时 feedback 写明要改什么）。验收后，等它完成的交接会自动发出。"),
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
@@ -401,6 +403,20 @@ def format_handoff_review(h: Handoff, from_group: str, from_agent: str, to_group
         f"用 `{MCP_PREFIX}review_handoff` 处理：{TOOL_GUIDE['review_handoff']}",
         "对照项目 Brief、项目决定和进行中的交接判断：要做的事和交回的东西是否写清楚、是否重复、接手的成员和依赖是否合适。"
         "涉及改范围、改验收标准、发布，或你拿不准的，交给人（escalate）。这一轮不处理的会自动转给人。",
+    ])
+
+
+def format_request_review(r: UserRequest, agent_name: str, group_name: str, handoff: str, returns_left: int) -> str:
+    """给项目负责人：一个由它确认的交接引出、已交付、等它验收的用户任务。"""
+    return "\n".join([
+        f"## 网络通知：待你验收的任务 {r.id}（你是项目负责人）",
+        f"{group_name}的 {agent_name} 交付了「{r.title}」", f"期望交付：{r.expected_outcome}",
+        *([f"当初的交接：{handoff[:1500]}"] if handoff else []),
+        f"交付说明：{r.summary[:3000] or '（没有说明）'}",
+        f"用 `{MCP_PREFIX}review_request` 处理：{TOOL_GUIDE['review_request']}",
+        "对照交接内容、项目 Brief 与项目决定，检查交付物（看 `project/` 里发布的文件；你看不到对方的工作目录）是否达到期望。"
+        f"没达到就退回并写清要改什么（还能退回 {max(returns_left, 0)} 次，用完转给人）；涉及改范围、改验收标准、最终发布的，交给人。"
+        "这一轮不处理的会自动转给人。",
     ])
 
 
