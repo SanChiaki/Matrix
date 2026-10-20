@@ -23,12 +23,12 @@ from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DECISIONS_PUSHED, DESCRIPTION_LIMIT,
+from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, AUTONOMY, LEAD_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DECISIONS_PUSHED, DESCRIPTION_LIMIT,
                      GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, PROJECT_FILES, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
-                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_notice, format_ledger, format_open_requests, format_project,
+                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_review, format_handoff_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir, workdir
@@ -48,6 +48,8 @@ class Limits:
     turn_timeout_s: float = 1800
     task_timeout_s: float = 900
     approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
+    lead_daily: int = 20            # 项目负责人 24 小时内最多确认几条交接，超了转给人（不变量 20）
+    lead_pair: int = 4              # 同一对群组之间 24 小时内最多几条负责人确认的交接（来回踢就停下）
 
 
 @dataclass
@@ -68,6 +70,8 @@ class ExecContext:
     wake: list[str] = field(default_factory=list)     # 这一轮送达的交付（本轮结束仍未处理即视为接受）
     addressed: list[str] = field(default_factory=list)  # 席位：这一轮送达的、@ 它的人的消息（open_request 的来源）
     in_project: bool = False        # 所在群组挂在项目里：有项目工具（handoff）
+    lead: bool = False              # 项目负责人在它统筹的群聊席位里：有负责人工具（review_handoff）
+    reviews: list[str] = field(default_factory=list)  # 这一轮送达的待确认交接（本轮结束仍未处理即转给人）
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -81,7 +85,7 @@ class ExecContext:
 
     @property
     def tools(self) -> list[str]:
-        return network_tools_for(self.kind, self.in_group, self.can_delegate, self.in_project)
+        return network_tools_for(self.kind, self.in_group, self.can_delegate, self.in_project, self.lead)
 
     @property
     def share_tag(self) -> str:
@@ -1011,7 +1015,8 @@ class Network:
         sid = seat_id(conv.id, agent_id)
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
                           group_id=group.id if group else None, authority=self._effective(agent, agent.authority)[0],
-                          constraints=[], depth=0, chain=[agent.id], in_project=self._project_of(group) is not None)
+                          constraints=[], depth=0, chain=[agent.id], in_project=self._project_of(group) is not None,
+                          lead=self._is_lead_seat(group, agent.id))
         with self._lock:
             upto = len(conv.messages)
             fresh = conv.messages[seat.seen:upto]  # 上次运行之后对话里的新消息：公开上下文
@@ -1050,6 +1055,7 @@ class Network:
                 seat.archive_seen = archive_rev
                 seat.project_seen = project_key
             self._auto_accept(ctx)
+            self._unreviewed(ctx)
             self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id,
                                        text=res.final_text.strip() or "（空回复）", task_ids=ctx.created,
                                        steps=steps, wake=wake, private_to=owner_only))
@@ -1289,6 +1295,20 @@ class Network:
                 if r is not None and r.status == "in_progress":
                     blocks.append(format_request_changes(r, self._who(r.requester_id).strip()))
                     wake.append(f"{self._who(r.requester_id).strip()} 退回了 {r.id}")
+            elif kind == "handoff_review":
+                with self._lock:
+                    h = self.store.handoffs.get(it["handoff_id"])
+                    if h is None or not ctx.lead or self._awaiting(h) != "lead":
+                        continue  # 已经处理了、转给了人，或者这里不再是负责人
+                    others = [f"- {x.id}（{self._handoff_label(x)}）→ {self._name(x.to_agent_id)}："
+                              f"{_short(_first_line(x.text), 80)}"
+                              for x in self.store.handoffs.values() if x.project_id == h.project_id and x.id != h.id
+                              and x.to_group_id == h.to_group_id and self._handoff_open(x)]
+                    blocks.append(format_handoff_review(h, self._group_name(h.from_group_id), self._name(h.from_agent_id),
+                                                        self._group_name(h.to_group_id), self._name(h.to_agent_id),
+                                                        others))
+                ctx.reviews.append(h.id)
+                wake.append(f"待确认的交接 {h.id}")
             elif kind in ("handoff", "handoff_done"):
                 h = self.store.handoffs.get(it["handoff_id"])
                 if h is None:
@@ -1300,7 +1320,8 @@ class Network:
                                                       r.summary if r else ""))
                     wake.append(f"交接 {h.id} 已完成")
                 else:
-                    blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id)))
+                    blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id),
+                                                        self._approver(h)))
                     wake.append(f"交接 {h.id} {HANDOFF_CN.get(h.status, h.status)}")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
@@ -2151,15 +2172,17 @@ class Network:
         if loose:
             lanes.append(("未分方面", "", loose))
         handoffs = [f"- {h.id}：{self._group_name(h.from_group_id)} 的 {self._name(h.from_agent_id)} → "
-                    f"{self._group_name(h.to_group_id)} 的 {self._name(h.to_agent_id)}，{HANDOFF_CN.get(h.status, h.status)}"
+                    f"{self._group_name(h.to_group_id)} 的 {self._name(h.to_agent_id)}，{self._handoff_label(h)}"
                     + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "")
                     + (f"（完成后网络会通知 {self._name(h.from_agent_id)}）" if h.status in ("scheduled", "sent") else "")
                     + f"：{_short(_first_line(h.text), 80)}"
                     for h in sorted(self.store.handoffs.values(), key=lambda h: h.created_at)
                     if h.project_id == p.id and self._handoff_open(h)][-12:]
         active = [d for d in p.decisions if d.status == "active"][-DECISIONS_PUSHED:]
+        lead = self._lead_of(p)
+        lead_text = (f"{self._name(lead[0])}（{self._group_name(lead[1].id)}）" if lead else "")
         return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs, self._recent_files(p),
-                              [format_decision(d, self._name, self._email) for d in active])
+                              [format_decision(d, self._name, self._email) for d in active], lead=lead_text)
 
     def _recent_files(self, p: Project, n: int = 6) -> list[str]:
         """调用方持有锁。最近发布 / 更新的项目文件（谁、什么时候）：别的方面改了你依赖的文件时，你能看出来。"""
@@ -2274,13 +2297,209 @@ class Network:
                         conversation_id=ctx.conversation_id, to_group_id=to.id, to_agent_id=target.id, text=text,
                         after=after, replaces=old_id)
             self.store.handoffs[h.id] = h
+            route = self._route_handoff(p, h, dup=bool(same))
             self.store.save()
-        self._handoff_event(h)
         wait = f"；会等 {'、'.join(after)} 完成后再发出" if after else ""
-        dup = ("\n注意：「{}」已有进行中的交接 {}。如果这条是重复的，告诉用户；要替换旧的，重新提交并写 replaces。"
-               .format(to.name, "、".join(f"{x.id}（{HANDOFF_CN.get(x.status, x.status)}）" for x in same))) if same else ""
-        return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等人确认{wait}。确认后以人的名义发进对方群聊；"
-                "结果会作为通知送给你，在那之前不要假设对方已经开始。" + dup), False
+        dups = "、".join(f"{x.id}（{self._handoff_label(x)}）" for x in same)
+        if route == "self":  # 负责人自己提交、没有重复、在预算内：直接确认
+            try:
+                self.approve_handoff(h.id, by_agent=ctx.agent_id)
+            except NetworkError as e:
+                with self._lock:
+                    self._escalate(h, f"负责人提交后确认失败：{e}")
+                    self.store.save()
+                self._handoff_event(h)
+                return f"已提交交接 {h.id}，但没能直接发出（{e}），已转给人确认。", False
+            return (f"已发出交接 {h.id}（→「{to.name}」的 {target.name}，你是项目负责人，已直接确认{wait}）。"
+                    "对方做完、人验收后会通知你。"), False
+        self._handoff_event(h)
+        if route == "lead":
+            self._kick_lead(p)
+        who = {"lead": "项目负责人", "self": "你"}.get(route, "人")
+        if route == "lead" and ctx.agent_id == p.lead_agent_id:
+            tail = f"\n「{to.name}」已有进行中的交接 {dups}：确认这条确实要另发，就在下一轮用 review_handoff 处理它；要替换旧的，重新提交并写 replaces。"
+        else:
+            tail = ("\n注意：「{}」已有进行中的交接 {}。如果这条是重复的，告诉用户；要替换旧的，重新提交并写 replaces。"
+                    .format(to.name, dups)) if same else ""
+        if h.escalation:
+            tail += f"\n这条转给了人确认：{h.escalation}"
+        return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等{who}确认{wait}。确认后以项目所有者的名义发进对方群聊；"
+                "结果会作为通知送给你，在那之前不要假设对方已经开始。" + tail), False
+
+    # ---- 负责人统筹：项目负责人 Agent 代所有者确认交接，网络强制边界，超出就转给人（不变量 19、20）----
+    def _lead_of(self, p: Project | None) -> tuple[str, Group] | None:
+        """调用方持有锁。打开了负责人统筹、负责人仍在一个挂载群组里：(负责人 id, 它统筹的群组)。"""
+        if p is None or p.autonomy != "lead" or not p.lead_agent_id:
+            return None
+        g = self.store.groups.get(p.lead_group_id or "")
+        if g is None or self._project_of(g) is not p or p.lead_agent_id not in g.member_ids \
+                or p.lead_agent_id not in self.store.agents:
+            return None
+        return p.lead_agent_id, g
+
+    def _is_lead_seat(self, g: Group | None, agent_id: str) -> bool:
+        """身份由网络认定（不变量 10）：只有负责人在它统筹的那个群聊席位里才有负责人工具。"""
+        with self._lock:
+            lead = self._lead_of(self._project_of(g))
+            return lead is not None and g is not None and lead == (agent_id, g)
+
+    def _awaiting(self, h: Handoff) -> str | None:
+        """调用方持有锁。待谁确认：lead / owner；不在待确认状态时 None。负责人统筹关了或负责人不在了，转回人。"""
+        if h.status != "pending":
+            return None
+        if h.reviewer == "lead" and self._lead_of(self.store.projects.get(h.project_id)) is not None:
+            return "lead"
+        return "owner"
+
+    def _handoff_label(self, h: Handoff) -> str:
+        """调用方持有锁。"""
+        if h.status == "pending":
+            return "待项目负责人确认" if self._awaiting(h) == "lead" else "待人确认"
+        return HANDOFF_CN.get(h.status, h.status)
+
+    def _approver(self, h: Handoff) -> str:
+        return f"项目负责人 {self._name(h.approved_by_agent)}" if h.approved_by_agent else "人"
+
+    def _lead_budget(self, p: Project, h: Handoff) -> str:
+        """调用方持有锁。负责人再确认这条会不会超出边界：返回原因，空表示没超。"""
+        since = time.time() - 86400
+        done = [x for x in self.store.handoffs.values() if x.project_id == p.id and x.approved_by_agent
+                and (x.decided_at or 0) >= since]
+        if len(done) >= self.limits.lead_daily:
+            return f"负责人 24 小时内已确认 {len(done)} 条交接（上限 {self.limits.lead_daily}）"
+        pair = {h.from_group_id, h.to_group_id}
+        n = sum(1 for x in done if {x.from_group_id, x.to_group_id} == pair)
+        if n >= self.limits.lead_pair:
+            return (f"{self._group_name(h.from_group_id)}和{self._group_name(h.to_group_id)}之间 24 小时内已有 {n} 条"
+                    f"负责人确认的交接（上限 {self.limits.lead_pair}），可能在来回返工")
+        return ""
+
+    def _lead_seat(self, p: Project) -> Seat | None:
+        """调用方持有锁。"""
+        lead = self._lead_of(p)
+        if lead is None:
+            return None
+        return self._seat(self._group_chat(lead[1]), lead[0])
+
+    def _route_handoff(self, p: Project, h: Handoff, dup: bool) -> str:
+        """调用方持有锁。新交接给谁确认：owner（人）、lead（负责人下一轮处理）、self（负责人自己提交的，直接确认）。"""
+        lead = self._lead_of(p)
+        if lead is None:
+            return "owner"
+        over = self._lead_budget(p, h)
+        seat = self._lead_seat(p)
+        if over or seat is None or seat.blocked:
+            self._escalate(h, over or "项目负责人的席位出错暂停了")
+            return "owner"
+        if h.from_agent_id == lead[0] and not dup:
+            return "self"
+        h.reviewer = "lead"
+        seat.inbox.append({"kind": "handoff_review", "handoff_id": h.id})
+        return "lead"
+
+    def _escalate(self, h: Handoff, reason: str) -> None:
+        """调用方持有锁。"""
+        h.reviewer, h.escalation = "owner", reason.strip()[:500]
+
+    def _kick_lead(self, p: Project) -> None:
+        with self._lock:
+            lead = self._lead_of(p)
+            conv = self._group_chat(lead[1]) if lead else None
+        if lead is not None:
+            self._kick("seat", seat_id(conv.id, lead[0]))
+
+    def _unreviewed(self, ctx: ExecContext) -> None:
+        """这一轮送达、负责人却没处理的交接：转给人，不无限挂着（参照 _auto_accept 的“送达即处理”）。"""
+        left = []
+        with self._lock:
+            for hid in ctx.reviews:
+                h = self.store.handoffs.get(hid)
+                if h is not None and self._awaiting(h) == "lead":
+                    self._escalate(h, "项目负责人这一轮没有处理")
+                    left.append(h)
+            if left:
+                self.store.save()
+        for h in left:
+            self._handoff_event(h)
+
+    def _tool_review_handoff(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        if not ctx.lead:
+            return "只有项目负责人在它统筹的群聊里能确认交接", True
+        hid = str(args.get("handoff_id", "")).strip()
+        decision = str(args.get("decision", "")).strip().lower()
+        note = str(args.get("note") or "").strip()
+        with self._lock:
+            h = self.store.handoffs.get(hid)
+            g = self.store.groups.get(ctx.group_id or "")
+            p = self._project_of(g)
+            if h is None or p is None or h.project_id != p.id or self._awaiting(h) != "lead":
+                return f"{hid} 不是等你确认的交接（可能已经处理、转给了人，或不在这个项目里）", True
+            if decision == "escalate":
+                self._escalate(h, f"项目负责人转给人：{note or '没有写原因'}")
+                self.store.save()
+            elif decision == "confirm":
+                over = self._lead_budget(p, h)
+                to = self.store.groups.get(h.to_group_id)
+                agent = str(args.get("agent") or "").strip()
+                target = self._resolve_member(to, agent) if (agent and to) else None
+                if over:
+                    self._escalate(h, over)
+                    self.store.save()
+                elif agent and target is None:
+                    return f"「{agent}」不是{self._group_name(h.to_group_id)}的成员", True
+            elif decision != "decline":
+                return "decision 只能是 confirm、decline 或 escalate", True
+        if decision == "escalate":
+            self._handoff_event(h)
+            return f"已把 {h.id} 转给人确认。", False
+        if decision == "decline":
+            self.reject_handoff(h.id, note, by_agent=ctx.agent_id)
+            return f"已不采纳 {h.id}，提交者会被唤醒。", False
+        if over:
+            self._handoff_event(h)
+            return f"没有确认：{over}。已转给人。", False
+        after = args.get("after")
+        try:
+            self.approve_handoff(h.id, text=str(args.get("message") or "").strip() or None,
+                                 agent_id=target.id if target else None,
+                                 after=re.split(r"[\s,，、]+", str(after).strip()) if after is not None else None,
+                                 replaces=str(args.get("replaces") or "").strip() or None, by_agent=ctx.agent_id)
+        except NetworkError as e:
+            return str(e), True
+        return (f"已确认 {h.id}：" + ("排队中，依赖完成后由网络发出。" if h.status == "scheduled"
+                                      else "已以项目所有者的名义发进对方群聊。")), False
+
+    def set_project_lead(self, project_id: str, agent_id: str | None, autonomy: str = "manual",
+                         group_id: str | None = None, actor: str | None = None) -> Project:
+        """所有者指定项目负责人、打开或关闭负责人统筹。负责人必须是某个挂载群组的成员；统筹在它那个群组的群聊席位里进行。
+        改动后还等负责人确认的交接一律转给人（不变量 20：所有者随时能收回）。"""
+        if autonomy not in AUTONOMY:
+            raise NetworkError(f"autonomy 只能是 {'、'.join(AUTONOMY)}")
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            g = None
+            if agent_id:
+                attached = [x for x in self.store.groups.values()
+                            if self._project_of(x) is p and agent_id in x.member_ids]
+                g = next((x for x in attached if x.id == group_id), None) if group_id else (attached[0] if attached else None)
+                if g is None:
+                    raise NetworkError("项目负责人必须是挂进这个项目的群组的成员")
+            elif autonomy == "lead":
+                raise NetworkError("打开负责人统筹前先指定项目负责人")
+            before = (p.lead_agent_id, p.lead_group_id, p.autonomy)
+            p.lead_agent_id, p.lead_group_id, p.autonomy = agent_id or None, g.id if g else None, autonomy
+            moved = []
+            if before != (p.lead_agent_id, p.lead_group_id, p.autonomy):
+                for h in self.store.handoffs.values():
+                    if h.project_id == p.id and h.status == "pending" and h.reviewer == "lead":
+                        self._escalate(h, "项目负责人或统筹方式改了，转给人确认")
+                        moved.append(h)
+                self._project_changed(p, "project.lead", by_user=actor, lead=p.lead_agent_id, autonomy=autonomy)
+            self.store.save()
+        for h in moved:
+            self._handoff_event(h)
+        self._project_event(p)
+        return p
 
     def _handoff_deps(self, project_id: str, ids: list[str], me: str | None = None) -> list[str]:
         """调用方持有锁。依赖的交接：同一项目里、没被拒绝、不成环。"""
@@ -2311,7 +2530,7 @@ class Network:
 
     def approve_handoff(self, handoff_id: str, text: str | None = None, agent_id: str | None = None,
                         after: list[str] | None = None, replaces: str | None = None,
-                        actor: str | None = None) -> Handoff:
+                        actor: str | None = None, by_agent: str | None = None) -> Handoff:
         """项目所有者确认交接（可以改内容、换接手的成员、改依赖）：依赖都完成了就以他的名义发进目标群聊并 @ 目标成员，
         否则进入 scheduled，等依赖完成后由网络发出。对 scheduled 的交接再确认一次（after=[]）就是立即发出。"""
         with self._lock:
@@ -2345,6 +2564,7 @@ class Network:
                 if loop:
                     raise NetworkError(f"替换后会互相等待：{'、'.join(sorted(loop))} 在等 {old.id}")
             h.to_agent_id, h.text, h.after, h.approved_by = target_id, body, deps, actor or h.owner_id
+            h.approved_by_agent = by_agent  # 负责人确认的：仍以所有者的名义发出，消息里写明是谁确认的
             h.replaces, h.decided_at = old_id or None, time.time()
             if old is not None:  # 旧的作废；等旧的改为等这条
                 old.status, old.note, old.decided_at = "superseded", f"被 {h.id} 取代", time.time()
@@ -2382,10 +2602,11 @@ class Network:
                 chat = self._group_chat(to)
                 origin = f"「{src.name}」的 {self._name(h.from_agent_id)}" if src else self._name(h.from_agent_id)
                 waited = f"，等 {'、'.join(h.after)} 完成后发出" if h.after else ""
+                by = f"项目负责人 {self._name(h.approved_by_agent)} " if h.approved_by_agent else "我"
         if not ok:
             self._handoff_event(h)
             return
-        msg = self.send_message(chat.id, f"@{target.name} {h.text}\n\n（交接：来自{origin}，已由我确认{waited}）",
+        msg = self.send_message(chat.id, f"@{target.name} {h.text}\n\n（交接：来自{origin}，已由{by}确认{waited}）",
                                 mentions=[target.id], actor=h.approved_by or h.owner_id)
         with self._lock:
             h.status, h.message_id = "sent", msg.id
@@ -2395,12 +2616,14 @@ class Network:
             self.store.save()
         self._handoff_event(h)
 
-    def reject_handoff(self, handoff_id: str, note: str = "", actor: str | None = None) -> Handoff:
+    def reject_handoff(self, handoff_id: str, note: str = "", actor: str | None = None,
+                       by_agent: str | None = None) -> Handoff:
         with self._lock:
             h = self._handoff(handoff_id, actor)
             if h.status not in ("pending", "scheduled"):
                 raise NetworkError(f"交接 {h.id} 已经处理过")
             h.status, h.note, h.decided_at = "rejected", note.strip()[:1000], time.time()
+            h.approved_by_agent = by_agent
             holder = self._holder(h.context_kind, h.context_id)
             if holder is not None:
                 holder.inbox.append({"kind": "handoff", "handoff_id": h.id})
@@ -2424,6 +2647,8 @@ class Network:
         src, to = self.store.groups.get(h.from_group_id), self.store.groups.get(h.to_group_id)
         return {**h.to_dict(), "from_group_name": src.name if src else "", "to_group_name": to.name if to else "",
                 "from_agent_name": self._name(h.from_agent_id), "to_agent_name": self._name(h.to_agent_id),
+                "awaiting": self._awaiting(h),
+                "approved_by_agent_name": self._name(h.approved_by_agent) if h.approved_by_agent else None,
                 "to_conversation_id": (self._group_chat_of(h.to_group_id).id if self._group_chat_of(h.to_group_id) else None)}
 
     def _handoff_event(self, h: Handoff) -> None:
@@ -2696,8 +2921,12 @@ class Network:
                       for g in self.store.groups.values() if g.project_id == p.id and self.can_see_group(g, actor)]
             reqs = sorted((r for r in self.store.requests.values()
                            if r.project_id == p.id and self.can_see_request(r, actor)), key=lambda r: -r.created_at)
+            # 可以当项目负责人的：挂载群组里的成员（统筹在那个群组的群聊席位里进行）
+            leads = [{"agent_id": m, "name": self._name(m), "group_id": g.id, "group_name": g.name}
+                     for g in self.store.groups.values() if self._project_of(g) is p for m in g.member_ids]
             return {**self.project_summary(p, actor), "groups": groups, "requests": [self.request_card(r) for r in reqs],
-                    "files": self.project_files(p), "handoffs": self.handoffs(actor, p.id)}
+                    "files": self.project_files(p), "handoffs": self.handoffs(actor, p.id),
+                    "lead_candidates": leads, "lead_active": self._lead_of(p) is not None}
 
     # ================= 人：续接 =================
     def resume_conversation(self, conv_id: str, agent_id: str | None = None, note: str = "",
@@ -2865,7 +3094,7 @@ class Network:
                 "projects": [self.project_summary(p, actor) for p in self.store.projects.values()
                              if self.can_see_project(p, actor)],
                 "handoffs": [self._handoff_card(h) for h in self.store.handoffs.values()
-                             if h.status == "pending" and (actor is None or h.owner_id in (None, actor))],
+                             if self._awaiting(h) == "owner" and (actor is None or h.owner_id in (None, actor))],
                 "authorities": AUTHORITIES,
                 "seq": self.bus.last_seq,
             }
@@ -3072,18 +3301,22 @@ TOOL_HANDLERS = {
     "publish_file": Network._tool_publish_file,
     "propose_brief": Network._tool_propose_brief,
     "handoff": Network._tool_handoff,
+    "review_handoff": Network._tool_review_handoff,
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
     "accept_request": Network._tool_accept_request,
 }
 
 
-def network_tools_for(kind: str, in_group: bool, can_delegate: bool, in_project: bool = False) -> list[str]:
+def network_tools_for(kind: str, in_group: bool, can_delegate: bool, in_project: bool = False,
+                      lead: bool = False) -> list[str]:
     """一次执行能用的网络工具：席位（群聊、私聊）有用户任务工具；群组里有档案工具；群组挂在项目里有项目工具；
-    有 delegate 时再加协作工具。"""
+    项目负责人在它统筹的席位里有负责人工具；有 delegate 时再加协作工具。"""
     def ok(n: str) -> bool:
         if n in REQUEST_TOOLS:
             return kind == "seat"
+        if n in LEAD_TOOLS:
+            return kind == "seat" and in_group and in_project and lead
         if n in ARCHIVE_TOOLS:
             return in_group
         if n in PROJECT_TOOLS:
@@ -3093,7 +3326,7 @@ def network_tools_for(kind: str, in_group: bool, can_delegate: bool, in_project:
 
 
 
-HANDOFF_CN = {"pending": "待人确认", "scheduled": "已确认、排队中", "sent": "已发出、对方在做", "rejected": "未采纳",
+HANDOFF_CN = {"pending": "待确认", "scheduled": "已确认、排队中", "sent": "已发出、对方在做", "rejected": "未采纳",
               "superseded": "已被取代"}
 UPDATABLE_AGENT_FIELDS = ("name", "description", "capabilities", "authority", "chat_enabled")
 APPROVAL_CN = {"allowed": "批准", "rejected": "拒绝", "cancelled": "作废", "pending": "待审批"}

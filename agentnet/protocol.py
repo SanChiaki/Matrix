@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, LEAD_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, DECISIONS_PUSHED, GROUP_FILES, MCP_PREFIX,
                      PROJECT_FILES, AgentNode, Conversation, Decision, Group, Handoff, KnowledgeItem, Message, Project, Proposal, Task,
                      UserRequest)
 
@@ -78,6 +78,9 @@ TOOL_GUIDE: dict[str, str] = {
                 "人确认后以人的名义发进对方群聊；对方做完、人验收后网络会唤醒你（不用再让对方回头找你）。"
                 "要等别的交接做完才能开始的，用 after 写上那些交接的 id，网络会在它们完成后再发出。"
                 "交给别的群组的产物先用 publish_file target=project 发布。"),
+    "review_handoff": ("项目负责人处理一条待确认的交接（handoff_id；decision=confirm 确认、decline 不采纳、escalate 交给人）。"
+                       "确认时可以改 message、换 agent、改 after、写 replaces；不采纳或交给人时写 note（会告诉提交者 / 人）。"
+                       "确认后以项目所有者的名义发进对方群聊。"),
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
@@ -99,7 +102,7 @@ def _network_tools(group: Group, can_delegate: bool) -> list[str]:
              "规则和内部群组相同。"] if group.kind == "joint" else []
     return archive + [
         "", f"## 协作：你所在的群组「{group.name}」",
-        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items() if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + PROJECT_TOOLS),
+        *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items() if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + PROJECT_TOOLS + LEAD_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -186,7 +189,7 @@ def format_archive(g: Group, active: list[Decision], files: list[str], name: Cal
 
 def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]], files: list[str],
                    handoffs: list[str] | None = None, recent: list[str] | None = None,
-                   decisions: list[str] | None = None) -> str:
+                   decisions: list[str] | None = None, lead: str = "") -> str:
     """项目背景的推送部分：只给挂载在这个项目里的群组（不变量 18）。lanes：(方面, 说明, 承担的群组名)。
     和群组档案一样只是背景，不附带“先读”之类的指令。"""
     mine = next((w for w in p.workstreams if w.id == g.workstream_id), None)
@@ -194,6 +197,8 @@ def format_project(p: Project, g: Group, lanes: list[tuple[str, str, list[str]]]
              f"群组「{g.name}」是这个项目的一部分" + (f"，负责「{mine.name}」方面。" if mine else "，还没有分到具体方面。")
              + "其他方面由别的群组负责：它们的成员不在你的群组里，你不能委托给他们。"
              f"需要别的方面接着做时，用 `{MCP_PREFIX}handoff` 提交交接（{TOOL_GUIDE['handoff']}）"]
+    if lead:
+        parts.append(f"项目负责人：{lead}。各群组提交的交接由它确认，超出边界或它拿不准的转给项目所有者。")
     if p.brief:
         parts += ["### 项目 Brief", p.brief]
     if decisions:
@@ -368,17 +373,32 @@ def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
     ])
 
 
-def format_handoff_notice(h: Handoff, group_name: str, agent_name: str) -> str:
+def format_handoff_notice(h: Handoff, group_name: str, agent_name: str, by: str = "人") -> str:
     if h.status == "sent":
-        text = [f"## 网络通知：你的交接 {h.id} 已由人确认，发给了「{group_name}」的 {agent_name}",
+        text = [f"## 网络通知：你的交接 {h.id} 已由{by if by == '人' else by + ' '}确认，发给了「{group_name}」的 {agent_name}",
                 "对方做完、人验收通过后会通知你；它的产物看项目文件（`project/`）。"]
     elif h.status == "superseded":
         text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 被另一条交接取代，不会发出"]
     else:
-        text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳"]
+        text = [f"## 网络通知：你提交给「{group_name}」的交接 {h.id} 没有被采纳" + (f"（{by}）" if by != "人" else "")]
     if h.note:
         text.append(f"意见：{h.note}")
     return "\n".join(text)
+
+
+def format_handoff_review(h: Handoff, from_group: str, from_agent: str, to_group: str, to_agent: str,
+                          others: list[str]) -> str:
+    """给项目负责人：一条等它确认的交接。"""
+    route = (f"{from_group}的 {from_agent} → {to_group}的 {to_agent}"
+             + (f"，等 {'、'.join(h.after)} 完成后发出" if h.after else "")
+             + (f"，要替换 {h.replaces}" if h.replaces else ""))
+    return "\n".join([
+        f"## 网络通知：待你确认的交接 {h.id}（你是项目负责人）", route, "交接内容：", h.text,
+        *(["同一目标群组里还没结束的交接：", *others] if others else []),
+        f"用 `{MCP_PREFIX}review_handoff` 处理：{TOOL_GUIDE['review_handoff']}",
+        "对照项目 Brief、项目决定和进行中的交接判断：要做的事和交回的东西是否写清楚、是否重复、接手的成员和依赖是否合适。"
+        "涉及改范围、改验收标准、发布，或你拿不准的，交给人（escalate）。这一轮不处理的会自动转给人。",
+    ])
 
 
 def format_handoff_done(h: Handoff, group_name: str, agent_name: str, summary: str) -> str:

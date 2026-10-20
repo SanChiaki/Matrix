@@ -47,6 +47,9 @@ ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_b
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 # 项目工具：群组挂在项目里时才有，不需要 delegate。跨群组只能提交交接，由人确认后发出（docs/projects.md）。
 PROJECT_TOOLS = ("handoff",)
+# 负责人工具：项目打开“负责人统筹”时，只有项目负责人 Agent 在它自己群聊的席位里有（不变量 19、20）。
+LEAD_TOOLS = ("review_handoff",)
+AUTONOMY = ("manual", "lead")  # 交接由谁确认：manual 人（项目所有者）；lead 项目负责人 Agent，超出边界时转给人
 
 
 class TaskStatus(StrEnum):
@@ -332,7 +335,10 @@ class Handoff:
     after: list[str] = field(default_factory=list)  # 依赖的交接：它们都完成（人验收）后才发出
     replaces: str | None = None          # 要替换的交接：确认这条时旧的作废，依赖它的改为依赖这条
     status: str = "pending"              # pending | scheduled（已确认，等依赖完成）| sent | rejected | superseded
-    approved_by: str | None = None       # 谁确认的：以他的名义发出
+    approved_by: str | None = None       # 以谁的名义发出：项目所有者（人确认，或负责人代为确认）
+    approved_by_agent: str | None = None  # 负责人 Agent 确认的：记下是哪个 Agent
+    reviewer: str = "owner"              # 待谁确认：owner（人）| lead（项目负责人 Agent）
+    escalation: str = ""                 # 转给人的原因（超出预算、负责人要求、负责人没处理……）
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
     returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间
@@ -391,6 +397,9 @@ class Project:
     brief: str = ""                      # 目标、范围、成功标准、当前阶段：推送给挂载群组的席位与任务
     workstreams: list[Workstream] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)  # 项目级决定：只有所有者记录，推送给所有挂载群组
+    lead_agent_id: str | None = None     # 项目负责人：挂载群组里的一个成员
+    lead_group_id: str | None = None     # 负责人在哪个群组的群聊席位里统筹
+    autonomy: str = "manual"             # manual | lead：交接由人确认，还是由负责人确认（见 AUTONOMY）
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
