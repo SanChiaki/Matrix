@@ -548,6 +548,8 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 .decisions li.superseded > div:first-child, .decisions li.revoked > div:first-child { text-decoration: line-through; }
 .decisions .meta { margin-top: 4px; font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .files li, .refs li { font-size: 13px; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.files li .switch { flex: none; gap: 4px; font-size: 12px; white-space: nowrap; color: var(--muted, inherit); }
+.files li .switch input { width: auto; flex: none; margin: 0; }
 .suggestions li { padding: 10px 12px; border: 1px solid var(--accent-line); border-radius: var(--radius-sm); background: var(--accent-soft); margin-top: 8px; }
 .file-up { margin-top: 8px; display: inline-flex; cursor: pointer; }
 .warn-box { padding: 8px 10px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--human) 8%, transparent); color: var(--human); }

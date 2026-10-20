@@ -65,7 +65,7 @@ def test_requests_take_project_from_group(tmp_path: Path):
 
 
 def test_project_is_owner_only(tmp_path: Path):
-    """不变量 13、16：项目只有所有者看得到；群组与项目必须同一个所有者；联合群组暂不能挂项目。"""
+    """不变量 13、16：项目只有所有者看得到；群组与项目必须同一个所有者；联合群组只能挂进主持人的项目。"""
     net, alice, bob, a, g, p, research, proto = setup(tmp_path)
     with pytest.raises(NetworkError, match="unknown project"):
         net.project_detail(p.id, actor=bob)
@@ -80,8 +80,9 @@ def test_project_is_owner_only(tmp_path: Path):
     with pytest.raises(NetworkError, match="unknown group"):
         net.assign_group(g.id, p.id, actor=bob)
     jg, jchat = joint(net, alice, "bob@x.io", bob, [a.id])
-    with pytest.raises(NetworkError, match="联合群组"):
-        net.assign_group(jg.id, p.id, actor=alice)
+    pb = net.create_project("bob 的", actor=bob)
+    with pytest.raises(NetworkError, match="只有主持人"):  # 联合群组只能由主持人挂进主持人自己的项目
+        net.assign_group(jg.id, pb.id, actor=bob)
     # 联合群组里的任务卡别的参与方也看得到：不能归到项目
     net.send_message(jchat.id, "@A 帮我写", actor=bob, background=False)
     jr = next(iter(net.store.requests.values()))

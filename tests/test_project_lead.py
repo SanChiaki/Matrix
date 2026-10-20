@@ -39,7 +39,7 @@ def test_lead_confirms_handoffs(tmp_path: Path):
             out.append(call.tool("review_handoff", handoff_id=hid, decision="confirm", message="跑 project/ac.md 的全部用例"))
         return "ok"
     net, alice, bob, pm, eng, qa, p, chats = build(tmp_path, handler)
-    with pytest.raises(NetworkError, match="必须是挂进这个项目的群组的成员"):
+    with pytest.raises(NetworkError, match="必须是挂进这个项目的内部群组的成员"):
         net.set_project_lead(p.id, net.create_agent("X", "x", [], [], actor=alice).id, "lead", actor=alice)
     with pytest.raises(NetworkError, match="先指定项目负责人"):
         net.set_project_lead(p.id, None, "lead", actor=alice)
@@ -250,3 +250,41 @@ def test_lead_accepts_requests_from_its_handoffs(tmp_path: Path):
     # 改回只确认交接：等负责人验收的转给人
     _, dev = kickoff("实现 v5", [("switch", "")])
     assert dev.reviewer == "owner" and "统筹方式改了" in dev.escalation
+
+
+def test_lead_told_when_project_stalls(tmp_path: Path):
+    """不变量 20：项目里没有在跑、也没有谁会被唤醒，排队的交接还在等停在“进行中”的工作（互相等待）时，网络告诉负责人，
+    同样的局面只提醒一次；负责人可以立即发出它确认过的排队交接。"""
+    runs: list[tuple[str, str, list[str]]] = []
+    plan: dict[str, list] = {}
+    out: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        runs.append((call.agent_id, call.prompt, call.tool_names))
+        last = ""
+        for name, kw in plan.pop(call.agent_id, []):
+            if kw.get("after") == "$prev":
+                kw = {**kw, "after": re.search(r"ho-[0-9a-f]{8}", last).group()}
+            last = call.tool(name, **kw)
+        if call.agent_id == eng.id and "（@ 你）" in call.prompt:  # 登记了，但要等测试结论才交付
+            call.tool("open_request", title="实现", expected_outcome="代码")
+        if call.agent_id == pm.id and "项目停下来了" in call.prompt:
+            hid = re.search(r"- (ho-[0-9a-f]{8})（→「测试组」", call.prompt).group(1)
+            out.append(call.tool("review_handoff", handoff_id=hid, decision="send_now"))
+        return "ok"
+    net, alice, bob, pm, eng, qa, p, chats = build(tmp_path, handler, Limits(lead_pair=10))
+    net.set_project_lead(p.id, pm.id, "lead_accept", actor=alice)
+    plan[pm.id] = [("handoff", dict(group="开发组", agent="Eng", message="实现 v2")),
+                   ("handoff", dict(group="测试组", agent="QA", message="测 v2", after="$prev"))]
+    net.send_message(chats["产品组"].id, "@PM 开工", actor=alice, background=False)
+    net.wait_quiet()
+    stalls = [pr for a, pr, _ in runs if a == pm.id and "项目停下来了" in pr]
+    assert len(stalls) == 1 and "任务" in stalls[0] and "进行中" in stalls[0]
+    assert "已立即发出" in out[0] and any(a == qa.id for a, *_ in runs)
+    h = next(x for x in net.store.handoffs.values() if x.text == "测 v2")
+    assert h.status == "sent" and h.after == []
+    # 不是它确认过的排队交接：不能 send_now
+    plan[pm.id] = [("review_handoff", dict(handoff_id=h.id, decision="send_now"))]
+    net.send_message(chats["产品组"].id, "@PM 再发一次", actor=alice, background=False)
+    net.wait_quiet()
+    assert sum(1 for a, pr, _ in runs if a == pm.id and "项目停下来了" in pr) == 1
