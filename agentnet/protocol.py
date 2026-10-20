@@ -323,6 +323,9 @@ def retry_prompt(note: str | None, error: str | None) -> str:
              f"中断原因：{(error or '未知')[:300]}"]
     if error and "MALFORMED_RESPONSE" in error:
         lines.append("最可能是某次工具调用的参数不是合法 JSON。请重新发出那一步；长文本分段写，一次只发一个工具调用。")
+    if error and "TIMEOUT" in error:
+        lines.append("这一轮做得太久被终止了。不要重复已经做完的步骤（已经跑过的测试、已经写好的文件）：尽快收尾，"
+                     "交付或说明进展；还要做的长时间工作拆小，或者委托出去。")
     lines.append("已经完成的工作（文件、已交付的委托、已入库的知识）都还在，不要从头再来，从中断处继续。")
     if note:
         lines += ["", f"补充说明：{note}"]

@@ -414,7 +414,7 @@ function renderProjectDetail(box, d) {
         <label for="lead-agent">项目负责人</label>
         <select id="lead-agent"><option value="">不设</option>${(d.lead_candidates || []).map((c) =>
           `<option value="${esc(c.agent_id)}|${esc(c.group_id)}" ${c.agent_id === d.lead_agent_id && c.group_id === d.lead_group_id ? "selected" : ""}>${esc(c.name)}（#${esc(c.group_name)}）</option>`).join("")}</select>
-        <label class="switch"><input type="checkbox" id="lead-on" ${d.autonomy === "lead" ? "checked" : ""}> 交接由负责人确认，不用我逐条确认</label>
+        <label class="switch"><input type="checkbox" id="lead-on" ${d.autonomy === "lead" ? "checked" : ""}><span>交接由负责人确认，不用我逐条确认</span></label>
         <button type="submit">保存</button></form>
       <p class="hint">${d.autonomy === "lead" && !d.lead_active ? '<span class="warn">负责人已不在它统筹的群组里，交接回到你这里确认。</span> ' : ""}负责人在它所在群组的群聊里处理交接，以你的名义发出。
         超出边界（24 小时内的总数、同一对群组之间的往返次数）、负责人拿不准或没处理的，转给你。用户任务的验收、项目决定仍然由你来。</p>

@@ -538,6 +538,7 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 .archive-sec .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
 .archive-sec form.stack { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .archive-sec form.stack button { align-self: flex-end; }
+.archive-sec form.stack .switch input { width: auto; flex: none; margin: 0; }
 .archive-sec .md.brief { padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
 .archive-sec details { margin-top: 8px; }
 .archive-sec details summary { cursor: pointer; font-size: 12.5px; color: var(--text-2); }

@@ -89,7 +89,7 @@ ERROR_CLASSES: dict[str, tuple[str, bool]] = {
     "MALFORMED_RESPONSE": ("malformed_tool_call", True),  # 模型写出的工具参数不是合法 JSON
     "EMPTY_RESPONSE": ("empty_response", True),
     "RATE_LIMIT": ("rate_limited", False),
-    "TIMEOUT": ("timeout", False),
+    "TIMEOUT": ("timeout", True),  # 一轮做得太久：会话还在，续接一次收尾（再超时才中断，交给人）
     "TRANSPORT": ("provider_connection", False),
     "SERVER": ("provider_server", False),
 }
