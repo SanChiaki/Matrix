@@ -184,6 +184,12 @@ class HandoffApproveIn(BaseModel):
     replaces: str | None = None          # 替换一条还没发出的交接（旧的作废，等旧的改为等这条）
 
 
+class ProjectLeadIn(BaseModel):
+    agent_id: str | None = None          # 项目负责人；None 表示不设
+    group_id: str | None = None          # 负责人在哪个挂载群组里统筹（它在多个群组里时）
+    autonomy: str = "manual"             # manual：交接由你确认；lead：由负责人确认，超出边界时转给你
+
+
 class PromoteIn(BaseModel):
     group_id: str
     name: str = Field(min_length=1, max_length=120)
@@ -492,6 +498,11 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/projects/{project_id}/decisions")
     def record_project_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:
         network.record_project_decision(project_id, body.text, body.reason, body.supersedes, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/lead")
+    def set_project_lead(project_id: str, body: ProjectLeadIn, user: Me) -> dict:
+        network.set_project_lead(project_id, body.agent_id, body.autonomy, body.group_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.delete("/api/projects/{project_id}/decisions/{decision_id}")

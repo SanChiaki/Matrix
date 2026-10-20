@@ -642,7 +642,27 @@ def test_malformed_response_auto_resumes_once(tmp_path: Path):
     assert [m.role for m in conv.messages] == ["user", "agent"] and conv.messages[-1].text == "续上了"
     assert rt.calls[1].session_id == rt.calls[0].session_id and rt.calls[1].resumed
     assert [e.data["error_class"] for e in net.bus.since(0) if e.type == "run.retry"] == ["malformed_tool_call"]
-    assert classify_error("x TIMEOUT y") == ("timeout", False)
+    assert classify_error("x TIMEOUT y") == ("timeout", True)
+
+
+def test_timeout_continues_once_then_blocks(tmp_path: Path):
+    """一轮超时：同一会话自动续接一次并提示收尾；续接也超时才中断席位，交给人“继续”。"""
+    prompts: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        prompts.append(call.prompt)
+        if call.turn >= 3:  # 第二件：续接也超时
+            call.fail("TIMEOUT: 超过 1800 秒，网络终止了这次运行")
+        if call.turn == 1:
+            call.fail("TIMEOUT: 超过 1800 秒，网络终止了这次运行")
+        return "收尾了"
+
+    net = Network(ScriptedRuntime(handler), tmp_path)
+    a = net.create_agent("A", "A", ["a"], [])
+    conv = talk(net, a, None, "第一件")
+    assert conv.messages[-1].text == "收尾了" and "不要重复已经做完的步骤" in prompts[1]
+    net.send_message(conv.id, "第二件", background=False)
+    assert seat(net, conv, a).blocked and "超时" in conv.messages[-1].text and len(prompts) == 4
 
 
 def test_failed_round_keeps_progress_and_resumes(tmp_path: Path):

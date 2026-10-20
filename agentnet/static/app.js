@@ -249,14 +249,18 @@ const handoffItem = (h, all = []) => {
   const gone = (h.after || []).filter((i) => !all.some((x) => x.id === i));  // 依赖已不在进行中（未采纳等）
   if (h.status === "scheduled") return `<li class="todo-item handoff"><div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
       <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> <span class="pill status waiting">排队中</span></div>
-      <p class="hint">等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
+      <p class="hint">${h.approved_by_agent_name ? `项目负责人 ${esc(h.approved_by_agent_name)} 已确认，` : ""}等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
       ${gone.length ? `<p class="warn">依赖 ${gone.map(esc).join("、")} 已不在进行中（可能没被采纳），这条不会自动发出。</p>` : ""}
       <div class="actions"><button type="button" class="ghost sm" data-ho-now="${esc(h.id)}">现在就发出</button>
         <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不发了</button></div></li>`;
+  const lead = h.awaiting === "lead";
   return `<li class="todo-item handoff" data-ho="${esc(h.id)}">
     <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
-      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> ${pill("pending")}
+      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
+      ${lead ? '<span class="pill status waiting">等负责人确认</span>' : pill("pending")}
       <span class="muted">${time(h.created_at)}</span></div>
+    ${h.escalation ? `<p class="warn">转给你：${esc(h.escalation)}</p>` : ""}
+    ${lead ? '<p class="hint">项目负责人会在下一轮处理；你也可以直接确认或不采纳。</p>' : ""}
     <label class="sr-only" for="ho-${esc(h.id)}">交接内容</label>
     <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
     ${peers.length ? `<fieldset class="ho-after"><legend>等这些完成后再发出</legend>${peers.map((x) => `<label><input type="checkbox" data-ho-dep="${esc(h.id)}" value="${esc(x.id)}"
@@ -330,7 +334,7 @@ function renderProjectOverview(d) {
   const lanes = [...d.workstreams.map((w) => ({ id: w.id, name: w.name, note: w.description })),
     { id: null, name: "未分方面", note: "" }];
   const card = (r) => `<li><a class="task-card" href="#board" data-req="${esc(r.id)}">
-      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span>${reqPill(r.status)}</span>
+      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span>${reqPillOf(r)}</span>
       <span class="mission">${esc(r.title)}</span>
       <span class="meta"><span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span></span></a></li>`;
   const html = lanes.map((ln) => {
@@ -362,7 +366,8 @@ function handoffsHtml(hs) {
   const live = hs.filter((h) => open.includes(h) || (h.status === "sent" && !h.returned_at));
   const row = (h) => `<li><b>${esc(h.from_agent_name)}</b> <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
     ${h.status === "sent" ? `<a class="pill status ${h.returned_at ? "completed" : "running"}" href="#${esc(h.to_conversation_id || "")}">${h.returned_at ? "已完成" : "已发出"}</a>` : '<span class="pill status rejected">未采纳</span>'}
-    <span class="muted">${time(h.decided_at || h.created_at)}</span><p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
+    <span class="muted">${time(h.decided_at || h.created_at)}${h.approved_by_agent_name ? ` · 负责人 ${esc(h.approved_by_agent_name)} 处理` : ""}</span>
+    <p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
   return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${open.length} 待确认或排队</h3>
     ${open.length ? `<ul class="todo-list">${open.map((h) => handoffItem(h, live)).join("")}</ul>` : ""}
     ${done.length ? `<details><summary>已处理 · ${done.length}</summary><ul class="refs">${done.map(row).join("")}</ul></details>` : ""}</section>`;
@@ -403,6 +408,18 @@ function renderProjectDetail(box, d) {
         <button type="button" class="link" data-rmws="${esc(w.id)}">删除</button></li>`).join("") || '<li class="empty">还没有方面</li>'}</ul>
       <form id="ws-form" class="stack"><label for="ws-name" class="sr-only">方面名称</label><input id="ws-name" required maxlength="80" placeholder="例如：市场调研">
         <label for="ws-desc" class="sr-only">说明</label><input id="ws-desc" maxlength="500" placeholder="说明（可选）"><button type="submit">添加方面</button></form>
+    </section>
+    <section class="archive-sec" aria-labelledby="pj-lead"><h3 id="pj-lead">负责人统筹</h3>
+      <form id="lead-form" class="stack">
+        <label for="lead-agent">项目负责人</label>
+        <select id="lead-agent"><option value="">不设</option>${(d.lead_candidates || []).map((c) =>
+          `<option value="${esc(c.agent_id)}|${esc(c.group_id)}" ${c.agent_id === d.lead_agent_id && c.group_id === d.lead_group_id ? "selected" : ""}>${esc(c.name)}（#${esc(c.group_name)}）</option>`).join("")}</select>
+        <label class="switch"><input type="checkbox" id="lead-on" ${d.autonomy !== "manual" ? "checked" : ""}><span>交接由负责人确认，不用我逐条确认</span></label>
+        <label class="switch"><input type="checkbox" id="lead-accept" ${d.autonomy === "lead_accept" ? "checked" : ""}><span>它确认的交接引出的任务也由它验收</span></label>
+        <button type="submit">保存</button></form>
+      <p class="hint">${d.autonomy !== "manual" && !d.lead_active ? '<span class="warn">负责人已不在它统筹的群组里，交接回到你这里确认。</span> ' : ""}负责人在它所在群组的群聊里处理交接，以你的名义发出。
+        超出边界（24 小时内的总数、同一对群组之间的往返次数）、负责人拿不准或没处理的，转给你。
+        打开“由它验收”后，负责人验收它确认的交接引出的、不是它自己做的任务（退回有上限）；你交代的任务、项目决定仍然由你来。</p>
     </section>
     <section class="archive-sec" aria-labelledby="pj-dec"><h3 id="pj-dec">项目决定 · ${d.decisions.filter((x) => x.status === "active").length}</h3>
       <ul class="decisions">${d.decisions.filter((x) => x.status === "active").map((x) => `<li><span>${esc(x.text)}</span>
@@ -445,6 +462,10 @@ function renderProjectDetail(box, d) {
     call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
   $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
     call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
+  $("#lead-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    const [agent_id, group_id] = ($("#lead-agent").value || "|").split("|");
+    call(`/api/projects/${d.id}/lead`, { method: "PUT", body: { agent_id: agent_id || null, group_id: group_id || null,
+      autonomy: !agent_id || !$("#lead-on").checked ? "manual" : $("#lead-accept").checked ? "lead_accept" : "lead" } }); });
   $("#pdec-form", box).addEventListener("submit", (e) => { e.preventDefault();
     call(`/api/projects/${d.id}/decisions`, { method: "POST", body: { text: $("#pdec-text").value, reason: $("#pdec-reason").value } }); });
   box.querySelectorAll("[data-rmdec]").forEach((b) => b.addEventListener("click", () => {
@@ -474,6 +495,8 @@ const BOARD_COLS = [
   { key: "failed", title: "已取消", match: (r) => r.status === "cancelled" },
 ];
 const REQ_CN = { in_progress: "进行中", in_review: "待验收", completed: "已完成", cancelled: "已取消" };
+// 等项目负责人验收的（docs/projects.md §9）：卡片上和“待你验收”区分开
+const reqPillOf = (r) => r.status === "in_review" && r.awaiting === "lead" ? '<span class="pill status waiting">等负责人验收</span>' : reqPill(r.status);
 const reqPill = (st) => `<span class="pill status ${st === "in_progress" ? "running" : st === "cancelled" ? "rejected" : esc(st)}">${REQ_CN[st] || esc(st)}</span>`;
 
 async function loadBoard() {
@@ -509,7 +532,8 @@ function renderBoard() {
         <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button>
         <a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a></div>
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
-    ...(b.handoffs || []).filter((h) => h.status === "pending" || h.status === "scheduled").map((h) => handoffItem(h, b.handoffs)),
+    ...(b.handoffs || []).filter((h) => (h.status === "pending" && h.awaiting !== "lead")
+      || (h.status === "scheduled" && !h.approved_by_agent)).map((h) => handoffItem(h, b.handoffs)),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
@@ -540,7 +564,7 @@ function renderBoard() {
   }));
 
   const card = (r) => `<li><button type="button" class="task-card ${S.reqSel === r.id ? "selected" : ""}" data-id="${esc(r.id)}">
-      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span></span>
+      <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span>${r.awaiting === "lead" ? reqPillOf(r) : ""}</span>
       <span class="mission">${esc(r.title)}</span>
       <span class="meta">${r.project_name ? `<span class="proj">${esc(r.project_name)}${r.workstream_name ? ` · ${esc(r.workstream_name)}` : ""}</span>` : ""}
         <span>${esc(r.conversation_kind === "dm" ? "私聊" : r.conversation_title)}</span><span>${time(r.created_at)}</span>
@@ -585,12 +609,15 @@ async function renderRequest(box = $("#board-detail")) {
   const r = await api(`/api/requests/${id}`).catch(() => null);
   if (!r || S.reqSel !== id) return;
   const mine = !r.requester_id || r.requester_id === S.me?.id;
-  box.innerHTML = `<h2 class="panel-title">${esc(r.title)} ${reqPill(r.status)}</h2>
+  box.innerHTML = `<h2 class="panel-title">${esc(r.title)} ${reqPillOf(r)}</h2>
     <p class="muted">${esc(r.agent_name)} 接下 · ${esc(r.conversation_kind === "dm" ? "私聊" : `群聊「${r.conversation_title}」`)} · ${time(r.created_at)}
       ${r.requester_id && !mine ? ` · ${esc(r.requester)} 下发` : ""}</p>
     <dl><dt>交代的原话</dt><dd>${esc(r.message)}</dd><dt>交付要求</dt><dd>${esc(r.expected_outcome)}</dd>
       ${r.summary ? `<dt>交付说明</dt><dd class="md">${renderMarkdown(r.summary)}</dd>` : ""}
-      ${r.revisions ? `<dt>返工</dt><dd>退回 ${r.revisions} 次${r.feedback ? ` · 最近意见：${esc(r.feedback)}` : ""}</dd>` : ""}</dl>
+      ${r.revisions ? `<dt>返工</dt><dd>退回 ${r.revisions} 次${r.lead_returns ? `（负责人 ${r.lead_returns} 次）` : ""}${r.feedback ? ` · 最近意见：${esc(r.feedback)}` : ""}</dd>` : ""}
+      ${r.reviewed_by_agent_name ? `<dt>验收</dt><dd>项目负责人 ${esc(r.reviewed_by_agent_name)}</dd>` : ""}
+      ${r.escalation && r.status === "in_review" ? `<dt>转给你</dt><dd>${esc(r.escalation)}</dd>` : ""}</dl>
+    ${r.status === "in_review" && r.awaiting === "lead" ? '<p class="hint">项目负责人会在下一轮验收；你也可以直接处理。</p>' : ""}
     ${r.status === "in_review" && mine ? `<form id="req-review" class="stack">
       <div class="actions"><button type="button" id="req-accept">验收通过</button></div>
       <label for="req-feedback" class="sr-only">要改什么</label>
@@ -1544,7 +1571,7 @@ function renderThread() {
       const sender = !m.user_id || m.user_id === S.me?.id ? "你" : (c.senders?.[m.user_id] || "参与者");
       // 被认定为任务的消息：标出任务与状态，点开到看板
       const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
-        `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPill(r.status)}</a>`).join("");
+        `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPillOf(r)}</a>`).join("");
       return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${to}${time(m.ts)}</div><div class="body">${mentionHtml(m.text)}</div>${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">

@@ -179,6 +179,42 @@ TOOLS = [
         },
     },
     {
+        "name": "review_handoff",
+        "description": ("项目负责人确认、不采纳或转交人处理一条待确认的交接。确认后以项目所有者的名义发进对方群聊并 @ 对方成员；"
+                        "超出网络设的边界时会自动转给人。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "handoff_id": {"type": "string", "description": "交接 id"},
+                "decision": {"type": "string", "enum": ["confirm", "decline", "escalate"],
+                             "description": "confirm 确认；decline 不采纳（提交者会被唤醒）；escalate 交给人"},
+                "message": {"type": "string", "description": "可选：确认时改写的交接内容"},
+                "agent": {"type": "string", "description": "可选：确认时换一个接手的成员（目标群组里的名称）"},
+                "after": {"type": "string", "description": "可选：确认时改依赖（交接 id，逗号分隔；空字符串表示不等）"},
+                "replaces": {"type": "string", "description": "可选：确认时替换的、还没发出的交接 id"},
+                "note": {"type": "string", "description": "不采纳或交给人时的理由"},
+            },
+            "required": ["handoff_id", "decision"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "review_request",
+        "description": ("项目负责人验收一个由它确认的交接引出的、已交付的任务：验收、退回（写明要改什么）或交给人。"
+                        "验收后等它完成的交接会自动发出。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "request_id": {"type": "string", "description": "任务 id（req-…）"},
+                "decision": {"type": "string", "enum": ["accept", "changes", "escalate"],
+                             "description": "accept 验收；changes 退回返工；escalate 交给人验收"},
+                "feedback": {"type": "string", "description": "退回时要改什么；交给人时的理由"},
+            },
+            "required": ["request_id", "decision"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_brief",
         "description": "建议修改群组 brief（目标、范围、成功标准、当前阶段）。写完整的新 brief；主持人采纳后才生效。",
         "inputSchema": {
