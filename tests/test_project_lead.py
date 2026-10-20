@@ -39,7 +39,7 @@ def test_lead_confirms_handoffs(tmp_path: Path):
             out.append(call.tool("review_handoff", handoff_id=hid, decision="confirm", message="跑 project/ac.md 的全部用例"))
         return "ok"
     net, alice, bob, pm, eng, qa, p, chats = build(tmp_path, handler)
-    with pytest.raises(NetworkError, match="必须是挂进这个项目的群组的成员"):
+    with pytest.raises(NetworkError, match="必须是挂进这个项目的内部群组的成员"):
         net.set_project_lead(p.id, net.create_agent("X", "x", [], [], actor=alice).id, "lead", actor=alice)
     with pytest.raises(NetworkError, match="先指定项目负责人"):
         net.set_project_lead(p.id, None, "lead", actor=alice)

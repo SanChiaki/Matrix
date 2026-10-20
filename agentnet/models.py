@@ -48,7 +48,7 @@ REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 # 项目工具：群组挂在项目里时才有，不需要 delegate。跨群组只能提交交接，由人确认后发出（docs/projects.md）。
 PROJECT_TOOLS = ("handoff",)
 # 负责人工具：项目打开“负责人统筹”时，只有项目负责人 Agent 在它自己群聊的席位里有（不变量 19、20）。
-LEAD_TOOLS = ("review_handoff", "review_request")
+LEAD_TOOLS = ("review_handoff", "review_request", "share_file")
 # 负责人统筹的档位：manual 交接由人（项目所有者）确认；lead 交接由项目负责人 Agent 确认；
 # lead_accept 再加上：负责人确认的交接引出的用户任务也由负责人验收。超出边界时都转给人。
 AUTONOMY = ("manual", "lead", "lead_accept")
@@ -331,7 +331,7 @@ class Handoff:
     context_kind: str                    # seat | task：处理结果通知谁
     context_id: str
     conversation_id: str
-    to_group_id: str
+    to_group_id: str                     # 联合群组提交的交接由负责人 / 所有者分派：确认前为空
     to_agent_id: str
     text: str
     after: list[str] = field(default_factory=list)  # 依赖的交接：它们都完成（人验收）后才发出
@@ -399,7 +399,9 @@ class Project:
     brief: str = ""                      # 目标、范围、成功标准、当前阶段：推送给挂载群组的席位与任务
     workstreams: list[Workstream] = field(default_factory=list)
     decisions: list[Decision] = field(default_factory=list)  # 项目级决定：只有所有者记录，推送给所有挂载群组
-    lead_agent_id: str | None = None     # 项目负责人：挂载群组里的一个成员
+    # 共享给联合群组的项目文件：文件名 → 联合群组 id。联合群组只看得到共享给它的文件（不变量 18）
+    shares: dict[str, list[str]] = field(default_factory=dict)
+    lead_agent_id: str | None = None     # 项目负责人：挂载的内部群组里的一个成员
     lead_group_id: str | None = None     # 负责人在哪个群组的群聊席位里统筹
     autonomy: str = "manual"             # manual | lead | lead_accept（见 AUTONOMY）
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1

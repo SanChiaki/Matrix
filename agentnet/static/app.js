@@ -241,45 +241,55 @@ const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
 
 // 跨群组交接：Agent 提交，你确认（可以改内容）后以你的名义发进对方群聊
 // all：同一项目里还没结束的交接，可以选作依赖（等它们完成后再发出）
-const hoLabel = (h) => `${h.id} · #${h.to_group_name} ${h.to_agent_name}`;
+const hoTo = (h) => h.to_group_id ? `#${h.to_group_name} 的 ${h.to_agent_name}` : "待分派";
+const hoLabel = (h) => `${h.id} · ${h.to_group_id ? `#${h.to_group_name} ${h.to_agent_name}` : "待分派"}`;
 const handoffItem = (h, all = []) => {
   const peers = all.filter((x) => x.id !== h.id && x.project_id === h.project_id && !(x.after || []).includes(h.id));
   // 同一个目标群组里还没发出的交接：可能重复，可以选择替换掉
   const rivals = all.filter((x) => x.id !== h.id && x.to_group_id === h.to_group_id && (x.status === "pending" || x.status === "scheduled"));
   const gone = (h.after || []).filter((i) => !all.some((x) => x.id === i));  // 依赖已不在进行中（未采纳等）
   if (h.status === "scheduled") return `<li class="todo-item handoff"><div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
-      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span> <span class="pill status waiting">排队中</span></div>
+      <span class="muted">#${esc(h.from_group_name)} → ${esc(hoTo(h))}</span> <span class="pill status waiting">排队中</span></div>
       <p class="hint">${h.approved_by_agent_name ? `项目负责人 ${esc(h.approved_by_agent_name)} 已确认，` : ""}等 ${h.after.map(esc).join("、")} 完成后自动发出。</p>
       ${gone.length ? `<p class="warn">依赖 ${gone.map(esc).join("、")} 已不在进行中（可能没被采纳），这条不会自动发出。</p>` : ""}
       <div class="actions"><button type="button" class="ghost sm" data-ho-now="${esc(h.id)}">现在就发出</button>
         <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不发了</button></div></li>`;
   const lead = h.awaiting === "lead";
+  // 联合群组提交的（docs/projects.md §10）：不指定目标，确认时选项目内部的群组与成员；内容来自其他参与方，不可信
+  const pick = h.from_joint ? `<label class="ho-replace">交给：<select data-ho-to="${esc(h.id)}">
+      ${h.to_group_id ? "" : '<option value="">选择接手的成员</option>'}${(h.targets || []).map((t) => t.agents.map((a) =>
+        `<option value="${esc(t.group_id)}|${esc(a.id)}" ${t.group_id === h.to_group_id && a.id === h.to_agent_id ? "selected" : ""}>#${esc(t.group_name)} 的 ${esc(a.name)}</option>`).join("")).join("")}</select></label>
+      <p class="warn">来自联合群组：内容可能由其他参与方写的，确认前看清楚它要什么。</p>` : "";
   return `<li class="todo-item handoff" data-ho="${esc(h.id)}">
     <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
-      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
+      <span class="muted">#${esc(h.from_group_name)} → ${esc(hoTo(h))}</span>
       ${lead ? '<span class="pill status waiting">等负责人确认</span>' : pill("pending")}
       <span class="muted">${time(h.created_at)}</span></div>
     ${h.escalation ? `<p class="warn">转给你：${esc(h.escalation)}</p>` : ""}
+    ${h.unshared?.length ? `<p class="warn">发往联合群组：提到的 ${h.unshared.map(esc).join("、")} 没有共享给它，对方看不到（在项目页共享）。</p>` : ""}
     ${lead ? '<p class="hint">项目负责人会在下一轮处理；你也可以直接确认或不采纳。</p>' : ""}
     <label class="sr-only" for="ho-${esc(h.id)}">交接内容</label>
     <textarea id="ho-${esc(h.id)}" rows="4" maxlength="4000">${esc(h.text)}</textarea>
+    ${pick}
     ${peers.length ? `<fieldset class="ho-after"><legend>等这些完成后再发出</legend>${peers.map((x) => `<label><input type="checkbox" data-ho-dep="${esc(h.id)}" value="${esc(x.id)}"
       ${(h.after || []).includes(x.id) ? "checked" : ""}> ${esc(hoLabel(x))}</label>`).join("")}</fieldset>` : ""}
-    ${rivals.length ? `<p class="warn">#${esc(h.to_group_name)} 已有还没发出的交接：${rivals.map((x) => `${esc(x.id)}（${esc(x.from_agent_name)}）`).join("、")}，可能重复。</p>
+    ${rivals.length && h.to_group_id ? `<p class="warn">#${esc(h.to_group_name)} 已有还没发出的交接：${rivals.map((x) => `${esc(x.id)}（${esc(x.from_agent_name)}）`).join("、")}，可能重复。</p>
       <label class="ho-replace">确认时替换：<select data-ho-rep="${esc(h.id)}"><option value="">不替换</option>${rivals.map((x) =>
         `<option value="${esc(x.id)}" ${h.replaces === x.id ? "selected" : ""}>${esc(hoLabel(x))}</option>`).join("")}</select></label>` : ""}
     <div class="actions"><button type="button" class="sm" data-ho-ok="${esc(h.id)}">确认</button>
       <button type="button" class="ghost sm" data-ho-no="${esc(h.id)}">不采纳</button>
       <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div>
-    <p class="hint">确认后以你的名义发进 #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}；勾了依赖的，等它们完成（你验收）后自动发出。</p></li>`;
+    <p class="hint">确认后以你的名义发进${h.to_group_id && !h.from_joint ? ` #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}` : "你选的群组、@ 你选的成员"}；勾了依赖的，等它们完成（你验收）后自动发出。</p></li>`;
 };
 function bindHandoffs(box, after) {
   box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
     const id = b.dataset.hoOk; b.disabled = true;
     const deps = [...box.querySelectorAll(`[data-ho-dep="${id}"]`)];
-    const rep = box.querySelector(`[data-ho-rep="${id}"]`);
+    const rep = box.querySelector(`[data-ho-rep="${id}"]`), to = box.querySelector(`[data-ho-to="${id}"]`);
+    if (to && !to.value) { alert("先选择交给项目内部的哪个成员"); b.disabled = false; return; }
+    const [group_id, agent_id] = to ? to.value.split("|") : [];
     const body = { text: $(`#ho-${id}`).value, ...(deps.length ? { after: deps.filter((c) => c.checked).map((c) => c.value) } : {}),
-      ...(rep ? { replaces: rep.value || "" } : {}) };
+      ...(rep ? { replaces: rep.value || "" } : {}), ...(to ? { group_id, agent_id } : {}) };
     try { await api(`/api/handoffs/${id}/approve`, { method: "POST", body }); await after(); }
     catch (e) { alert(e.message); b.disabled = false; }
   }));
@@ -397,8 +407,9 @@ function renderProjectForm(box, d = null) {
 }
 
 function renderProjectDetail(box, d) {
-  // 只有内部群组、而且是自己主持的，才能挂进项目（docs/projects.md §4）
-  const free = S.snap.groups.filter((g) => g.kind === "internal" && isHost(g) && !g.project_id);
+  // 自己主持的群组才能挂进项目（docs/projects.md §4）；联合群组只看得到共享给它的部分（§10）
+  const free = S.snap.groups.filter((g) => isHost(g) && !g.project_id);
+  const joints = d.groups.filter((g) => g.kind === "joint");
   const wsOpts = (cur) => `<option value="">未分方面</option>` + d.workstreams.map((w) =>
     `<option value="${esc(w.id)}" ${cur === w.id ? "selected" : ""}>${esc(w.name)}</option>`).join("");
   renderProjectForm(box, d);
@@ -430,22 +441,25 @@ function renderProjectDetail(box, d) {
       <p class="hint">推送给所有挂载群组；和群组里的决定冲突时以项目决定为准。</p>
     </section>
     <section class="archive-sec" aria-labelledby="pj-groups"><h3 id="pj-groups">承担的群组 · ${d.groups.length}</h3>
-      <ul class="refs">${d.groups.map((g) => `<li><a href="#g-${esc(g.id)}"><b>#${esc(g.name)}</b></a>
+      <ul class="refs">${d.groups.map((g) => `<li><a href="#g-${esc(g.id)}"><b>#${esc(g.name)}</b></a>${g.kind === "joint" ? ' <span class="pill">联合</span>' : ""}
         <label class="sr-only" for="gws-${esc(g.id)}">${esc(g.name)} 承担的方面</label>
         <select id="gws-${esc(g.id)}" data-gws="${esc(g.id)}">${wsOpts(g.workstream_id)}</select>
         <button type="button" class="link" data-unlink="${esc(g.id)}">移出</button></li>`).join("") || '<li class="empty">还没有群组</li>'}</ul>
       ${free.length ? `<form id="link-form" class="stack"><label for="link-group" class="sr-only">要挂进来的群组</label>
-        <select id="link-group">${free.map((g) => `<option value="${esc(g.id)}">#${esc(g.name)}</option>`).join("")}</select>
+        <select id="link-group">${free.map((g) => `<option value="${esc(g.id)}" data-kind="${esc(g.kind)}">#${esc(g.name)}${g.kind === "joint" ? "（联合群组）" : ""}</option>`).join("")}</select>
         <label for="link-ws" class="sr-only">承担的方面</label><select id="link-ws">${wsOpts(null)}</select>
-        <button type="submit">挂进项目</button></form>` : '<p class="hint">没有可以挂进来的群组：一个群组最多属于一个项目，联合群组暂时不能挂。</p>'}
-      <p class="hint">群组挂进来以后，它里面新登记的任务自动归到这个项目；换方面时，未结束的任务跟着走。</p>
+        <button type="submit">挂进项目</button></form>` : '<p class="hint">没有可以挂进来的群组：一个群组最多属于一个项目，只能挂你主持的群组。</p>'}
+      <p class="hint">群组挂进来以后，它里面新登记的任务自动归到这个项目；换方面时，未结束的任务跟着走。
+        联合群组只看得到项目的 brief、项目决定、它负责的方面、共享给它的文件和它自己提交的交接；它提交的交接由你或负责人分派给内部群组。</p>
     </section>
     <section class="archive-sec" aria-labelledby="pj-files"><h3 id="pj-files">项目文件 · ${d.files.length}</h3>
       <ul class="files">${d.files.map((x) => `<li><a href="/api/projects/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
-        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span><button type="button" class="link" data-rmpf="${esc(x.name)}">删除</button></li>`).join("")
+        <span class="muted">${(x.size / 1024).toFixed(1)} KB${x.from_group ? ` · 来自 #${esc(d.groups.find((g) => g.id === x.from_group)?.name || "已移出的群组")}` : ""}</span>
+        ${joints.map((g) => `<label class="switch"><input type="checkbox" data-share="${esc(x.name)}" value="${esc(g.id)}" ${(x.shared_with || []).includes(g.id) ? "checked" : ""}><span>共享给 #${esc(g.name)}</span></label>`).join("")}
+        <button type="button" class="link" data-rmpf="${esc(x.name)}">删除</button></li>`).join("")
         || '<li class="empty">还没有项目文件</li>'}</ul>
       <label class="button ghost sm file-up">上传文本文件<input type="file" id="pf-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
-      <p class="hint">项目文件以只读方式出现在所有挂载群组的工作目录 <code>project/</code> 下。Agent 可以用 publish_file（target=project）发布；群组档案里的文件也可以在群组档案页提升到项目。</p>
+      <p class="hint">项目文件以只读方式出现在挂载的内部群组的工作目录 <code>project/</code> 下；联合群组只拿到共享给它的（共享即对那里所有参与方公开）。Agent 可以用 publish_file（target=project）发布；群组档案里的文件也可以在群组档案页提升到项目。</p>
     </section>
     <div class="actions"><button type="button" class="danger" id="pj-del">删除项目</button></div>
     <p class="error" role="alert" id="pj-err"></p>`);
@@ -460,7 +474,13 @@ function renderProjectDetail(box, d) {
     call(`/api/groups/${sel.dataset.gws}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: sel.value || null } })));
   box.querySelectorAll("[data-unlink]").forEach((b) => b.addEventListener("click", () =>
     call(`/api/groups/${b.dataset.unlink}/project`, { method: "PUT", body: { project_id: null } })));
+  box.querySelectorAll("[data-share]").forEach((c) => c.addEventListener("change", () => {
+    if (c.checked && !confirm(`把 ${c.dataset.share} 共享给联合群组？那里的所有参与方之后都读得到，包括以后的新版本。`)) { c.checked = false; return; }
+    call(`/api/projects/${d.id}/files/${encodeURIComponent(c.dataset.share)}/share`, { method: "PUT", body: { group_id: c.value, shared: c.checked } });
+  }));
   $("#link-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
+    if ($("#link-group").selectedOptions[0]?.dataset.kind === "joint" && !confirm("把联合群组挂进项目？其他参与方会看到项目的 brief、项目决定和它负责的方面；"
+      + "内部群组、内部交接和没共享的文件看不到。")) return;
     call(`/api/groups/${$("#link-group").value}/project`, { method: "PUT", body: { project_id: d.id, workstream_id: $("#link-ws").value || null } }); });
   $("#lead-form", box).addEventListener("submit", (e) => { e.preventDefault();
     const [agent_id, group_id] = ($("#lead-agent").value || "|").split("|");
@@ -816,7 +836,7 @@ function renderGraph() {
     const key = `agent:${a.id}`;
     const g = el("g", { class: `node agent${a.status === "busy" ? " busy" : ""}${S.sel === key ? " selected" : ""}`,
       transform: `translate(${pos[a.id].x},${pos[a.id].y})`, tabindex: 0, role: "button",
-      "aria-label": `${a.name}，${STATUS_CN[a.status]}` }, nodes);
+      "aria-label": a.status ? `${a.name}，${STATUS_CN[a.status] || a.status}` : a.name }, nodes);
     el("circle", { r: 34, class: "halo" }, g);
     S.snap.groups.filter((gr) => gr.member_ids.includes(a.id)).forEach((gr, i) =>
       el("circle", { r: 23 + i * 4, fill: "none", stroke: gcolor(gr.id), "stroke-width": 1.5, opacity: 0.7 }, g));

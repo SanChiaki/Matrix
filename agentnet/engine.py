@@ -28,7 +28,7 @@ from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, AUTONOMY, LEAD_TOOLS
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
-                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_review, format_request_review, format_handoff_notice, format_ledger, format_open_requests, format_project,
+                       format_delivery, format_failure, format_failure_notice, format_handoff_done, format_handoff_review, format_project_shared, format_request_review, format_handoff_notice, format_ledger, format_open_requests, format_project,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir, workdir
@@ -50,6 +50,7 @@ class Limits:
     approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
     lead_daily: int = 20            # 项目负责人 24 小时内最多确认几条交接，超了转给人（不变量 20）
     lead_pair: int = 4              # 同一对群组之间 24 小时内最多几条负责人确认的交接（来回踢就停下）
+    lead_joint_daily: int = 5       # 每个联合群组 24 小时内最多几条交接由负责人确认（外部来的，更低）
 
 
 @dataclass
@@ -1304,13 +1305,24 @@ class Network:
                     h = self.store.handoffs.get(it["handoff_id"])
                     if h is None or not ctx.lead or self._awaiting(h) != "lead":
                         continue  # 已经处理了、转给了人，或者这里不再是负责人
-                    others = [f"- {x.id}（{self._handoff_label(x)}）→ {self._name(x.to_agent_id)}："
+                    src = self.store.groups.get(h.from_group_id)
+                    joint = src is not None and src.kind == "joint"
+                    others = [f"- {x.id}（{self._handoff_label(x)}）→ {self._name(x.to_agent_id) or '待分派'}："
                               f"{_short(_first_line(x.text), 80)}"
                               for x in self.store.handoffs.values() if x.project_id == h.project_id and x.id != h.id
-                              and x.to_group_id == h.to_group_id and self._handoff_open(x)]
+                              and self._handoff_open(x)
+                              and (x.from_group_id == h.from_group_id if joint else x.to_group_id == h.to_group_id)]
+                    p = self.store.projects.get(h.project_id)
+                    targets = [f"- {self._group_name(x.id)}：{'、'.join(self._name(m) for m in x.member_ids)}"
+                               for x in self.store.groups.values() if self._project_of(x) is p and x.kind == "internal"] \
+                        if joint else []
+                    who = self.store.agents.get(h.from_agent_id)
+                    foreign = self._email(who.owner_id) if joint and who and who.owner_id != h.owner_id else ""
                     blocks.append(format_handoff_review(h, self._group_name(h.from_group_id), self._name(h.from_agent_id),
-                                                        self._group_name(h.to_group_id), self._name(h.to_agent_id),
-                                                        others))
+                                                        self._group_name(h.to_group_id) if h.to_group_id else "",
+                                                        self._name(h.to_agent_id) if h.to_agent_id else "",
+                                                        others, targets=targets, joint=joint, foreign=foreign)
+                                  + (self._joint_note(p, self.store.groups.get(h.to_group_id), h.text, lead=True) if p else ""))
                 ctx.reviews.append(h.id)
                 wake.append(f"待确认的交接 {h.id}")
             elif kind == "request_review":
@@ -1321,7 +1333,9 @@ class Network:
                     h = self._request_handoff(r)
                     blocks.append(format_request_review(r, self._name(r.agent_id), self._group_name(
                                                             getattr(self.store.conversations.get(r.conversation_id), "group_id", "") or ""),
-                                                        h.text if h else "", self.limits.max_revisions - r.lead_returns))
+                                                        h.text if h else "", self.limits.max_revisions - r.lead_returns,
+                                                        joint=self._group_name(h.from_group_id) if h and getattr(
+                                                            self.store.groups.get(h.from_group_id), "kind", "") == "joint" else ""))
                 ctx.request_reviews.append(r.id)
                 wake.append(f"待验收的 {r.id}")
             elif kind in ("handoff", "handoff_done"):
@@ -1329,15 +1343,18 @@ class Network:
                 if h is None:
                     continue
                 to = self.store.groups.get(h.to_group_id)
+                here = self.store.groups.get(ctx.group_id or "")
+                # 联合群组里的提交者看不到项目内部：不写交给了哪个群组、谁，也不带内部的交付说明
+                hidden = here is not None and here.kind == "joint" and (to is None or to.kind == "internal")
                 if kind == "handoff_done":
                     r = self.store.requests.get(it["request_id"])
                     by = f"项目负责人 {self._name(r.reviewed_by_agent)} " if r and r.reviewed_by_agent else "人"
                     blocks.append(format_handoff_done(h, to.name if to else "", self._name(r.agent_id if r else h.to_agent_id),
-                                                      r.summary if r else "", by))
+                                                      r.summary if r else "", "项目" if hidden else by, hidden=hidden))
                     wake.append(f"交接 {h.id} 已完成")
                 else:
                     blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id),
-                                                        self._approver(h)))
+                                                        "项目" if hidden else self._approver(h), hidden=hidden))
                     wake.append(f"交接 {h.id} {HANDOFF_CN.get(h.status, h.status)}")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
@@ -1396,8 +1413,10 @@ class Network:
         if g is not None:
             shutil.copytree(self.store.group_dir(g.id), workdir / GROUP_FILES, symlinks=False)
             p = self._project_of(g)
-            if p is not None:
-                shutil.copytree(self.store.project_dir(p.id), workdir / PROJECT_FILES, symlinks=False)
+            if p is not None:  # 联合群组只拷共享给它的文件
+                (workdir / PROJECT_FILES).mkdir()
+                for f in self._visible_files(p, g):
+                    shutil.copy2(self.store.project_dir(p.id) / f["name"], workdir / PROJECT_FILES / f["name"])
 
     def _archive_text(self, g: Group) -> str:
         """调用方持有锁。"""
@@ -1469,13 +1488,12 @@ class Network:
         out: list[dict[str, Any]] = []
         if g is None:
             return out
-        dirs = [(GROUP_FILES, self.store.group_dir(g.id))]
-        if (pj := self._project_of(g)) is not None:
-            dirs.append((PROJECT_FILES, self.store.project_dir(pj.id)))
-        for mount, d in dirs:
-            for p in sorted(d.iterdir()):
-                if p.is_file() and p.stat().st_size <= 2_000_000:
-                    out.append({"path": f"{mount}/{p.name}", "data": p.read_bytes()})
+        files = [(GROUP_FILES, p) for p in sorted(self.store.group_dir(g.id).iterdir())]
+        if (pj := self._project_of(g)) is not None:  # 联合群组只下发共享给它的项目文件
+            files += [(PROJECT_FILES, self.store.project_dir(pj.id) / f["name"]) for f in self._visible_files(pj, g)]
+        for mount, p in files:
+            if p.is_file() and p.stat().st_size <= 2_000_000:
+                out.append({"path": f"{mount}/{p.name}", "data": p.read_bytes()})
         return out
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
@@ -1677,7 +1695,12 @@ class Network:
             if project is not None:
                 name = self.publish_project_file(project.id, fname, content, agent_id=ctx.agent_id, source=ctx.id,
                                                  group_id=g.id)
-                return f"已发布到项目「{project.name}」：{PROJECT_FILES}/{name}。项目里所有群组此后都能读到。"
+                if g.kind == "joint":
+                    return (f"已发布到项目「{project.name}」：{PROJECT_FILES}/{name}。项目内部和这个群组的所有参与方"
+                            "此后都能读到。")
+                shared = [self._group_name(x) for x in project.shares.get(name, [])]
+                note = (f"注意：这份文件共享给了联合群组{'、'.join(shared)}，新版本对那里的参与方也可见。" if shared else "")
+                return f"已发布到项目「{project.name}」：{PROJECT_FILES}/{name}。项目里所有内部群组此后都能读到。" + note
             name = self.publish_file(g.id, fname, content, agent_id=ctx.agent_id, source=ctx.id)
             return f"已发布到群组档案：{GROUP_FILES}/{name}。群组所有成员此后都能读到。"
         agent = self.store.agents.get(ctx.agent_id)
@@ -2151,21 +2174,28 @@ class Network:
             r = self._request(request_id, actor)
             conv = self.store.conversations.get(r.conversation_id)
             src = next((m for m in conv.messages if m.id == r.message_id), None) if conv else None
-            return {**self.request_card(r), "message": src.text if src else "",
+            return {**self.request_card(r, actor), "message": src.text if src else "",
                     "tasks": [self.store.tasks[t].to_dict() for t in r.task_ids
                               if t in self.store.tasks and self.can_see_task(self.store.tasks[t], actor)]}
 
-    def request_card(self, r: UserRequest) -> dict[str, Any]:
-        """调用方持有锁。"""
+    def _strip_project(self, d: dict[str, Any], r: UserRequest, actor: str | None) -> dict[str, Any]:
+        """调用方持有锁。项目只有所有者看得到：联合群组里别的参与者看到的任务卡不带项目归属（不变量 13）。"""
+        p = self.store.projects.get(r.project_id or "")
+        if actor is None or p is None or self.can_see_project(p, actor):
+            return d
+        return {**d, "project_id": None, "workstream_id": None, "project_name": None, "workstream_name": None}
+
+    def request_card(self, r: UserRequest, actor: str | None = None) -> dict[str, Any]:
+        """调用方持有锁。actor：给谁看（别的参与者看不到项目归属）。"""
         conv = self.store.conversations.get(r.conversation_id)
         p = self.store.projects.get(r.project_id or "")
         w = next((w for w in p.workstreams if w.id == r.workstream_id), None) if p else None
-        return {**r.to_dict(), "agent_name": self._name(r.agent_id), "requester": self._email(r.requester_id),
+        card = {**r.to_dict(), "agent_name": self._name(r.agent_id), "requester": self._email(r.requester_id),
                 "conversation_title": conv.title if conv else "", "conversation_kind": conv.kind if conv else "",
                 "delegations": len(r.task_ids), "project_name": p.name if p else None,
-                "awaiting": self._request_awaiting(r),
-                "reviewed_by_agent_name": self._name(r.reviewed_by_agent) if r.reviewed_by_agent else None,
-                "workstream_name": w.name if w else None}
+                "workstream_name": w.name if w else None, "awaiting": self._request_awaiting(r),
+                "reviewed_by_agent_name": self._name(r.reviewed_by_agent) if r.reviewed_by_agent else None}
+        return self._strip_project(card, r, actor)
 
     # ================= 项目 =================
     # 目标与汇总层（docs/projects.md）：只有一个所有者，汇总挂载群组里的用户任务。群组、委托、知识、可见性的规则
@@ -2174,11 +2204,51 @@ class Network:
     # target=project 或人的操作，记入 projects/<id>/log.jsonl）。
     # 只有内部群组能挂进项目，而且群组与项目必须是同一个所有者（不跨信任域，不变量 16）。
     def _project_of(self, g: Group | None) -> Project | None:
-        """群组所属的项目（只认内部群组：联合群组即使有残留的归属也不推送）。"""
-        if g is None or g.kind != "internal" or not g.project_id:
+        """群组所属的项目。群组的所有者（联合群组是主持人）必须是项目所有者：别人的群组即使有残留的归属也不认。
+        联合群组只拿到项目的共享部分（_project_text、_visible_files），见 docs/projects.md §10。"""
+        if g is None or not g.project_id:
             return None
         p = self.store.projects.get(g.project_id)
         return p if p is not None and p.owner_id == g.owner_id else None
+
+    def _visible_files(self, p: Project, g: Group) -> list[dict[str, Any]]:
+        """调用方持有锁。群组看得到的项目文件：内部群组看全部，联合群组只看共享给它的（不变量 18）。"""
+        files = self.project_files(p)
+        return files if g.kind != "joint" else [f for f in files if g.id in p.shares.get(f["name"], [])]
+
+    def _unshared_refs(self, p: Project, g: Group | None, text: str) -> list[str]:
+        """调用方持有锁。发往联合群组的文字里提到、却没共享给它的项目文件：对方看不到，要先共享。"""
+        if g is None or g.kind != "joint":
+            return []
+        return [x["name"] for x in self.project_files(p) if x["name"] in text and g.id not in p.shares.get(x["name"], [])]
+
+    def _joint_note(self, p: Project, g: Group | None, text: str, lead: bool) -> str:
+        """调用方持有锁。交接发往联合群组时的提醒：内容对所有参与方公开；提到的文件没共享的，对方看不到。"""
+        if g is None or g.kind != "joint":
+            return ""
+        missing = self._unshared_refs(p, g, text)
+        how = "用 share_file 共享给它" if lead else "请项目所有者（或项目负责人）共享"
+        return (f"\n发往联合群组「{g.name}」：内容对那里的所有参与方公开，不要带项目内部的细节。"
+                + (f"消息里提到的 {'、'.join(missing)} 没有共享给它，对方看不到；要对方读到，{how}。" if missing else ""))
+
+    def _file_origin(self, p: Project, name: str) -> str | None:
+        """调用方持有锁。最近一次发布这个文件的群组（人上传的为 None）。"""
+        return self._file_origins(p).get(name)
+
+    def _file_origins(self, p: Project) -> dict[str, str | None]:
+        """调用方持有锁。每个项目文件最近一次是哪个群组发布的（人上传的为 None）。"""
+        import json
+        log = self.store.project_dir(p.id).parent / "log.jsonl"
+        origins: dict[str, str | None] = {}
+        if log.is_file():
+            for line in log.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("action") == "file.publish" and e.get("file"):
+                    origins[e["file"]] = e.get("group")
+        return origins
 
     def _project_key(self, g: Group | None) -> str:
         """调用方持有锁。项目背景的版本：项目、它的版本、群组承担的方面任何一个变了都要重新推送。"""
@@ -2190,13 +2260,27 @@ class Network:
         p = self._project_of(g)
         if p is None:
             return ""
+        if g.kind == "joint":  # 只露共享部分：不出现内部群组、内部交接、没共享给它的文件
+            mine = next((w.name for w in p.workstreams if w.id == g.workstream_id), "")
+            visible = {f["name"] for f in self._visible_files(p, g)}
+            handoffs = [f"- {h.id}：{self._name(h.from_agent_id)}，{self._handoff_label(h)}"
+                        + (f"（完成后网络会通知 {self._name(h.from_agent_id)}）" if h.status in ("pending", "scheduled", "sent") else "")
+                        + f"：{_short(_first_line(h.text), 80)}"
+                        for h in sorted(self.store.handoffs.values(), key=lambda h: h.created_at)
+                        if h.project_id == p.id and h.from_group_id == g.id and self._handoff_open(h)][-12:]
+            active = [d for d in p.decisions if d.status == "active"][-DECISIONS_PUSHED:]
+            return format_project_shared(p, g, mine, sorted(visible), handoffs, self._recent_files(p, only=visible),
+                                         [format_decision(d, self._name, self._email) for d in active])
         attached = [x for x in self.store.groups.values() if x.project_id == p.id and self._project_of(x) is p]
-        lanes = [(w.name, w.description, [x.name for x in attached if x.workstream_id == w.id]) for w in p.workstreams]
-        loose = [x.name for x in attached if x.workstream_id is None or not any(w.id == x.workstream_id for w in p.workstreams)]
+        label = lambda x: x.name + ("（联合群组，有其他参与方）" if x.kind == "joint" else "")  # noqa: E731
+        lanes = [(w.name, w.description, [label(x) for x in attached if x.workstream_id == w.id]) for w in p.workstreams]
+        loose = [label(x) for x in attached
+                 if x.workstream_id is None or not any(w.id == x.workstream_id for w in p.workstreams)]
         if loose:
             lanes.append(("未分方面", "", loose))
         handoffs = [f"- {h.id}：{self._group_name(h.from_group_id)} 的 {self._name(h.from_agent_id)} → "
-                    f"{self._group_name(h.to_group_id)} 的 {self._name(h.to_agent_id)}，{self._handoff_label(h)}"
+                    + (f"{self._group_name(h.to_group_id)} 的 {self._name(h.to_agent_id)}" if h.to_group_id else "（待分派）")
+                    + f"，{self._handoff_label(h)}"
                     + (f"（等 {'、'.join(h.after)}）" if h.status == "scheduled" else "")
                     + (f"（完成后网络会通知 {self._name(h.from_agent_id)}）" if h.status in ("scheduled", "sent") else "")
                     + f"：{_short(_first_line(h.text), 80)}"
@@ -2208,7 +2292,7 @@ class Network:
         return format_project(p, g, lanes, [f["name"] for f in self.project_files(p)], handoffs, self._recent_files(p),
                               [format_decision(d, self._name, self._email) for d in active], lead=lead_text)
 
-    def _recent_files(self, p: Project, n: int = 6) -> list[str]:
+    def _recent_files(self, p: Project, n: int = 6, only: set[str] | None = None) -> list[str]:
         """调用方持有锁。最近发布 / 更新的项目文件（谁、什么时候）：别的方面改了你依赖的文件时，你能看出来。"""
         import json
         log = self.store.project_dir(p.id).parent / "log.jsonl"
@@ -2223,12 +2307,13 @@ class Network:
             if e.get("action") == "file.publish" and e.get("file"):
                 prev = seen.pop(e["file"], {})  # 重新插入：按最后一次发布排序
                 seen[e["file"]] = {**e, "n": prev.get("n", 0) + 1}
-        present = {f["name"] for f in self.project_files(p)}
+        present = {f["name"] for f in self.project_files(p)} if only is None else only
         out = []
         for name, e in list(seen.items())[::-1]:
             if name not in present:
                 continue
-            who = self._name(e["by_agent"]) if e.get("by_agent") else self._email(e.get("by_user"))
+            # 联合群组看到的版本不写是谁发布的（可能是内部的 Agent）
+            who = "" if only is not None else self._name(e["by_agent"]) if e.get("by_agent") else self._email(e.get("by_user"))
             when = time.strftime("%m-%d %H:%M", time.localtime(e["ts"]))
             out.append(f"- {name}：{when} {who} " + ("发布" if e["n"] == 1 else f"更新（第 {e['n']} 版）"))
             if len(out) >= n:
@@ -2270,10 +2355,16 @@ class Network:
             raise NetworkError(f"文件太大：最多 {GROUP_FILE_LIMIT // 1000} KB")
         with self._lock:
             p = self.visible_project(project_id, actor)
-            (self.store.project_dir(p.id) / fname).write_bytes(content)
+            g = self.store.groups.get(group_id or "")
+            path = self.store.project_dir(p.id) / fname
+            # 联合群组发布的：不能覆盖不是它发布的同名文件（否则合作方能改掉项目内部的文件），发布后共享给它自己
+            if g is not None and g.kind == "joint" and path.exists() and self._file_origin(p, fname) != g.id:
+                raise NetworkError(f"项目里已有同名文件 {fname}，换个名字（name）再发布")
+            path.write_bytes(content)
             self._project_changed(p, "file.publish", by_user=actor, by_agent=agent_id, file=fname, size=len(content),
                                   source=source, group=group_id)
-            g = self.store.groups.get(group_id or "")
+            if g is not None and g.kind == "joint":
+                p.shares[fname] = _dedup(p.shares.get(fname, []) + [g.id])
             if g is not None and agent_id:
                 self._people_event(g, f"{self._name(agent_id)} 把 {fname} 发布到了项目「{p.name}」")
             self.store.save()
@@ -2290,36 +2381,44 @@ class Network:
             return "message 不能为空：写清要对方做什么、依据哪些文件、交回什么", True
         if len(text) > BRIEF_LIMIT:
             return f"message 太长（{len(text)} 字），请压缩到 {BRIEF_LIMIT} 字以内；细节写进文件发布到项目", True
+        joint = g.kind == "joint"
         with self._lock:
             p = self._project_of(g)
             if p is None:
                 return f"群组「{g.name}」不属于任何项目，没有可以交接的群组", True
-            peers = [x for x in self.store.groups.values() if x.id != g.id and self._project_of(x) is p]
-            want = str(args.get("group", "")).strip().lstrip("#")
-            to = next((x for x in peers if x.name.lower() == want.lower()), None)
-            if to is None:
-                names = "、".join(f"「{x.name}」" for x in peers) or "（没有）"
-                return f"「{want}」不是项目「{p.name}」里的其他群组。可以交接给：{names}", True
-            target = self._resolve_member(to, str(args.get("agent", "")))
-            if target is None:
-                members = "、".join(self._name(m) for m in to.member_ids)
-                return f"「{args.get('agent', '')}」不是「{to.name}」的成员。成员：{members}", True
+            if joint:  # 联合群组看不到项目内部：交给项目，由负责人 / 所有者决定交给内部的谁（docs/projects.md §10）
+                to = target = None
+                mine = {x.id for x in self.store.handoffs.values() if x.project_id == p.id and x.from_group_id == g.id}
+            else:
+                peers = [x for x in self.store.groups.values() if x.id != g.id and self._project_of(x) is p]
+                want = str(args.get("group", "")).strip().lstrip("#")
+                to = next((x for x in peers if x.name.lower() == want.lower()), None)
+                if to is None:
+                    names = "、".join(f"「{x.name}」" for x in peers) or "（没有）"
+                    return f"「{want}」不是项目「{p.name}」里的其他群组。可以交接给：{names}", True
+                target = self._resolve_member(to, str(args.get("agent", "")))
+                if target is None:
+                    members = "、".join(self._name(m) for m in to.member_ids)
+                    return f"「{args.get('agent', '')}」不是「{to.name}」的成员。成员：{members}", True
+                mine = None
             try:
-                after = self._handoff_deps(p.id, re.split(r"[\s,，、]+", str(args.get("after") or "").strip()))
+                after = self._handoff_deps(p.id, re.split(r"[\s,，、]+", str(args.get("after") or "").strip()),
+                                           allowed=mine)
             except NetworkError as e:
                 return str(e), True
             old_id = str(args.get("replaces") or "").strip() or None
             if old_id:
                 old = self.store.handoffs.get(old_id)
-                if old is None or old.project_id != p.id or old.to_group_id != to.id or not self._handoff_open(old) \
-                        or old.status == "sent":
-                    return f"replaces 里的 {old_id} 不是发给「{to.name}」、还没发出的交接", True
-            same = [x for x in self.store.handoffs.values() if x.project_id == p.id and x.to_group_id == to.id
-                    and self._handoff_open(x) and x.id != old_id]
+                if old is None or old.project_id != p.id or not self._handoff_open(old) or old.status == "sent" \
+                        or (old.to_group_id != to.id if to else old.from_group_id != g.id):
+                    where = f"发给「{to.name}」" if to else "这个群组提交"
+                    return f"replaces 里的 {old_id} 不是{where}、还没发出的交接", True
+            same = [x for x in self.store.handoffs.values() if x.project_id == p.id and self._handoff_open(x)
+                    and x.id != old_id and (x.to_group_id == to.id if to else x.from_group_id == g.id)]
             h = Handoff(id=new_id("ho"), project_id=p.id, owner_id=p.owner_id, from_group_id=g.id,
                         from_agent_id=ctx.agent_id, context_kind=ctx.kind, context_id=ctx.id,
-                        conversation_id=ctx.conversation_id, to_group_id=to.id, to_agent_id=target.id, text=text,
-                        after=after, replaces=old_id)
+                        conversation_id=ctx.conversation_id, to_group_id=to.id if to else "",
+                        to_agent_id=target.id if target else "", text=text, after=after, replaces=old_id)
             self.store.handoffs[h.id] = h
             route = self._route_handoff(p, h, dup=bool(same))
             # 人这一轮交代的事引出了跨组工作，却没登记为任务：看板上没有它，最终也没有人验收的地方
@@ -2339,19 +2438,28 @@ class Network:
                     self.store.save()
                 self._handoff_event(h)
                 return f"已提交交接 {h.id}，但没能直接发出（{e}），已转给人确认。", False
+            with self._lock:
+                note = self._joint_note(p, to, text, lead=True)
             return (f"已发出交接 {h.id}（→「{to.name}」的 {target.name}，你是项目负责人，已直接确认{wait}）。"
-                    "对方做完、验收后会通知你。" + todo), False
+                    "对方做完、验收后会通知你。" + note + todo), False
         self._handoff_event(h)
         if route == "lead":
             self._kick_lead(p)
-        who = {"lead": "项目负责人", "self": "你"}.get(route, "人")
-        if route == "lead" and ctx.agent_id == p.lead_agent_id:
-            tail = f"\n「{to.name}」已有进行中的交接 {dups}：确认这条确实要另发，就在下一轮用 review_handoff 处理它；要替换旧的，重新提交并写 replaces。"
+        who = {"lead": "项目负责人", "self": "你"}.get(route, "项目所有者")
+        dest = f"「{to.name}」" if to else "项目内部"
+        if route == "lead" and ctx.agent_id == p.lead_agent_id and not joint:
+            tail = f"\n{dest}已有进行中的交接 {dups}：确认这条确实要另发，就在下一轮用 review_handoff 处理它；要替换旧的，重新提交并写 replaces。"
         else:
-            tail = ("\n注意：「{}」已有进行中的交接 {}。如果这条是重复的，告诉用户；要替换旧的，重新提交并写 replaces。"
-                    .format(to.name, dups)) if same else ""
-        if h.escalation:
+            tail = (f"\n注意：{'这个群组' if joint else dest}已有进行中的交接 {dups}。如果这条是重复的，告诉用户；"
+                    "要替换旧的，重新提交并写 replaces。") if same else ""
+        if h.escalation and not joint:
             tail += f"\n这条转给了人确认：{h.escalation}"
+        if to is not None:
+            with self._lock:
+                tail += self._joint_note(p, to, text, lead=ctx.lead)
+        if joint:
+            return (f"已提交交接 {h.id}，由{who}决定交给项目内部的哪个成员{wait}。你看不到项目内部；"
+                    "做完、验收后网络会通知你，产物以共享文件的形式出现在 `project/`。" + tail + todo), False
         return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等{who}确认{wait}。确认后以项目所有者的名义发进对方群聊；"
                 "结果会作为通知送给你，在那之前不要假设对方已经开始。" + tail + todo), False
 
@@ -2361,7 +2469,8 @@ class Network:
         if p is None or p.autonomy not in ("lead", "lead_accept") or not p.lead_agent_id:
             return None
         g = self.store.groups.get(p.lead_group_id or "")
-        if g is None or self._project_of(g) is not p or p.lead_agent_id not in g.member_ids \
+        # 负责人看得到全项目：只能在内部群组里统筹（它在联合群聊里的回复对所有参与方公开）
+        if g is None or g.kind != "internal" or self._project_of(g) is not p or p.lead_agent_id not in g.member_ids \
                 or p.lead_agent_id not in self.store.agents:
             return None
         return p.lead_agent_id, g
@@ -2389,17 +2498,23 @@ class Network:
     def _approver(self, h: Handoff) -> str:
         return f"项目负责人 {self._name(h.approved_by_agent)}" if h.approved_by_agent else "人"
 
-    def _lead_budget(self, p: Project, h: Handoff) -> str:
+    def _lead_budget(self, p: Project, h: Handoff, to_group_id: str | None = None) -> str:
         """调用方持有锁。负责人再确认这条会不会超出边界：返回原因，空表示没超。"""
         since = time.time() - 86400
         done = [x for x in self.store.handoffs.values() if x.project_id == p.id and x.approved_by_agent
                 and (x.decided_at or 0) >= since]
         if len(done) >= self.limits.lead_daily:
             return f"负责人 24 小时内已确认 {len(done)} 条交接（上限 {self.limits.lead_daily}）"
-        pair = {h.from_group_id, h.to_group_id}
+        src = self.store.groups.get(h.from_group_id)
+        if src is not None and src.kind == "joint":  # 外部来的交接单独设一个更低的上限
+            n = sum(1 for x in done if x.from_group_id == src.id)
+            if n >= self.limits.lead_joint_daily:
+                return (f"负责人 24 小时内已确认 {n} 条来自联合群组{self._group_name(src.id)}的交接"
+                        f"（上限 {self.limits.lead_joint_daily}）")
+        pair = {h.from_group_id, to_group_id or h.to_group_id}
         n = sum(1 for x in done if {x.from_group_id, x.to_group_id} == pair)
         if n >= self.limits.lead_pair:
-            return (f"{self._group_name(h.from_group_id)}和{self._group_name(h.to_group_id)}之间 24 小时内已有 {n} 条"
+            return (f"{self._group_name(h.from_group_id)}和{self._group_name(to_group_id or h.to_group_id)}之间 24 小时内已有 {n} 条"
                     f"负责人确认的交接（上限 {self.limits.lead_pair}），可能在来回返工")
         return ""
 
@@ -2420,7 +2535,7 @@ class Network:
         if over or seat is None or seat.blocked:
             self._escalate(h, over or "项目负责人的席位出错暂停了")
             return "owner"
-        if h.from_agent_id == lead[0] and not dup:
+        if h.from_agent_id == lead[0] and not dup and h.to_group_id:
             return "self"
         h.reviewer = "lead"
         seat.inbox.append({"kind": "handoff_review", "handoff_id": h.id})
@@ -2548,15 +2663,20 @@ class Network:
                 self._escalate(h, f"项目负责人转给人：{note or '没有写原因'}")
                 self.store.save()
             elif decision == "confirm":
-                over = self._lead_budget(p, h)
-                to = self.store.groups.get(h.to_group_id)
+                want = str(args.get("group") or "").strip().lstrip("#")
+                to = next((x for x in self.store.groups.values() if self._project_of(x) is p
+                           and x.name.lower() == want.lower()), None) if want else self.store.groups.get(h.to_group_id)
+                if to is None:
+                    return ("这条交接还没有目标：用 group、agent 指定项目里哪个群组的哪个成员接手" if not want
+                            else f"「{want}」不是项目里的群组"), True
                 agent = str(args.get("agent") or "").strip()
-                target = self._resolve_member(to, agent) if (agent and to) else None
+                target = self._resolve_member(to, agent) if agent else None
+                if agent and target is None or (to.id != h.to_group_id and target is None):
+                    return f"要指定{self._group_name(to.id)}里接手的成员（agent）", True
+                over = self._lead_budget(p, h, to.id)
                 if over:
                     self._escalate(h, over)
                     self.store.save()
-                elif agent and target is None:
-                    return f"「{agent}」不是{self._group_name(h.to_group_id)}的成员", True
             elif decision != "decline":
                 return "decision 只能是 confirm、decline 或 escalate", True
         if decision == "escalate":
@@ -2571,7 +2691,7 @@ class Network:
         after = args.get("after")
         try:
             self.approve_handoff(h.id, text=str(args.get("message") or "").strip() or None,
-                                 agent_id=target.id if target else None,
+                                 agent_id=target.id if target else None, group_id=to.id,
                                  after=re.split(r"[\s,，、]+", str(after).strip()) if after is not None else None,
                                  replaces=str(args.get("replaces") or "").strip() or None, by_agent=ctx.agent_id)
         except NetworkError as e:
@@ -2590,10 +2710,10 @@ class Network:
             g = None
             if agent_id:
                 attached = [x for x in self.store.groups.values()
-                            if self._project_of(x) is p and agent_id in x.member_ids]
+                            if self._project_of(x) is p and x.kind == "internal" and agent_id in x.member_ids]
                 g = next((x for x in attached if x.id == group_id), None) if group_id else (attached[0] if attached else None)
                 if g is None:
-                    raise NetworkError("项目负责人必须是挂进这个项目的群组的成员")
+                    raise NetworkError("项目负责人必须是挂进这个项目的内部群组的成员")
             elif autonomy == "lead":
                 raise NetworkError("打开负责人统筹前先指定项目负责人")
             before = (p.lead_agent_id, p.lead_group_id, p.autonomy)
@@ -2622,12 +2742,14 @@ class Network:
         self._project_event(p)
         return p
 
-    def _handoff_deps(self, project_id: str, ids: list[str], me: str | None = None) -> list[str]:
-        """调用方持有锁。依赖的交接：同一项目里、没被拒绝、不成环。"""
+    def _handoff_deps(self, project_id: str, ids: list[str], me: str | None = None,
+                      allowed: set[str] | None = None) -> list[str]:
+        """调用方持有锁。依赖的交接：同一项目里、没被拒绝、不成环；allowed 限定只能等哪些（联合群组只能等自己提交的）。"""
         out = []
         for i in _dedup([x for x in ids if x]):
             d = self.store.handoffs.get(i)
-            if d is None or d.project_id != project_id or d.status == "rejected" or i == me:
+            if d is None or d.project_id != project_id or d.status == "rejected" or i == me \
+                    or (allowed is not None and i not in allowed):
                 raise NetworkError(f"after 里的 {i} 不是这个项目里可以等待的交接")
             seen, todo = set(), list(d.after)
             while todo:  # 不成环：依赖链上不能回到自己
@@ -2651,17 +2773,24 @@ class Network:
 
     def approve_handoff(self, handoff_id: str, text: str | None = None, agent_id: str | None = None,
                         after: list[str] | None = None, replaces: str | None = None,
-                        actor: str | None = None, by_agent: str | None = None) -> Handoff:
+                        actor: str | None = None, by_agent: str | None = None,
+                        group_id: str | None = None) -> Handoff:
         """项目所有者确认交接（可以改内容、换接手的成员、改依赖）：依赖都完成了就以他的名义发进目标群聊并 @ 目标成员，
         否则进入 scheduled，等依赖完成后由网络发出。对 scheduled 的交接再确认一次（after=[]）就是立即发出。"""
         with self._lock:
             h = self._handoff(handoff_id, actor)
             if h.status not in ("pending", "scheduled"):
                 raise NetworkError(f"交接 {h.id} 已经处理过")
-            to = self.store.groups.get(h.to_group_id)
             src = self.store.groups.get(h.from_group_id)
-            if to is None or self._project_of(to) is None or self._project_of(to).id != h.project_id:
-                raise NetworkError("目标群组已不在这个项目里")
+            if group_id and group_id != h.to_group_id and agent_id is None:  # 分派或改派：换了群组就要重新指定成员
+                raise NetworkError("换了目标群组，要同时指定接手的成员")
+            to = self.store.groups.get(group_id or h.to_group_id)
+            if to is None:
+                raise NetworkError("这条交接来自联合群组：确认时要选项目内部的哪个群组、哪个成员接手")
+            if self._project_of(to) is None or self._project_of(to).id != h.project_id or to.id == h.from_group_id:
+                raise NetworkError("目标群组不在这个项目里")
+            if src is not None and src.kind == "joint" and to.kind == "joint":
+                raise NetworkError("联合群组提交的交接只能交给项目内部的群组（不在合作方之间转交）")
             target_id = agent_id or h.to_agent_id
             if target_id not in to.member_ids:
                 raise NetworkError(f"{self._name(target_id)} 不在「{to.name}」里")
@@ -2684,7 +2813,7 @@ class Network:
                 loop = waiting & (set(deps) - {old.id})
                 if loop:
                     raise NetworkError(f"替换后会互相等待：{'、'.join(sorted(loop))} 在等 {old.id}")
-            h.to_agent_id, h.text, h.after, h.approved_by = target_id, body, deps, actor or h.owner_id
+            h.to_group_id, h.to_agent_id, h.text, h.after, h.approved_by = to.id, target_id, body, deps, actor or h.owner_id
             h.approved_by_agent = by_agent  # 负责人确认的：仍以所有者的名义发出，消息里写明是谁确认的
             h.replaces, h.decided_at = old_id or None, time.time()
             if old is not None:  # 旧的作废；等旧的改为等这条
@@ -2721,9 +2850,18 @@ class Network:
             else:
                 ok = True
                 chat = self._group_chat(to)
-                origin = f"「{src.name}」的 {self._name(h.from_agent_id)}" if src else self._name(h.from_agent_id)
+                p = self.store.projects.get(h.project_id)
+                if to.kind == "joint":  # 发进联合群聊：所有参与方都看得到，不写内部群组和内部成员
+                    origin = f"项目「{p.name if p else ''}」"
+                    by = "项目负责人" if h.approved_by_agent else "我"
+                else:
+                    who = self.store.agents.get(h.from_agent_id)
+                    foreign = (f"（属于 {self._email(who.owner_id)}，其他参与方提交）"
+                               if src and src.kind == "joint" and who and who.owner_id != h.owner_id else "")
+                    origin = (f"{'联合群组' if src and src.kind == 'joint' else ''}「{src.name}」的 "
+                              f"{self._name(h.from_agent_id)}{foreign}") if src else self._name(h.from_agent_id)
+                    by = f"项目负责人 {self._name(h.approved_by_agent)} " if h.approved_by_agent else "我"
                 waited = f"，等 {'、'.join(h.after)} 完成后发出" if h.after else ""
-                by = f"项目负责人 {self._name(h.approved_by_agent)} " if h.approved_by_agent else "我"
         if not ok:
             self._handoff_event(h)
             return
@@ -2770,6 +2908,17 @@ class Network:
                 "from_agent_name": self._name(h.from_agent_id), "to_agent_name": self._name(h.to_agent_id),
                 "awaiting": self._awaiting(h),
                 "approved_by_agent_name": self._name(h.approved_by_agent) if h.approved_by_agent else None,
+                "from_joint": bool(src and src.kind == "joint"),
+                # 发往联合群组、提到却没共享给它的项目文件（对方看不到）
+                "unshared": (self._unshared_refs(self.store.projects[h.project_id], to, h.text)
+                             if h.project_id in self.store.projects else []),
+                # 可以交给谁：联合群组提交的只能给内部群组；人确认时可以改派
+                "targets": [{"group_id": x.id, "group_name": x.name,
+                             "agents": [{"id": m, "name": self._name(m)} for m in x.member_ids]}
+                            for x in self.store.groups.values()
+                            if x.project_id == h.project_id and x.id != h.from_group_id
+                            and self._project_of(x) is not None
+                            and not (src and src.kind == "joint" and x.kind == "joint")],
                 "to_conversation_id": (self._group_chat_of(h.to_group_id).id if self._group_chat_of(h.to_group_id) else None)}
 
     def _handoff_event(self, h: Handoff) -> None:
@@ -2825,7 +2974,9 @@ class Network:
                 raise NetworkError(f"群组「{g.name}」不在项目「{p.name}」里")
             src = self.group_file(g.id, name, actor)
             content = src.read_bytes()
-        return self.publish_project_file(p.id, src.name, content, actor=actor, source=f"group:{g.id}")
+        # 从联合群组的档案提升：仍然共享给那个群组（规则同联合群组自己发布）
+        return self.publish_project_file(p.id, src.name, content, actor=actor, source=f"group:{g.id}",
+                                         group_id=g.id if g.kind == "joint" else None)
 
     def delete_project_file(self, project_id: str, name: str, actor: str | None = None) -> None:
         with self._lock:
@@ -2833,9 +2984,55 @@ class Network:
             path = self.store.project_dir(p.id) / _safe_filename(name)
             self._check(path.is_file(), f"file {name}")
             path.unlink()
+            p.shares.pop(path.name, None)
             self._project_changed(p, "file.delete", by_user=actor, file=path.name)
             self.store.save()
         self._project_event(p)
+
+    def share_project_file(self, project_id: str, name: str, group_id: str, shared: bool = True,
+                           actor: str | None = None, by_agent: str | None = None) -> Project:
+        """把一份项目文件共享给项目里的一个联合群组（或取消共享）。共享后那个群组的所有参与方都读得到（不变量 18）。
+        人（项目所有者）或项目负责人（share_file）来做；在那个联合群聊里记一条事件。"""
+        with self._lock:
+            p = self.visible_project(project_id, actor)
+            fname = _safe_filename(name)
+            self._check((self.store.project_dir(p.id) / fname).is_file(), f"file {name}")
+            g = self.store.groups.get(group_id)
+            if g is None or g.kind != "joint" or self._project_of(g) is not p:
+                raise NetworkError("只能共享给挂在这个项目里的联合群组")
+            now = p.shares.get(fname, [])
+            if shared == (g.id in now):
+                return p
+            p.shares[fname] = _dedup(now + [g.id]) if shared else [x for x in now if x != g.id]
+            if not p.shares[fname]:
+                p.shares.pop(fname)
+            self._project_changed(p, "file.share" if shared else "file.unshare", by_user=actor, by_agent=by_agent,
+                                  file=fname, group=g.id)
+            who = f"项目负责人 {self._name(by_agent)}" if by_agent else "项目所有者"
+            self._people_event(g, f"{who}{'共享' if shared else '取消共享'}了项目文件 {fname}"
+                                  + ("（此后在 project/ 里读得到）" if shared else ""))
+            self.store.save()
+        self._project_event(p)
+        self._emit_group_chat(g)
+        return p
+
+    def _tool_share_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        if not ctx.lead:
+            return "只有项目负责人在它统筹的群聊里能共享项目文件", True
+        with self._lock:
+            p = self._project_of(self.store.groups.get(ctx.group_id or ""))
+            want = str(args.get("group", "")).strip().lstrip("#")
+            g = next((x for x in self.store.groups.values() if x.kind == "joint" and self._project_of(x) is p
+                      and x.name.lower() == want.lower()), None) if p else None
+            joints = "、".join(f"「{x.name}」" for x in self.store.groups.values()
+                               if x.kind == "joint" and p is not None and self._project_of(x) is p) or "（没有）"
+        if g is None:
+            return f"「{want}」不是项目里的联合群组。可以共享给：{joints}", True
+        try:
+            self.share_project_file(p.id, str(args.get("name", "")), g.id, by_agent=ctx.agent_id)
+        except NetworkError as e:
+            return str(e), True
+        return (f"已把 {args.get('name')} 共享给联合群组「{g.name}」：那里的所有参与方此后都读得到，之后的新版本也一样。"), False
 
     def project_file(self, project_id: str, name: str, actor: str | None = None) -> Path:
         p = self.visible_project(project_id, actor)
@@ -2965,16 +3162,23 @@ class Network:
             p = None
             if project_id:
                 p = self.visible_project(project_id, actor)
-                if g.kind != "internal":
-                    raise NetworkError("联合群组暂时不能挂进项目：项目信息对其他参与方露出多少还没定（docs/projects.md）")
                 if g.owner_id != p.owner_id:
                     raise NetworkError("群组和项目不是同一个所有者")
                 if workstream_id:
                     self._workstream(p, workstream_id)
             elif workstream_id:
                 raise NetworkError("不在项目里的群组不能指定方面")
+            joined = g.kind == "joint" and p is not None and g.project_id != p.id
+            if g.kind == "joint" and old is not None and (p is None or p.id != old.id):  # 离开项目：共享随之收回
+                for name in list(old.shares):
+                    old.shares[name] = [x for x in old.shares[name] if x != g.id]
+                    if not old.shares[name]:
+                        old.shares.pop(name)
             g.project_id = p.id if p else None
             g.workstream_id = (workstream_id or None) if p else None
+            if joined:  # 告诉所有参与方：从此能看到项目的哪些内容
+                self._people_event(g, f"主持人把群组挂进了项目「{p.name}」：项目 brief、项目决定、共享给本群的项目文件、"
+                                      "本群提交的交接，此后对本群所有参与方可见；项目内部的群组与工作不可见")
             conv = self._group_chat_of(g.id)
             for r in self.store.requests.values():
                 if conv is not None and r.conversation_id == conv.id and r.status in ("in_progress", "in_review"):
@@ -2985,6 +3189,8 @@ class Network:
         self.bus.emit("group.updated", group=g.to_dict())
         for pj in {x.id: x for x in (old, p) if x is not None}.values():
             self._project_event(pj)
+        if g.kind == "joint":
+            self._emit_group_chat(g)
         return g
 
     def assign_request(self, request_id: str, project_id: str | None, workstream_id: str | None = None,
@@ -3044,9 +3250,12 @@ class Network:
                            if r.project_id == p.id and self.can_see_request(r, actor)), key=lambda r: -r.created_at)
             # 可以当项目负责人的：挂载群组里的成员（统筹在那个群组的群聊席位里进行）
             leads = [{"agent_id": m, "name": self._name(m), "group_id": g.id, "group_name": g.name}
-                     for g in self.store.groups.values() if self._project_of(g) is p for m in g.member_ids]
+                     for g in self.store.groups.values() if self._project_of(g) is p and g.kind == "internal"
+                     for m in g.member_ids]
+            origins = self._file_origins(p)
             return {**self.project_summary(p, actor), "groups": groups, "requests": [self.request_card(r) for r in reqs],
-                    "files": self.project_files(p), "handoffs": self.handoffs(actor, p.id),
+                    "files": [{**x, "shared_with": p.shares.get(x["name"], []), "from_group": origins.get(x["name"])}
+                              for x in self.project_files(p)], "handoffs": self.handoffs(actor, p.id),
                     "lead_candidates": leads, "lead_active": self._lead_of(p) is not None}
 
     # ================= 人：续接 =================
@@ -3226,7 +3435,7 @@ class Network:
         with self._lock:
             reqs = sorted((r for r in self.store.requests.values() if self.can_see_request(r, actor)),
                           key=lambda r: -r.created_at)
-            cards = [self.request_card(r) for r in reqs]
+            cards = [self.request_card(r, actor) for r in reqs]
             proposals = [p.to_dict() for p in self.store.proposals.values()
                          if p.status == "pending" and self.can_review_proposal(p, actor)]
             busy = {a.id: self.ledger(a.id) for a in self.store.agents.values()
@@ -3264,7 +3473,7 @@ class Network:
             return {**d, "messages": [self.message_view(m, actor) for m in conv.messages
                                       if self.can_see_message(m, actor)],
                     "tasks": sorted(tasks, key=lambda t: t["created_at"]), "proposals": proposals,
-                    "requests": [self.request_card(r) for r in self.store.requests.values()
+                    "requests": [self.request_card(r, actor) for r in self.store.requests.values()
                                  if r.conversation_id == conv_id and self.can_see_request(r, actor)],
                     "approvals": approvals, "members": self._members(conv), "live": live, "running": running,
                     "group_kind": g.kind if g else None, "is_host": g is None or actor is None or g.owner_id in (None, actor),
@@ -3342,7 +3551,10 @@ class Network:
                 return data if d is not None and d.user_id == actor else None
             if ev_type == "request.updated":
                 r = self.store.requests.get((data.get("request") or {}).get("id", ""))
-                return data if r is None or self.can_see_request(r, actor) else None
+                if r is None:
+                    return data
+                return {**data, "request": self._strip_project(data["request"], r, actor)} \
+                    if self.can_see_request(r, actor) else None
             if ev_type == "proposal.updated":
                 p = self.store.proposals.get((data.get("proposal") or {}).get("id", ""))
                 return data if p is None or self.can_review_proposal(p, actor) else None
@@ -3424,6 +3636,7 @@ TOOL_HANDLERS = {
     "handoff": Network._tool_handoff,
     "review_handoff": Network._tool_review_handoff,
     "review_request": Network._tool_review_request,
+    "share_file": Network._tool_share_file,
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
     "accept_request": Network._tool_accept_request,

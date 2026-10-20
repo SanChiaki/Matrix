@@ -180,6 +180,7 @@ class FileIn(BaseModel):
 class HandoffApproveIn(BaseModel):
     text: str | None = Field(default=None, max_length=4000)
     agent_id: str | None = None
+    group_id: str | None = None          # 交给哪个群组：联合群组提交的交接必须指定（只能是内部群组）
     after: list[str] | None = None       # 等哪些交接完成后再发出；None = 沿用提交时的，[] = 立即发出
     replaces: str | None = None          # 替换一条还没发出的交接（旧的作废，等旧的改为等这条）
 
@@ -188,6 +189,11 @@ class ProjectLeadIn(BaseModel):
     agent_id: str | None = None          # 项目负责人；None 表示不设
     group_id: str | None = None          # 负责人在哪个挂载群组里统筹（它在多个群组里时）
     autonomy: str = "manual"             # manual：交接由你确认；lead：由负责人确认，超出边界时转给你
+
+
+class ShareIn(BaseModel):
+    group_id: str                        # 项目里的联合群组
+    shared: bool = True
 
 
 class PromoteIn(BaseModel):
@@ -489,7 +495,8 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/handoffs/{handoff_id}/approve")
     def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
-        return network.approve_handoff(handoff_id, body.text, body.agent_id, body.after, body.replaces, actor=user.id).to_dict()
+        return network.approve_handoff(handoff_id, body.text, body.agent_id, body.after, body.replaces, actor=user.id,
+                                       group_id=body.group_id).to_dict()
 
     @app.post("/api/handoffs/{handoff_id}/reject")
     def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
@@ -519,6 +526,11 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/projects/{project_id}/files/promote")
     def promote_file(project_id: str, body: PromoteIn, user: Me) -> dict:
         network.promote_file(project_id, body.group_id, body.name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/files/{name}/share")
+    def share_project_file(project_id: str, name: str, body: ShareIn, user: Me) -> dict:
+        network.share_project_file(project_id, name, body.group_id, body.shared, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.get("/api/projects/{project_id}/files/{name}")
