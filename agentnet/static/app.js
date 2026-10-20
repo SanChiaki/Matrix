@@ -243,6 +243,21 @@ const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
 // all：同一项目里还没结束的交接，可以选作依赖（等它们完成后再发出）
 const hoTo = (h) => h.to_group_id ? `#${h.to_group_name} 的 ${h.to_agent_name}` : "待分派";
 const hoLabel = (h) => `${h.id} · ${h.to_group_id ? `#${h.to_group_name} ${h.to_agent_name}` : "待分派"}`;
+// 联合群组提交、内部已完成的交接：选要交回的项目文件，共享给它并通知提交者（docs/projects.md §10）
+const deliverItem = (h) => `<li class="todo-item handoff" data-ho="${esc(h.id)}">
+    <div class="who">${avatar(h.from_agent_name, "sm")}<b>${esc(h.from_agent_name)}</b>
+      <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
+      <span class="pill status in_review">待交回</span><span class="muted">${time(h.returned_at)}</span></div>
+    <p class="hint">${esc(h.text.slice(0, 200))}</p>
+    <p class="hint">项目内部已完成${h.approved_by_agent_name ? `（负责人 ${esc(h.approved_by_agent_name)} 也可以交回）` : ""}。
+      选要交回的文件：共享给 #${esc(h.from_group_name)}（那里的所有参与方都读得到），并通知提交者。</p>
+    <label class="sr-only" for="dlv-${esc(h.id)}">要交回的项目文件</label>
+    <select id="dlv-${esc(h.id)}" multiple size="${Math.min(6, Math.max(2, (h.project_files || []).length))}">${(h.project_files || []).map((n) =>
+      `<option value="${esc(n)}">${esc(n)}</option>`).join("")}</select>
+    <label class="sr-only" for="dln-${esc(h.id)}">给对方的说明</label>
+    <input id="dln-${esc(h.id)}" maxlength="2000" placeholder="给对方的说明（可选，不要写项目内部的细节）">
+    <div class="actions"><button type="button" class="sm" data-ho-dlv="${esc(h.id)}">交回</button>
+      <a href="#${esc(h.conversation_id)}" class="muted">查看来源</a></div></li>`;
 const handoffItem = (h, all = []) => {
   const peers = all.filter((x) => x.id !== h.id && x.project_id === h.project_id && !(x.after || []).includes(h.id));
   // 同一个目标群组里还没发出的交接：可能重复，可以选择替换掉
@@ -282,6 +297,14 @@ const handoffItem = (h, all = []) => {
     <p class="hint">确认后以你的名义发进${h.to_group_id && !h.from_joint ? ` #${esc(h.to_group_name)}，@ ${esc(h.to_agent_name)}` : "你选的群组、@ 你选的成员"}；勾了依赖的，等它们完成（你验收）后自动发出。</p></li>`;
 };
 function bindHandoffs(box, after) {
+  box.querySelectorAll("[data-ho-dlv]").forEach((b) => b.addEventListener("click", async () => {
+    const id = b.dataset.hoDlv, files = [...$(`#dlv-${id}`).selectedOptions].map((o) => o.value);
+    if (!files.length) { alert("先选要交回的文件"); return; }
+    if (!confirm(`把 ${files.join("、")} 共享给联合群组并通知对方？那里的所有参与方之后都读得到。`)) return;
+    b.disabled = true;
+    try { await api(`/api/handoffs/${id}/deliver`, { method: "POST", body: { files, note: $(`#dln-${id}`).value } }); await after(); }
+    catch (e) { alert(e.message); b.disabled = false; }
+  }));
   box.querySelectorAll("[data-ho-ok]").forEach((b) => b.addEventListener("click", async () => {
     const id = b.dataset.hoOk; b.disabled = true;
     const deps = [...box.querySelectorAll(`[data-ho-dep="${id}"]`)];
@@ -372,14 +395,15 @@ function renderProjectOverview(d) {
 
 function handoffsHtml(hs) {
   if (!hs.length) return "";
-  const open = hs.filter((h) => h.status === "pending" || h.status === "scheduled"), done = hs.filter((h) => !open.includes(h));
+  const toDeliver = hs.filter((h) => h.to_deliver && h.returned_at);
+  const open = hs.filter((h) => h.status === "pending" || h.status === "scheduled"), done = hs.filter((h) => !open.includes(h) && !toDeliver.includes(h));
   const live = hs.filter((h) => open.includes(h) || (h.status === "sent" && !h.returned_at));
   const row = (h) => `<li><b>${esc(h.from_agent_name)}</b> <span class="muted">#${esc(h.from_group_name)} → #${esc(h.to_group_name)} 的 ${esc(h.to_agent_name)}</span>
-    ${h.status === "sent" ? `<a class="pill status ${h.returned_at ? "completed" : "running"}" href="#${esc(h.to_conversation_id || "")}">${h.returned_at ? "已完成" : "已发出"}</a>` : '<span class="pill status rejected">未采纳</span>'}
+    ${h.status === "sent" ? `<a class="pill status ${h.returned_at ? "completed" : "running"}" href="#${esc(h.to_conversation_id || "")}">${h.delivered_at ? "已交回" : h.returned_at ? "已完成" : "已发出"}</a>` : '<span class="pill status rejected">未采纳</span>'}
     <span class="muted">${time(h.decided_at || h.created_at)}${h.approved_by_agent_name ? ` · 负责人 ${esc(h.approved_by_agent_name)} 处理` : ""}</span>
     <p class="hint">${esc(h.text.slice(0, 160))}</p></li>`;
   return `<section class="archive-sec handoffs" aria-labelledby="pj-ho"><h3 id="pj-ho">交接 · ${open.length} 待确认或排队</h3>
-    ${open.length ? `<ul class="todo-list">${open.map((h) => handoffItem(h, live)).join("")}</ul>` : ""}
+    ${open.length || toDeliver.length ? `<ul class="todo-list">${open.map((h) => handoffItem(h, live)).join("")}${toDeliver.map(deliverItem).join("")}</ul>` : ""}
     ${done.length ? `<details><summary>已处理 · ${done.length}</summary><ul class="refs">${done.map(row).join("")}</ul></details>` : ""}</section>`;
 }
 
@@ -554,6 +578,7 @@ function renderBoard() {
       <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
     ...(b.handoffs || []).filter((h) => (h.status === "pending" && h.awaiting !== "lead")
       || (h.status === "scheduled" && !h.approved_by_agent)).map((h) => handoffItem(h, b.handoffs)),
+    ...(b.handoffs || []).filter((h) => h.to_deliver && h.returned_at).map(deliverItem),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>

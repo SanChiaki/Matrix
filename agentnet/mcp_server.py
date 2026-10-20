@@ -187,8 +187,8 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "handoff_id": {"type": "string", "description": "交接 id"},
-                "decision": {"type": "string", "enum": ["confirm", "decline", "escalate"],
-                             "description": "confirm 确认；decline 不采纳（提交者会被唤醒）；escalate 交给人"},
+                "decision": {"type": "string", "enum": ["confirm", "decline", "escalate", "send_now"],
+                             "description": "confirm 确认；decline 不采纳（提交者会被唤醒）；escalate 交给人；send_now 立即发出你确认过的排队交接"},
                 "message": {"type": "string", "description": "可选：确认时改写的交接内容"},
                 "group": {"type": "string", "description": "确认时交给哪个群组（联合群组提交的交接必须指定，只能是内部群组）"},
                 "agent": {"type": "string", "description": "确认时接手的成员（目标群组里的名称；换了群组时必须指定）"},
@@ -202,14 +202,17 @@ TOOLS = [
     },
     {
         "name": "share_file",
-        "description": "项目负责人把一份项目文件共享给项目里的一个联合群组；那里的所有参与方此后都读得到（包括之后的新版本）。",
+        "description": ("项目负责人把项目文件共享给项目里的一个联合群组；那里的所有参与方此后都读得到（包括之后的新版本）。"
+                        "写 handoff 时是交回那个联合群组提交的交接：共享并通知提交者。"),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "项目文件名（project/ 下的）"},
-                "group": {"type": "string", "description": "联合群组的名称"},
+                "name": {"type": "string", "description": "项目文件名（project/ 下的）；交回时可以写多个，逗号分隔"},
+                "group": {"type": "string", "description": "联合群组的名称（写了 handoff 时不用写）"},
+                "handoff": {"type": "string", "description": "可选：要交回的交接 id（联合群组提交的）"},
+                "note": {"type": "string", "description": "可选：交回时给对方的说明（不要写项目内部的细节）"},
             },
-            "required": ["name", "group"],
+            "required": ["name"],
             "additionalProperties": False,
         },
     },

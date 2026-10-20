@@ -185,6 +185,11 @@ class HandoffApproveIn(BaseModel):
     replaces: str | None = None          # 替换一条还没发出的交接（旧的作废，等旧的改为等这条）
 
 
+class HandoffDeliverIn(BaseModel):
+    files: list[str] = Field(min_length=1, max_length=40)   # 交回的项目文件：共享给提交它的联合群组
+    note: str = Field("", max_length=2000)
+
+
 class ProjectLeadIn(BaseModel):
     agent_id: str | None = None          # 项目负责人；None 表示不设
     group_id: str | None = None          # 负责人在哪个挂载群组里统筹（它在多个群组里时）
@@ -261,6 +266,7 @@ Me = Annotated[User, Depends(current_user)]
 def create_app(network: Network) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        network.check_stalls()  # 重启前就停住的项目：告诉负责人
         yield
         # 事件流阻塞在线程里等事件，uvicorn 取消不了线程：不主动唤醒，进程会卡在关闭阶段，
         # 浏览器那头的连接也一直不断，EventSource 就不会触发重连。
@@ -501,6 +507,10 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/handoffs/{handoff_id}/reject")
     def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
         return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
+
+    @app.post("/api/handoffs/{handoff_id}/deliver")
+    def deliver_handoff(handoff_id: str, body: HandoffDeliverIn, user: Me) -> dict:
+        return network.deliver_handoff(handoff_id, body.files, body.note, actor=user.id).to_dict()
 
     @app.post("/api/projects/{project_id}/decisions")
     def record_project_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:

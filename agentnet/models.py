@@ -344,6 +344,9 @@ class Handoff:
     note: str = ""                       # 人的意见（拒绝理由）
     message_id: str | None = None        # 发出的消息
     returned_at: float | None = None     # 由这条消息引出的用户任务验收通过、已通知提交者的时间
+    # 联合群组提交的：内部验收不通知对方，由负责人 / 所有者把产物共享回去时才算交回（docs/projects.md §10）
+    delivered_at: float | None = None
+    delivered_files: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
 
@@ -407,6 +410,7 @@ class Project:
     archive_rev: int = 0                 # 推送给 Agent 的部分（名称、brief、方面、挂载群组、文件）每变一次 +1
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    stall_key: str = ""                  # 上次提醒负责人“项目停下来了”时的状态，同样的状态不重复提醒
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
