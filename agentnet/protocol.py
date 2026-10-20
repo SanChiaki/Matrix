@@ -420,8 +420,8 @@ def format_request_review(r: UserRequest, agent_name: str, group_name: str, hand
     ])
 
 
-def format_handoff_done(h: Handoff, group_name: str, agent_name: str, summary: str) -> str:
-    return "\n".join([f"## 网络通知：你交接给「{group_name}」{agent_name} 的工作已完成，人已验收（{h.id}）",
+def format_handoff_done(h: Handoff, group_name: str, agent_name: str, summary: str, by: str = "人") -> str:
+    return "\n".join([f"## 网络通知：你交接给「{group_name}」{agent_name} 的工作已完成，{by}已验收（{h.id}）",
                       f"交接内容：{h.text[:300]}", f"对方的交付说明：{summary[:2000] or '（没有说明）'}",
                       "产物看项目文件（`project/`）。接着做你这边等着它的工作。"])
 

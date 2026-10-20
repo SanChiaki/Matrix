@@ -73,6 +73,7 @@ def test_lead_confirms_handoffs(tmp_path: Path):
     net.wait_quiet()
     h2 = next(x for x in net.store.handoffs.values() if x.id != h.id)
     assert "已直接确认" in out[0] and h2.status == "sent" and h2.approved_by_agent == pm.id
+    assert "还没有登记为任务" in out[0]  # 人交代的事分派了出去却没登记：提醒它登记，最终由人验收
     assert any(m.role == "user" and "做 v1.1" in m.text for m in chats["开发组"].messages)
     # 负责人自己提交、和进行中的交接重复的：不直接发，下一轮由它自己用 review_handoff 确认
     out.clear()
@@ -214,6 +215,7 @@ def test_lead_accepts_requests_from_its_handoffs(tmp_path: Path):
     h, dev = kickoff("实现 v2", [("changes", "补测试"), ("accept", "")], qa_after=True)
     assert dev.status == "completed" and dev.reviewed_by_agent == pm.id and dev.reviewed_by is None and dev.lead_returns == 1
     assert any("项目负责人 PM 退回了" in pr for a, pr, _ in runs if a == eng.id)
+    assert any("项目负责人 PM 已验收" in pr for a, pr, _ in runs if a == pm.id)  # 回路通知写明是谁验收的
     h_qa = next(x for x in net.store.handoffs.values() if x.text == "验收 实现 v2")
     assert h.returned_at is not None and h_qa.status == "sent" and any(a == qa.id for a, *_ in runs)
     assert any(m.role == "event" and "项目负责人 PM 验收了" in m.text for m in chats["开发组"].messages)

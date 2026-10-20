@@ -1331,8 +1331,9 @@ class Network:
                 to = self.store.groups.get(h.to_group_id)
                 if kind == "handoff_done":
                     r = self.store.requests.get(it["request_id"])
+                    by = f"项目负责人 {self._name(r.reviewed_by_agent)} " if r and r.reviewed_by_agent else "人"
                     blocks.append(format_handoff_done(h, to.name if to else "", self._name(r.agent_id if r else h.to_agent_id),
-                                                      r.summary if r else ""))
+                                                      r.summary if r else "", by))
                     wake.append(f"交接 {h.id} 已完成")
                 else:
                     blocks.append(format_handoff_notice(h, to.name if to else "（已删除的群组）", self._name(h.to_agent_id),
@@ -2321,7 +2322,12 @@ class Network:
                         after=after, replaces=old_id)
             self.store.handoffs[h.id] = h
             route = self._route_handoff(p, h, dup=bool(same))
+            # 人这一轮交代的事引出了跨组工作，却没登记为任务：看板上没有它，最终也没有人验收的地方
+            unregistered = ctx.kind == "seat" and ctx.addressed and not any(
+                r.agent_id == ctx.agent_id and r.message_id in ctx.addressed for r in self.store.requests.values())
             self.store.save()
+        todo = ("\n这一轮人交代给你的事还没有登记为任务：要分派给别的组、有交付目标的，先用 open_request 登记，"
+                "全部完成后用 deliver_request 交付，由人验收。") if unregistered else ""
         wait = f"；会等 {'、'.join(after)} 完成后再发出" if after else ""
         dups = "、".join(f"{x.id}（{self._handoff_label(x)}）" for x in same)
         if route == "self":  # 负责人自己提交、没有重复、在预算内：直接确认
@@ -2334,7 +2340,7 @@ class Network:
                 self._handoff_event(h)
                 return f"已提交交接 {h.id}，但没能直接发出（{e}），已转给人确认。", False
             return (f"已发出交接 {h.id}（→「{to.name}」的 {target.name}，你是项目负责人，已直接确认{wait}）。"
-                    "对方做完、人验收后会通知你。"), False
+                    "对方做完、验收后会通知你。" + todo), False
         self._handoff_event(h)
         if route == "lead":
             self._kick_lead(p)
@@ -2347,7 +2353,7 @@ class Network:
         if h.escalation:
             tail += f"\n这条转给了人确认：{h.escalation}"
         return (f"已提交交接 {h.id}（→「{to.name}」的 {target.name}），等{who}确认{wait}。确认后以项目所有者的名义发进对方群聊；"
-                "结果会作为通知送给你，在那之前不要假设对方已经开始。" + tail), False
+                "结果会作为通知送给你，在那之前不要假设对方已经开始。" + tail + todo), False
 
     # ---- 负责人统筹：项目负责人 Agent 代所有者确认交接，网络强制边界，超出就转给人（不变量 19、20）----
     def _lead_of(self, p: Project | None) -> tuple[str, Group] | None:
