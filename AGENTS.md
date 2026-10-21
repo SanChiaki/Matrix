@@ -23,7 +23,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 概念 | 含义 |
 | --- | --- |
 | User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据 |
-| Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（provider / model / reasoning_effort，空则用运行时默认）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
+| Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（云侧启用模型目录时是预置模型 id `model_preset`，否则是 provider / model / reasoning_effort；空则用默认）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
 | Group（群组） | 成员集合，**没有主 Agent**。`internal`（内部群组）：只有所有者，成员只能是所有者自己的 Agent。`joint`（联合群组，参照 Raft 的 joint channel，research: raft#joint-channel）：主持人（`owner_id`）邀请用户，接受后成为参与者（`participants`），每人只能加入自己的 Agent。创建后不能转换类型。委托只能发给同组成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准。每个群组带一份**群组档案**（见下） |
 | Conversation | 参照 Raft 的频道与 DM（research: raft#channels-dm）：`group`（群聊）**每个群组一个**，建群组即有，人在消息里 **@ 谁，谁接任务**；`dm`（私聊）**每个 Agent 一个**，只有它的所有者能开，第一次打开时创建，不用 @，不能委托。群组 / Agent 删除后对应对话归档为只读。消息的 `audience` 限定谁看得到这条（如席位失败说明、外溢申请），`private_to` 限定谁看得到它的过程（`steps` / `wake`） |
 | Approval | Agent 想在工作目录以外操作时向**它的所有者**发起的一次性申请（pending / allowed / rejected / cancelled） |
@@ -161,6 +161,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
+| `agentnet/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `AGENTNET_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
 | `agentnet/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
 | `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
@@ -168,7 +169,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `agentnet/static/` | 单页前端（原生 JS） |
-| `tests/` | `test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案）、`test_projects.py`（项目） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案）、`test_projects.py`（项目） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
 | `docs/projects.md` | 项目：目标与汇总层的设计与分阶段计划 |
@@ -180,6 +181,7 @@ uv sync                                         # 安装依赖
 uv run pytest -q                                # 全部测试（离线，不需要 dsh）
 uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
 uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
+uv run agentnet --models models.json            # 云侧只允许 models.json 里的预置模型（改文件即生效）
 uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect run                                        # 前台运行已配对的连接器

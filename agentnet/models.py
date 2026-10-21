@@ -85,6 +85,8 @@ class AgentNode:
     chat_enabled: bool = True            # 人是否可以直接与它对话
     # 运行时模型：{provider, model, reasoning_effort?}；None 表示用运行时自己的默认模型
     model: dict[str, str] | None = None
+    # 云侧预置模型 id（model_catalog）：启用目录后云侧 Agent 只能从中选；None = 目录默认。与 model 二选一
+    model_preset: str | None = None
     # 绑定的运行时：None = 默认运行时（平台云侧）；非 None = 已注册的端侧运行时名（docs/device-runtimes.md）
     device_runtime: str | None = None
     # 设备上的哪个 harness（HARNESSES 的键）；None = 设备的默认 harness（旧数据、旧连接器只有一个）

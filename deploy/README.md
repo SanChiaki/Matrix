@@ -25,6 +25,23 @@ docker compose up -d --build
 - 在 `.env` 里写 `DEEPSEEK_API_KEY=...`，然后执行 `docker compose up -d` 让它生效。
 - 进容器用 dsh 自己的方式登录或配置：`docker compose exec matrix dsh headless --help`。
 
+## 预置模型（可选）
+
+在数据卷里放一份 `/data/models.json`，云侧 Agent 就只能从里面选模型；改这个文件即生效，不用重启。删掉文件回到自由填写。
+`provider` 必须是 dsh 里已配置的。
+
+```json
+{
+  "default": "flash",
+  "models": [
+    {"id": "flash", "label": "DeepSeek Flash", "provider": "deepseek-official", "model": "deepseek-flash"},
+    {"id": "opus", "label": "Claude Opus", "provider": "hi-code-claude", "model": "claude-opus-5-5", "reasoning_effort": "high"}
+  ]
+}
+```
+
+从列表里删掉一个模型，用它的 Agent 下一轮起改用 `default`。文件写坏时服务沿用上一份并在日志里写原因。
+
 ## 更新
 
 ```bash

@@ -36,6 +36,7 @@ from .auth import Pairings
 from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
+from .model_catalog import ModelCatalog
 from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
 from .store import Store
 
@@ -101,7 +102,8 @@ class NetworkError(ValueError):
 
 class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
-                 tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True):
+                 tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
+                 models: ModelCatalog | None = None):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -109,6 +111,8 @@ class Network:
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
         self.store = Store(data_dir, seed=seed)
+        # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
+        self.models = models or ModelCatalog(self.store.root / "models.json")
         self.bus = EventBus()
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
@@ -195,27 +199,30 @@ class Network:
     # ================= Agent 管理 =================
     def create_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
                      chat_enabled: bool = True, model: dict[str, str] | None = None,
+                     model_preset: str | None = None,
                      device_runtime: str | None = None, harness: str | None = None,
                      actor: str | None = None) -> AgentNode:
         with self._lock:
             self._check_device_runtime(device_runtime, actor)
             self._check_harness(device_runtime or None, harness or None)
-            a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor)
-            a.device_runtime = device_runtime or None
-            a.harness = harness or None
+            a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor,
+                                model_preset=model_preset, device_runtime=device_runtime or None,
+                                harness=harness or None)
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
 
     def _new_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
                    chat_enabled: bool, model: dict[str, str] | None, created_by: str,
-                   owner_id: str | None = None) -> AgentNode:
+                   owner_id: str | None = None, model_preset: str | None = None,
+                   device_runtime: str | None = None, harness: str | None = None) -> AgentNode:
         """调用方持有锁。"""
         if self.store.agent_by_name(name):
             raise NetworkError(f"Agent 名称已存在：{name}")
         a = AgentNode(id=new_id("agent"), name=name.strip(), description=description.strip(),
                       capabilities=_clean_caps(capabilities), authority=_clean_auth(authority),
-                      chat_enabled=chat_enabled, model=_clean_model(model), created_by=created_by,
-                      owner_id=owner_id)
+                      chat_enabled=chat_enabled, created_by=created_by, owner_id=owner_id,
+                      device_runtime=device_runtime, harness=harness)
+        self._set_model(a, model, model_preset)
         self.store.agents[a.id] = a
         self.store.save()
         return a
@@ -233,11 +240,14 @@ class Network:
                     harness = None
                 self._check_device_runtime(device, actor)
                 self._check_harness(device, harness)
+                moved = (device is None) != (a.device_runtime is None)
                 a.device_runtime, a.harness = device, harness
+                if moved and "model" not in fields and "model_preset" not in fields:
+                    # 云侧 ↔ 端侧：模型的取值范围不同，原来的选择能沿用就沿用，不能就改回默认
+                    self._set_model(a, a.model, None if device else a.model_preset, strict=False)
+            if "model" in fields or "model_preset" in fields:  # 两个都没给 / 为空 = 改回默认模型
+                self._set_model(a, fields.pop("model", None), fields.pop("model_preset", None))
             for k, v in fields.items():
-                if k == "model":  # None / {} 表示改回运行时默认模型
-                    a.model = _clean_model(v)
-                    continue
                 if v is None:
                     continue
                 if k == "authority":
@@ -250,6 +260,50 @@ class Network:
             self.store.save()
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
+
+    # ---- 模型：云侧启用目录时只能选预置模型；端侧用自己 harness 里的模型，自由填写 ----
+    def _set_model(self, a: AgentNode, model: dict[str, Any] | None, preset: str | None,
+                   strict: bool = True) -> None:
+        """设置 Agent 的模型（两个都空 = 默认模型）。调用方持有锁。
+        strict=False 用于换运行位置时沿用原来的选择：不合用的改回默认，不报错。"""
+        model, preset = _clean_model(model), (preset or "").strip() or None
+        if a.device_runtime or not self.models.active:
+            if preset and strict:
+                raise NetworkError("预置模型只用于平台云侧的 Agent" if a.device_runtime else "没有配置预置模型")
+            a.model, a.model_preset = model, None
+            return
+        if preset is None and model is not None:  # 旧客户端 / 旧数据给的是具体配置：对上了就算选了它
+            hit = self.models.match(model)
+            if hit is None and strict:
+                raise NetworkError(f"{model['provider']} / {model['model']} 不在预置模型里")
+            preset = hit.id if hit else None
+        if preset and self.models.get(preset) is None:
+            if strict:
+                raise NetworkError(f"没有这个预置模型：{preset}")
+            preset = None
+        a.model, a.model_preset = None, preset
+
+    def model_info(self, a: AgentNode) -> dict[str, Any]:
+        """这个 Agent 这一轮实际用哪个模型、从哪来：preset（选的预置模型）/ custom（自己填的）/
+        default（目录默认）/ runtime（运行时默认，model 为 None 表示由运行时自己决定）。
+        unavailable：选的模型已从目录里下架，或启用目录前自己填的不在目录里，这一轮改用默认。"""
+        if a.device_runtime or not self.models.active:
+            if a.model:
+                return {"source": "custom", "preset": None, "model": a.model, "label": None, "unavailable": False}
+            return {"source": "runtime", "preset": None, "model": None, "label": None, "unavailable": False}
+        p = self.models.get(a.model_preset) if a.model_preset else self.models.match(a.model)
+        if p is not None:
+            return {"source": "preset", "preset": p.id, "model": p.run_model(), "label": p.label, "unavailable": False}
+        unavailable = bool(a.model_preset or a.model)
+        d = self.models.default()
+        if d is not None:
+            return {"source": "default", "preset": d.id, "model": d.run_model(), "label": d.label,
+                    "unavailable": unavailable}
+        return {"source": "runtime", "preset": None, "model": None, "label": None, "unavailable": unavailable}
+
+    def run_model(self, a: AgentNode) -> dict[str, str] | None:
+        """交给运行时的模型；None = 运行时自己的默认。"""
+        return self.model_info(a)["model"]
 
     def _check_device_runtime(self, device_id: str | None, actor: str | None) -> None:
         """只能绑定自己的、未吊销的设备（不变量 16）。调用方持有锁。"""
@@ -1580,7 +1634,7 @@ class Network:
         self.bus.emit("agent.updated", agent=agent.to_dict())
         self.bus.emit("runtime.invoke", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
                       resumed=bool(session_id), authority=ctx.authority, network_tools=tools is not None,
-                      model=agent.model)
+                      model=self.run_model(agent))
 
         def on_event(ev: dict[str, Any]) -> None:
             t = ev.get("type")
@@ -1620,7 +1674,7 @@ class Network:
                 materials = self._materials(ctx) if agent.device_runtime else []
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
-                                              on_event=on_event, timeout_s=timeout_s, model=agent.model,
+                                              on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
                                               approvals=approvals, materials=materials, home=home,
                                               harness=agent.harness))
         except Exception as e:  # noqa: BLE001
@@ -1998,7 +2052,8 @@ class Network:
 
     def approve_proposal(self, proposal_id: str, name: str | None = None, description: str | None = None,
                          capabilities: list[str] | None = None, authority: list[str] | None = None,
-                         model: dict[str, str] | None = None, note: str = "", actor: str | None = None) -> AgentNode:
+                         model: dict[str, str] | None = None, model_preset: str | None = None, note: str = "",
+                         actor: str | None = None) -> AgentNode:
         """提议者 Agent 的所有者批准提议：可以修改字段，但权限不能超出提议者提议时的有效权限；
         以批准人的身份创建（新 Agent 归批准人）并作为他的成员加入群组。"""
         with self._lock:
@@ -2015,7 +2070,7 @@ class Network:
             a = self._new_agent(name or p.name, description or p.description,
                                 capabilities if capabilities is not None else p.capabilities, auth,
                                 chat_enabled=True, model=model, created_by=f"proposal:{p.id}",
-                                owner_id=actor or p.owner_id or g.owner_id)
+                                owner_id=actor or p.owner_id or g.owner_id, model_preset=model_preset)
             g.member_ids.append(a.id)
             p.status, p.agent_id, p.note, p.decided_at = "approved", a.id, note.strip(), time.time()
             self.store.save()
@@ -3628,6 +3683,7 @@ class Network:
         d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
                                      "enforcement": {x: caps.level(x) for x in a.authority}}
         d["effective_authority"] = caps.effective(a.authority)
+        d["model_info"] = self.model_info(a)
         if not d["mine"]:  # 联合群组里别人的 Agent：只给名片（名称、描述、能力、自身权限）
             d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
                                    "chat_enabled")}

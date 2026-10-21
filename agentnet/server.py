@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from . import auth
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
+from .model_catalog import ModelCatalog
 from .models import DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
@@ -66,6 +67,7 @@ class AgentIn(BaseModel):
     authority: list[str] = Field(default_factory=list)
     chat_enabled: bool = True
     model: ModelIn | None = None
+    model_preset: str | None = Field(None, max_length=64)  # 预置模型 id（启用模型目录时云侧只能用它）
     device_runtime: str | None = None   # 绑定的设备 id；None = 平台云侧（默认运行时）
     harness: str | None = Field(None, max_length=40)  # 设备上的哪个 harness；None = 设备默认
 
@@ -76,7 +78,8 @@ class AgentPatch(BaseModel):
     capabilities: list[str] | None = None
     authority: list[str] | None = None
     chat_enabled: bool | None = None
-    model: ModelIn | None = None  # 显式传 null 表示改回运行时默认模型
+    model: ModelIn | None = None  # 显式传 null 表示改回默认模型（model / model_preset 都没给时不改）
+    model_preset: str | None = Field(None, max_length=64)
     device_runtime: str | None = None   # 显式传 null 表示改回平台云侧
     harness: str | None = Field(None, max_length=40)
 
@@ -87,6 +90,7 @@ class ProposalApprove(BaseModel):
     capabilities: list[str] | None = Field(None, max_length=10)
     authority: list[str] | None = None
     model: ModelIn | None = None
+    model_preset: str | None = Field(None, max_length=64)
     note: str = Field("", max_length=500)
 
 
@@ -361,6 +365,12 @@ def create_app(network: Network) -> FastAPI:
     def update_agent(agent_id: str, body: AgentPatch, user: Me) -> dict:
         a = network.update_agent(agent_id, actor=user.id, **body.model_dump(exclude_unset=True))
         return network.agent_view(a, user.id)
+
+    @app.get("/api/models")
+    def models(user: Me) -> dict:
+        """云侧预置模型目录（部署方维护 models.json，改了就生效）；active=False 时云侧照旧自由填写。"""
+        return {**network.models.public(),
+                "runtime_default": getattr(network.runtime, "default_model", lambda: None)()}
 
     @app.delete("/api/agents/{agent_id}")
     def delete_agent(agent_id: str, user: Me) -> dict:
@@ -840,10 +850,13 @@ class AgentNetServer(uvicorn.Server):
         super().handle_exit(sig, frame)
 
 
-def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False) -> Network:
-    """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。"""
+def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
+                  models: str | None = None) -> Network:
+    """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
+    models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
-    return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed)
+    return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
+                   models=ModelCatalog(Path(models).resolve()) if models else None)
 
 
 def main() -> None:
@@ -852,12 +865,17 @@ def main() -> None:
     p.add_argument("--port", type=int, default=8765)
     p.add_argument("--data", default=os.environ.get("AGENTNET_DATA", ".agentnet"))
     p.add_argument("--dsh-bin", default="dsh")
+    p.add_argument("--models", default=os.environ.get("AGENTNET_MODELS"),
+                   help="云侧预置模型目录（JSON，改了就生效）；默认 <data>/models.json，没有就不限制")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=os.environ.get("AGENTNET_HOST", "127.0.0.1"))
     args = p.parse_args()
 
-    network = build_network(args.runtime, args.data, args.port, args.dsh_bin)
+    network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
+    catalog = network.models
+    if catalog.active:
+        print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")
     config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
     AgentNetServer(config, network).run()
