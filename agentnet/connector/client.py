@@ -54,8 +54,15 @@ class _Run:
 
 
 class Connector:
-    def __init__(self, driver: Driver, workroot: Path, bridge: LocalBridge | None = None):
-        self.driver = driver
+    """一台设备一个连接器；可以同时提供多个 harness（驱动），第一个是默认。
+    `run.request.harness` 选驱动；本机没有就直接回失败，不落到别的 harness 上（能力不同，权限会算错）。"""
+
+    def __init__(self, drivers: Driver | list[Driver], workroot: Path, bridge: LocalBridge | None = None):
+        drivers = list(drivers) if isinstance(drivers, (list, tuple)) else [drivers]
+        if not drivers:
+            raise DeviceError("至少要有一个驱动")
+        self.drivers: dict[str, Driver] = {d.name: d for d in drivers}
+        self.driver = drivers[0]  # 默认 harness
         self.workroot = Path(workroot).expanduser()
         self.bridge = bridge or LocalBridge()
         self._ws: Any = None
@@ -82,14 +89,19 @@ class Connector:
         if first.get("type") != HELLO:
             ws.close()
             raise DeviceError(f"握手失败：期望 {HELLO}，收到 {first.get('type')!r}")
-        caps = self.driver.capabilities()
-        ws.send(json.dumps({"type": HELLO_OK, "protocol": PROTOCOL, "runtime": self.driver.name,
-                            "capabilities": {"name": caps.name, "placement": caps.placement,
-                                             "enforcement": caps.enforcement,
-                                             "session_resume": caps.session_resume, "steer": caps.steer,
-                                             "approval": caps.approval, "sandbox": caps.sandbox}},
-                           ensure_ascii=False))
+        ws.send(json.dumps(self.hello_message(), ensure_ascii=False))
         self._ws = ws
+
+    def hello_message(self) -> dict[str, Any]:
+        """握手回执：默认 harness 放在 runtime / capabilities（旧服务器只认这两个），全部放在 runtimes。"""
+        def caps_of(d: Driver) -> dict[str, Any]:
+            c = d.capabilities()
+            return {"name": c.name, "placement": c.placement, "enforcement": c.enforcement,
+                    "session_resume": c.session_resume, "steer": c.steer,
+                    "approval": c.approval, "sandbox": c.sandbox}
+        return {"type": HELLO_OK, "protocol": PROTOCOL, "runtime": self.driver.name,
+                "capabilities": caps_of(self.driver),
+                "runtimes": [{"runtime": name, "capabilities": caps_of(d)} for name, d in self.drivers.items()]}
 
     def serve_forever(self) -> None:
         """收到消息就处理；连接断开时抛 DeviceError（由外层按退避重连）。"""
@@ -195,7 +207,8 @@ class Connector:
             run_id=run_id, agent_id=str(msg.get("agent_id", "")), context_id=str(msg.get("context_id", "")),
             prompt=str(msg.get("prompt", "")), workdir=workdir,
             authority=list(msg.get("authority") or []), tool_names=list(msg.get("tool_names") or []),
-            session_id=msg.get("session_id"), model=msg.get("model"))
+            session_id=msg.get("session_id"), model=msg.get("model"),
+            harness=str(msg["harness"]) if msg.get("harness") else None)
         run.workdir = workdir
         run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
@@ -256,9 +269,14 @@ class Connector:
     def _execute(self, run: _Run, spec: RunSpec) -> None:
         before = None
         try:
-            spec.workdir.mkdir(parents=True, exist_ok=True)
-            before = self._mount_home(run, spec)
-            outcome = self.driver.run(spec, run, run.cancel)
+            driver = self.drivers.get(spec.harness) if spec.harness else self.driver
+            if driver is None:
+                outcome = RunOutcome(ok=False, error=f"DRIVER 这台设备上没有 {spec.harness}"
+                                                     f"（有 {'、'.join(self.drivers)}）")
+            else:
+                spec.workdir.mkdir(parents=True, exist_ok=True)
+                before = self._mount_home(run, spec)
+                outcome = driver.run(spec, run, run.cancel)
         except Exception as e:  # noqa: BLE001 —— 驱动异常等价于运行时失败
             outcome = RunOutcome(ok=False, error=f"runtime error: {e!r}")
         finally:

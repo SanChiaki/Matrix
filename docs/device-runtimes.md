@@ -1,7 +1,7 @@
 # 云侧与端侧运行时（设计文档）
 
 状态：**方向已定，部分已实现**。已实现：运行时契约与能力报告、连接器协议与配对、`matrix-connect` 与三个驱动、
-端侧可达性、材料下发与回传、端侧 UI。未实现：云侧的读隔离（需求 #34）。实现状态见 [REQUIREMENTS.md](../REQUIREMENTS.md)。
+端侧可达性、材料下发与回传、端侧 UI、一机多 harness、设备码配对与后台服务（2.4–2.6 节）。未实现：云侧的读隔离（需求 #34）。实现状态见 [REQUIREMENTS.md](../REQUIREMENTS.md)。
 
 目标：让 Matrix 里的 Agent 既可以跑在**平台云侧**（内置的 DSH 运行时），也可以跑在**用户端侧**
 （用户自己的 Claude Code、Codex 等 harness），并在网络中**同等看待**。
@@ -109,6 +109,55 @@ class AgentRuntime(Protocol):
 
 选择标准不是"哪条路更先进"，而是**不变量能不能守住**：ACP 能给出完整的能力报告、审批上行、
 会话续接，就走协议；给不了，就写原生。同一个连接器可以混用两种驱动。
+
+### 2.4 一台设备，多个 harness
+
+参照 Raft Computer 与 xmatrix daemon（research: local-harness-integration#raft、local-harness-integration#xmatrix）：
+**一台电脑一个连接器**，它检测本机装了哪些 harness，全部报告给网络。
+
+- 握手 `hello.ok` 多一个 `runtimes: [{runtime, capabilities}]`，第一个是默认；旧连接器不带，等于只有 `runtime` 这一个。
+  `capabilities_from_hello` 对每一份单独裁剪（只认已知权限）。
+- Agent 绑定到 **设备 + harness**（`Agent.device_runtime` + `Agent.harness`，后者取 `models.HARNESSES` 的键；
+  `None` = 设备的默认 harness，旧数据不用迁移）。`run.request.harness` 告诉连接器用哪个驱动；
+  本机没有就直接回失败，**不落到别的 harness 上**（能力不同，权限会算错）。
+- 有效权限（不变量 1）按 **Agent 绑定的那个 harness** 能强制的部分计算（`DeviceRuntime.capabilities(harness)`）。
+- 设备在线但没有 Agent 要的 harness：和离线一样按不可达等待（`runtime_for` 返回 `None`），
+  席位只给所有者写一条“装好并重启连接器后处理”；装上之后重连即消费积压。
+- 设备记下最近一次报告的 harness（`Device.harnesses`），离线时 UI 仍按它让人选；绑定时如果设备报告过列表，
+  harness 必须在其中，没连过的设备允许先绑定。
+
+### 2.5 设备码配对
+
+参照 xmatrix 的设备码登录与 Raft 的“浏览器里批准设备”（research: xmatrix#runtime-access、local-harness-integration#raft）：
+人不再复制令牌。
+
+```
+matrix-connect setup <服务器>
+  ├─ POST /api/devices/pair        {name, hostname, harnesses}  → {device_code, user_code, verify_path}
+  ├─ 打印配对码，打开 <服务器>/#pair=<user_code>
+  │     人在已登录的网页里看主机名与 harness，批准（POST …/pair/<码>/approve）或拒绝
+  └─ POST /api/devices/pair/poll   {device_code}  → pending | approved{token} | denied | expired
+```
+
+- `device_code` 是连接器自己轮询用的高熵密钥，不给人看；`user_code` 8 位（去掉易混字符），10 分钟有效。
+- 批准就是签发一条普通设备令牌（`issue_device_token`，只存 sha256、可吊销），**批准的人就是设备的所有者**；
+  令牌经轮询只交付一次。申请与轮询不需要登录，看与批准需要。
+- 防滥用：同时等待的申请有上限（`PAIR_MAX_PENDING`）；每个用户输错用户码有上限（`PAIR_MAX_MISSES`，超限后正确的码也不受理），
+  挡住登录用户逐个试别人的码。配对状态只在内存里，服务重启后没批准的申请作废。
+- 反向钓鱼（别人把他的配对链接发给你）：批准页写明“只批准你刚刚在自己电脑上看到的码”，并展示主机名；
+  即使误批，那台机器也只是出现在你的设备列表里，要你自己把 Agent 绑上去它才会运行什么。
+- 没有浏览器的机器保留手动签发令牌（`POST /api/devices` + `matrix-connect --url --token --driver`）。
+
+### 2.6 本机配置与后台服务
+
+- `setup` 把服务器、令牌、设备名写进 `~/.config/matrix-connect/config.json`（0600，可用 `MATRIX_CONNECT_CONFIG` 改位置）；
+  令牌不出现在命令行参数、服务定义和 `status` 输出里。
+- 然后装成用户级后台服务（`agentnet/connector/service.py`）：macOS 是 `~/Library/LaunchAgents/dev.matrix.connect.plist`
+  （`launchctl bootstrap gui/<uid>`），Linux 是 `systemd --user` 单元；`KeepAlive` / `Restart=always`，PATH 取 setup 时的值，
+  让服务找得到 claude / codex / dsh。其他系统前台运行 `matrix-connect run`。
+- uvx 的临时环境会被清理，不写进开机自启；设备页给的命令先 `uv tool install`，再 `setup`。
+- 不做桌面客户端（签名、公证、自动更新对本地 Demo 太重），也不改写用户各 harness 的全局配置
+  （Reason Network 那种做法会把网络工具注入人正在用的会话，违反不变量 7；research: reason-network#setup）。
 
 ---
 

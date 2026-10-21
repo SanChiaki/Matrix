@@ -27,6 +27,7 @@ class RunSpec:
     tool_names: list[str]
     session_id: str | None = None
     model: dict[str, str] | None = None
+    harness: str | None = None        # 用哪个驱动；None = 连接器的默认驱动
 
 
 @dataclass

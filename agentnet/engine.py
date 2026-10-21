@@ -24,7 +24,7 @@ from typing import Any
 
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, AUTONOMY, LEAD_TOOLS, PROJECT_TOOLS, REQUEST_TOOLS, AUTHORITIES, BRIEF_LIMIT, DECISIONS_PUSHED, DESCRIPTION_LIMIT,
-                     GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, MCP_PREFIX, PROJECT_FILES, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
+                     GROUP_FILE_LIMIT, GROUP_FILES, GROUP_KINDS, HARNESSES, MCP_PREFIX, PROJECT_FILES, TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision,
                      Delegation, Group, Handoff, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus,
                      UserRequest, Workstream, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_decision,
@@ -32,6 +32,7 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import homedir, workdir
+from .auth import Pairings
 from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
@@ -103,6 +104,7 @@ class Network:
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
+        self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
         self.limits = limits or Limits()
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
@@ -193,11 +195,14 @@ class Network:
     # ================= Agent 管理 =================
     def create_agent(self, name: str, description: str, capabilities: list[str], authority: list[str],
                      chat_enabled: bool = True, model: dict[str, str] | None = None,
-                     device_runtime: str | None = None, actor: str | None = None) -> AgentNode:
+                     device_runtime: str | None = None, harness: str | None = None,
+                     actor: str | None = None) -> AgentNode:
         with self._lock:
             self._check_device_runtime(device_runtime, actor)
+            self._check_harness(device_runtime or None, harness or None)
             a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor)
             a.device_runtime = device_runtime or None
+            a.harness = harness or None
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
 
@@ -220,6 +225,15 @@ class Network:
             a = self.owned_agent(agent_id, actor)
             if "name" in fields and fields["name"] != a.name and self.store.agent_by_name(fields["name"]):
                 raise NetworkError(f"Agent 名称已存在：{fields['name']}")
+            if "device_runtime" in fields or "harness" in fields:
+                # 运行位置一起改：显式传空 = 改回平台云侧（harness 一并清掉）；只改 harness 时沿用原设备
+                device = fields.pop("device_runtime", a.device_runtime) or None
+                harness = fields.pop("harness", a.harness if device == a.device_runtime else None) or None
+                if device is None:
+                    harness = None
+                self._check_device_runtime(device, actor)
+                self._check_harness(device, harness)
+                a.device_runtime, a.harness = device, harness
             for k, v in fields.items():
                 if k == "model":  # None / {} 表示改回运行时默认模型
                     a.model = _clean_model(v)
@@ -230,8 +244,6 @@ class Network:
                     v = _clean_auth(v)
                 elif k == "capabilities":
                     v = _clean_caps(v)
-                elif k == "device_runtime":
-                    self._check_device_runtime(v or None, actor)
                 elif k not in UPDATABLE_AGENT_FIELDS:
                     raise NetworkError(f"不能修改 {k}")
                 setattr(a, k, v)
@@ -246,6 +258,19 @@ class Network:
         d = self.store.devices.get(device_id)
         if d is None or d.revoked or (actor is not None and d.user_id != actor):
             raise NetworkError(f"设备 {device_id} 不存在或属于别人")
+
+    def _check_harness(self, device_id: str | None, harness: str | None) -> None:
+        """harness 必须是网络认得的；设备报告过 harness 列表时必须在其中。还没连过的设备不知道装了什么，
+        允许先绑定（上线后没有就按不可达等待，见 runtime_for）。调用方持有锁。"""
+        if not harness:
+            return
+        if harness not in HARNESSES:
+            raise NetworkError(f"未知的 harness：{harness}")
+        if not device_id:
+            raise NetworkError("平台云侧运行内置 dsh，不能选 harness；先选一台设备")
+        d = self.store.devices.get(device_id)
+        if d is not None and d.harnesses and harness not in d.harnesses:
+            raise NetworkError(f"设备 {d.name} 上没有 {harness}（它报告的是 {'、'.join(d.harnesses)}）")
 
     def delete_agent(self, agent_id: str, actor: str | None = None) -> None:
         with self._lock:
@@ -843,7 +868,11 @@ class Network:
 
     def _note_offline(self, conv: Conversation, agent: AgentNode) -> None:
         """端侧不在线：给所有者留一条排队说明，同样的说明不重复写。"""
-        text = f"{agent.name} 的端侧运行时 {agent.device_runtime} 未连接：消息已排队，等它上线后处理。"
+        if agent.device_runtime in self._runtimes:  # 设备在线，只是没有它要的 harness
+            text = (f"{agent.name} 要用的 {HARNESSES.get(agent.harness or '', agent.harness)} 在设备 "
+                    f"{self._device_name(agent)} 上找不到：消息已排队，装好并重启连接器后处理。")
+        else:
+            text = f"{agent.name} 的端侧运行时 {self._where(agent)} 未连接：消息已排队，等它上线后处理。"
         if any(m.role == "system" and m.text == text for m in conv.messages[-3:]):
             return
         self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, text=text,
@@ -940,23 +969,29 @@ class Network:
         """注册一个端侧运行时（连接器上线时调用）。同名覆盖：重连后以新的能力声明为准。
         上线即消费积压：绑定到这个运行时的等待中任务与席位重新调度（docs/device-runtimes.md §5）。"""
         self._runtimes[name] = runtime
-        caps = self._caps_of(runtime)
         wake: list[tuple[str, str]] = []
         with self._lock:
+            info = getattr(runtime, "info", None)
+            device = self.store.devices.get(name)
+            if device is not None and info is not None:
+                device.harnesses = list(info.harnesses)  # 离线时 UI 仍按它让人选 harness
             for a in self.store.agents.values():
-                if a.device_runtime == name:
-                    a.enforcement = dict(caps.enforcement)  # 记下最近一次声明，离线时沿用
+                if a.device_runtime == name and self._serves(runtime, a):
+                    # 记下最近一次声明，离线时沿用
+                    a.enforcement = dict(self._caps_of(runtime, a.harness).enforcement)
             self.store.save()
             for t in self.store.tasks.values():
                 agent = self.store.agents.get(t.delegatee_id or "")
-                if agent is not None and agent.device_runtime == name and t.status == TaskStatus.WAITING:
+                if (agent is not None and agent.device_runtime == name and self._serves(runtime, agent)
+                        and t.status == TaskStatus.WAITING):
                     t.status, t.error = TaskStatus.RUNNING, None
                     self.store.save()
                     wake.append(("task", t.id))
             for conv in self.store.conversations.values():
                 for agent_id, seat in conv.seats.items():
                     agent = self.store.agents.get(agent_id)
-                    if agent is not None and agent.device_runtime == name and seat.inbox:
+                    if (agent is not None and agent.device_runtime == name and self._serves(runtime, agent)
+                            and seat.inbox):
                         wake.append(("seat", seat_id(conv.id, agent_id)))
         for kind, cid in wake:
             self.bus.emit("task.updated" if kind == "task" else "conversation.updated",
@@ -968,10 +1003,27 @@ class Network:
         self._runtimes.pop(name, None)
 
     def runtime_for(self, agent: AgentNode | None = None) -> AgentRuntime | None:
-        """Agent 绑定的运行时；未绑定用默认运行时；绑定了但不在线返回 None（这一轮按不可达处理）。"""
+        """Agent 绑定的运行时；未绑定用默认运行时；绑定了但不在线、或设备上没有它要的 harness 时
+        返回 None（这一轮按不可达处理，装上 harness 重连后继续）。"""
         if agent is not None and agent.device_runtime:
-            return self._runtimes.get(agent.device_runtime)
+            rt = self._runtimes.get(agent.device_runtime)
+            return rt if rt is not None and self._serves(rt, agent) else None
         return self.runtime
+
+    @staticmethod
+    def _serves(runtime: AgentRuntime, agent: AgentNode) -> bool:
+        """端侧运行时是否提供 Agent 绑定的 harness。不区分 harness 的运行时（测试替身等）总是提供。"""
+        serves = getattr(runtime, "serves", None)
+        return serves(agent.harness) if callable(serves) else True
+
+    def _device_name(self, agent: AgentNode) -> str:
+        d = self.store.devices.get(agent.device_runtime or "")
+        return d.name if d is not None else str(agent.device_runtime)
+
+    def _where(self, agent: AgentNode) -> str:
+        """端侧位置的说明：“设备名 · harness”。"""
+        name = self._device_name(agent)
+        return f"{name} · {HARNESSES.get(agent.harness, agent.harness)}" if agent.harness else name
 
     def _device_of_context(self, context_id: str) -> DeviceRuntime | None:
         """正在为这个执行上下文提供服务的端侧运行时（publish_file 回读文件用）。"""
@@ -983,24 +1035,26 @@ class Network:
 
     def device_online(self, agent: AgentNode | None) -> bool:
         """端侧运行时是否在线。未绑定端侧的 Agent 视为在线（走默认运行时）。"""
-        return agent is None or not agent.device_runtime or agent.device_runtime in self._runtimes
+        return agent is None or not agent.device_runtime or self.runtime_for(agent) is not None
 
     @staticmethod
-    def _caps_of(runtime: AgentRuntime | None) -> RuntimeCapabilities:
-        """运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。"""
+    def _caps_of(runtime: AgentRuntime | None, harness: str | None = None) -> RuntimeCapabilities:
+        """运行时没实现 capabilities() 时按全部可强制处理（保持旧行为）。端侧设备按 harness 取。"""
         if runtime is None:
             return RuntimeCapabilities(name="offline", placement="device")
         get = getattr(runtime, "capabilities", None)
-        return get() if callable(get) else RuntimeCapabilities.all_enforced(getattr(runtime, "name", "runtime"))
+        if not callable(get):
+            return RuntimeCapabilities.all_enforced(getattr(runtime, "name", "runtime"))
+        return get(harness) if isinstance(runtime, DeviceRuntime) else get()
 
     def capabilities(self, agent: AgentNode | None = None) -> RuntimeCapabilities:
         rt = self.runtime_for(agent)
         if rt is not None:
-            return self._caps_of(rt)
+            return self._caps_of(rt, agent.harness if agent is not None else None)
         if agent is not None and agent.device_runtime:
             # 端侧离线：沿用最近一次握手声明的能力（第 5 节）。从没连过的设备没有任何声明，
             # 这时权限按 unavailable 处理——不能因为"还不知道"就当成可以强制。
-            return RuntimeCapabilities(name=agent.device_runtime, placement="device",
+            return RuntimeCapabilities(name=agent.harness or agent.device_runtime, placement="device",
                                        enforcement=dict(agent.enforcement))
         return self._caps_of(None)
 
@@ -1560,14 +1614,15 @@ class Network:
                 agent.active = max(0, agent.active - 1)
             self.bus.emit("agent.updated", agent=agent.to_dict())
             return RunResult(session_id or "", "", ok=False,
-                             error=f"TRANSPORT 端侧运行时 {agent.device_runtime} 未连接")
+                             error=f"TRANSPORT 端侧运行时 {self._where(agent)} 未连接")
         try:
             with self._lock:
                 materials = self._materials(ctx) if agent.device_runtime else []
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=agent.model,
-                                              approvals=approvals, materials=materials, home=home))
+                                              approvals=approvals, materials=materials, home=home,
+                                              harness=agent.harness))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:

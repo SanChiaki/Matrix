@@ -106,9 +106,11 @@ async function submitOnboard(e) {
 async function enter() {
   S.me = await api("/api/me");
   $("#me-email").textContent = S.me.email;
+  const pairing = location.hash.startsWith("#pair=");  // 先记下：start() 里的路由会把它换成 #devices
   if (!S.started) { S.started = true; await start(); }
   else await reload();
-  if (S.me.agent_count === 0 && !S.skipOnboard) showGate("onboard");
+  // 从连接器打开的配对链接：先让人批准设备，不拦在“创建第一个 Agent”的引导上
+  if (S.me.agent_count === 0 && !S.skipOnboard && !pairing) showGate("onboard");
   else hideGate();
 }
 
@@ -181,6 +183,14 @@ function route() {
   const hash = location.hash.slice(1);
   const PLAIN = ["network", "projects", "board", "agents", "groups", "devices"];
   // 参照 Raft：#g-<群组> 打开群组的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
+  // #pair=<配对码>：连接器 setup 打开的批准页（docs/device-runtimes.md 第 2.5 节）
+  const pair = hash.match(/^pair=([A-Za-z0-9-]{4,16})$/);
+  if (pair) {
+    S.devicePanel = { pair: pair[1] };
+    S.convId = null; S.conv = null;
+    show("devices");
+    return;
+  }
   const m = hash.match(/^(g|dm)-(.+)$/);
   if (m) {
     const body = m[1] === "g" ? { group_id: m[2] } : { agent_id: m[2] };
@@ -930,7 +940,7 @@ function renderAgents() {
         <div class="card-head">${avatar(a.name)}<span class="name">${esc(a.name)}</span>${pill(a.status)}</div>
         <p class="card-desc">${esc(a.description)}</p>
         <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}${a.device_runtime
-          ? `<span class="tag model" title="端侧运行时">${a.device_online ? "本机" : "设备离线"}</span>` : ""}</div>
+          ? `<span class="tag model" title="端侧运行时">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "本机") : "设备离线"}</span>` : ""}</div>
       </button>
       <div class="card-foot"><span>${a.mine ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
         ${!a.mine ? '<span class="muted">联合群组里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
@@ -992,10 +1002,9 @@ function renderAgentEditor(isNew = false) {
         <div class="field"><label for="af-device">运行在</label>
           <select id="af-device" name="device_runtime">
             <option value="">平台云侧（内置 dsh）</option>
-            ${(S.devices || []).filter((d) => !d.revoked).map((d) =>
-              `<option value="${esc(d.id)}" ${x.device_runtime === d.id ? "selected" : ""}>设备：${esc(d.name)}</option>`).join("")}
+            ${placementOptions(x)}
           </select>
-          <p class="hint">${S.devices?.length ? "端侧 Agent 在你这台电脑上跑，用你本机的登录与文件；它读不到服务器上的数据。" : "还没有设备。先到「设备」页连接一台，才可以选择端侧运行。"}</p>
+          <p class="hint">${S.devices?.length ? "端侧 Agent 在你这台电脑上用选定的 harness 跑，用你本机的登录与文件；它读不到服务器上的数据。" : "还没有设备。先到「设备」页连接一台，才可以选择端侧运行。"}</p>
         </div>
       </fieldset>
       <fieldset class="model"><legend>模型</legend>
@@ -1021,7 +1030,7 @@ function renderAgentEditor(isNew = false) {
       authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
       chat_enabled: f.chat_enabled.checked,
       model: readModel(f),
-      device_runtime: f.device_runtime.value || null,
+      ...placementOf(f.device_runtime.value),
     };
     if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
       $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
@@ -1823,7 +1832,12 @@ function bindComposer() {
 init().catch((e) => { document.body.insertAdjacentHTML("afterbegin", `<p class="error" role="alert">加载失败：${esc(e.message)}</p>`); });
 
 // ================= 设备（端侧运行时） =================
-// 一台设备 = 一个连接器；令牌只显示一次。Agent 在编辑器里选择"跑在哪台设备上"。
+// 一台设备 = 一台电脑上的一个连接器，可以同时提供多个 harness（claude-code / codex / dsh）。
+// 接入走设备码配对：电脑上跑 setup，浏览器里批准（#pair=<码>）；手动签发令牌留作没有浏览器时的备用。
+const harnessLabel = (h) => S.info?.harnesses?.[h] || h;
+const harnessTags = (d) => (d.harnesses || []).map((h, i) =>
+  `<span class="tag model" title="${i === 0 ? "默认 harness" : "harness"}">${esc(harnessLabel(h))}</span>`).join("");
+
 async function renderDevicesView() {
   let devices = [];
   try { devices = await api("/api/devices"); } catch { devices = []; }
@@ -1837,11 +1851,11 @@ async function renderDevicesView() {
           ${d.revoked ? '<span class="vis-tag other">已吊销</span>'
             : `<span class="pill status ${online ? "busy" : "idle"}">${online ? "在线" : "离线"}</span>`}</div>
         <p class="card-desc">${agents.length ? `运行 ${agents.map((a) => esc(a.name)).join("、")}` : "还没有 Agent 绑到这台设备"}</p>
-        <div class="card-meta"><span class="muted">${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</span></div>
+        <div class="card-meta">${harnessTags(d)}<span class="muted">${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</span></div>
       </button>
       <div class="card-foot"><span></span>${d.revoked ? "" : `<button type="button" class="danger sm" data-revoke="${esc(d.id)}">吊销</button>`}</div>
     </div></li>`;
-  }).join("") || '<li class="empty">还没有设备。点“连接一台设备”，在要运行 Agent 的电脑上启动连接器。</li>';
+  }).join("") || '<li class="empty">还没有设备。点“连接一台设备”，在要运行 Agent 的电脑上执行一条命令。</li>';
   $("#device-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
     if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
     S.devicePanel = null; S.deviceSel = b.dataset.id; renderDevicesView();
@@ -1854,26 +1868,82 @@ async function renderDevicesView() {
   renderDeviceDetail();
 }
 
-// 侧边栏状态放在 S.devicePanel 里："new" = 签发表单，{ token, name, cmd } = 签发结果。
-// 签发后的 reload() 与 SSE 事件都会重渲染设备页；按状态还原，令牌一直保留到点“完成”。
+// Agent 的“运行在”：每台设备按它报告的 harness 各一项，值是 "<设备 id>|<harness>"；
+// 还没连过的设备不知道装了什么，只有一项（用设备的默认 harness）。没指定 harness 的旧 Agent 落在第一项上。
+function placementOptions(x) {
+  return (S.devices || []).filter((d) => !d.revoked).map((d) => {
+    const hs = d.harnesses || [];
+    if (!hs.length) {
+      return `<option value="${esc(d.id)}" ${x.device_runtime === d.id ? "selected" : ""}>${esc(d.name)} · 还没连接过</option>`;
+    }
+    const mine = x.device_runtime === d.id;
+    const cur = mine ? x.harness || hs[0] : null;
+    // 绑定的 harness 不在最近一次报告里（卸掉了）：仍列出来，免得保存时被悄悄换掉
+    const all = mine && cur && !hs.includes(cur) ? [...hs, cur] : hs;
+    return all.map((h) => `<option value="${esc(`${d.id}|${h}`)}" ${cur === h ? "selected" : ""}>${esc(d.name)} · ${esc(harnessLabel(h))}${hs.includes(h) ? "" : "（设备上没有）"}</option>`).join("");
+  }).join("");
+}
+const placementOf = (v) => {
+  const [device, harness] = (v || "").split("|");
+  return { device_runtime: device || null, harness: harness || null };
+};
+
+// 在电脑上执行的一条命令：安装（或更新）连接器，然后配对并装成后台服务。命令里没有任何密钥。
+const setupCmd = () =>
+  `uv tool install --force git+https://github.com/SanChiaki/Matrix.git && matrix-connect setup ${location.origin}`;
+// 备用：手动签发的令牌（没有浏览器的机器）。令牌只显示一次。
 const connectCmd = (token) => {
   const origin = location.origin.replace(/^http/, "ws");
   return `uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect --url ${origin}/api/devices/connect --token ${token} --driver claude-code`;
 };
 
+function copyButton(btnSel, preSel, statusSel, text) {
+  $(btnSel).addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      $(statusSel).textContent = "已复制到剪贴板。";
+    } catch {  // 剪贴板不可用（非安全上下文等）：选中文本，让人手动复制
+      const r = document.createRange(); r.selectNodeContents($(preSel));
+      const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      $(statusSel).textContent = "无法自动复制，已选中命令，请按 ⌘C / Ctrl+C。";
+    }
+  });
+}
+
+// 侧边栏状态放在 S.devicePanel 里："new" = 连接说明，{ pair, info?, error? } = 批准配对，
+// { token, name, cmd } = 手动签发的结果。reload() 与 SSE 事件都会重渲染设备页；按状态还原，令牌一直保留到点“完成”。
 function renderDeviceDetail() {
   const box = $("#device-detail"), panel = S.devicePanel;
   if (panel === "new") {
-    if (box.querySelector("#device-form")) return;  // 表单已在：不重绘，免得冲掉正在输入的名称
+    if (box.querySelector("#device-setup")) return;  // 已在：不重绘，免得冲掉正在输入的内容
+    const cmd = setupCmd();
     box.innerHTML = `<h2 class="panel-title">连接一台设备</h2>
-      <p class="muted">先给这台电脑起个名字，签发一个令牌，然后在它上面运行连接器。</p>
-      <form class="editor" id="device-form">
-        <div class="field"><label for="dv-name">设备名称</label><input id="dv-name" name="name" placeholder="我的笔记本" maxlength="80"></div>
+      <p class="muted">在要运行 Agent 的电脑上执行（需要 <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>）：</p>
+      <pre class="cmd" id="device-setup" tabindex="0">${esc(cmd)}</pre>
+      <div class="actions"><button type="button" id="dv-copy-setup">复制命令</button></div>
+      <p class="hint" id="dv-copied-setup" role="status"></p>
+      <p class="hint">它会检测本机装了的 Claude Code、Codex、dsh，打开浏览器让你批准这台电脑，再装成后台服务（登录后自动运行）。命令里没有密钥；令牌只保存在那台电脑上。</p>
+      <form class="editor" id="pair-form">
+        <div class="field"><label for="pair-code">浏览器没有自动打开？输入终端里显示的配对码</label>
+          <input id="pair-code" name="code" placeholder="ABCD-EFGH" maxlength="16" autocomplete="off" spellcheck="false"></div>
         <p class="error" role="alert"></p>
-        <div class="actions"><button type="submit">签发令牌</button><button type="button" class="ghost" id="dv-cancel">取消</button></div>
-      </form>`;
-    $("#dv-name").focus();
+        <div class="actions"><button type="submit">下一步</button><button type="button" class="ghost" id="dv-cancel">取消</button></div>
+      </form>
+      <details class="manual"><summary>没有浏览器的机器：手动签发令牌</summary>
+        <form class="editor" id="device-form">
+          <div class="field"><label for="dv-name">设备名称</label><input id="dv-name" name="name" placeholder="我的服务器" maxlength="80"></div>
+          <p class="error" role="alert"></p>
+          <div class="actions"><button type="submit" class="ghost">签发令牌</button></div>
+        </form>
+      </details>`;
+    copyButton("#dv-copy-setup", "#device-setup", "#dv-copied-setup", cmd);
     $("#dv-cancel").addEventListener("click", () => { S.devicePanel = null; renderDeviceDetail(); });
+    $("#pair-form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const code = $("#pair-code").value.trim();
+      if (!code) { $(".error", $("#pair-form")).textContent = "请输入配对码。"; return; }
+      S.devicePanel = { pair: code }; renderDeviceDetail();
+    });
     $("#device-form").addEventListener("submit", async (e) => {
       e.preventDefault();
       const btn = $("#device-form button[type=submit]");
@@ -1888,6 +1958,7 @@ function renderDeviceDetail() {
     });
     return;
   }
+  if (panel && panel.pair) { renderPairing(box, panel); return; }
   if (panel && panel.token) {
     if (box.querySelector("#device-cmd")) return;  // 已经显示：不重绘（保住选中状态与“已复制”提示）
     box.innerHTML = `<h2 class="panel-title">${esc(panel.name)}</h2>
@@ -1897,17 +1968,8 @@ function renderDeviceDetail() {
       <div class="actions"><button type="button" id="dv-copy">复制命令</button>
         <button type="button" class="ghost" id="dv-done">已复制，完成</button></div>
       <p class="hint" id="dv-copied" role="status"></p>
-      <p class="hint">把 --driver 换成 dsh 或 codex 即可换 harness。本机需要先装好对应的 harness 并登录（claude / codex / dsh 在 PATH 里）。连接器只发出站请求；断开后会自动重连，任务在服务端排队等待。</p>`;
-    $("#dv-copy").addEventListener("click", async () => {
-      try {
-        await navigator.clipboard.writeText(panel.cmd);
-        $("#dv-copied").textContent = "已复制到剪贴板。";
-      } catch {  // 剪贴板不可用（非安全上下文等）：选中文本，让人手动复制
-        const r = document.createRange(); r.selectNodeContents($("#device-cmd"));
-        const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-        $("#dv-copied").textContent = "无法自动复制，已选中命令，请按 ⌘C / Ctrl+C。";
-      }
-    });
+      <p class="hint">手动令牌一次只接一个 harness：把 --driver 换成 dsh 或 codex 即可换。能开浏览器的电脑建议改用“连接一台设备”里的一条命令，自动检测全部 harness。</p>`;
+    copyButton("#dv-copy", "#device-cmd", "#dv-copied", panel.cmd);
     $("#dv-done").addEventListener("click", () => {
       if (!confirm("关掉后令牌不会再显示。确认已经复制好了？")) return;
       S.devicePanel = null; renderDeviceDetail();
@@ -1918,7 +1980,59 @@ function renderDeviceDetail() {
   if (!d) { box.innerHTML = placeholder("选择一台设备查看，或连接新设备。"); return; }
   const agents = S.snap.agents.filter((a) => a.device_runtime === d.id);
   box.innerHTML = `<h2 class="panel-title">${esc(d.name)}</h2>
-    <p class="muted">${d.revoked ? "已吊销" : "有效"} · ${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</p>
-    <dl><dt>运行在这台设备上的 Agent</dt><dd>${agents.length ? tags(agents.map((a) => a.name)) : '<span class="muted">无</span>'}</dd></dl>
-    <p class="hint">连接器只发出站请求；设备离线时绑在它上面的 Agent 进入等待，不消耗重试。令牌只在签发时显示一次。</p>`;
+    <p class="muted">${d.revoked ? "已吊销" : d.online ? "在线" : "离线"}${d.hostname ? ` · ${esc(d.hostname)}` : ""} · ${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</p>
+    <dl><dt>harness</dt><dd>${(d.harnesses || []).length ? harnessTags(d) : '<span class="muted">还没报告（连接器连上后显示）</span>'}</dd>
+      <dt>运行在这台设备上的 Agent</dt><dd>${agents.length ? tags(agents.map((a) => a.harness ? `${a.name} · ${harnessLabel(a.harness)}` : a.name)) : '<span class="muted">无</span>'}</dd></dl>
+    <p class="hint">在那台电脑上装了新的 harness 后，重启连接器（或后台服务）就会出现在这里。连接器只发出站请求；设备离线时绑在它上面的 Agent 进入等待，不消耗重试。</p>`;
+}
+
+// 批准一台设备：看清主机名与 harness，确认是自己刚刚在那台电脑上看到的码，再批准。
+function renderPairing(box, panel) {
+  if (!panel.info && !panel.error) {
+    if (!panel.loading) {
+      panel.loading = true;
+      api(`/api/devices/pair/${encodeURIComponent(panel.pair)}`)
+        .then((info) => { panel.info = info; })
+        .catch((err) => { panel.error = err.message; })
+        .finally(() => { if (S.devicePanel === panel) { box.innerHTML = ""; renderDeviceDetail(); } });
+    }
+    box.innerHTML = `<h2 class="panel-title">批准设备</h2><p class="muted">正在查找配对码 ${esc(panel.pair)}…</p>`;
+    return;
+  }
+  if (box.querySelector("#pair-approve")) return;  // 已在：不重绘，保住正在输入的名称
+  const done = () => { S.devicePanel = null; if (location.hash.startsWith("#pair=")) history.replaceState(null, "", "#devices"); };
+  if (panel.error) {
+    box.innerHTML = `<h2 class="panel-title">批准设备</h2>
+      <p class="error" role="alert">${esc(panel.error)}</p>
+      <p class="hint">配对码 10 分钟内有效。过期了就在那台电脑上重新运行 matrix-connect setup。</p>
+      <div class="actions"><button type="button" class="ghost" id="pair-back">返回</button></div>`;
+    $("#pair-back").addEventListener("click", () => { done(); renderDeviceDetail(); });
+    return;
+  }
+  const p = panel.info;
+  box.innerHTML = `<h2 class="panel-title">批准设备</h2>
+    <div class="warn-box">只批准你刚刚在自己电脑上看到的配对码。批准后，这台电脑可以替你运行绑定到它的 Agent。</div>
+    <dl style="margin-top:12px"><dt>配对码</dt><dd><code>${esc(p.user_code)}</code></dd>
+      <dt>主机名</dt><dd>${esc(p.hostname || "未报告")}</dd>
+      <dt>检测到的 harness</dt><dd>${(p.harnesses || []).length ? harnessTags(p) : '<span class="muted">没有（装好后重启连接器即可）</span>'}</dd></dl>
+    <form class="editor" id="pair-approve">
+      <div class="field"><label for="pa-name">设备名称</label><input id="pa-name" name="name" value="${esc(p.name || "")}" maxlength="80"></div>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">批准</button><button type="button" class="danger" id="pa-deny">拒绝</button></div>
+    </form>`;
+  const code = encodeURIComponent(panel.pair);
+  $("#pair-approve").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = $("#pair-approve button[type=submit]");
+    btn.disabled = true;
+    try {
+      const d = await api(`/api/devices/pair/${code}/approve`, { method: "POST", body: { name: $("#pa-name").value.trim() } });
+      done(); S.deviceSel = d.id;
+      await reload();
+    } catch (err) { $(".error", $("#pair-approve")).textContent = err.message; btn.disabled = false; }
+  });
+  $("#pa-deny").addEventListener("click", async () => {
+    try { await api(`/api/devices/pair/${code}/deny`, { method: "POST", body: {} }); } catch { /* 已过期也一样 */ }
+    done(); renderDeviceDetail();
+  });
 }

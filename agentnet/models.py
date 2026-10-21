@@ -34,6 +34,14 @@ TOOL_AUTHORITY: dict[str, str | None] = {
     "bash": "shell.exec",
 }
 
+# 端侧 harness（连接器驱动名 -> 显示名）。一台设备可以同时提供多个；Agent 绑定到“设备 + harness”。
+# 连接器的驱动名必须在这里（test_connector_drivers_are_known_harnesses）。
+HARNESSES: dict[str, str] = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "dsh": "dsh",
+}
+
 MCP_SERVER = "agentnet"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
@@ -79,6 +87,8 @@ class AgentNode:
     model: dict[str, str] | None = None
     # 绑定的运行时：None = 默认运行时（平台云侧）；非 None = 已注册的端侧运行时名（docs/device-runtimes.md）
     device_runtime: str | None = None
+    # 设备上的哪个 harness（HARNESSES 的键）；None = 设备的默认 harness（旧数据、旧连接器只有一个）
+    harness: str | None = None
     # 该运行时最近一次握手声明的强制能力（权限 -> enforced/advisory/unavailable）。
     # 设备离线时用它，避免把"未知"当成"全都不行"而误收窄委托权限。
     enforcement: dict[str, str] = field(default_factory=dict)
@@ -461,6 +471,9 @@ class Device:
     created_at: float = field(default_factory=time.time)
     last_seen_at: float | None = None    # 最近一次握手时间
     revoked_at: float | None = None
+    # 最近一次握手报告的 harness（第一个是默认）；设备离线时 UI 仍按它让人选
+    harnesses: list[str] = field(default_factory=list)
+    hostname: str = ""                   # 设备码配对时连接器报告的主机名，只用于展示
 
     @property
     def revoked(self) -> bool:
@@ -469,7 +482,8 @@ class Device:
     def public(self) -> dict[str, Any]:
         """对外的设备信息：不含令牌与哈希。"""
         return {"id": self.id, "name": self.name, "created_at": self.created_at,
-                "last_seen_at": self.last_seen_at, "revoked": self.revoked}
+                "last_seen_at": self.last_seen_at, "revoked": self.revoked,
+                "harnesses": list(self.harnesses), "hostname": self.hostname}
 
 
 @dataclass

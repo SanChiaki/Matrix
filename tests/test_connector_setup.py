@@ -1,0 +1,196 @@
+"""连接器的一机多 harness、配置、设备码配对与后台服务（docs/device-runtimes.md 第 2.4–2.6 节）。"""
+import json
+import os
+import stat
+import threading
+import time
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from agentnet.connector import config as cfg
+from agentnet.connector import pairing, service
+from agentnet.connector.client import Connector
+from agentnet.connector.drivers.base import RunOutcome
+from agentnet.connector.main import detect_drivers, main
+from agentnet.models import HARNESSES
+from agentnet.server import create_app
+from tests.test_devices import build
+from tests.test_users import client
+
+
+class FakeDriver:
+    def __init__(self, name, installed=True):
+        self.name = name
+        self.installed = installed
+        self.ran = []
+
+    def capabilities(self):
+        from agentnet.runtime import RuntimeCapabilities
+        return RuntimeCapabilities(name=self.name, placement="device", enforcement={"web.research": "enforced"})
+
+    def available(self):
+        return self.installed
+
+    def run(self, spec, ctx, cancel):
+        self.ran.append(spec.run_id)
+        return RunOutcome(final_text=f"{self.name} done")
+
+
+def run_msg(run_id, harness=None):
+    return {"run_id": run_id, "agent_id": "a", "context_id": f"c-{run_id}", "prompt": "p",
+            "workdir_ref": f"a/c-{run_id}", "authority": [], "tool_names": [], "harness": harness}
+
+
+def wait_for(cond, n=200):
+    for _ in range(n):
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+# ================= 一机多 harness =================
+def test_connector_routes_each_run_to_its_harness(tmp_path):
+    claude, codex = FakeDriver("claude-code"), FakeDriver("codex")
+    c = Connector([claude, codex], tmp_path)
+    sent = []
+    c.send = sent.append
+    c._start(run_msg("r1", "codex"))
+    c._start(run_msg("r2"))                 # 不指定：默认（第一个）
+    c._start(run_msg("r3", "dsh"))          # 本机没有：直接回失败，不落到别的 harness 上
+    assert wait_for(lambda: len(sent) == 3)
+    by_run = {m["run_id"]: m for m in sent}
+    assert by_run["r1"]["final_text"] == "codex done" and by_run["r2"]["final_text"] == "claude-code done"
+    assert by_run["r3"]["ok"] is False and "dsh" in by_run["r3"]["error"]
+    assert codex.ran == ["r1"] and claude.ran == ["r2"]
+    c.close()
+
+
+def test_hello_lists_every_driver():
+    c = Connector([FakeDriver("claude-code"), FakeDriver("codex")], Path("/tmp"))
+    msg = c.hello_message()
+    assert msg["runtime"] == "claude-code" and [r["runtime"] for r in msg["runtimes"]] == ["claude-code", "codex"]
+    from agentnet.device import capabilities_from_hello
+    assert capabilities_from_hello(msg).harnesses == ["claude-code", "codex"]
+    c.close()
+
+
+def test_detect_drivers_keeps_only_installed(monkeypatch):
+    import agentnet.connector.main as m
+    monkeypatch.setattr(m, "build_driver", lambda name, **kw: FakeDriver(name, installed=name != "dsh"))
+    assert [d.name for d in detect_drivers()] == ["claude-code", "codex"]
+    assert [d.name for d in detect_drivers(["codex", "dsh"])] == ["codex"]
+
+
+def test_connector_drivers_are_known_harnesses():
+    """连接器的驱动名必须是网络认得的 harness，否则 Agent 绑不上去。"""
+    from agentnet.connector.main import DRIVERS
+    assert set(DRIVERS) <= set(HARNESSES)
+
+
+# ================= 配置 =================
+def test_config_round_trip_is_private(tmp_path):
+    path = tmp_path / "conf" / "config.json"
+    cfg.save(cfg.Config(server="https://m.example", token="secret", device_id="dev-1", device_name="笔记本"), path)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600            # 令牌只有本人可读
+    got = cfg.load(path)
+    assert got.token == "secret" and got.ws_url == "wss://m.example/api/devices/connect"
+    assert cfg.load(tmp_path / "none.json") is None
+
+
+def test_server_urls():
+    assert cfg.normalize_server("127.0.0.1:8765/") == "http://127.0.0.1:8765"
+    assert cfg.normalize_server("https://m.example/") == "https://m.example"
+    assert cfg.Config(server="http://127.0.0.1:8765", token="t").ws_url == "ws://127.0.0.1:8765/api/devices/connect"
+    with pytest.raises(ValueError):
+        cfg.normalize_server("ftp://x")
+
+
+# ================= 设备码配对（真实 API） =================
+def test_pair_against_the_server(tmp_path):
+    net = build(tmp_path / "srv")
+    anon = TestClient(create_app(net))
+    alice = client(net, "alice@x.io")
+    shown = []
+
+    def post(url, body):
+        path = url.removeprefix("http://testserver")
+        return anon.post(path, json=body).json()
+
+    def show(p):  # 人看到码后在网页里批准
+        shown.append(p)
+        threading.Timer(0.05, lambda: alice.post(f"/api/devices/pair/{p['user_code']}/approve", json={})).start()
+
+    conf = pairing.pair("http://testserver", name="笔记本", harnesses=["codex"], post=post, show=show,
+                        sleep=lambda s: time.sleep(0.02))
+    assert shown and conf.device_name == "笔记本" and conf.email == "alice@x.io"
+    assert net.store.devices[conf.device_id].harnesses == ["codex"]
+    from agentnet import auth
+    assert auth.device_of(net.store, conf.token).id == conf.device_id
+
+
+def test_pair_denied_raises(tmp_path):
+    net = build(tmp_path / "srv")
+    anon = TestClient(create_app(net))
+    alice = client(net, "alice@x.io")
+    post = lambda url, body: anon.post(url.removeprefix("http://testserver"), json=body).json()
+    show = lambda p: alice.post(f"/api/devices/pair/{p['user_code']}/deny", json={})
+    with pytest.raises(pairing.PairingError, match="拒绝"):
+        pairing.pair("http://testserver", post=post, show=show, sleep=lambda s: None)
+
+
+# ================= 后台服务 =================
+def test_launchd_plist_runs_the_connector(tmp_path):
+    text = service.launchd_plist("/opt/bin/matrix-connect", tmp_path / "config.json", "/usr/bin:/opt/bin",
+                                 tmp_path / "log")
+    assert "<string>/opt/bin/matrix-connect</string>" in text and "<string>run</string>" in text
+    assert "<key>KeepAlive</key>" in text and "/usr/bin:/opt/bin" in text and "secret" not in text
+
+
+def test_systemd_unit_runs_the_connector(tmp_path):
+    text = service.systemd_unit("/opt/bin/matrix-connect", tmp_path / "config.json", "/usr/bin")
+    assert "ExecStart=/opt/bin/matrix-connect run --config" in text and "Restart=always" in text
+    assert "Environment=PATH=/usr/bin" in text
+
+
+def test_install_writes_the_unit_and_loads_it(tmp_path):
+    ran = []
+    home = tmp_path / "home"
+    path = service.install("/opt/bin/matrix-connect", tmp_path / "config.json", system="Darwin", home=home,
+                           run=lambda cmd: ran.append(cmd), env_path="/usr/bin")
+    assert path == home / "Library/LaunchAgents" / f"{service.LABEL}.plist" and path.exists()
+    assert any("bootstrap" in c for c in ran)
+    service.uninstall(system="Darwin", home=home, run=lambda cmd: ran.append(cmd))
+    assert not path.exists() and any("bootout" in c for c in ran)
+
+    ran.clear()
+    unit = service.install("/opt/bin/matrix-connect", tmp_path / "config.json", system="Linux", home=home,
+                           run=lambda cmd: ran.append(cmd), env_path="/usr/bin")
+    assert unit == home / ".config/systemd/user/matrix-connect.service" and unit.exists()
+    assert ["systemctl", "--user", "enable", "--now", "matrix-connect.service"] in ran
+    with pytest.raises(service.ServiceError):
+        service.install("/x", tmp_path / "c.json", system="Windows", home=home, run=lambda c: None)
+
+
+def test_ephemeral_install_is_detected():
+    """uvx 的临时环境会被清理：不能把它写进开机自启。"""
+    assert service.is_ephemeral("/Users/x/.cache/uv/archive-v0/abc/bin/matrix-connect")
+    assert not service.is_ephemeral("/Users/x/.local/bin/matrix-connect")
+
+
+# ================= 命令行 =================
+def test_status_never_prints_the_token(tmp_path, capsys):
+    path = tmp_path / "config.json"
+    cfg.save(cfg.Config(server="http://127.0.0.1:8765", token="s3cret-token", device_id="dev-1",
+                        device_name="笔记本", email="alice@x.io"), path)
+    main(["status", "--config", str(path)])
+    out = capsys.readouterr().out
+    assert "笔记本" in out and "alice@x.io" in out and "s3cret-token" not in out
+
+
+def test_run_without_config_explains_setup(tmp_path, capsys):
+    with pytest.raises(SystemExit) as e:
+        main(["run", "--config", str(tmp_path / "none.json")])
+    assert e.value.code == 2 and "setup" in capsys.readouterr().err

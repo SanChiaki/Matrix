@@ -109,10 +109,18 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - Agent 可以跑在**平台云侧**（内置 dsh）或**用户端侧**（用户自己的 Claude Code / Codex 等 harness）。
   网络对两者**同等看待**：位置只是节点属性，不改 Seat / Task / Approval / 知识 / 群组成员的语义。
-- 端侧的接入方式是用户电脑上的**出站连接器**（不开入站端口），按用户配对：一个用户可以签发**多条**
-  设备令牌（`POST /api/devices`，只存 sha256，可单独吊销），连接器用令牌连 `GET /api/devices/connect`
+- 端侧的接入方式是用户电脑上的**出站连接器**（不开入站端口），按用户配对：一个用户可以有**多条**
+  设备令牌（只存 sha256，可单独吊销），连接器用令牌连 `GET /api/devices/connect`
   （WebSocket，令牌走 query）。网络工具经连接器回传，身份仍由执行上下文令牌认定；
   审批上行进入现有 Approval 记录，由 Agent 的所有者决定。
+- **一台电脑一个连接器，一机多 harness**（参照 Raft Computer，research: local-harness-integration#raft）：
+  握手报告本机全部 harness（`hello.ok.runtimes`），Agent 绑定“设备 + harness”（`Agent.harness`，取
+  `models.HARNESSES` 的键，`None` = 设备默认）。有效权限按绑定的 harness 计算；设备上没有那个 harness 时按不可达等待，
+  不换到别的 harness 上跑。
+- **接入走设备码配对**（参照 xmatrix，research: xmatrix#runtime-access）：`matrix-connect setup <服务器>` 申请配对码，
+  人在已登录的网页（`#pair=<码>`）里批准，令牌经轮询只交付一次，存进本机 0600 配置文件；再装成 launchd / systemd 用户服务。
+  `/api/devices/pair` 与 `…/pair/poll` 不需要登录，所以同时等待的申请数、每个用户输错配对码的次数都有上限（`auth.PAIR_*`），
+  不要去掉。手动签发令牌（`POST /api/devices`）留作没有浏览器时的备用。
 - **有效权限要再交运行时强制执行能力**：只有该 harness 能强制的权限才进入有效权限，
   只能靠提示词约定的按 `advisory` 记账、自动收窄，并在委托详情里写明原因。
 - 私有目录在端侧就留在用户电脑上（`<root>/.homes/<agent>/`），网络不读、不注入；服务器只在 `run.request.home`
@@ -126,8 +134,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   `engine.Network.capabilities`/`_effective`/`runtime_for`、`Task.narrowed`、`device.py`、设备令牌与
   `/api/devices/connect`）。**连接器本体已实现**：`uv run matrix-connect`（`agentnet/connector/`），dsh、
   Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端。**端侧其余部分也已实现**：
-  设备管理页（签发 / 吊销令牌、在线状态）、Agent 绑定设备与能力缺口展示、材料下发（`run.request.materials`）
-  与 `publish_file` 回传（`file.fetch`）。**还没有**：云侧的读隔离（需求 #34）。
+  设备管理页（配对 / 吊销、在线状态、harness 列表）、Agent 绑定“设备 + harness”与能力缺口展示、材料下发（`run.request.materials`）
+  与 `publish_file` 回传（`file.fetch`）、设备码配对与后台服务（需求 #41）。**还没有**：云侧的读隔离（需求 #34）。
 
 ### 执行模型：异步委托 + 收件箱唤醒
 
@@ -152,7 +160,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
-| `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动 |
+| `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `agentnet/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
 | `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
@@ -173,7 +181,9 @@ uv run pytest -q                                # 全部测试（离线，不需
 uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
 uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
 uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在群聊里 @ Product Strategy Agent
-uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 端侧连接器
+uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
+uv run matrix-connect run                                        # 前台运行已配对的连接器
+uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 手动令牌（备用）
 ```
 
 ## 工程约束
