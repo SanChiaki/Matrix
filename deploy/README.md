@@ -83,7 +83,7 @@ uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
 
 dsh 在 Linux 上用 bwrap 做沙箱。如果没有可用的沙箱，它会 fail closed，也就是拒绝执行命令，而不是不加限制地执行。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
 
-沙箱只限制写，不限制读，见 AGENTS.md 的“已知风险”。
+沙箱只限制写，不限制读，见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
 
 ## 数据与备份
 
