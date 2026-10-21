@@ -175,8 +175,19 @@ async function start() {
   window.addEventListener("resize", () => S.view === "network" && renderGraph());
   window.addEventListener("hashchange", route);
   await reload();
+  loadModels();
   route();
   connect();
+}
+
+// 云侧预置模型目录：部署方维护的 models.json，改了即生效。active=false 时云侧照旧自由填写。
+async function loadModels() {
+  try {
+    const m = await api("/api/models");
+    const changed = JSON.stringify(m) !== JSON.stringify(S.models);
+    S.models = m;
+    if (changed && S.view === "agents") renderAgentsView();
+  } catch { S.models = S.models || null; }
 }
 
 function route() {
@@ -219,6 +230,7 @@ function show(view) {
   document.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === view)));
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
   if (view !== "chats") history.replaceState(null, "", `#${view}`);
+  if (view === "agents") loadModels();
   render();
 }
 
@@ -898,7 +910,7 @@ function renderNetDetail() {
     box.innerHTML = `<div class="card-head">${avatar(x.name)}<h2 class="panel-title" style="margin:0">${esc(x.name)}</h2>${pill(x.status)}</div>
       <p class="muted" style="margin-top:12px">${esc(x.description)}</p>
       <dl><dt>能力</dt><dd>${tags(x.capabilities)}</dd><dt>自身权限</dt><dd>${tags(x.authority, "ok")}</dd>
-      <dt>模型</dt><dd>${esc(modelLabel(effectiveModel(x)) || "运行时默认")}${x.model ? "" : ' <span class="muted">（默认）</span>'}</dd>
+      <dt>模型</dt><dd>${modelDd(x)}</dd>
       <dt>可对话</dt><dd>${x.chat_enabled ? "是" : "否"}</dd>
       ${x.created_by.startsWith("proposal:") ? `<dt>来源</dt><dd>由 Agent 提议、人批准创建</dd>` : ""}
       <dt>群组</dt><dd>${tags(S.snap.groups.filter((g) => g.member_ids.includes(a)).map((g) => g.name))}</dd>
@@ -960,11 +972,32 @@ function readModel(f) {
   return provider && model ? { provider, model, reasoning_effort: effort || null } : null;
 }
 
-const effectiveModel = (a) => a.model || S.defaultModel;
+// 实际用的模型由服务器算（model_info）：预置 / 自己填的 / 目录默认 / 运行时默认，以及选的是否已下架
+const effectiveModel = (a) => a.model_info?.model || (a.device_runtime ? null : S.defaultModel);
+const modelSourceCN = { preset: "预置模型", custom: "单独配置", default: "默认模型", runtime: "运行时默认" };
 const modelTag = (a) => {
-  const m = effectiveModel(a);
-  return m ? `<span class="tag model" title="${a.model ? "单独配置" : "运行时默认"}">${esc(m.model)}${a.model ? "" : " · 默认"}</span>` : "";
+  const i = a.model_info, m = effectiveModel(a);
+  if (!m) return "";
+  const dflt = !i || i.source === "default" || i.source === "runtime";
+  const title = i?.unavailable ? "选的模型已下架，改用默认模型" : modelSourceCN[i?.source || "runtime"];
+  return `<span class="tag model${i?.unavailable ? " warn" : ""}" title="${esc(title)}">${esc(i?.label || m.model)}${i?.unavailable ? " · 原选择已下架" : dflt ? " · 默认" : ""}</span>`;
 };
+function modelDd(a) {
+  const i = a.model_info, m = effectiveModel(a);
+  if (!m) return a.device_runtime ? 'harness 默认 <span class="muted">（端侧）</span>' : "运行时默认";
+  const text = i?.label ? `${i.label} · ${modelLabel(m)}` : modelLabel(m);
+  const note = i?.unavailable ? '<span class="hint warn">选的模型已下架，现在用默认模型</span>'
+    : i?.source === "default" || i?.source === "runtime" || !i ? ' <span class="muted">（默认）</span>' : "";
+  return `${esc(text)}${note}`;
+}
+const catalogOn = () => !!S.models?.active;
+// 预置模型下拉框的选项；sel 是当前选中的 id（"" = 默认）
+function presetOptions(sel) {
+  const d = S.models.models.find((m) => m.id === S.models.default);
+  const dflt = d ? `默认（${d.label}）` : S.defaultModel ? `默认（${modelLabel(S.defaultModel)}）` : "运行时默认";
+  return `<option value="">${esc(dflt)}</option>` + S.models.models.map((m) =>
+    `<option value="${esc(m.id)}" ${m.id === sel ? "selected" : ""}>${esc(m.label)} · ${esc(m.model)}${m.reasoning_effort ? ` · ${esc(m.reasoning_effort)}` : ""}</option>`).join("");
+}
 
 function renderAgentReadonly(box, a) {
   box.innerHTML = `<h2 class="panel-title">${avatar(a.name)} ${esc(a.name)}</h2>
@@ -1008,12 +1041,15 @@ function renderAgentEditor(isNew = false) {
         </div>
       </fieldset>
       <fieldset class="model"><legend>模型</legend>
-        <div class="model-fields">
+        ${catalogOn() ? `<div class="field" id="af-preset-box"><label for="af-preset">预置模型</label>
+          <select id="af-preset" name="model_preset">${presetOptions(x.model_info?.source === "preset" ? x.model_info.preset : "")}</select>
+          <p class="hint">${x.model_info?.unavailable ? '<span class="warn">原来选的模型已下架，现在用默认模型；重新选一个后保存。</span> ' : ""}平台云侧的 Agent 只能用部署方预置的模型。</p></div>` : ""}
+        <div class="model-fields" id="af-free">
           <div class="field"><label for="af-provider">Provider</label><input id="af-provider" name="provider" value="${esc(x.model?.provider || "")}" placeholder="${esc(S.defaultModel?.provider || "")}"></div>
           <div class="field"><label for="af-model">Model</label><input id="af-model" name="model" value="${esc(x.model?.model || "")}" placeholder="${esc(S.defaultModel?.model || "")}"></div>
           <div class="field"><label for="af-effort">推理强度</label><input id="af-effort" name="effort" value="${esc(x.model?.reasoning_effort || "")}" placeholder="默认"></div>
         </div>
-        <p class="hint">留空则使用运行时默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。provider 必须是运行时里已配置的。</p>
+        <p class="hint" id="af-free-hint">留空则使用${catalogOn() ? " harness 自己的默认模型。端侧用的是你本机 harness 里的模型" : `运行时默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。provider 必须是运行时里已配置的`}。</p>
       </fieldset>
       <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
       <p class="hint">它只为你工作。要和别人协作，把它带进联合群组：别人可以在那里 @ 它，但它仍然以你的名义、用你的资源运行，工作区外的操作由你审批。</p>
@@ -1022,6 +1058,15 @@ function renderAgentEditor(isNew = false) {
         ${a ? `${a.chat_enabled ? '<button type="button" class="ghost" id="af-chat">私聊</button>' : ""}<button type="button" class="danger" id="af-del">删除</button>` : ""}</div>
     </form>`;
   const f = $("#agent-form");
+  // 启用预置模型时：云侧只能选预置模型，端侧（用户自己的 harness）仍然自由填写
+  const usePreset = () => !!f.model_preset && !f.device_runtime.value;
+  const syncModelFields = () => {
+    if (!f.model_preset) return;
+    $("#af-preset-box").hidden = !usePreset();
+    $("#af-free").hidden = $("#af-free-hint").hidden = usePreset();
+  };
+  f.device_runtime.addEventListener("change", syncModelFields);
+  syncModelFields();
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = {
@@ -1029,11 +1074,16 @@ function renderAgentEditor(isNew = false) {
       capabilities: f.capabilities.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
       authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
       chat_enabled: f.chat_enabled.checked,
-      model: readModel(f),
       ...placementOf(f.device_runtime.value),
     };
-    if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
-      $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
+    if (usePreset()) {
+      Object.assign(body, { model: null, model_preset: f.model_preset.value || null });
+    } else if (f.device_runtime.value || S.models) {
+      // 端侧总是自由填写；云侧要等目录取回来才知道该怎么填（没取到时不改模型，免得把选好的预置模型冲掉）
+      if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
+        $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
+      }
+      Object.assign(body, { model: readModel(f), model_preset: null });
     }
     try {
       const r = await api(a ? `/api/agents/${a.id}` : "/api/agents", { method: a ? "PATCH" : "POST", body });
@@ -1344,6 +1394,7 @@ function proposalCard(p) {
       <div class="field"><label for="pp-desc-${esc(p.id)}">描述</label><textarea id="pp-desc-${esc(p.id)}" name="description" rows="2" required minlength="2" maxlength="2000">${esc(p.description)}</textarea></div>
       <div class="field"><label for="pp-caps-${esc(p.id)}">能力</label><input id="pp-caps-${esc(p.id)}" name="capabilities" value="${esc(p.capabilities.join(", "))}"></div>
       <fieldset class="checks"><legend>权限 · 不能超出提议者的有效权限</legend>${boxes || '<span class="muted">提议者没有可授予的权限</span>'}</fieldset>
+      ${catalogOn() ? `<div class="field"><label for="pp-model-${esc(p.id)}">模型</label><select id="pp-model-${esc(p.id)}" name="model_preset">${presetOptions("")}</select></div>` : ""}
       <div class="field"><label for="pp-note-${esc(p.id)}">审核意见（会告诉提议者）</label><input id="pp-note-${esc(p.id)}" name="note"></div>
       <p class="hint">批准后以你的身份创建（归你所有），并加入群组「${esc(group(p.group_id)?.name || "")}」。</p>
       <p class="error" role="alert"></p>
@@ -1358,7 +1409,8 @@ function bindProposals(root) {
       e.preventDefault();
       const body = { name: f.name.value.trim(), description: f.description.value.trim(), note: f.note.value.trim(),
         capabilities: f.capabilities.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
-        authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value) };
+        authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
+        model_preset: f.model_preset?.value || null };
       try { await api(`/api/proposals/${id}/approve`, { method: "POST", body }); await reload(); }
       catch (err) { $(".error", f).textContent = err.message; }
     });
@@ -1506,7 +1558,7 @@ function renderMembers() {
   if (c.kind === "dm") {
     const a = agent(c.agent_id);
     box.innerHTML = a ? `${workdirsHtml(c)}<ul class="member-list">${row(a)}</ul>
-      <dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${esc(modelLabel(effectiveModel(a)) || "运行时默认")}</dd></dl>
+      <dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${modelDd(a)}</dd></dl>
       <p class="hint">私聊里它只能自己完成，不能委托。要让它和别的成员协作，在群聊里 @ 它。</p>` : placeholder("这个 Agent 已删除。");
     bindWorkdirs(box, c);
     return;
