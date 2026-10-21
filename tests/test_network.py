@@ -980,12 +980,14 @@ def test_archive_tools_mounted_without_delegate_and_checked_by_network():
 
 
 def test_invariants_have_tests():
-    """AGENTS.md 里的每条网络不变量都要有测试：测试 docstring 写“不变量 N”。新增不变量却没写测试时变红。"""
+    """docs/reference/invariants.md 里的每条网络不变量都要有测试：测试 docstring 写“不变量 N”。
+    新增不变量却没写测试、或 AGENTS.md 里的索引和全文对不上时变红。"""
     import re
     root = Path(__file__).parent.parent
-    doc = (root / "AGENTS.md").read_text(encoding="utf-8")
-    section = doc.split("### 一、网络不变量", 1)[1].split("### 二、", 1)[0]
-    declared = {int(n) for n in re.findall(r"^(\d+)\. \*\*", section, re.M)}
+    numbered = lambda text: {int(n) for n in re.findall(r"^(\d+)\. \*\*", text, re.M)}
+    declared = numbered((root / "docs" / "reference" / "invariants.md").read_text(encoding="utf-8"))
+    index = (root / "AGENTS.md").read_text(encoding="utf-8").split("### 一、网络不变量", 1)[1].split("### 二、", 1)[0]
+    assert numbered(index) == declared, "AGENTS.md 的不变量索引和 docs/reference/invariants.md 对不上"
     tests = "".join(p.read_text(encoding="utf-8") for p in (root / "tests").glob("test_*.py"))
     covered = {int(n) for tag in re.findall(r"不变量 ([\d、]+)", tests) for n in tag.split("、") if n}
     assert declared and declared <= covered, f"没有测试标注的不变量：{sorted(declared - covered)}"

@@ -1,0 +1,20 @@
+# 执行模型与看板
+
+> 入口见 [AGENTS.md](../../AGENTS.md)。
+
+## 执行模型：异步委托 + 收件箱唤醒
+
+参照 Raft 的 inbox + wake 模型（research: raft#inbox-wake）：
+
+- `delegate` **立即返回**任务 id，不阻塞。每个执行上下文（席位、任务）有一个收件箱；收件箱有内容且没在运行时，网络续接它的会话跑一轮。同一上下文同时只跑一轮，运行中到达的内容等这一轮结束再送达。
+- 任务状态：`running → in_review → completed`，另有 `failed`（可续接）、`rejected`（授权阶段被拒）。交付进入 `in_review`，交付通知送进委托方收件箱；委托方 `accept_task` 或 `request_changes`（执行者在原会话返工）。送达那一轮结束仍未处理的交付视为接受（`auto_accepted`）。
+- 执行者自己还有进行中的子任务或待审核提议时，这一轮的回复只记为进展（`task.notes`），等回报唤醒后再交付。
+- 对话状态：`thinking`（有席位在跑一轮）/ `waiting`（有进行中的委托）/ `idle`。
+- 失败语义：运行时错误按类别处理（`runtime.classify_error`）；`MALFORMED_RESPONSE`、`EMPTY_RESPONSE`、`TIMEOUT` 用同一会话自动续接一次（超时的续接提示收尾）。仍失败时这个**席位**进入 `blocked`（其他席位不受影响），失败消息列出它已完成的委托与已入库知识；人点“继续”或再 @ 它，同一会话从中断处接着做。失败的任务由委托方 `retry_task` 或人在 UI 上续接。
+
+## 看板：只有人交代的任务
+
+- 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。
+- 群聊被 @、私聊消息都可以成为任务。是不是任务由接任务的 Agent 判断（提示词 `protocol._requests`），登记、交付、退回都写一条 `event` 进对话。
+- `open_request` / `deliver_request` / `accept_request` 只有席位（群聊、私聊）有，不需要 `delegate`；委托任务里没有。
+- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部群组、私聊里是同一个人）。只有下发的人能验收、退回、取消；也可在本轮送达且 @ 接任务席位的消息里明确验收，由该席位用 `accept_request` 代办（记录消息依据，不开放退回或取消）。
