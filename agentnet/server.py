@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 from . import auth
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
-from .models import DESCRIPTION_LIMIT, User
+from .models import DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
@@ -67,6 +67,7 @@ class AgentIn(BaseModel):
     chat_enabled: bool = True
     model: ModelIn | None = None
     device_runtime: str | None = None   # 绑定的设备 id；None = 平台云侧（默认运行时）
+    harness: str | None = Field(None, max_length=40)  # 设备上的哪个 harness；None = 设备默认
 
 
 class AgentPatch(BaseModel):
@@ -76,7 +77,8 @@ class AgentPatch(BaseModel):
     authority: list[str] | None = None
     chat_enabled: bool | None = None
     model: ModelIn | None = None  # 显式传 null 表示改回运行时默认模型
-    device_runtime: str | None = None
+    device_runtime: str | None = None   # 显式传 null 表示改回平台云侧
+    harness: str | None = Field(None, max_length=40)
 
 
 class ProposalApprove(BaseModel):
@@ -94,6 +96,17 @@ class MemberIn(BaseModel):
 
 class DeviceIn(BaseModel):
     name: str = Field("", max_length=80)
+
+
+class PairIn(BaseModel):
+    """连接器的配对申请（不需要登录）。字段只用于在批准页展示，超长截断。"""
+    name: str = ""
+    hostname: str = ""
+    harnesses: list[str] = Field(default_factory=list, max_length=16)
+
+
+class PairPollIn(BaseModel):
+    device_code: str = Field("", max_length=200)
 
 
 class NoteIn(BaseModel):
@@ -303,7 +316,8 @@ def create_app(network: Network) -> FastAPI:
     def info() -> dict:
         return {"runtime": network.runtime.name, "limits": network.limits.__dict__,
                 "default_model": getattr(network.runtime, "default_model", lambda: None)(),
-                "has_users": bool(store.users), "has_unclaimed": not store.users and bool(store.agents)}
+                "has_users": bool(store.users), "has_unclaimed": not store.users and bool(store.agents),
+                "harnesses": HARNESSES}
 
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
@@ -700,6 +714,46 @@ def create_app(network: Network) -> FastAPI:
         """签发一个连接器令牌。明文只在这里返回一次，之后只能看到设备列表。"""
         dev, token = auth.issue_device_token(store, user.id, body.name)
         return {**dev.public(), "token": token}
+
+    # 设备码配对：连接器申请与轮询不需要登录（它还没有令牌）；看与批准需要登录，批准的人就是设备的所有者
+    pairings = network.pairings
+
+    def _pairing(code: str, user: User) -> tuple[str, dict]:
+        try:
+            return pairings.lookup(code, user.id)
+        except auth.PairingLimit as e:
+            raise HTTPException(429, str(e)) from e
+        except auth.AuthError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.post("/api/devices/pair")
+    def pair_start(body: PairIn) -> dict:
+        harnesses = list(dict.fromkeys(h for h in body.harnesses if h in HARNESSES))
+        try:
+            p = pairings.start(body.name.strip()[:80], body.hostname.strip()[:80], harnesses)
+        except auth.PairingLimit as e:
+            raise HTTPException(429, str(e)) from e
+        return {**p, "verify_path": f"/#pair={p['user_code']}"}
+
+    @app.post("/api/devices/pair/poll")
+    def pair_poll(body: PairPollIn) -> dict:
+        return pairings.poll(body.device_code)
+
+    @app.get("/api/devices/pair/{code}")
+    def pair_view(code: str, user: Me) -> dict:
+        return pairings.view(_pairing(code, user)[1])
+
+    @app.post("/api/devices/pair/{code}/approve")
+    def pair_approve(code: str, body: DeviceIn, user: Me) -> dict:
+        _pairing(code, user)  # 统一 404 / 429
+        dev = pairings.approve(store, code, user.id, body.name)
+        return {**dev.public(), "online": False}
+
+    @app.post("/api/devices/pair/{code}/deny")
+    def pair_deny(code: str, user: Me) -> dict:
+        _pairing(code, user)
+        pairings.deny(code, user.id)
+        return {"ok": True}
 
     @app.delete("/api/devices/{device_id}")
     def delete_device(device_id: str, user: Me) -> dict:

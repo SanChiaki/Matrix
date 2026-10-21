@@ -30,14 +30,17 @@ from .runtime import (ENFORCED, RunRequest, RunResult, RuntimeCapabilities)
 # ---- 消息（服务器 → 连接器）----
 HELLO = "hello"                    # {protocol, token, runtime}
 RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation_id, session_id, workdir_ref,
-                                   #  prompt, authority, tool_names, model, materials, home}
+                                   #  prompt, authority, tool_names, model, materials, home, harness}
+                                   #  harness: 用设备上的哪个 harness；null = 默认（握手里的第一个）
                                    #  materials: [{path, data(base64)}] —— 群组文件与委托材料的只读副本
                                    #  home: "rw" | "ro" | null —— 私有目录怎么挂载；目录本身在连接器本机，不经过网络
 CANCEL = "cancel"                  # {run_id}
 SHUTDOWN = "shutdown"
 
 # ---- 消息（连接器 → 服务器）----
-HELLO_OK = "hello.ok"              # {runtime, capabilities}
+HELLO_OK = "hello.ok"              # {runtime, capabilities, runtimes?}
+                                   #  runtimes: [{runtime, capabilities}] —— 一台设备上的多个 harness，
+                                   #  第一个是默认；旧连接器不带，等于只有 runtime 这一个
 RUN_EVENT = "run.event"            # {run_id, event}  —— 与 RunRequest.on_event 的事件同形
 RUN_RESULT = "run.result"          # {run_id, session_id, final_text, tool_calls, usage, ok, error}
 TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
@@ -68,10 +71,24 @@ class DeviceLink(Protocol):
 
 @dataclass
 class DeviceInfo:
-    """连接器握手时报告的能力（第 10 节要逐条验证的那几项）。"""
+    """连接器握手时报告的能力（第 10 节要逐条验证的那几项）。
+    `runtime` / `capabilities` 是默认 harness；`runtimes` 是这台设备上的全部 harness（含默认，按报告顺序）。"""
     runtime: str
     capabilities: RuntimeCapabilities
     protocol: int = PROTOCOL
+    runtimes: dict[str, RuntimeCapabilities] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.runtimes:
+            self.runtimes = {self.runtime: self.capabilities}
+
+    @property
+    def harnesses(self) -> list[str]:
+        return list(self.runtimes)
+
+    def capabilities_for(self, harness: str | None) -> RuntimeCapabilities | None:
+        """某个 harness 的能力；None = 默认 harness；这台设备没有返回 None。"""
+        return self.capabilities if harness is None else self.runtimes.get(harness)
 
 
 class DeviceRuntime:
@@ -91,8 +108,13 @@ class DeviceRuntime:
         self._seq = 0
 
     # ---- AgentRuntime ----
-    def capabilities(self) -> RuntimeCapabilities:
-        return self.info.capabilities
+    def capabilities(self, harness: str | None = None) -> RuntimeCapabilities:
+        """默认 harness 的能力；指定了但这台设备没有时，按全部不可用处理。"""
+        caps = self.info.capabilities_for(harness)
+        return caps if caps is not None else RuntimeCapabilities(name=harness or self.name, placement="device")
+
+    def serves(self, harness: str | None) -> bool:
+        return self.info.capabilities_for(harness) is not None
 
     def run(self, req: RunRequest) -> RunResult:
         run_id = self._next_run_id()
@@ -108,7 +130,7 @@ class DeviceRuntime:
             "prompt": req.prompt, "authority": list(req.authority),
             "tool_names": list(req.tools.names or []) if req.tools else [],
             "model": req.model, "materials": list(getattr(req, "materials", None) or []),
-            "home": getattr(req, "home", None),
+            "home": getattr(req, "home", None), "harness": req.harness,
         }
         try:
             self.link.send(payload)
@@ -260,16 +282,29 @@ def capabilities_from_hello(msg: dict[str, Any]) -> DeviceInfo:
     if proto != PROTOCOL:
         raise DeviceError(f"protocol mismatch: connector {proto}, server {PROTOCOL}")
     raw = msg.get("capabilities") or {}
+    default = _caps(str(msg.get("runtime") or raw.get("name") or "device"), raw)
+    runtimes: dict[str, RuntimeCapabilities] = {}
+    for item in msg.get("runtimes") or []:
+        name = str((item or {}).get("runtime") or "")[:40] if isinstance(item, dict) else ""
+        if name and name not in runtimes and len(runtimes) < 16:
+            runtimes[name] = _caps(name, item.get("capabilities") or {})
+    if default.name in runtimes:   # 默认 harness 以 runtimes 里的那份为准，并排在第一个
+        default = runtimes.pop(default.name)
+        runtimes = {default.name: default, **runtimes}
+    elif runtimes:
+        default = next(iter(runtimes.values()))
+    return DeviceInfo(runtime=default.name, capabilities=default, protocol=proto, runtimes=runtimes)
+
+
+def _caps(name: str, raw: dict[str, Any]) -> RuntimeCapabilities:
+    """连接器声明的一份能力。多报的权限会被裁掉：只认已知权限。"""
     enforcement = {a: lvl for a, lvl in (raw.get("enforcement") or {}).items()
                    if a in AUTHORITIES and lvl in (ENFORCED, "advisory", "unavailable")}
-    caps = RuntimeCapabilities(name=str(msg.get("runtime") or raw.get("name") or "device"),
-                               placement="device",
-                               enforcement=enforcement,
+    return RuntimeCapabilities(name=name, placement="device", enforcement=enforcement,
                                session_resume=bool(raw.get("session_resume", False)),
                                steer=bool(raw.get("steer", False)),
                                approval=str(raw.get("approval") or "none"),
                                sandbox=str(raw.get("sandbox") or "none"))
-    return DeviceInfo(runtime=caps.name, capabilities=caps, protocol=proto)
 
 
 @dataclass
