@@ -167,6 +167,39 @@ def test_project_lead_api(tmp_path: Path):
 
 
 
+def test_lead_return_then_fast_redelivery_is_not_escalated(tmp_path: Path):
+    """不变量 20：负责人这一轮退回了任务，执行者在这一轮结束前就重新交付——这一轮处理过了，不算“没有验收”，
+    重新交付在下一轮送到负责人手里。"""
+    import time
+    reviews: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        if call.agent_id == pm.id and "@ 你" in call.prompt:
+            call.tool("handoff", group="开发组", agent="Eng", message="实现 v3")
+        if call.agent_id == pm.id and "待你验收的任务" in call.prompt:
+            rid = re.search(r"待你验收的任务 (req-[0-9a-f]{8})", call.prompt).group(1)
+            decision = "changes" if not reviews else "accept"
+            reviews.append(decision)
+            call.tool("review_request", request_id=rid, decision=decision, feedback="补测试")
+            if decision == "changes":  # 这一轮还没结束，执行者已经返工交付
+                deadline = time.time() + 5
+                while net.store.requests[rid].status != "in_review" and time.time() < deadline:
+                    time.sleep(0.01)
+        if call.agent_id == eng.id and ("（@ 你）" in call.prompt or "退回了" in call.prompt):
+            mine = [r for r in net.store.requests.values() if r.agent_id == eng.id and r.status == "in_progress"]
+            rid = mine[-1].id if mine else re.search(r"req-[0-9a-f]{8}", call.tool(
+                "open_request", title="做事", expected_outcome="结果")).group()
+            call.tool("deliver_request", request_id=rid, summary="做完了")
+        return "ok"
+    net, alice, bob, pm, eng, qa, p, chats = build(tmp_path, handler, Limits(lead_pair=10))
+    net.set_project_lead(p.id, pm.id, "lead_accept", actor=alice)
+    net.send_message(chats["产品组"].id, "@PM 开工", actor=alice, background=False)
+    net.wait_quiet()
+    dev = next(r for r in net.store.requests.values() if r.agent_id == eng.id)
+    assert reviews == ["changes", "accept"]
+    assert dev.status == "completed" and dev.reviewed_by_agent == pm.id and dev.escalation == ""
+
+
 def test_lead_accepts_requests_from_its_handoffs(tmp_path: Path):
     """不变量 20、10：打开 lead_accept 后，负责人确认的交接引出的、不是它自己做的任务交付后由负责人验收（身份由网络认定），
     验收后等它的交接自动发出；负责人退回有上限，超了转给人；负责人一轮没处理、人亲自退回后验收归人；

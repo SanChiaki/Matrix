@@ -2,22 +2,32 @@
 
 - macOS：`~/Library/LaunchAgents/<LABEL>.plist`，`launchctl bootstrap gui/<uid>`。
 - Linux：`~/.config/systemd/user/matrix-connect.service`，`systemctl --user enable --now`。
+- Windows：任务计划程序里当前用户的“登录时”任务（`schtasks /Create /XML`，不需要管理员），定义另存在
+  `%LOCALAPPDATA%\\matrix-connect\\task.xml`。用 pythonw 跑（没有控制台窗口），日志写文件；每 5 分钟重复触发、
+  已在运行就忽略，进程退出后最多 5 分钟重新拉起（相当于 KeepAlive / Restart=always）。
+  装完要等连接器在日志里写下启动行才算成功，没起来就撤销任务并报错（任务计划程序自己不报告这个）。
+  不做成 Windows 服务：那要管理员，而且以 SYSTEM 身份运行，拿不到用户自己的 harness 凭据。
 - 其他系统：不支持，提示前台运行 `matrix-connect run`。
 
 服务定义里只有可执行文件、配置文件路径和 PATH（让服务找得到 claude / codex / dsh），**不含令牌**。
+Windows 的任务以用户身份运行，用的是用户自己的环境变量（PATH 里有 npm 装的 harness），不另写 PATH。
 """
 
 from __future__ import annotations
 
+import getpass
 import os
 import platform
 import plistlib
 import subprocess
+import time
 from pathlib import Path
 from typing import Callable
+from xml.sax.saxutils import escape
 
 LABEL = "dev.matrix.connect"
 UNIT = "matrix-connect.service"
+TASK = "MatrixConnect"  # Windows 任务计划程序里的任务名
 
 Run = Callable[[list[str]], None]
 
@@ -27,7 +37,7 @@ class ServiceError(RuntimeError):
 
 
 def _run(cmd: list[str]) -> None:
-    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False)
     if r.returncode != 0:
         raise ServiceError(f"{' '.join(cmd)} 失败：{(r.stderr or r.stdout).strip()}")
 
@@ -73,17 +83,90 @@ def systemd_unit(exe: str, config: Path, env_path: str) -> str:
     ])
 
 
+def windows_user() -> str:
+    domain, name = os.environ.get("USERDOMAIN", ""), os.environ.get("USERNAME") or getpass.getuser()
+    return f"{domain}\\{name}" if domain else name
+
+
+def _started(log: Path, since: float, timeout: float = 15) -> bool:
+    """任务真的跑起来了：连接器启动时往日志里写一行（main._log_to）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if log.stat().st_mtime >= since:
+                return True
+        except FileNotFoundError:
+            pass
+        time.sleep(0.5)
+    return False
+
+
+def windows_launcher(exe: str) -> Path:
+    """后台跑用的 pythonw.exe：和 matrix-connect.exe 在同一个 Scripts 目录（venv / uv tool 都是这样）。
+    直接跑 matrix-connect.exe 会一直挂着一个控制台窗口。"""
+    p = Path(exe).with_name("pythonw.exe")
+    if not p.exists():
+        raise ServiceError(f"找不到 {p}：后台服务要用 pythonw 运行（没有控制台窗口）")
+    return p
+
+
+def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path) -> str:
+    q = lambda s: escape(f'"{s}"')  # noqa: E731 —— 路径可能带空格
+    args = f"-m agentnet.connector.main run --config {q(config)} --log {q(log)}"
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Matrix connector (matrix-connect)</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{escape(user)}</UserId>
+      <Repetition><Interval>PT5M</Interval><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author"><UserId>{escape(user)}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec><Command>{escape(str(launcher))}</Command><Arguments>{args}</Arguments><WorkingDirectory>{escape(str(workdir))}</WorkingDirectory></Exec>
+  </Actions>
+</Task>
+"""
+
+
+def windows_log(home: Path) -> Path:
+    return _windows_dir(home) / "matrix-connect.log"
+
+
+def _windows_dir(home: Path) -> Path:
+    base = os.environ.get("LOCALAPPDATA") if home == Path.home() else None
+    return Path(base or home / "AppData" / "Local") / "matrix-connect"
+
+
 def unit_path(system: str | None = None, home: Path | None = None) -> Path:
     system, home = system or platform.system(), Path(home or Path.home())
     if system == "Darwin":
         return home / "Library" / "LaunchAgents" / f"{LABEL}.plist"
     if system == "Linux":
         return home / ".config" / "systemd" / "user" / UNIT
+    if system == "Windows":
+        return _windows_dir(home) / "task.xml"
     raise ServiceError(f"{system} 上还不支持后台服务；请前台运行 matrix-connect run")
 
 
 def install(exe: str, config: Path, *, system: str | None = None, home: Path | None = None,
-            run: Run = _run, env_path: str | None = None) -> Path:
+            run: Run = _run, env_path: str | None = None,
+            started: Callable[[Path, float], bool] = _started) -> Path:
     system, home = system or platform.system(), Path(home or Path.home())
     path = unit_path(system, home)
     env_path = env_path or os.environ.get("PATH", "/usr/bin:/bin")
@@ -96,10 +179,27 @@ def install(exe: str, config: Path, *, system: str | None = None, home: Path | N
             run(["launchctl", "bootout", domain, str(path)])
         except ServiceError:
             pass
-        path.write_text(launchd_plist(exe, config, env_path, log))
+        path.write_text(launchd_plist(exe, config, env_path, log), encoding="utf-8")
         run(["launchctl", "bootstrap", domain, str(path)])
+    elif system == "Windows":
+        log = windows_log(home)
+        xml = windows_task_xml(windows_launcher(exe), Path(config), log, windows_user(), home)
+        path.write_text(xml, encoding="utf-16")  # schtasks /XML 要 UTF-16
+        try:  # 已经装过：先停掉在跑的那个，再按新定义注册
+            run(["schtasks", "/End", "/TN", TASK])
+        except ServiceError:
+            pass
+        run(["schtasks", "/Create", "/TN", TASK, "/XML", str(path), "/F"])
+        since = time.time() - 1
+        run(["schtasks", "/Run", "/TN", TASK])
+        # 任务计划程序不报告进程起没起来。常见的坑：在打包应用（MSIX，如桌面应用内置的终端）里运行时，
+        # AppData 的写入被重定向进包的私有目录，任务看不到这里装的 Python，会一直挂着、也没有日志
+        if not started(log, since):
+            uninstall(system=system, home=home, run=run)
+            raise ServiceError(f"任务没能启动连接器（{log} 没有写入）。请在普通的 PowerShell 窗口里重新运行"
+                               " matrix-connect setup，或前台运行 matrix-connect run 查看报错")
     else:
-        path.write_text(systemd_unit(exe, config, env_path))
+        path.write_text(systemd_unit(exe, config, env_path), encoding="utf-8")
         run(["systemctl", "--user", "daemon-reload"])
         run(["systemctl", "--user", "enable", "--now", UNIT])
     return path
@@ -113,10 +213,14 @@ def uninstall(*, system: str | None = None, home: Path | None = None, run: Run =
     try:
         if system == "Darwin":
             run(["launchctl", "bootout", f"gui/{os.getuid()}", str(path)])
+        elif system == "Windows":
+            run(["schtasks", "/End", "/TN", TASK])
         else:
             run(["systemctl", "--user", "disable", "--now", UNIT])
     except ServiceError:
         pass  # 没在运行：照样删掉定义
+    if system == "Windows":
+        run(["schtasks", "/Delete", "/TN", TASK, "/F"])
     path.unlink()
     if system == "Linux":
         try:
@@ -130,4 +234,6 @@ def log_hint(system: str | None = None) -> str:
     system = system or platform.system()
     if system == "Darwin":
         return f"日志：{Path.home() / 'Library/Logs/matrix-connect.log'}"
+    if system == "Windows":
+        return f"日志：{windows_log(Path.home())}"
     return f"日志：journalctl --user -u {UNIT} -f"

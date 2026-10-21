@@ -23,7 +23,7 @@ def fingerprint(root: Path) -> dict[str, tuple[int, int]]:
     for p in root.rglob("*"):
         if p.is_file() and not p.is_symlink():
             st = p.stat()
-            out[str(p.relative_to(root))] = (st.st_size, st.st_mtime_ns)
+            out[p.relative_to(root).as_posix()] = (st.st_size, st.st_mtime_ns)
     return out
 
 
@@ -51,7 +51,7 @@ def sync_back(home: Path, dest: Path, before: HomeMount, ctx_id: str = "") -> li
         target = rel
         if now.get(rel) != before.home.get(rel):  # 别的运行在这期间也改过（或删过 / 新建过）
             p = Path(rel)
-            target = str(p.with_name(f"{p.stem}.conflict-{safe_tag(ctx_id)[-24:]}{p.suffix}"))
+            target = p.with_name(f"{p.stem}.conflict-{safe_tag(ctx_id)[-24:]}{p.suffix}").as_posix()
             conflicts.append(target)
         (home / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dest / rel, home / target)

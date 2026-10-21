@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -31,7 +32,7 @@ APPROVAL_PLUGIN = Path(__file__).parent / "dsh_plugins" / "approval.mjs"
 # 权限 -> 允许后才启用的 DSH 插件 id
 AUTHORITY_PLUGINS: dict[str, list[str]] = {
     "web.research": ["tool-web"],
-    "shell.exec": ["tool-bash", "tool-jobs"],
+    "shell.exec": ["tool-bash", "tool-pwsh", "tool-jobs"],  # Windows 上模型用的 shell 是 pwsh
 }
 
 # 始终禁用：能在运行期重新启用插件、从而绕过权限覆盖层的工具。
@@ -40,6 +41,41 @@ AUTHORITY_PLUGINS: dict[str, list[str]] = {
 ALWAYS_DISABLED = [
     "tool-plugin-manager",
 ]
+
+# npm 在 Windows 上生成的 .cmd 包装：... "%_prog%"  "%dp0%\node_modules\<包>\<入口>.js" %*
+_NPM_SHIM = re.compile(r'"%dp0%\\([^"\r\n]+)"\s+%\*')
+
+
+def no_window() -> int:
+    """Popen 的 creationflags：Windows 上没有控制台时（后台服务用 pythonw 跑），harness 子进程不要各自弹出控制台窗口。
+    有控制台时不加，Ctrl+C 照常传给子进程。"""
+    if os.name != "nt":
+        return 0
+    import ctypes
+    return 0 if ctypes.windll.kernel32.GetConsoleWindow() else subprocess.CREATE_NO_WINDOW
+
+
+def argv(cmd: list[str], windows: bool = os.name == "nt") -> list[str]:
+    """把命令的可执行文件解析成能直接交给 Popen 的形式。
+
+    Windows 上 npm 装的 CLI（dsh、claude、codex）是 .cmd 包装：CreateProcess 不按 PATHEXT 找它，
+    经 cmd.exe 转一道又会改写参数里的引号与特殊字符（--mcp-config 的 JSON、带空格的路径）。
+    认得出 npm 包装时直接用 node 跑它指向的脚本；其他系统原样返回。"""
+    if not windows or not cmd:
+        return cmd
+    found = shutil.which(cmd[0])
+    if found is None:
+        return cmd
+    if found.lower().endswith((".cmd", ".bat")):
+        try:
+            m = _NPM_SHIM.search(Path(found).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            m = None
+        if m:
+            node = Path(found).parent / "node.exe"
+            return [str(node) if node.exists() else (shutil.which("node") or "node"),
+                    str(Path(found).parent / m.group(1)), *cmd[1:]]
+    return [found, *cmd[1:]]
 
 
 @dataclass
@@ -267,8 +303,9 @@ class DshRuntime:
         if self._default_model is None:
             self._default_model = {}
             try:
-                out = subprocess.run([self.dsh_bin, self.profile, "--dump-config"], capture_output=True, text=True,
-                                     timeout=30).stdout
+                out = subprocess.run(argv([self.dsh_bin, self.profile, "--dump-config"]), capture_output=True, text=True,
+                                     encoding="utf-8", errors="replace", timeout=30,
+                                     creationflags=no_window()).stdout
                 block = out.split("- id: agent-default-model", 1)[1].split("\n- ", 1)[0]
                 for key, dst in (("provider", "provider"), ("model", "model"), ("reasoningEffort", "reasoning_effort")):
                     m = re.search(rf"^\s+{key}: ['\"]?([^'\"\n]+)", block, re.M)
@@ -300,8 +337,9 @@ class DshRuntime:
         stderr_tail: list[str] = []
 
         proc = subprocess.Popen(
-            cmd, cwd=req.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+            argv(cmd), cwd=req.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
+            creationflags=no_window(),
         )
 
         def drain_stderr() -> None:

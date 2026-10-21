@@ -7,7 +7,7 @@ from __future__ import annotations
 import io
 import shutil
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from .models import AGENT_HOME, GROUP_FILES, PROJECT_FILES
 
@@ -43,8 +43,17 @@ def outputs(root: Path, top: bool = True) -> list[Path]:
 
 
 def listing(root: Path) -> list[dict]:
-    return [{"path": str(r), "size": (root / r).stat().st_size, "updated_at": (root / r).stat().st_mtime}
+    return [{"path": r.as_posix(), "size": (root / r).stat().st_size, "updated_at": (root / r).stat().st_mtime}
             for r in outputs(root)][:MAX_FILES]
+
+
+def safe_rel(rel: str) -> Path | None:
+    """来自网络或模型的相对路径；绝对路径、带根或盘符的、含 .. 的一律 None。
+    两种系统的写法都拒绝：Windows 上 "/etc/x"、"C:x" 不算 is_absolute()，拼上去却会落到工作目录以外。"""
+    if not rel or ".." in PurePosixPath(rel).parts or ".." in PureWindowsPath(rel).parts \
+            or PurePosixPath(rel).anchor or PureWindowsPath(rel).anchor:
+        return None
+    return Path(rel)
 
 
 def resolve(root: Path, rel: str) -> Path | None:
@@ -68,7 +77,7 @@ def snapshot(src: Path, dst: Path) -> tuple[list[str], int]:
             continue
         (dst / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src / rel, dst / rel)
-        copied.append(str(rel))
+        copied.append(rel.as_posix())
         total += size
     return copied, len(files) - len(copied)
 
@@ -78,5 +87,5 @@ def pack(d: Path) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for rel in outputs(d, top=False):
-            z.write(d / rel, str(Path(d.name) / rel))
+            z.write(d / rel, (Path(d.name) / rel).as_posix())
     return buf.getvalue()

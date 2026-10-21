@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import signal
 import socket
 import subprocess
@@ -221,7 +222,7 @@ def test_mcp_server_calls_back_into_network(tmp_path: Path):
         ]
         out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input="\n".join(json.dumps(m) for m in msgs),
                              capture_output=True, text=True, timeout=30,
-                             env={"AGENTNET_TOOL_URL": net.tool_url, "AGENTNET_TOKEN": "tok"}).stdout
+                             env={**os.environ, "AGENTNET_TOOL_URL": net.tool_url, "AGENTNET_TOKEN": "tok"}, encoding="utf-8").stdout
         res = {r["id"]: r["result"] for r in map(json.loads, out.splitlines())}
         assert "Market Research Agent" in res[2]["content"][0]["text"] and not res[2]["isError"]
         assert "已受理" in res[3]["content"][0]["text"] and not res[3]["isError"]  # 异步：立即返回

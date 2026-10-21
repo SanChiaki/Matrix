@@ -35,19 +35,19 @@ def test_delivery_hands_files_to_direct_delegator(tmp_path: Path):
         if call.agent_id == eng.id:
             if call.turn == 1:
                 (cwd / "pkg").mkdir(exist_ok=True)
-                (cwd / "pkg" / "a.py").write_text("A = 1")
+                (cwd / "pkg" / "a.py").write_text("A = 1", encoding="utf-8")
                 (cwd / "pkg" / "__pycache__").mkdir(exist_ok=True)
                 (cwd / "pkg" / "__pycache__" / "a.pyc").write_bytes(b"x")
                 (cwd / "tmp").mkdir(exist_ok=True)
-                (cwd / "tmp" / "scratch.txt").write_text("draft")
+                (cwd / "tmp" / "scratch.txt").write_text("draft", encoding="utf-8")
                 call.tool("delegate", agent="Helper", mission="写文档", expected_outcome="doc")
                 return "等 Helper"
             # Helper 的产物在本任务目录的 deliveries/ 下：集成进自己的产物
             sub = next((cwd / "deliveries").iterdir())
-            (cwd / "docs.md").write_text((sub / "doc.md").read_text())
+            (cwd / "docs.md").write_text((sub / "doc.md").read_text(encoding="utf-8"), encoding="utf-8")
             return "实现完成"
         if call.agent_id == helper.id:
-            (cwd / "doc.md").write_text("# doc")
+            (cwd / "doc.md").write_text("# doc", encoding="utf-8")
             return "文档完成"
         return "ok"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
@@ -58,11 +58,11 @@ def test_delivery_hands_files_to_direct_delegator(tmp_path: Path):
     t_help = next(t for t in net.store.tasks.values() if t.delegatee_id == helper.id)
 
     # 子任务的产物进上一级任务的工作目录
-    assert (tmp_path / "tasks" / t_eng.id / "deliveries" / t_help.id / "doc.md").read_text() == "# doc"
+    assert (tmp_path / "tasks" / t_eng.id / "deliveries" / t_help.id / "doc.md").read_text(encoding="utf-8") == "# doc"
     # 交到席位的产物：只有执行者自己写的，不含运行时文件、临时文件、缓存、别人交来的产物
     seat_dir = tmp_path / chat.seats[lead.id].workdir
     got = seat_dir / "deliveries" / t_eng.id
-    assert sorted(str(p.relative_to(got)) for p in got.rglob("*") if p.is_file()) == ["docs.md", "pkg/a.py"]
+    assert sorted(p.relative_to(got).as_posix() for p in got.rglob("*") if p.is_file()) == ["docs.md", "pkg/a.py"]
     assert t_eng.result["files"] == ["docs.md", "pkg/a.py"]
     assert any(f"deliveries/{t_eng.id}/" in p and "pkg/a.py" in p for p in prompts[lead.id][1:])
     # 只给直接委托方：同组其他成员、群聊里都看不到
@@ -78,9 +78,9 @@ def test_workdir_browsing_and_directory_publish(tmp_path: Path):
     def handler(call: ScriptCall) -> str:
         cwd = Path(call.cwd)
         (cwd / "site").mkdir(exist_ok=True)
-        (cwd / "site" / "index.html").write_text("<h1>hi</h1>")
+        (cwd / "site" / "index.html").write_text("<h1>hi</h1>", encoding="utf-8")
         (cwd / "site" / "node_modules").mkdir(exist_ok=True)
-        (cwd / "site" / "node_modules" / "big.js").write_text("x")
+        (cwd / "site" / "node_modules" / "big.js").write_text("x", encoding="utf-8")
         out.append(call.tool("publish_file", path="site"))
         return "ok"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
@@ -116,10 +116,10 @@ def test_redelivery_replaces_files(tmp_path: Path):
                 return "退回"
             return "收到"
         if call.turn == 1:
-            (cwd / "v1.txt").write_text("1")
+            (cwd / "v1.txt").write_text("1", encoding="utf-8")
         else:
             (cwd / "v1.txt").unlink()
-            (cwd / "v2.txt").write_text("2")
+            (cwd / "v2.txt").write_text("2", encoding="utf-8")
         return "交付"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
     chat = net.group_chat(g.id, actor=alice)

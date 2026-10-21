@@ -295,6 +295,8 @@ def test_archive_writes_only_through_network(tmp_path: Path):
         (call.cwd / "agent-home" / "private.md").write_text("私有", encoding="utf-8")
         out = [call.tool("publish_file", path="report.md"),
                call.tool("publish_file", path="../../state.json"),
+               # 带根不带盘符：Windows 上不算 is_absolute()，拼上去却指向本盘的 state.json
+               call.tool("publish_file", path="/" + (tmp_path / "state.json").relative_to(tmp_path.anchor).as_posix()),
                call.tool("publish_file", path="agent-home/private.md"),
                call.tool("publish_file", path="group/背景.md")]
         return "\n".join(out)

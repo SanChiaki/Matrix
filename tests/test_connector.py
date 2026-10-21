@@ -21,8 +21,12 @@ from agentnet.runtime import ADVISORY, ENFORCED, ToolBridge
 def fake_bin(tmp_path: Path, name: str, body: str) -> str:
     """写一个假 harness：读 stdin，按 body 往 stdout 写。"""
     p = tmp_path / name
-    p.write_text(f"#!{sys.executable}\nimport sys, json\nsys.stdin.read()\n" + body)
+    p.write_text(f"#!{sys.executable}\nimport sys, json\nsys.stdin.read()\n" + body, encoding="utf-8")
     p.chmod(p.stat().st_mode | stat.S_IXUSR)
+    if os.name == "nt":  # Windows 不认 shebang：用 .cmd 包一层（和 npm 装的 harness 一样）
+        shim = tmp_path / f"{name}.cmd"
+        shim.write_text(f'@set PYTHONIOENCODING=utf-8\r\n@"{sys.executable}" "{p}" %*\r\n', encoding="utf-8")
+        return str(shim)
     return str(p)
 
 
@@ -51,7 +55,7 @@ class Ctx:
 def test_workdir_ref_cannot_escape_the_root(tmp_path):
     c = Connector(ClaudeDriver(), tmp_path)
     assert c.workdir_of("agent-1/conv-1") == tmp_path / "agent-1" / "conv-1"
-    for bad in ("../etc", "/etc/passwd", "a/../../b", ""):
+    for bad in ("../etc", "/etc/passwd", "a/../../b", "", "C:/x", "C:x/y", "a/C:"):  # 盘符在 Windows 上会跳出根目录
         with pytest.raises(Exception):
             c.workdir_of(bad)
     c.close()
@@ -133,7 +137,9 @@ def test_codex_command_sandbox_and_resume(tmp_path):
     rw = d.command(spec(tmp_path, authority=["shell.exec", "file.write"]))
     assert "read-only" in ro and "workspace-write" in rw
     resumed = d.command(spec(tmp_path, session_id="th-1"))
-    assert resumed[1:3] == ["exec", "resume"] and "th-1" in resumed
+    assert resumed[1:3] == ["exec", "resume"] and resumed[-2:] == ["th-1", "-"]
+    # resume 子命令没有 --sandbox / --cd（传了 codex 直接报参数错误）：沙箱经 -c 覆盖
+    assert "--sandbox" not in resumed and "--cd" not in resumed and 'sandbox_mode="read-only"' in resumed
     assert d.capabilities().level("web.research") == ADVISORY  # 不在 exec 参数里：不入有效权限
 
 
@@ -173,11 +179,12 @@ def test_materials_are_written_and_group_is_refreshed(tmp_path):
     c = Connector(ClaudeDriver(), tmp_path)
     wd = c.workdir_of("a/c")
     (wd / "group").mkdir(parents=True)
-    (wd / "group" / "stale.md").write_text("old")
+    (wd / "group" / "stale.md").write_text("old", encoding="utf-8")
     c._write_materials(wd, [{"path": "group/brief.md", "data": base64.b64encode("新档案".encode()).decode()}])
-    assert (wd / "group" / "brief.md").read_text() == "新档案"
+    assert (wd / "group" / "brief.md").read_text(encoding="utf-8") == "新档案"
     assert not (wd / "group" / "stale.md").exists()  # 上一轮的只读副本不残留
-    for bad in ({"path": "/etc/passwd", "data": ""}, {"path": "../x", "data": ""}):
+    for bad in ({"path": p, "data": ""} for p in ("/etc/passwd", "../x", r"\x", "C:x", r"C:\x", r"\\srv\share\x",
+                                                    r"group\..\..\x")):
         with pytest.raises(Exception):
             c._write_materials(wd, [bad])
     c.close()
@@ -187,9 +194,9 @@ def test_safe_path_rejects_escape_and_missing(tmp_path):
     from agentnet.connector.client import Connector
     root = tmp_path / "root"
     (root / "sub").mkdir(parents=True)
-    (root / "sub" / "ok.md").write_text("x")
-    assert Connector._safe_path(root, "sub/ok.md").read_text() == "x"
-    for bad in ("../root/sub/ok.md", "/etc/passwd", "sub/../../x", "nope.md"):
+    (root / "sub" / "ok.md").write_text("x", encoding="utf-8")
+    assert Connector._safe_path(root, "sub/ok.md").read_text(encoding="utf-8") == "x"
+    for bad in ("../root/sub/ok.md", "/etc/passwd", "sub/../../x", "nope.md", r"\sub\ok.md", "C:sub/ok.md"):
         with pytest.raises(Exception):
             Connector._safe_path(root, bad)
 
@@ -262,7 +269,7 @@ def test_run_request_carries_materials_to_the_connector(tmp_path):
         if (wd / "group" / "brief.md").exists():
             break
         time.sleep(0.01)
-    assert (wd / "group" / "brief.md").read_text() == "目标：调研"
+    assert (wd / "group" / "brief.md").read_text(encoding="utf-8") == "目标：调研"
     c.close()
 
 
@@ -284,3 +291,42 @@ def test_claude_env_drops_host_credentials():
     env = clean_env({"PATH": "/bin", "CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://host",
                      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1", "HOME": "/Users/x"})
     assert env == {"PATH": "/bin", "HOME": "/Users/x"}
+
+
+# ================= Windows =================
+NPM_SHIM = ('@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n'
+            'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+            r'"%dp0%\node_modules\@deepseek-ai\dsh\lib\bin.js" %*' '\r\n')
+NPM_SCRIPT = r"node_modules\@deepseek-ai\dsh\lib\bin.js"
+
+
+def test_npm_cmd_shim_runs_through_node_not_cmd_exe(tmp_path):
+    """Windows 上 npm 装的 harness 是 .cmd 包装：直接用 node 跑它指向的脚本，参数（JSON、路径）不经 cmd.exe 改写。"""
+    from agentnet.runtime import argv
+    shim = tmp_path / "dsh.cmd"
+    shim.write_text(NPM_SHIM, encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "node.exe").write_text("", encoding="utf-8")
+    got = argv([str(shim), "headless", '{"a": "b c"}'], windows=True)
+    assert got == [str(tmp_path / "node.exe"), str(tmp_path / NPM_SCRIPT), "headless", '{"a": "b c"}']
+    assert argv(["dsh", "x"], windows=False) == ["dsh", "x"]  # 其他系统原样
+    assert argv(["no-such-harness-xyz"], windows=True) == ["no-such-harness-xyz"]
+
+
+def test_codex_resume_trusts_windows_paths(tmp_path):
+    r"""codex 的 -c 值是 TOML：Windows 路径里的反斜杠不能写进基本字符串（\U 是非法转义）。"""
+    import tomllib
+    from agentnet.connector.drivers.codex import toml_key
+    for p in (r"C:\Users\me\.matrix\a\c", "/home/me/a", "it's"):
+        assert tomllib.loads(f'projects.{toml_key(p)}.trust_level="trusted"')["projects"][p]["trust_level"] == "trusted"
+
+
+def test_harness_output_in_locale_encoding_does_not_fail_the_run(tmp_path):
+    """harness 调的子进程（如 Windows 的 taskkill）按区域编码（GBK）输出：解不了的字节替换掉，这一轮照常完成。"""
+    body = """
+sys.stderr.buffer.write("成功: 已终止 PID 1 的进程。\\r\\n".encode("gbk")); sys.stderr.flush()
+print(json.dumps({"type":"thread.started","thread_id":"th-8"}))
+print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":"ok"}}))
+"""
+    out = CodexDriver(fake_bin(tmp_path, "codex", body)).run(spec(tmp_path), Ctx(), threading.Event())
+    assert out.ok and out.final_text == "ok" and out.session_id == "th-8"

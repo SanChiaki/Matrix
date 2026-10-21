@@ -32,6 +32,7 @@ TOOL_AUTHORITY: dict[str, str | None] = {
     "write": "file.write",
     "edit": "file.write",
     "bash": "shell.exec",
+    "pwsh": "shell.exec",
 }
 
 # 端侧 harness（连接器驱动名 -> 显示名）。一台设备可以同时提供多个；Agent 绑定到“设备 + harness”。

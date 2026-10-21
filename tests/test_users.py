@@ -52,7 +52,7 @@ def test_register_login_logout(tmp_path: Path):
     assert c.post("/api/auth/login", json={"email": "a@x.io", "password": "wrong-pass"}).status_code == 400
     assert c.post("/api/auth/login", json={"email": "a@x.io", "password": "password-123"}).status_code == 200
     assert c.get("/api/me").status_code == 200
-    raw = (tmp_path / "state.json").read_text()
+    raw = (tmp_path / "state.json").read_text(encoding="utf-8")
     assert "password-123" not in raw  # 只存 scrypt 哈希
 
 
@@ -124,14 +124,14 @@ def test_legacy_shared_agents_migrate_to_owner_only(tmp_path: Path):
     g = net.create_group("G", "", [b.id], actor=bob)
     dm = net.direct_chat(b.id, actor=bob)
     net.wait_quiet()
-    raw = json.loads((tmp_path / "state.json").read_text())
+    raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     for x in raw["agents"]:
         x["visibility"], x["shared_with"] = "public", []
     raw["groups"][0]["member_ids"].append(a.id)        # 旧版：bob 的群里有 alice 的公开 Agent
     legacy = {**next(c for c in raw["conversations"] if c["id"] == dm.id), "id": "conv-legacy",
               "agent_id": a.id}                         # 旧版：bob 和 alice 的公开 Agent 私聊
     raw["conversations"].append(legacy)
-    (tmp_path / "state.json").write_text(json.dumps(raw))
+    (tmp_path / "state.json").write_text(json.dumps(raw), encoding="utf-8")
     net2 = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     assert net2.store.conversations["conv-legacy"].archived
     assert not net2.store.conversations[dm.id].archived
@@ -223,8 +223,9 @@ def test_patch_mounts_approval_plugin():
     from agentnet.runtime import APPROVAL_PLUGIN
     y = build_patch_yaml(["file.write"], approvals=ApprovalBridge(url="http://127.0.0.1:1/internal/approval",
                                                                    token="t", handler=lambda t, r: "rejected"))
-    assert "id: agentnet-approval" in y and str(APPROVAL_PLUGIN) in y and '"t"' in y
-    assert APPROVAL_PLUGIN.exists() and "approval/request" in APPROVAL_PLUGIN.read_text()
+    import json
+    assert "id: agentnet-approval" in y and json.dumps(str(APPROVAL_PLUGIN)) in y and '"t"' in y
+    assert APPROVAL_PLUGIN.exists() and "approval/request" in APPROVAL_PLUGIN.read_text(encoding="utf-8")
 
 
 def test_approval_endpoint_and_api(tmp_path: Path):

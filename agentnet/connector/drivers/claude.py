@@ -20,7 +20,7 @@ from pathlib import Path
 
 import sys
 
-from ...runtime import MCP_SERVER_SCRIPT, ENFORCED, UNAVAILABLE, RuntimeCapabilities
+from ...runtime import MCP_SERVER_SCRIPT, ENFORCED, UNAVAILABLE, RuntimeCapabilities, argv, no_window
 from .base import RunOutcome, RunSpec
 
 # 宿主环境里这些变量会让子进程里的 claude 改用宿主进程的凭据 / 网关，而不是用户自己的登录，
@@ -92,9 +92,9 @@ class ClaudeDriver:
 
     def run(self, spec: RunSpec, ctx, cancel: threading.Event) -> RunOutcome:
         spec.workdir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(self.command(spec), cwd=Path(spec.workdir), env=clean_env(),
+        proc = subprocess.Popen(argv(self.command(spec)), cwd=Path(spec.workdir), env=clean_env(),
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, encoding="utf-8")
+                                text=True, encoding="utf-8", errors="replace", creationflags=no_window())
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(spec.prompt)
         proc.stdin.close()

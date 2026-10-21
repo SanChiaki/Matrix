@@ -29,7 +29,7 @@ def test_issue_and_revoke_device_token(tmp_path):
     alice = next(u for u in net.store.users.values() if u.email == "alice@x.io")
     dev, token = auth.issue_device_token(net.store, alice.id, "笔记本")
     assert dev.public()["name"] == "笔记本" and "token" not in dev.public()
-    assert token not in net.store.path.read_text()  # 只存哈希
+    assert token not in net.store.path.read_text(encoding="utf-8")  # 只存哈希
 
     assert auth.device_of(net.store, token).id == dev.id
     auth.revoke_device(net.store, dev.id, alice.id)

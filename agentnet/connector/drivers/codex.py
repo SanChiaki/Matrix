@@ -17,8 +17,13 @@ import subprocess
 import threading
 from pathlib import Path
 
-from ...runtime import ADVISORY, ENFORCED, RuntimeCapabilities
+from ...runtime import ADVISORY, ENFORCED, RuntimeCapabilities, argv, no_window
 from .base import RunOutcome, RunSpec
+
+
+def toml_key(s: str) -> str:
+    """TOML 的带引号键：优先用字面量字符串（Windows 路径里的反斜杠不当转义），含单引号时退回基本字符串。"""
+    return f"'{s}'" if "'" not in s and "\n" not in s else json.dumps(s)
 
 
 class CodexDriver:
@@ -41,22 +46,22 @@ class CodexDriver:
         return "workspace-write" if "file.write" in authority else "read-only"
 
     def command(self, spec: RunSpec) -> list[str]:
-        cmd = [self.codex_bin, "exec", "--json", "--skip-git-repo-check",
-               "--sandbox", self.sandbox(spec.authority), "--cd", str(spec.workdir)]
-        if spec.model and spec.model.get("model"):
-            cmd += ["--model", spec.model["model"]]
+        model = ["--model", spec.model["model"]] if spec.model and spec.model.get("model") else []
         if spec.session_id:
-            # 续接：`codex exec resume <id>` 是子命令，提示词从 stdin 进
-            return [self.codex_bin, "exec", "resume", spec.session_id, "--json", "--skip-git-repo-check",
-                    "--sandbox", self.sandbox(spec.authority), "-c",
-                    f'projects."{spec.workdir}".trust_level="trusted"']
-        cmd.append("-")  # 提示词从 stdin 读
-        return cmd
+            # 续接：`codex exec resume` 不认 --sandbox / --cd：沙箱用 -c 覆盖，工作目录就是进程的 cwd
+            return [self.codex_bin, "exec", "resume", "--json", "--skip-git-repo-check",
+                    "-c", f'sandbox_mode="{self.sandbox(spec.authority)}"',
+                    "-c", f'projects.{toml_key(str(spec.workdir))}.trust_level="trusted"',
+                    *model, spec.session_id, "-"]  # 提示词从 stdin 读
+        return [self.codex_bin, "exec", "--json", "--skip-git-repo-check",
+                "--sandbox", self.sandbox(spec.authority), "--cd", str(spec.workdir), *model, "-"]
 
     def run(self, spec: RunSpec, ctx, cancel: threading.Event) -> RunOutcome:
         spec.workdir.mkdir(parents=True, exist_ok=True)
-        proc = subprocess.Popen(self.command(spec), cwd=Path(spec.workdir), stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        proc = subprocess.Popen(argv(self.command(spec)), cwd=Path(spec.workdir), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                encoding="utf-8", errors="replace",  # Windows 上子进程的提示可能是 GBK
+                                creationflags=no_window())
         assert proc.stdin is not None and proc.stdout is not None
         proc.stdin.write(spec.prompt)
         proc.stdin.close()

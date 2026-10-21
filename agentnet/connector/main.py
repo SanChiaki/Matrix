@@ -92,7 +92,20 @@ def _no_config(path: Path) -> None:
     print(f"还没有配置（{path}）。先运行：matrix-connect setup <服务器地址>", file=sys.stderr)
     raise SystemExit(2)
 
+LOG_MAX_BYTES = 5_000_000
+
+def _log_to(path: Path) -> None:
+    """输出写进日志文件：Windows 的后台服务用 pythonw 跑，没有 stdout / stderr。超过上限时滚动一份。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size > LOG_MAX_BYTES:
+        path.replace(path.with_name(path.name + ".1"))
+    f = open(path, "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115 —— 进程结束前一直用
+    sys.stdout = sys.stderr = f
+    print(f"—— 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ——")  # service.install 靠它确认任务起来了
+
 def cmd_run(args: argparse.Namespace) -> None:
+    if args.log:
+        _log_to(Path(args.log).expanduser())
     path = Path(args.config).expanduser()
     conf = cfg.load(path)
     if conf is None:
@@ -217,6 +230,7 @@ def main(argv: list[str] | None = None) -> None:
 
     r = sub.add_parser("run", help="前台运行（后台服务跑的就是它）")
     r.add_argument("--config", **conf_opt)
+    r.add_argument("--log", default=None, help="输出写进这个文件（后台服务用）")
     r.set_defaults(func=cmd_run)
 
     st = sub.add_parser("status", help="查看本机配置与检测到的 harness")
@@ -231,3 +245,6 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
     args.func(args)
 
+
+if __name__ == "__main__":  # Windows 后台服务：pythonw -m agentnet.connector.main run …
+    main()

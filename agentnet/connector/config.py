@@ -55,7 +55,7 @@ def save(conf: Config, path: Path | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # 先以 0600 创建，令牌不会短暂可读
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(asdict(conf), f, ensure_ascii=False, indent=2)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
@@ -66,6 +66,6 @@ def load(path: Path | None = None) -> Config | None:
     path = Path(path or default_path())
     if not path.exists():
         return None
-    raw = json.loads(path.read_text())
+    raw = json.loads(path.read_text(encoding="utf-8"))
     known = {f.name for f in fields(Config)}
     return Config(**{k: v for k, v in raw.items() if k in known})
