@@ -117,6 +117,7 @@ class Network:
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
+        self._settling = 0                # 刚跑完一轮、还在收尾（停滞检查可能再唤醒负责人）的个数
         self._approval_waits: dict[str, threading.Event] = {}
         self._home_locks: dict[str, threading.Lock] = {}
         self._lock = self.store.lock
@@ -855,7 +856,7 @@ class Network:
         seat = conv.seats.get(agent_id)
         if seat is None:
             workdir = self.store.seat_dir(conv.id, agent_id if conv.kind == "group" else None)
-            seat = Seat(agent_id=agent_id, workdir=str(workdir.relative_to(self.store.root)))
+            seat = Seat(agent_id=agent_id, workdir=workdir.relative_to(self.store.root).as_posix())
             conv.seats[agent_id] = seat
         return seat
 
@@ -864,7 +865,7 @@ class Network:
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
-                if not self._running:
+                if not self._running and not self._settling:
                     return
             time.sleep(0.02)
         raise TimeoutError(f"网络未在 {timeout}s 内静止：{sorted(self._running)}")
@@ -946,11 +947,17 @@ class Network:
                 again = self._eligible(kind, cid)
                 if not again:
                     self._running.discard(cid)
+                    self._settling += 1  # 停滞检查还可能唤醒负责人：收尾完之前也不算静止
             if again:
                 self._pool.submit(self._round_safe, kind, cid)
-            self._refresh_conv(self._conv_id_of(kind, cid))
-            if not again:
-                self._check_stall(kind, cid)
+            try:
+                self._refresh_conv(self._conv_id_of(kind, cid))
+                if not again:
+                    self._check_stall(kind, cid)
+            finally:
+                if not again:
+                    with self._lock:
+                        self._settling -= 1
 
     def _internal_error(self, kind: str, cid: str, e: Exception) -> None:
         if kind == "seat":
@@ -1801,7 +1808,7 @@ class Network:
         holder = self._holder(ctx.kind, ctx.id)
         rel = str(args.get("path", "")).strip()
         top = Path(rel).parts[0] if Path(rel).parts else ""
-        if not rel or top in (GROUP_FILES, PROJECT_FILES, HOME_DIR) or Path(rel).is_absolute() or ".." in Path(rel).parts:
+        if top in (GROUP_FILES, PROJECT_FILES, HOME_DIR) or workdir.safe_rel(rel) is None:
             return (f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {GROUP_FILES}/、{PROJECT_FILES}/ 与 {HOME_DIR}/）",
                     True)
         target = str(args.get("target") or "group").strip()
@@ -2868,6 +2875,9 @@ class Network:
             running = [t for t in r.task_ids if (t2 := self.store.tasks.get(t)) and t2.status == TaskStatus.RUNNING]
             if decision == "accept" and running:
                 return f"还有委托没有回报（{', '.join(running)}）：等它们交付或失败后再验收", True
+            # 这一轮已经处理了：退回后执行者可能在这一轮结束前就重新交付，那是下一轮的新通知，不算这一轮没验收
+            if rid in ctx.request_reviews:
+                ctx.request_reviews.remove(rid)
             conv_g = self.store.groups.get(getattr(self.store.conversations.get(r.conversation_id), "group_id", "") or "")
             lead = self._lead_label(conv_g, ctx.agent_id).removeprefix("项目负责人").strip()
             joint_h = self._request_handoff(r)

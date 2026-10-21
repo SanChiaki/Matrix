@@ -102,13 +102,13 @@ def test_connector_home_persists_across_contexts(tmp_path):
         if spec.context_id == "c1":
             (home / "notes.md").write_text("第一次的笔记", encoding="utf-8")
         else:
-            spec.workdir.joinpath("seen.txt").write_text((home / "notes.md").read_text(encoding="utf-8"))
+            spec.workdir.joinpath("seen.txt").write_text((home / "notes.md").read_text(encoding="utf-8"), encoding="utf-8")
 
     c = Connector(Driver(body), tmp_path)
     assert run_once(c, "a", "c1", "rw")["ok"]
     run_once(c, "a", "c2", "rw")
     assert (tmp_path / HOMES / "a" / "notes.md").read_text(encoding="utf-8") == "第一次的笔记"
-    assert (c.workdir_of("a/c2") / "seen.txt").read_text() == "第一次的笔记"
+    assert (c.workdir_of("a/c2") / "seen.txt").read_text(encoding="utf-8") == "第一次的笔记"
     c.close()
 
 
@@ -118,20 +118,20 @@ def test_connector_read_only_home_discards_changes(tmp_path):
 
     def body(spec):
         home = spec.workdir / "agent-home"
-        seen.append(home.exists() and (home / "keep.md").read_text())
+        seen.append(home.exists() and (home / "keep.md").read_text(encoding="utf-8"))
         if home.exists():
-            (home / "keep.md").write_text("被改了")
+            (home / "keep.md").write_text("被改了", encoding="utf-8")
 
     c = Connector(Driver(body), tmp_path)
     (tmp_path / HOMES / "a").mkdir(parents=True)
-    (tmp_path / HOMES / "a" / "keep.md").write_text("原样")
+    (tmp_path / HOMES / "a" / "keep.md").write_text("原样", encoding="utf-8")
     run_once(c, "a", "c1", "ro")
     stale = c.workdir_of("a/c2") / "agent-home"
     stale.mkdir(parents=True)
-    (stale / "keep.md").write_text("残留")
+    (stale / "keep.md").write_text("残留", encoding="utf-8")
     run_once(c, "a", "c2", None)
     assert seen == ["原样", False]
-    assert (tmp_path / HOMES / "a" / "keep.md").read_text() == "原样"
+    assert (tmp_path / HOMES / "a" / "keep.md").read_text(encoding="utf-8") == "原样"
     c.close()
 
 
@@ -141,7 +141,7 @@ def test_connector_home_merge_keeps_both_on_conflict(tmp_path):
 
     def body(spec):
         gate.wait()
-        (spec.workdir / "agent-home" / "notes.md").write_text(f"{spec.context_id} 的笔记")
+        (spec.workdir / "agent-home" / "notes.md").write_text(f"{spec.context_id} 的笔记", encoding="utf-8")
         if spec.context_id == "c2":
             import time
             time.sleep(0.1)  # 让 c1 先写回
@@ -155,9 +155,9 @@ def test_connector_home_merge_keeps_both_on_conflict(tmp_path):
     for t in threads:
         t.join(5)
     home = tmp_path / HOMES / "a"
-    assert (home / "notes.md").read_text() == "c1 的笔记"
+    assert (home / "notes.md").read_text(encoding="utf-8") == "c1 的笔记"
     conflicts = [p for p in home.iterdir() if p.name.startswith("notes.conflict-")]
-    assert len(conflicts) == 1 and conflicts[0].read_text() == "c2 的笔记"
+    assert len(conflicts) == 1 and conflicts[0].read_text(encoding="utf-8") == "c2 的笔记"
     c.close()
 
 
@@ -167,7 +167,7 @@ def test_connector_refuses_to_expose_homes(tmp_path):
     for bad in (".homes/a", "a/.homes", ".x"):
         with pytest.raises(Exception):
             c.workdir_of(bad)
-    for bad in ("", "../x", "a/b", ".homes"):
+    for bad in ("", "../x", "a/b", ".homes", "C:", "C:x"):
         with pytest.raises(Exception):
             c.home_of(bad)
     with pytest.raises(Exception):
@@ -175,11 +175,14 @@ def test_connector_refuses_to_expose_homes(tmp_path):
 
     wd = c.workdir_of("a/c")
     (wd / "agent-home").mkdir(parents=True)
-    (wd / "agent-home" / "secret.md").write_text("私密")
+    (wd / "agent-home" / "secret.md").write_text("私密", encoding="utf-8")
     (wd / "group").mkdir()
-    (wd / "group" / "brief.md").write_text("档案")
-    (wd / "out.md").write_text("产物")
-    (wd / "link.md").symlink_to(wd / "agent-home" / "secret.md")
+    (wd / "group" / "brief.md").write_text("档案", encoding="utf-8")
+    (wd / "out.md").write_text("产物", encoding="utf-8")
+    try:
+        (wd / "link.md").symlink_to(wd / "agent-home" / "secret.md")
+    except OSError:  # Windows 没开开发者模式时不能建符号链接：其余检查照做
+        pass
     run = _Run(c, "run-f")
     run.workdir = wd
     c._runs["run-f"] = run

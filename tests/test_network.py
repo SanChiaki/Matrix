@@ -815,8 +815,8 @@ def test_agent_home_persists_without_injection(tmp_path: Path):
 
     def handler(call: ScriptCall) -> str:
         home = call.cwd / "agent-home"
-        seen.append((home / "notes.md").read_text() if (home / "notes.md").exists() else "")
-        (home / "notes.md").write_text(f"第 {len(seen)} 次运行的笔记")
+        seen.append((home / "notes.md").read_text(encoding="utf-8") if (home / "notes.md").exists() else "")
+        (home / "notes.md").write_text(f"第 {len(seen)} 次运行的笔记", encoding="utf-8")
         return "ok"
 
     net = Network(ScriptedRuntime(handler), tmp_path)
@@ -825,7 +825,7 @@ def test_agent_home_persists_without_injection(tmp_path: Path):
     c1 = talk(net, a, None, "一")
     c2 = talk(net, a, g, "二")  # 另一个对话（群聊），同一个 Agent
     assert seen == ["", "第 1 次运行的笔记"]
-    assert (net.store.agent_dir(a.id) / "notes.md").read_text() == "第 2 次运行的笔记"
+    assert (net.store.agent_dir(a.id) / "notes.md").read_text(encoding="utf-8") == "第 2 次运行的笔记"
     assert not (net.store.root / seat(net, c1, a).workdir / "agent-home").exists()  # 运行结束后卸载
     first_prompt = net.runtime.calls[1].prompt
     assert "第 1 次运行的笔记" not in first_prompt and "agent-home" in first_prompt
@@ -974,7 +974,7 @@ def test_archive_tools_mounted_without_delegate_and_checked_by_network():
     assert set(network_tools_for("seat", True, False)) == set(ARCHIVE_TOOLS + REQUEST_TOOLS)
     env = {**os.environ, "AGENTNET_TOOLS": ",".join(network_tools_for("task", True, False))}
     out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n',
-                         capture_output=True, text=True, env=env, timeout=10).stdout
+                         capture_output=True, text=True, env=env, timeout=10, encoding="utf-8").stdout
     import json
     assert [t["name"] for t in json.loads(out)["result"]["tools"]] == list(ARCHIVE_TOOLS)
 
@@ -1024,11 +1024,12 @@ def test_authorities_registered_everywhere():
 def test_dsh_patch_reflects_authority_and_mounts_mcp():
     y = build_patch_yaml(["web.research"])
     assert "id: tool-bash" in y and "id: tool-web" not in y
+    assert "id: tool-pwsh" in y  # Windows 上的 shell：没有 shell.exec 也要禁用
     assert "id: tool-plugin-manager" in y and "tool-subagent" not in y and "tool-workflow" not in y
     assert "insert" not in y
     y2 = build_patch_yaml(["web.research", "shell.exec", "delegate"],
                           ToolBridge(url="http://127.0.0.1:1/internal/tools", token="t", handler=lambda n, a: ("", False)))
-    assert "id: tool-bash" not in y2
+    assert "id: tool-bash" not in y2 and "id: tool-pwsh" not in y2
     assert y2.startswith("#") and "- insert:" in y2 and "dsh-mcp-client" in y2 and "AGENTNET_TOKEN" in y2
     assert permission_mode(["web.research"]) == "read-only"
     assert permission_mode(["file.write"]) == "workspace-write"
@@ -1046,7 +1047,8 @@ def test_mcp_server_stdio(tmp_path: Path):
     from agentnet.runtime import MCP_SERVER_SCRIPT
     out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input="\n".join(json.dumps(m) for m in msgs),
                          capture_output=True, text=True, timeout=20,
-                         env={"AGENTNET_TOOL_URL": "http://127.0.0.1:9/x", "AGENTNET_TOKEN": "t"}).stdout
+                         env={**os.environ, "AGENTNET_TOOL_URL": "http://127.0.0.1:9/x", "AGENTNET_TOKEN": "t",
+                              "AGENTNET_TOOL_TIMEOUT": "3"}, encoding="utf-8").stdout  # 有的环境里连关闭的端口是超时而不是被拒
     res = [json.loads(line) for line in out.splitlines()]
     assert [r["id"] for r in res] == [1, 2, 3]
     assert res[0]["result"]["protocolVersion"] == "2025-06-18"

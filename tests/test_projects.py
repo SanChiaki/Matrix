@@ -170,11 +170,11 @@ def test_agent_publishes_to_project(tmp_path: Path):
     """不变量 18：publish_file target=project 只能发到自己群组所属的项目；别的挂载群组的委托任务读得到。"""
     def handler(call: ScriptCall) -> str:
         if call.context_id.startswith("task-"):
-            assert (Path(call.cwd) / "project" / "prd.md").read_text() == "# PRD"
+            assert (Path(call.cwd) / "project" / "prd.md").read_text(encoding="utf-8") == "# PRD"
             assert "负责「工程」" in call.prompt
             return "done"
         if call.agent_id == pm.id:
-            Path(call.cwd, "prd.md").write_text("# PRD")
+            Path(call.cwd, "prd.md").write_text("# PRD", encoding="utf-8")
             out = call.tool("publish_file", path="prd.md", target="project")
             assert "已发布到项目" in out, out
             assert "不能" not in call.tool("publish_file", path="prd.md")  # 默认仍是群组档案
@@ -202,7 +202,7 @@ def test_agent_publishes_to_project(tmp_path: Path):
     net.send_message(pchat.id, "@PM 写 PRD 发到项目", actor=alice, background=False)
     assert [f["name"] for f in net.project_detail(p.id, actor=alice)["files"]] == ["prd.md"]
     assert any("发布到了项目「tasky」" in m.text for m in pchat.messages)
-    assert (tmp_path / "projects" / p.id / "log.jsonl").read_text().count("file.publish") == 1
+    assert (tmp_path / "projects" / p.id / "log.jsonl").read_text(encoding="utf-8").count("file.publish") == 1
 
     net.send_message(net.group_chat(dg.id, actor=alice).id, "@Lead 实现", actor=alice, background=False)
     net.wait_quiet()
@@ -212,7 +212,7 @@ def test_agent_publishes_to_project(tmp_path: Path):
     # 不在项目里的群组：target=project 被拒
     holder = []
     def lone(call: ScriptCall) -> str:
-        Path(call.cwd, "x.md").write_text("x")
+        Path(call.cwd, "x.md").write_text("x", encoding="utf-8")
         holder.append(call.tool("publish_file", path="x.md", target="project"))
         holder.append(call.tool("publish_file", path="project/x.md"))
         return "ok"

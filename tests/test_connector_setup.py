@@ -2,6 +2,7 @@
 import json
 import os
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -94,7 +95,8 @@ def test_connector_drivers_are_known_harnesses():
 def test_config_round_trip_is_private(tmp_path):
     path = tmp_path / "conf" / "config.json"
     cfg.save(cfg.Config(server="https://m.example", token="secret", device_id="dev-1", device_name="笔记本"), path)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600            # 令牌只有本人可读
+    if os.name != "nt":  # Windows 没有 POSIX 权限位：配置在用户目录下，由 ACL 限定本人可读
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600        # 令牌只有本人可读
     got = cfg.load(path)
     assert got.token == "secret" and got.ws_url == "wss://m.example/api/devices/connect"
     assert cfg.load(tmp_path / "none.json") is None
@@ -155,6 +157,7 @@ def test_systemd_unit_runs_the_connector(tmp_path):
     assert "Environment=PATH=/usr/bin" in text
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="launchd 的 gui/<uid> 域只在 POSIX 上有意义")
 def test_install_writes_the_unit_and_loads_it(tmp_path):
     ran = []
     home = tmp_path / "home"
@@ -171,7 +174,54 @@ def test_install_writes_the_unit_and_loads_it(tmp_path):
     assert unit == home / ".config/systemd/user/matrix-connect.service" and unit.exists()
     assert ["systemctl", "--user", "enable", "--now", "matrix-connect.service"] in ran
     with pytest.raises(service.ServiceError):
-        service.install("/x", tmp_path / "c.json", system="Windows", home=home, run=lambda c: None)
+        service.install("/x", tmp_path / "c.json", system="Plan9", home=home, run=lambda c: None)
+
+
+def test_windows_install_registers_a_logon_task(tmp_path):
+    """Windows：当前用户的登录任务，用 pythonw 跑（没有控制台窗口），日志写文件，定义里不含令牌。"""
+    ran, up = [], lambda log, since: True
+    home, scripts = tmp_path / "home", tmp_path / "venv" / "Scripts"
+    scripts.mkdir(parents=True)
+    exe = scripts / "matrix-connect.exe"
+    exe.write_text("")
+    config = tmp_path / "my config.json"
+    cfg.save(cfg.Config(server="http://127.0.0.1:8765", token="s3cret-token"), config)
+    with pytest.raises(service.ServiceError):  # 没有 pythonw.exe：不装
+        service.install(str(exe), config, system="Windows", home=home, run=ran.append, started=up)
+    (scripts / "pythonw.exe").write_text("")
+
+    path = service.install(str(exe), config, system="Windows", home=home, run=ran.append, started=up)
+    assert path == home / "AppData/Local/matrix-connect/task.xml" and path.exists()
+    xml = path.read_text(encoding="utf-16")
+    assert xml.startswith('<?xml version="1.0" encoding="UTF-16"?>')
+    assert "<LogonTrigger>" in xml and "<MultipleInstancesPolicy>IgnoreNew" in xml
+    assert f"<Command>{scripts / 'pythonw.exe'}</Command>" in xml
+    assert f'-m agentnet.connector.main run --config "{config}"' in xml
+    assert f'--log "{home / "AppData/Local/matrix-connect/matrix-connect.log"}"' in xml
+    assert "s3cret-token" not in xml
+    assert ["schtasks", "/Create", "/TN", service.TASK, "/XML", str(path), "/F"] in ran
+    assert ran[-1] == ["schtasks", "/Run", "/TN", service.TASK]
+
+    ran.clear()
+    assert service.uninstall(system="Windows", home=home, run=ran.append) == path
+    assert not path.exists() and ["schtasks", "/Delete", "/TN", service.TASK, "/F"] in ran
+    assert service.uninstall(system="Windows", home=home, run=ran.append) is None
+
+    # 任务注册了却没把连接器跑起来（如在打包应用的终端里装的）：撤销任务并报错，不报“已装好”
+    ran.clear()
+    with pytest.raises(service.ServiceError, match="没能启动"):
+        service.install(str(exe), config, system="Windows", home=home, run=ran.append,
+                        started=lambda log, since: False)
+    assert not path.exists() and ran[-1] == ["schtasks", "/Delete", "/TN", service.TASK, "/F"]
+
+
+def test_install_waits_for_the_log(tmp_path):
+    """确认任务起来了靠连接器启动时写的日志：之前的旧日志不算。"""
+    log = tmp_path / "matrix-connect.log"
+    log.write_text("旧")
+    assert not service._started(log, time.time() + 5, timeout=0.6)
+    assert service._started(log, time.time() - 5, timeout=0.6)
+    assert not service._started(tmp_path / "none.log", 0, timeout=0.6)
 
 
 def test_ephemeral_install_is_detected():
@@ -194,3 +244,18 @@ def test_run_without_config_explains_setup(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(["run", "--config", str(tmp_path / "none.json")])
     assert e.value.code == 2 and "setup" in capsys.readouterr().err
+
+
+def test_run_log_captures_output(tmp_path, monkeypatch):
+    """后台服务（Windows 上的 pythonw）没有 stdout / stderr：`--log` 把输出写进文件，太大时滚动一份。"""
+    monkeypatch.setattr(sys, "stdout", sys.stdout)
+    monkeypatch.setattr(sys, "stderr", sys.stderr)
+    log = tmp_path / "logs" / "matrix-connect.log"
+    log.parent.mkdir()
+    log.write_text("旧" * 10)
+    monkeypatch.setattr("agentnet.connector.main.LOG_MAX_BYTES", 10)
+    with pytest.raises(SystemExit):
+        main(["run", "--config", str(tmp_path / "none.json"), "--log", str(log)])
+    sys.stderr.close()
+    assert "启动" in log.read_text(encoding="utf-8") and "setup" in log.read_text(encoding="utf-8")
+    assert (tmp_path / "logs" / "matrix-connect.log.1").read_text() == "旧" * 10

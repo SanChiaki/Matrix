@@ -17,6 +17,8 @@ TOKEN = os.environ.get("AGENTNET_TOKEN", "")
 TIMEOUT = float(os.environ.get("AGENTNET_TOOL_TIMEOUT", "1800"))
 ALLOWED = [n for n in os.environ.get("AGENTNET_TOOLS", "").split(",") if n]  # 这次执行能用的工具；空 = 全部
 PROTO = "2025-06-18"
+# 回调的是本机网络（云侧服务或端侧连接器的本机桥）：不走系统 / 环境里配置的代理
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 TOOLS = [
     {
@@ -295,7 +297,7 @@ def call_network(name: str, args: dict) -> tuple[str, bool]:
     body = json.dumps({"token": TOKEN, "tool": name, "args": args}).encode()
     req = urllib.request.Request(URL, data=body, headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        with _OPENER.open(req, timeout=TIMEOUT) as resp:
             data = json.loads(resp.read().decode())
         return str(data.get("text", "")), bool(data.get("is_error"))
     except urllib.error.HTTPError as e:
@@ -305,6 +307,9 @@ def call_network(name: str, args: dict) -> tuple[str, bool]:
 
 
 def main() -> None:
+    # MCP stdio 是 UTF-8、按换行分消息；Windows 上管道默认用区域编码（如 GBK），换行写成 CRLF
+    sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    sys.stdout.reconfigure(encoding="utf-8", newline="\n")
     for line in sys.stdin:
         line = line.strip()
         if not line:

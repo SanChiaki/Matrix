@@ -102,12 +102,12 @@ def test_request_manual_review_and_legacy_state(tmp_path):
     assert response.status_code == 200 and response.json()["status"] == "completed"
     assert r.reviewed_by == requester and r.accepted_by_message_id is None
     assert any("bob@x.io 验收了" in m.text for m in chat.messages)
-    raw = json.loads(net.store.path.read_text())
+    raw = json.loads(net.store.path.read_text(encoding="utf-8"))
     for item in raw["requests"]:
         item.pop("reviewed_by")
         item.pop("accepted_by_message_id")
         item["obsolete"] = True
-    net.store.path.write_text(json.dumps(raw))
+    net.store.path.write_text(json.dumps(raw), encoding="utf-8")
     old = Store(tmp_path, seed=False).requests[r.id]
     assert old.reviewed_by is None and old.accepted_by_message_id is None
 

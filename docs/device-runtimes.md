@@ -154,7 +154,11 @@ matrix-connect setup <服务器>
   令牌不出现在命令行参数、服务定义和 `status` 输出里。
 - 然后装成用户级后台服务（`agentnet/connector/service.py`）：macOS 是 `~/Library/LaunchAgents/dev.matrix.connect.plist`
   （`launchctl bootstrap gui/<uid>`），Linux 是 `systemd --user` 单元；`KeepAlive` / `Restart=always`，PATH 取 setup 时的值，
-  让服务找得到 claude / codex / dsh。其他系统前台运行 `matrix-connect run`。
+  让服务找得到 claude / codex / dsh。Windows 是任务计划程序里当前用户的“登录时”任务（`schtasks /Create /XML`，
+  不需要管理员；不做成 Windows 服务，那会以 SYSTEM 运行、拿不到用户的 harness 凭据），用 pythonw 跑（没有控制台窗口），
+  日志写 `%LOCALAPPDATA%\matrix-connect\matrix-connect.log`；每 5 分钟重复触发、已在运行就忽略，相当于 KeepAlive。
+  装完等连接器在日志里写下启动行才算成功，没起来就撤销并报错（在 MSIX 打包应用的终端里装时 AppData 被重定向，
+  任务看不到那里的 Python）。其他系统前台运行 `matrix-connect run`。
 - uvx 的临时环境会被清理，不写进开机自启；设备页给的命令先 `uv tool install`，再 `setup`。
 - 不做桌面客户端（签名、公证、自动更新对本地 Demo 太重），也不改写用户各 harness 的全局配置
   （Reason Network 那种做法会把网络工具注入人正在用的会话，违反不变量 7；research: reason-network#setup）。

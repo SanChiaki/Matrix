@@ -19,6 +19,7 @@ from typing import Any
 import base64
 
 from .. import homedir
+from ..workdir import safe_rel
 from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
 from ..models import AGENT_HOME, GROUP_FILES
@@ -178,8 +179,7 @@ class Connector:
 
     @staticmethod
     def _safe_path(root: Path, rel: str) -> Path:
-        parts = Path(rel).parts
-        if not rel or Path(rel).is_absolute() or ".." in parts:
+        if safe_rel(rel) is None:
             raise DeviceError(f"非法的路径：{rel!r}")
         p = (root / rel).resolve()
         if root.resolve() not in p.parents:
@@ -220,7 +220,7 @@ class Connector:
             shutil.rmtree(workdir / top, ignore_errors=True)
         for item in materials:
             rel = str(item.get("path", ""))
-            if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts or Path(rel).parts[0] == AGENT_HOME:
+            if safe_rel(rel) is None or Path(rel).parts[0] == AGENT_HOME:
                 raise DeviceError(f"非法的材料路径：{rel!r}")
             dest = workdir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -231,7 +231,7 @@ class Connector:
         必须拒绝绝对路径与 `..`：这个字符串来自网络，不能让它写到根目录以外。"""
         raw = ref.split("/")
         # 以 . 开头的段一律拒绝（`.` 本身除外）：私有目录在 <root>/.homes/ 下，工作目录不能落进去
-        if not ref or any(p in ("..", "") or (p.startswith(".") and p != ".") or Path(p).is_absolute()
+        if not ref or any(p in ("..", "") or (p.startswith(".") and p != ".") or safe_rel(p) is None
                           or "\\" in p for p in raw):
             raise DeviceError(f"非法的工作目录引用：{ref!r}")
         parts = [p for p in raw if p != "."]
@@ -241,7 +241,7 @@ class Connector:
 
     def home_of(self, agent_id: str) -> Path:
         """Agent 的私有目录：留在本机，跨对话、跨任务保留，网络不读（docs/device-runtimes.md 第 4 节）。"""
-        if not agent_id or agent_id.startswith(".") or any(c in agent_id for c in "/\\") or Path(agent_id).is_absolute():
+        if not agent_id or agent_id.startswith(".") or any(c in agent_id for c in "/\\") or safe_rel(agent_id) is None:
             raise DeviceError(f"非法的 Agent id：{agent_id!r}")
         return self.workroot / HOMES / agent_id
 
