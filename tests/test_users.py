@@ -22,11 +22,11 @@ def users(net: Network, *emails: str) -> list[str]:
 
 
 def joint(net: Network, host: str, guest_email: str, guest: str, members: list[str] | None = None):
-    """主持人建联合群组、邀请 guest，guest 接受。返回 (群组, 群聊)。"""
-    g = net.create_group("J", "联合", members or [], actor=host, kind="joint")
+    """主持人建联合项目、邀请 guest，guest 接受。返回 (项目, 群聊)。"""
+    g = net.create_project("J", "联合", members or [], actor=host, kind="joint")
     net.invite(g.id, guest_email, actor=host)
     net.respond_invitation(g.id, True, actor=guest)
-    return g, net.group_chat(g.id, actor=host)
+    return g, net.project_chat(g.id, actor=host)
 
 
 def client(net: Network, email: str) -> TestClient:
@@ -60,20 +60,20 @@ def test_first_user_claims_existing_data(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)  # 带种子数据
     first, second = users(net, "first@x.io", "second@x.io")
     assert all(a.owner_id == first for a in net.store.agents.values())
-    assert all(g.owner_id == first for g in net.store.groups.values())
+    assert all(g.owner_id == first for g in net.store.projects.values())
     assert all(c.owner_id == first for c in net.store.conversations.values())
-    assert net.snapshot(second)["agents"] == [] and net.snapshot(second)["groups"] == []
+    assert net.snapshot(second)["agents"] == [] and net.snapshot(second)["projects"] == []
 
 
 def test_server_does_not_seed(tmp_path: Path):
     from agentnet.server import build_network
     net = build_network("scripted", str(tmp_path), 1)
-    assert not net.store.agents and not net.store.groups
+    assert not net.store.agents and not net.store.projects
 
 
 # ================= 信任域：Agent 只属于它的所有者 =================
 def test_agents_belong_to_owner_only(tmp_path: Path):
-    """不变量 16：Agent 只有所有者能用（私聊、拉进群组）、能改；别人看不到。"""
+    """不变量 16：Agent 只有所有者能用（私聊、拉进项目）、能改；别人看不到。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
@@ -87,11 +87,11 @@ def test_agents_belong_to_owner_only(tmp_path: Path):
         net.delete_agent(a.id, actor=bob)
     with pytest.raises(NetworkError, match="不能修改"):
         net.update_agent(a.id, actor=alice, owner_id=bob)
-    gb = net.create_group("B", "", [], actor=bob)
+    gb = net.create_project("B", "", [], actor=bob)
     with pytest.raises(NetworkError, match="unknown agent"):
         net.add_member(gb.id, a.id, actor=bob)
     with pytest.raises(NetworkError, match="unknown agent"):
-        net.create_group("B2", "", [a.id], actor=bob)
+        net.create_project("B2", "", [a.id], actor=bob)
     c = client(net, "bob@x.io")
     assert c.post("/api/conversations", json={"agent_id": a.id}).status_code == 404
     assert c.post("/api/agents", json={"name": "Bx", "description": "bb", "visibility": "public"}).status_code == 200
@@ -103,31 +103,31 @@ def test_groups_are_private_to_owner(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
-    g = net.create_group("G", "", [a.id], actor=alice)
-    assert g.kind == "internal" and net.snapshot(bob)["groups"] == []
-    with pytest.raises(NetworkError, match="unknown group"):
-        net.group_chat(g.id, actor=bob)
-    chat = net.group_chat(g.id, actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
+    assert g.kind == "internal" and net.snapshot(bob)["projects"] == []
+    with pytest.raises(NetworkError, match="unknown project"):
+        net.project_chat(g.id, actor=bob)
+    chat = net.project_chat(g.id, actor=alice)
     with pytest.raises(NetworkError, match="unknown conversation"):
         net.send_message(chat.id, "@A hi", actor=bob)
-    with pytest.raises(NetworkError, match="内部群组"):
+    with pytest.raises(NetworkError, match="内部项目"):
         net.invite(g.id, "bob@x.io", actor=alice)
 
 
 def test_legacy_shared_agents_migrate_to_owner_only(tmp_path: Path):
-    """旧版 public / shared：别人的私聊归档为只读；内部群组里别人的 Agent 移出并记事件；委托记录保留。"""
+    """旧版 public / shared：别人的私聊归档为只读；内部项目里别人的 Agent 移出并记事件；委托记录保留。"""
     import json
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=bob)
-    g = net.create_group("G", "", [b.id], actor=bob)
+    g = net.create_project("G", "", [b.id], actor=bob)
     dm = net.direct_chat(b.id, actor=bob)
     net.wait_quiet()
     raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     for x in raw["agents"]:
         x["visibility"], x["shared_with"] = "public", []
-    raw["groups"][0]["member_ids"].append(a.id)        # 旧版：bob 的群里有 alice 的公开 Agent
+    raw["projects"][0]["member_ids"].append(a.id)        # 旧版：bob 的群里有 alice 的公开 Agent
     legacy = {**next(c for c in raw["conversations"] if c["id"] == dm.id), "id": "conv-legacy",
               "agent_id": a.id}                         # 旧版：bob 和 alice 的公开 Agent 私聊
     raw["conversations"].append(legacy)
@@ -135,8 +135,8 @@ def test_legacy_shared_agents_migrate_to_owner_only(tmp_path: Path):
     net2 = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     assert net2.store.conversations["conv-legacy"].archived
     assert not net2.store.conversations[dm.id].archived
-    assert net2.store.groups[g.id].member_ids == [b.id]
-    chat = net2._group_chat_of(g.id)
+    assert net2.store.projects[g.id].member_ids == [b.id]
+    chat = net2._project_chat_of(g.id)
     assert any("因为不属于你而被移出" in m.text for m in chat.messages if m.role == "event")
     assert "visibility" not in json.dumps(net2.store.agents[a.id].to_dict())
 
@@ -179,14 +179,14 @@ def _decide_when_pending(net: Network, allow: bool, actor: str | None) -> thread
 
 @pytest.mark.parametrize("allow,expected", [(True, "allowed-once"), (False, "rejected")])
 def test_outside_workspace_needs_owner_approval(tmp_path: Path, allow: bool, expected: str):
-    """不变量 14：联合群组里 bob @ alice 的 Agent，它申请在工作目录外操作：申请发给 Agent 的所有者，不是 @ 它的人；
+    """不变量 14：联合项目里 bob @ alice 的 Agent，它申请在工作目录外操作：申请发给 Agent 的所有者，不是 @ 它的人；
     申请理由只给所有者看。"""
     out: dict[str, str] = {}
     net = Network(ScriptedRuntime(_escalating(out)), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     pub = net.create_agent("Pub", "p", [], ["file.write"], actor=alice)
     g, chat = joint(net, bob, "alice@x.io", alice)
-    net.add_member(g.id, pub.id, actor=alice)
+    assert pub.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     th = _decide_when_pending(net, allow, alice)
     net.send_message(chat.id, "@Pub 写到外面", background=False, actor=bob)
     th.join(5)
@@ -265,13 +265,13 @@ def test_ledger_tells_agent_about_parallel_work(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, = users(net, "alice@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
-    g = net.create_group("G", "", [a.id], actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
     net.send_message(net.direct_chat(a.id, actor=alice).id, "第一件", actor=alice)
     started.wait(5)
     led = net.ledger(a.id)
     assert len(led) == 1 and led[0]["user"] == "alice@x.io" and led[0]["what"] == "私聊"
     assert net.board(alice)["ledger"] == {a.id: led}
-    chat = net.group_chat(g.id, actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 第二件", actor=alice)
     time.sleep(0.2)
     release.set()
@@ -284,7 +284,7 @@ def test_ledger_tells_agent_about_parallel_work(tmp_path: Path):
 
 
 def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
-    """不变量 16：联合群组里的运行，台账只列同一群组的工作，其余只给数量——bob @ 它问不出 alice 在别处做什么。"""
+    """不变量 16：联合项目里的运行，台账只列同一项目的工作，其余只给数量——bob @ 它问不出 alice 在别处做什么。"""
     started, release = threading.Event(), threading.Event()
     prompts: dict[str, str] = {}
 
@@ -298,16 +298,16 @@ def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
-    inner = net.create_group("内部收购组", "", [a.id], actor=alice)
+    inner = net.create_project("内部收购组", "", [a.id], actor=alice)
     g, chat = joint(net, alice, "bob@x.io", bob, [a.id])
-    net.send_message(net.group_chat(inner.id, actor=alice).id, "@A 机密收购案", actor=alice)
+    net.send_message(net.project_chat(inner.id, actor=alice).id, "@A 机密收购案", actor=alice)
     started.wait(5)
     net.send_message(chat.id, "@A 你在忙什么", actor=bob)
     time.sleep(0.2)
     release.set()
     net.wait_quiet()
     p = next(v for v in prompts.values() if "你在忙什么" in v)
-    assert "另有 1 项不在这个群组里的工作" in p
+    assert "另有 1 项不在这个项目里的工作" in p
     assert "内部收购组" not in p and "alice@x.io）" not in p.split("你同时还在处理")[1]
 
 
@@ -326,9 +326,9 @@ def test_home_merge_keeps_both_on_conflict(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, = users(net, "alice@x.io")
     a = net.create_agent("A", "a", [], ["file.write"], actor=alice)
-    g = net.create_group("G", "", [a.id], actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
     net.send_message(net.direct_chat(a.id, actor=alice).id, "私聊里", actor=alice)
-    net.send_message(net.group_chat(g.id, actor=alice).id, "@A 群聊里", actor=alice)
+    net.send_message(net.project_chat(g.id, actor=alice).id, "@A 群聊里", actor=alice)
     net.wait_quiet()
     home = net.agent_home(a.id)
     files = sorted(p.name for p in home.iterdir())
@@ -371,8 +371,8 @@ def test_board_shows_user_tasks_not_delegations(tmp_path: Path):
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], ["delegate"], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=alice)
-    g = net.create_group("G", "", [a.id, b.id], actor=alice)
-    chat = net.group_chat(g.id, actor=alice)
+    g = net.create_project("G", "", [a.id, b.id], actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 你好", background=False, actor=alice)
     assert net.board(alice)["requests"] == []           # 闲聊不是任务
     net.send_message(chat.id, "@A 写一份竞品报告", background=False, actor=alice)
@@ -421,7 +421,7 @@ def test_dm_task_review_and_rework(tmp_path: Path):
 
 def test_request_rules(tmp_path: Path):
     """来源由网络认定：没有交代给它的新消息不能登记；一条消息只登记一次；委托没回报不能交付；
-    委托任务里没有这两个工具；联合群组里由下发人验收，其他参与者看不到别人的任务。"""
+    委托任务里没有这两个工具；联合项目里由下发人验收，其他参与者看不到别人的任务。"""
     out: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
@@ -454,7 +454,7 @@ def test_request_rules(tmp_path: Path):
     a = net.create_agent("A", "a", [], ["delegate"], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=bob)
     g, chat = joint(net, alice, "bob@x.io", bob, [a.id])
-    net.add_member(g.id, b.id, actor=bob)
+    assert b.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     net.send_message(chat.id, "@A 做一件事", actor=bob)  # bob 交代给 alice 的 Agent
     time.sleep(0.3)
     assert "不能为空" in out["empty"] and "已经登记" in out["dup"] and "还有委托没有回报" in out["early"]

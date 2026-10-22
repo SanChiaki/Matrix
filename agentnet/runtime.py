@@ -83,7 +83,7 @@ class ToolBridge:
     """一次执行可用的网络工具：DSH 经 MCP → HTTP 回调；Scripted 直接调用 handler。"""
 
     url: str            # 网络内部工具端点，如 http://127.0.0.1:8765/internal/tools
-    token: str          # 执行上下文令牌：网络据此识别调用方与其群组、权限
+    token: str          # 执行上下文令牌：网络据此识别调用方与其项目、权限
     handler: ToolHandler
     timeout_s: float = 1800
     names: list[str] | None = None  # 这次执行能用的网络工具（None = 全部）；MCP 服务只列出这些
@@ -113,7 +113,7 @@ class RunRequest:
     model: dict[str, str] | None = None  # {provider, model, reasoning_effort?}；None 用运行时默认
     approvals: ApprovalBridge | None = None
     # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：
-    # [{"path": "group/x.md", "data": <bytes>}]
+    # [{"path": "project/x.md", "data": <bytes>}]
     materials: list[dict[str, Any]] = field(default_factory=list)
     # 私有目录（端侧运行时用；云侧由 _run 直接挂载）："rw" 挂载并写回，"ro" 只挂载不写回，None 不挂载
     home: str | None = None
@@ -419,7 +419,7 @@ class ScriptCall:
 
     @property
     def can_delegate(self) -> bool:
-        """挂载了协作工具（delegate 等）；只有群组档案工具时为 False。"""
+        """挂载了协作工具（delegate 等）；只有项目档案工具时为 False。"""
         return MCP_PREFIX + "delegate" in self.tool_names
 
     def _emit(self, ev: dict[str, Any]) -> None:

@@ -22,7 +22,7 @@ from .. import homedir
 from ..workdir import safe_rel
 from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
-from ..models import AGENT_HOME, GROUP_FILES
+from ..models import AGENT_HOME, PROJECT_FILES
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
 
@@ -162,7 +162,7 @@ class Connector:
         try:
             root = self._root_for_fetch(msg)
             path = self._safe_path(root, str(msg.get("path", "")))
-            for top in (AGENT_HOME, GROUP_FILES):  # 私有目录不经过网络；group/ 是下发的副本，不能当成产物回传
+            for top in (AGENT_HOME, PROJECT_FILES):  # 私有目录不经过网络；project/ 是下发的副本，不能当成产物回传
                 if (root / top).resolve() in (path, *path.parents):
                     raise DeviceError(f"不能发布 {top}/ 里的文件")
             reply["data"] = base64.b64encode(path.read_bytes()).decode()
@@ -216,7 +216,7 @@ class Connector:
     @staticmethod
     def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
         """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        for top in ("group", "materials"):
+        for top in ("group", PROJECT_FILES, "materials"):  # group/：旧版下发的
             shutil.rmtree(workdir / top, ignore_errors=True)
         for item in materials:
             rel = str(item.get("path", ""))

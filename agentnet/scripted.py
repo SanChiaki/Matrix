@@ -1,7 +1,7 @@
 """确定性脚本场景：用于自动化测试与离线演练（--runtime scripted）。
 
 群聊里被 @ 的成员接任务。被 @ 的若是 Product Strategy Agent（规划者），它分几轮推进：
-1. 被 @：open_request 登记为用户任务（看板）→ list_members → 逐个委托市场 / 技术 / 竞争 → 越界尝试委托群组外成员（被拒绝）。
+1. 被 @：open_request 登记为用户任务（看板）→ list_members → 逐个委托市场 / 技术 / 竞争 → 越界尝试委托项目外成员（被拒绝）。
 2. 每收到一份交付：验收（accept_task）；竞争格局一到，就把它共享给市场研究再委托一次。
 3. 所有委托都有了结果：整合回复，deliver_request 交付任务。
 被 @ 的若是专项成员（市场 / 技术 / 竞争），它自己回答，不转手。
@@ -62,7 +62,7 @@ def scenario_handler(call: ScriptCall) -> str:
         for n in (n for n in TARGETS if n in roster):
             tid = re.search(r"任务 (task-[0-9a-f]{8})", call.tool("delegate", agent=n, **ASKS[n])).group(1)
             st["pending"].add(tid)
-        # 越界尝试：委托群组外的 Agent 会被拒绝
+        # 越界尝试：委托项目外的 Agent 会被拒绝
         call.tool("delegate", agent="Legal Compliance Agent", mission="评估合规风险", expected_outcome="风险清单")
         return f"已委托 {len(st['pending'])} 个成员，等它们交付。"
 

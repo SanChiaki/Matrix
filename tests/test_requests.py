@@ -85,7 +85,7 @@ def test_accept_request_requires_own_seat(tmp_path, field):
 
 def test_accept_request_requires_reported_delegations(tmp_path):
     net, chat, r, _, requester, out = setup_request(tmp_path)
-    net.store.tasks["pending"] = Task(id="pending", conversation_id=chat.id, group_id=chat.group_id,
+    net.store.tasks["pending"] = Task(id="pending", conversation_id=chat.id, project_id=chat.project_id,
         delegator_id=r.agent_id, delegatee_id=r.agent_id, parent_task_id=None, depth=1,
         delegation=Delegation(mission="m", authority=[], constraints=[], expected_outcome="o"),
         status=TaskStatus.RUNNING)

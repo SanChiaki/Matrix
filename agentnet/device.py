@@ -32,7 +32,7 @@ HELLO = "hello"                    # {protocol, token, runtime}
 RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation_id, session_id, workdir_ref,
                                    #  prompt, authority, tool_names, model, materials, home, harness}
                                    #  harness: 用设备上的哪个 harness；null = 默认（握手里的第一个）
-                                   #  materials: [{path, data(base64)}] —— 群组文件与委托材料的只读副本
+                                   #  materials: [{path, data(base64)}] —— 项目文件与委托材料的只读副本
                                    #  home: "rw" | "ro" | null —— 私有目录怎么挂载；目录本身在连接器本机，不经过网络
 CANCEL = "cancel"                  # {run_id}
 SHUTDOWN = "shutdown"

@@ -23,12 +23,12 @@ _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 TOOLS = [
     {
         "name": "list_members",
-        "description": "列出你所在群组的其他成员：名称、描述、能力、权限、当前状态。委托前先用它发现谁能做。",
+        "description": "列出你所在项目的其他成员：名称、描述、能力、权限、当前状态。委托前先用它发现谁能做。",
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "delegate",
-        "description": ("把一个子任务委托给群组内的某个成员。立即返回任务 id，不等待结果；对方交付或失败时，"
+        "description": ("把一个子任务委托给项目内的某个成员。立即返回任务 id，不等待结果；对方交付或失败时，"
                         "网络会把结果作为通知在新的一轮里送给你。只能委托 list_members 返回的成员。"
                         "对方的实际权限 = 对方自身权限 ∩ 你在 authority 里授予的权限；你的约束会被继承。"),
         "inputSchema": {
@@ -49,7 +49,7 @@ TOOLS = [
     },
     {
         "name": "share_knowledge",
-        "description": "把一条你可见的知识显式共享给群组内的某个成员（对方此后在本对话发起的委托中可见）。",
+        "description": "把一条你可见的知识显式共享给项目内的某个成员（对方此后在本对话发起的委托中可见）。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -103,8 +103,8 @@ TOOLS = [
     },
     {
         "name": "propose_agent",
-        "description": ("群组里没有合适的成员时，提议新建一个 Agent。网络不会直接创建：人审核（可修改）后批准，"
-                        "新 Agent 加入当前群组；结果会作为通知送给你。提议的权限不能超出你当前的有效权限。"),
+        "description": ("项目里没有合适的成员时，提议新建一个 Agent。网络不会直接创建：人审核（可修改）后批准，"
+                        "新 Agent 加入当前项目；结果会作为通知送给你。提议的权限不能超出你当前的有效权限。"),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -119,10 +119,10 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
-    # ---- 群组档案：群组成员都能用，不需要 delegate。联合群组里写进去的内容对所有参与方可见 ----
+    # ---- 项目档案：项目成员都能用，不需要 delegate。联合项目里写进去的内容对所有参与方可见 ----
     {
         "name": "record_decision",
-        "description": ("把群组里定下来的一件事记进群组档案。群组所有成员此后每一轮都会看到仍然有效的决定。"
+        "description": ("把项目里定下来的一件事记进项目档案。项目所有成员此后每一轮都会看到仍然有效的决定。"
                         "要推翻旧决定，写 supersedes 为旧决定的 id。"),
         "inputSchema": {
             "type": "object",
@@ -137,7 +137,7 @@ TOOLS = [
     },
     {
         "name": "list_decisions",
-        "description": "列出群组档案里的决定。默认只列仍然有效的。",
+        "description": "列出项目档案里的决定。默认只列仍然有效的。",
         "inputSchema": {
             "type": "object",
             "properties": {"include_inactive": {"type": "string", "description": "写 true 时包含已取代 / 撤销的"}},
@@ -146,104 +146,51 @@ TOOLS = [
     },
     {
         "name": "publish_file",
-        "description": ("把当前工作目录里的一个文件发布进群组档案（同名覆盖）。群组所有成员此后都能在 ./group/ 读到。"
-                        "群组属于某个项目时，target=project 发布到项目文件，项目里所有群组此后都能在 ./project/ 读到。"
+        "description": ("把当前工作目录里的一个文件发布进项目档案（同名覆盖）。项目所有成员此后都能在 ./project/ 读到。"
                         "只发布与工作有关、验收过的内容。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "工作目录里的相对路径；是目录时打成一个 zip 发布"},
                 "name": {"type": "string", "description": "可选：在档案里的文件名"},
-                "target": {"type": "string", "enum": ["group", "project"],
-                           "description": "可选：group（默认，群组档案）或 project（群组所属项目的文件）"},
             },
             "required": ["path"],
             "additionalProperties": False,
         },
     },
     {
-        "name": "handoff",
-        "description": ("项目里需要别的方面（另一个群组）接着做时，提交一次交接：写清要对方做什么、依据哪些项目文件、"
-                        "交回什么。由人确认（可能修改）后，以人的名义发进对方群聊并 @ 对方成员；你不能直接跨群组委托。"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "group": {"type": "string",
-                          "description": "目标群组的名称（同一项目里的其他群组）；在联合群组里留空，由项目负责人分派"},
-                "agent": {"type": "string", "description": "目标群组里接手的成员名称；在联合群组里留空"},
-                "message": {"type": "string", "description": "交接内容：背景、要做什么、依据的文件（如 project/xxx）、交回什么"},
-                "after": {"type": "string",
-                          "description": "可选：要等哪些交接完成后再发出（交接 id，多个用逗号分隔），例如测试要等开发交付"},
-                "replaces": {"type": "string",
-                             "description": "可选：替换一个还没完成的、发给同一群组的交接（id）；人确认后旧的作废，等旧的交接改为等这条"},
-            },
-            "required": ["message"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "review_handoff",
-        "description": ("项目负责人确认、不采纳或转交人处理一条待确认的交接。确认后以项目所有者的名义发进对方群聊并 @ 对方成员；"
-                        "超出网络设的边界时会自动转给人。"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "handoff_id": {"type": "string", "description": "交接 id"},
-                "decision": {"type": "string", "enum": ["confirm", "decline", "escalate", "send_now"],
-                             "description": "confirm 确认；decline 不采纳（提交者会被唤醒）；escalate 交给人；send_now 立即发出你确认过的排队交接"},
-                "message": {"type": "string", "description": "可选：确认时改写的交接内容"},
-                "group": {"type": "string", "description": "确认时交给哪个群组（联合群组提交的交接必须指定，只能是内部群组）"},
-                "agent": {"type": "string", "description": "确认时接手的成员（目标群组里的名称；换了群组时必须指定）"},
-                "after": {"type": "string", "description": "可选：确认时改依赖（交接 id，逗号分隔；空字符串表示不等）"},
-                "replaces": {"type": "string", "description": "可选：确认时替换的、还没发出的交接 id"},
-                "note": {"type": "string", "description": "不采纳或交给人时的理由"},
-            },
-            "required": ["handoff_id", "decision"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "share_file",
-        "description": ("项目负责人把项目文件共享给项目里的一个联合群组；那里的所有参与方此后都读得到（包括之后的新版本）。"
-                        "写 handoff 时是交回那个联合群组提交的交接：共享并通知提交者。"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "项目文件名（project/ 下的）；交回时可以写多个，逗号分隔"},
-                "group": {"type": "string", "description": "联合群组的名称（写了 handoff 时不用写）"},
-                "handoff": {"type": "string", "description": "可选：要交回的交接 id（联合群组提交的）"},
-                "note": {"type": "string", "description": "可选：交回时给对方的说明（不要写项目内部的细节）"},
-            },
-            "required": ["name"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "review_request",
-        "description": ("项目负责人验收一个由它确认的交接引出的、已交付的任务：验收、退回（写明要改什么）或交给人。"
-                        "验收后等它完成的交接会自动发出。"),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "request_id": {"type": "string", "description": "任务 id（req-…）"},
-                "decision": {"type": "string", "enum": ["accept", "changes", "escalate"],
-                             "description": "accept 验收；changes 退回返工；escalate 交给人验收"},
-                "feedback": {"type": "string", "description": "退回时要改什么；交给人时的理由"},
-            },
-            "required": ["request_id", "decision"],
-            "additionalProperties": False,
-        },
-    },
-    {
         "name": "propose_brief",
-        "description": "建议修改群组 brief（目标、范围、成功标准、当前阶段）。写完整的新 brief；主持人采纳后才生效。",
+        "description": "建议修改项目纲要（目标、范围、成功标准、当前阶段）。写完整的新纲要；主持人采纳后才生效。",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "text": {"type": "string", "description": "完整的新 brief"},
+                "text": {"type": "string", "description": "完整的新纲要"},
                 "reason": {"type": "string", "description": "为什么要改"},
             },
             "required": ["text", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    # ---- 项目会话：助理读项目现状（按会话主人的可见性过滤）----
+    {
+        "name": "read_chat",
+        "description": "读项目群聊的消息：按关键词找，或看最近的若干条。只读，看到的范围和你的所有者一样。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "可选：关键词，只返回含它的消息"},
+                "limit": {"type": "string", "description": "可选：最多几条（1–50，默认 20），取最近的"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "read_request",
+        "description": "读项目里一个用户任务的详情：原始要求、状态、交付说明、为它发起的委托与结果。只读。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"request_id": {"type": "string", "description": "任务 id（req-…）"}},
+            "required": ["request_id"],
             "additionalProperties": False,
         },
     },

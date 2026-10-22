@@ -1,4 +1,4 @@
-"""ScriptedRuntime 驱动的网络语义测试：群组内委托、权限、防环、知识隔离、持久化、DSH 覆盖层，
+"""ScriptedRuntime 驱动的网络语义测试：项目内委托、权限、防环、知识隔离、持久化、DSH 覆盖层，
 以及异步委托（收件箱 + 唤醒）、验收、续接、提议新建 Agent、私有目录、按 Agent 配模型。"""
 
 from __future__ import annotations
@@ -30,17 +30,17 @@ def scenario(tmp_path: Path):
     rt = ScriptedRuntime(scenario_handler)
     net = Network(rt, tmp_path)
     lead = net.store.agent_by_name("Product Strategy Agent")
-    group = net.store.groups_of(lead.id)[0]
+    group = net.store.projects_of(lead.id)[0]
     conv = net.create_conversation(group.id)
     net.send_message(conv.id, f"@{lead.name} {GOAL}", background=False)
     return net, rt, conv
 
 
 def talk(net: Network, agent, group, text: str, conv=None):
-    """在群聊里 @ 一个成员（没有群组时开私聊）；返回对话。"""
+    """在群聊里 @ 一个成员（没有项目时开私聊）；返回对话。"""
     if conv is None:
         conv = net.create_conversation(group.id) if group is not None else net.create_conversation(agent_id=agent.id)
-    net.send_message(conv.id, f"@{agent.name} {text}" if conv.kind == "group" else text, background=False)
+    net.send_message(conv.id, f"@{agent.name} {text}" if conv.kind == "project" else text, background=False)
     return conv
 
 
@@ -72,20 +72,20 @@ def is_task(call: ScriptCall) -> bool:
 def pair(net: Network, a_auth=("delegate", "web.research"), b_auth=("web.research",)):
     a = net.create_agent("A", "A", ["a"], list(a_auth))
     b = net.create_agent("B", "B", ["b"], list(b_auth))
-    g = net.create_group("G", "", [a.id, b.id])
+    g = net.create_project("G", "", [a.id, b.id])
     return a, b, g
 
 
 # ================= 种子与基本委托 =================
 def test_seed_network(tmp_path: Path):
     net = Network(ScriptedRuntime(scenario_handler), tmp_path)
-    assert len(net.store.agents) == 5 and len(net.store.groups) == 1
-    g = next(iter(net.store.groups.values()))
+    assert len(net.store.agents) == 5 and len(net.store.projects) == 1
+    g = next(iter(net.store.projects.values()))
     legal = net.store.agent_by_name("Legal Compliance Agent")
     assert legal.id not in g.member_ids
 
 
-def test_conversation_delegates_within_group(scenario):
+def test_conversation_delegates_within_project(scenario):
     """异步：第一轮发出委托就结束；交付唤醒对话 Agent 验收；全部有结果后整合回复。"""
     net, rt, conv = scenario
     assert conv.status == "idle"
@@ -131,7 +131,7 @@ def test_outside_group_rejected_no_autocreate(scenario):
     net, _, _ = scenario
     rejected = [t for t in tasks(net) if t.status == TaskStatus.REJECTED]
     assert len(rejected) == 1 and rejected[0].delegatee_id is None
-    assert "不是群组" in rejected[0].error
+    assert "不是项目" in rejected[0].error
     assert len(net.store.agents) == 5
 
 
@@ -158,7 +158,7 @@ def test_grant_cannot_exceed_delegator(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path)
     lead = net.create_agent("Lead", "lead", ["plan"], ["delegate", "web.research"])
     worker = net.create_agent("Worker", "w", ["x"], ["web.research", "shell.exec"])
-    g = net.create_group("G", "", [lead.id, worker.id])
+    g = net.create_project("G", "", [lead.id, worker.id])
     talk(net, lead, g, "hi")
     t = tasks(net)[0]
     assert t.granted_authority == ["web.research"]  # 委托方没有 shell.exec，给不出去
@@ -190,7 +190,7 @@ def test_constraints_inherit_and_nested_no_cycle(tmp_path: Path):
 
     net = Network(ScriptedRuntime(handler), tmp_path)
     a, b, c = (net.create_agent(n, n, [n.lower()], ["delegate", "web.research"]) for n in "ABC")
-    g = net.create_group("G", "", [a.id, b.id, c.id])
+    g = net.create_project("G", "", [a.id, b.id, c.id])
     conv = talk(net, a, g, "go")
     t_c = next(t for t in tasks(net) if t.delegatee_id == c.id)
     t_b = next(t for t in tasks(net) if t.delegatee_id == b.id)
@@ -213,7 +213,7 @@ def test_run_progress_is_live_and_kept_on_reply(tmp_path: Path):
             seen["task"] = net.task_detail(call.context_id)["live"]
             return "B done"
         if call.turn == 1:
-            call.say("先看看群组成员")
+            call.say("先看看项目成员")
             call.tool("list_members")
             seen["conv"] = net.conversation_detail(call.context_id.split("/")[0])["live"]
             call.tool("delegate", agent="B", mission="查资料", expected_outcome="摘要")
@@ -251,7 +251,7 @@ def test_delegate_constraints_as_text(tmp_path: Path):
 
     net = Network(ScriptedRuntime(handler), tmp_path)
     a, b = (net.create_agent(n, n, [n.lower()], ["delegate", "web.research"]) for n in "AB")
-    g = net.create_group("G", "", [a.id, b.id])
+    g = net.create_project("G", "", [a.id, b.id])
     talk(net, a, g, "go")
     t1, t2 = tasks(net)
     assert t1.effective_constraints == ["只用公开信息", "不编造数据", "不评估技术实现"]
@@ -282,9 +282,9 @@ def test_depth_limit_unmounts_tools(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path, Limits(max_depth=1))
     a = net.create_agent("A", "a", ["a"], ["delegate"])
     b = net.create_agent("B", "b", ["b"], ["delegate"])
-    g = net.create_group("G", "", [a.id, b.id])
+    g = net.create_project("G", "", [a.id, b.id])
     talk(net, a, g, "go")
-    assert mounted == [False]  # 协作工具卸下；群组档案工具仍在（不需要 delegate）
+    assert mounted == [False]  # 协作工具卸下；项目档案工具仍在（不需要 delegate）
 
 
 def test_delegation_limit_spans_rounds(tmp_path: Path):
@@ -322,11 +322,11 @@ def test_dm_has_no_network_tools(tmp_path: Path):
 def test_conversation_rules(tmp_path: Path):
     net = Network(ScriptedRuntime(scenario_handler), tmp_path)
     legal = net.store.agent_by_name("Legal Compliance Agent")
-    g = next(iter(net.store.groups.values()))
+    g = next(iter(net.store.projects.values()))
     conv = net.create_conversation(g.id)
-    with pytest.raises(NetworkError, match="不是群组"):  # 只能 @ 群组成员
+    with pytest.raises(NetworkError, match="不是项目"):  # 只能 @ 项目成员
         net.send_message(conv.id, "hi", mentions=[legal.id])
-    assert net.resolve_mentions(conv, f"@{legal.name} 你好") == []  # 文本里 @ 群组外的人：不唤醒
+    assert net.resolve_mentions(conv, f"@{legal.name} 你好") == []  # 文本里 @ 项目外的人：不唤醒
     net.update_agent(legal.id, chat_enabled=False)
     with pytest.raises(NetworkError, match="未开放"):
         net.create_conversation(agent_id=legal.id)
@@ -399,17 +399,17 @@ def test_mention_several_members_runs_in_parallel_seats(tmp_path: Path):
 
 
 def test_one_chat_per_group_and_per_agent(tmp_path: Path):
-    """参照 Raft：群组就是群聊，建群组即有，不会重复创建；每个 Agent 一个私聊，第一次打开时创建。"""
+    """参照 Raft：项目就是群聊，建项目即有，不会重复创建；每个 Agent 一个私聊，第一次打开时创建。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)
-    seed = next(iter(net.store.groups.values()))
-    assert net._group_chat_of(seed.id) is not None  # 种子群组自带群聊
+    seed = next(iter(net.store.projects.values()))
+    assert net._project_chat_of(seed.id) is not None  # 种子项目自带群聊
     a, b, g = pair(net)
-    chat = net._group_chat_of(g.id)
+    chat = net._project_chat_of(g.id)
     assert chat is not None and chat.title == "G"
-    assert net.create_conversation(g.id).id == net.group_chat(g.id).id == chat.id
+    assert net.create_conversation(g.id).id == net.project_chat(g.id).id == chat.id
     dm = net.direct_chat(a.id)
     assert dm.kind == "dm" and net.direct_chat(a.id).id == dm.id
-    net.update_group(g.id, name="G2")
+    net.update_project(g.id, name="G2")
     assert chat.title == "G2"
     with pytest.raises(NetworkError, match="不能删除"):
         net.delete_conversation(chat.id)
@@ -429,28 +429,28 @@ def test_members_can_change_any_time(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path)
     a, b, g = pair(net)
     c = net.create_agent("C", "C", ["c"], [])
-    chat = net.group_chat(g.id)
+    chat = net.project_chat(g.id)
     net.add_member(g.id, c.id)
-    assert chat.messages[-1].role == "event" and "C 加入了群组" in chat.messages[-1].text
+    assert chat.messages[-1].role == "event" and "C 加入了项目" in chat.messages[-1].text
     talk(net, c, None, "欢迎", chat)
-    assert "（C 加入了群组）" in prompts[-1] and chat.messages[-1].agent_id == c.id
+    assert "（C 加入了项目）" in prompts[-1] and chat.messages[-1].agent_id == c.id
     net.remove_member(g.id, c.id)
-    assert "C 离开了群组" in chat.messages[-1].text
+    assert "C 离开了项目" in chat.messages[-1].text
     assert net.resolve_mentions(chat, "@C 还在吗") == []
-    with pytest.raises(NetworkError, match="不是群组"):
+    with pytest.raises(NetworkError, match="不是项目"):
         net.send_message(chat.id, "x", mentions=[c.id])
-    with pytest.raises(NetworkError, match="不在群组里"):
+    with pytest.raises(NetworkError, match="不在项目里"):
         net.remove_member(g.id, c.id)
-    with pytest.raises(NetworkError, match="已经在群组里"):
+    with pytest.raises(NetworkError, match="已经在项目里"):
         net.add_member(g.id, a.id)
 
 
 def test_deleted_group_or_agent_archives_chat(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)
     a, b, g = pair(net)
-    chat = net.group_chat(g.id)
+    chat = net.project_chat(g.id)
     dm = net.direct_chat(b.id)
-    net.delete_group(g.id)
+    net.delete_project(g.id)
     net.delete_agent(b.id)
     assert chat.archived and dm.archived
     with pytest.raises(NetworkError, match="已归档"):
@@ -463,7 +463,7 @@ def test_mention_resolution_longest_name_first(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)
     m = net.create_agent("Market", "m", ["m"], [])
     mr = net.create_agent("Market Research", "mr", ["mr"], [])
-    g = net.create_group("G", "", [m.id, mr.id])
+    g = net.create_project("G", "", [m.id, mr.id])
     conv = net.create_conversation(g.id)
     assert net.resolve_mentions(conv, "@Market Research 看看") == [mr.id]
     assert set(net.resolve_mentions(conv, "@market 和 @Market Research")) == {m.id, mr.id}
@@ -519,7 +519,7 @@ def test_share_requires_visibility(scenario):
     tech_task = by_target(net, "Technical Analysis Agent")[0]
     ci_key = next(k for k in net.store.knowledge if "Competitive" in net.store.knowledge[k].title)
     ctx = ExecContext(kind="task", id=tech_task.id, agent_id=tech.id, conversation_id=conv.id,
-                      group_id=conv.group_id, authority=["delegate"], constraints=[], depth=1, chain=[tech.id])
+                      project_id=conv.project_id, authority=["delegate"], constraints=[], depth=1, chain=[tech.id])
     net._contexts["tok"] = ctx
     text, err = net.handle_tool("tok", "share_knowledge", {"key": ci_key, "agent": "Market Research Agent"})
     assert err and "不可见" in text
@@ -540,7 +540,7 @@ def test_violation_recorded(tmp_path: Path):
     net = Network(ScriptedRuntime(handler), tmp_path)
     a = net.create_agent("L", "l", ["l"], ["delegate", "shell.exec"])
     w = net.create_agent("W", "w", ["w"], ["web.research"])
-    g = net.create_group("G", "", [a.id, w.id])
+    g = net.create_project("G", "", [a.id, w.id])
     talk(net, a, g, "go")
     t = tasks(net)[0]
     assert any("bash" in v for v in t.violations) and not any("subagent" in v for v in t.violations)
@@ -720,7 +720,7 @@ def _proposer(out: dict[str, str]):
         if "（@ 你）" in call.prompt:
             out["over"] = call.tool("propose_agent", name="Legal Agent", description="合规评估", reason="r",
                                     authority=["shell.exec"])
-            out["ok"] = call.tool("propose_agent", name="Legal Agent", description="合规评估", reason="群组里没人懂合规",
+            out["ok"] = call.tool("propose_agent", name="Legal Agent", description="合规评估", reason="项目里没人懂合规",
                                   capabilities=["legal"], authority=["web.research"])
             return "提议了，等人审核"
         if "已批准" in call.prompt:
@@ -733,7 +733,7 @@ def _proposer(out: dict[str, str]):
 
 
 def test_propose_agent_approved_joins_group(tmp_path: Path):
-    """不变量 2：Agent 只能提议；人批准（可修改，但权限不超出提议者）后以人的身份创建、加入群组，并唤醒提议者。"""
+    """不变量 2：Agent 只能提议；人批准（可修改，但权限不超出提议者）后以人的身份创建、加入项目，并唤醒提议者。"""
     out: dict[str, str] = {}
     net = Network(ScriptedRuntime(_proposer(out)), tmp_path)
     a, b, g = pair(net)
@@ -821,7 +821,7 @@ def test_agent_home_persists_without_injection(tmp_path: Path):
 
     net = Network(ScriptedRuntime(handler), tmp_path)
     a = net.create_agent("A", "A", ["a"], ["file.write"])
-    g = net.create_group("G", "", [a.id])
+    g = net.create_project("G", "", [a.id])
     c1 = talk(net, a, None, "一")
     c2 = talk(net, a, g, "二")  # 另一个对话（群聊），同一个 Agent
     assert seen == ["", "第 1 次运行的笔记"]
@@ -857,7 +857,7 @@ def test_persistence_roundtrip(scenario, tmp_path: Path):
     net2 = Network(ScriptedRuntime(scenario_handler), tmp_path)
     c2 = net2.store.conversations[conv.id]
     lead = net.store.agent_by_name("Product Strategy Agent")
-    assert c2.kind == "group" and c2.seats[lead.id].dsh_session_id == conv.seats[lead.id].dsh_session_id
+    assert c2.kind == "project" and c2.seats[lead.id].dsh_session_id == conv.seats[lead.id].dsh_session_id
     assert c2.seats[lead.id].seen == conv.seats[lead.id].seen and len(c2.messages) == len(conv.messages)
     assert len(net2.store.tasks) == len(net.store.tasks)
     rel = net2.relations()
@@ -870,7 +870,7 @@ def test_restart_fails_running_tasks_and_notifies(tmp_path: Path):
     a, b, g = pair(net)
     conv = talk(net, a, g, "go")
     from agentnet.models import Delegation, Task
-    t = Task(id="task-0000beef", conversation_id=conv.id, group_id=g.id, delegator_id=a.id, delegatee_id=b.id,
+    t = Task(id="task-0000beef", conversation_id=conv.id, project_id=g.id, delegator_id=a.id, delegatee_id=b.id,
              parent_task_id=None, depth=1, delegation=Delegation("m", [], [], "o"), dsh_session_id="s1")
     net.store.tasks[t.id] = t
     conv.status = "waiting"
@@ -883,7 +883,7 @@ def test_restart_fails_running_tasks_and_notifies(tmp_path: Path):
 
 def test_load_legacy_state(scenario, tmp_path: Path):
     """旧版 state.json：Agent 带 memory 字段；对话是“主 Agent”模型（agent_id + 单个会话）；任务缺少新字段。
-    对话迁移成只有这一个席位的群聊（在群组里）或私聊，沿用原会话与目录，还能续接；委托结果的可见性迁到席位。"""
+    对话迁移成只有这一个席位的群聊（在项目里）或私聊，沿用原会话与目录，还能续接；委托结果的可见性迁到席位。"""
     net, _, conv = scenario
     lead = net.store.agent_by_name("Product Strategy Agent")
     old_seat = conv.seats[lead.id]
@@ -900,7 +900,7 @@ def test_load_legacy_state(scenario, tmp_path: Path):
         for m in c["messages"]:
             for k in ("wake", "agent_id", "mentions"):
                 m.pop(k, None)
-    dm = {"id": "conv-0000dead", "agent_id": lead.id, "group_id": None, "title": "旧私聊", "messages": [],
+    dm = {"id": "conv-0000dead", "agent_id": lead.id, "project_id": None, "title": "旧私聊", "messages": [],
           "dsh_session_id": None}
     raw["conversations"].append(dm)
     for t in raw["tasks"]:
@@ -916,33 +916,33 @@ def test_load_legacy_state(scenario, tmp_path: Path):
     assert len(net2.store.agents) == len(net.store.agents)
     assert not hasattr(net2.store.agent_by_name("Market Research Agent"), "memory")
     c2 = net2.store.conversations[conv.id]
-    assert c2.kind == "group" and list(c2.seats) == [lead.id]
+    assert c2.kind == "project" and list(c2.seats) == [lead.id]
     s2 = c2.seats[lead.id]
     assert s2.dsh_session_id == old_seat.dsh_session_id and s2.workdir == f"conversations/{conv.id}"
     assert s2.seen == len(c2.messages)  # 旧消息已在会话里，不再重复送
     assert c2.messages[0].mentions == [lead.id] and c2.messages[1].agent_id == lead.id
     assert net2.store.conversations["conv-0000dead"].kind == "dm"
-    assert not c2.archived and net2._group_chat_of(c2.group_id).id == c2.id
+    assert not c2.archived and net2._project_chat_of(c2.project_id).id == c2.id
     first_ci = by_target(net2, "Competitive Intelligence Agent")[0]
     assert f"{conv.id}/{lead.id}" in net2.store.knowledge[f"{first_ci.id}:result"].visible_to
 
 
 def test_legacy_multiple_chats_collapse_to_one(tmp_path: Path):
-    """旧版每个群组可以开多个对话：加载后最近活跃的那个是群聊，其余归档只读，记录不丢。"""
+    """旧版每个项目可以开多个对话：加载后最近活跃的那个是群聊，其余归档只读，记录不丢。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)
     lead = net.store.agent_by_name("Product Strategy Agent")
-    g = net.store.groups_of(lead.id)[0]
+    g = net.store.projects_of(lead.id)[0]
     path = tmp_path / "state.json"
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["conversations"] = [
-        {"id": f"conv-old{i}", "agent_id": lead.id, "group_id": g.id, "title": f"与 {lead.name} 的对话",
+        {"id": f"conv-old{i}", "agent_id": lead.id, "project_id": g.id, "title": f"与 {lead.name} 的对话",
          "messages": [{"id": f"m{i}", "role": "user", "text": f"第 {i} 个"}], "updated_at": 100 + i}
         for i in range(3)]
     path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
     net2 = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)
     convs = net2.store.conversations
     assert [convs[f"conv-old{i}"].archived for i in range(3)] == [True, True, False]
-    assert net2.group_chat(g.id).id == "conv-old2" and convs["conv-old2"].title == g.name
+    assert net2.project_chat(g.id).id == "conv-old2" and convs["conv-old2"].title == g.name
     assert convs["conv-old0"].messages[0].text == "第 0 个"
 
 

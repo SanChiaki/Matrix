@@ -224,6 +224,9 @@ button.icon svg { width: 14px; height: 14px; }
 .conv-list a:hover { background: var(--surface-3); }
 .conv-list a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .conv-list li.selected a { background: var(--accent-soft); }
+.conv-list li.nested a { padding: 5px 10px 5px 28px; }
+.conv-list li.nested .avatar { width: 18px; height: 18px; font-size: 11px; border-radius: 5px; }
+.avatar.session { color: var(--muted); background: var(--surface-3); border-color: transparent; }
 .conv-list .c-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .conv-list .t { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
 .conv-list .t .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

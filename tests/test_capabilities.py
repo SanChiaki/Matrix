@@ -60,8 +60,8 @@ def test_seat_authority_excludes_advisory(tmp_path):
     net = build(tmp_path, limited("delegate"))
     alice = users(net, "alice@x.io")[0]
     a = net.create_agent("A", "做调研", ["research"], ["web.research", "delegate"], actor=alice)
-    g = net.create_group("G", "", [a.id], actor=alice)
-    chat = net.group_chat(g.id, actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 看看", actor=alice, background=False)
     call = net.runtime.calls[0]
     assert call.authority == ["web.research"]
@@ -75,8 +75,8 @@ def test_delegation_cannot_grant_what_runtime_cannot_enforce(tmp_path):
     alice = users(net, "alice@x.io")[0]
     lead = net.create_agent("Lead", "协调", [], ["delegate", "file.write"], actor=alice)
     worker = net.create_agent("Worker", "执行", [], ["file.write"], actor=alice)
-    g = net.create_group("G", "", [lead.id, worker.id], actor=alice)
-    chat = net.group_chat(g.id, actor=alice)
+    g = net.create_project("G", "", [lead.id, worker.id], actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
 
     seen = {}
 
@@ -108,8 +108,8 @@ def test_task_narrowing_is_shown_and_persisted(tmp_path):
     alice = users(net, "alice@x.io")[0]
     lead = net.create_agent("Lead", "协调", [], ["delegate"], actor=alice)
     worker = net.create_agent("Worker", "执行", [], ["file.write"], actor=alice)
-    g = net.create_group("G", "", [lead.id, worker.id], actor=alice)
-    chat = net.group_chat(g.id, actor=alice)
+    g = net.create_project("G", "", [lead.id, worker.id], actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
 
     def handler(call):
         if call.agent_id == lead.id and call.turn == 1:
