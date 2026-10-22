@@ -717,9 +717,28 @@ class Network:
         return g
 
     def project_files(self, g: Project) -> list[dict[str, Any]]:
+        import json
         d = self.store.project_dir(g.id)
-        return [{"name": p.name, "size": p.stat().st_size, "updated_at": p.stat().st_mtime}
-                for p in sorted(d.iterdir()) if p.is_file()]
+        by: dict[str, dict[str, Any]] = {}  # 文件名 → 最近一次发布的日志条目（谁更新的）
+        log = d.parent / "log.jsonl"
+        if log.is_file():
+            for line in log.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if e.get("action") == "file.publish" and e.get("file"):
+                    by[e["file"]] = e
+                elif e.get("action") == "file.delete":
+                    by.pop(e.get("file"), None)
+        out = []
+        for p in sorted(d.iterdir()):
+            if not p.is_file():
+                continue
+            e = by.get(p.name, {})
+            out.append({"name": p.name, "size": p.stat().st_size, "updated_at": p.stat().st_mtime,
+                        "by_agent": e.get("by_agent"), "by_user": e.get("by_user")})
+        return out
 
     def project_file(self, project_id: str, name: str, actor: str | None = None) -> Path:
         g = self.visible_project(project_id, actor)

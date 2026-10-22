@@ -383,3 +383,20 @@ def test_archive_api(tmp_path: Path):
     assert cb.post(f"/api/projects/{g['id']}/leave").status_code == 200
     assert cb.get(f"/api/projects/{g['id']}").status_code == 404
     assert cb.get(f"/api/projects/{g['id']}/files/a.md").status_code == 404
+
+
+def test_project_files_report_last_updater(tmp_path: Path):
+    """项目页的资产列表：每个文件带最近一次发布它的人 / Agent；删除后再发布以新的为准。"""
+    net = Network(ScriptedRuntime(lambda call: "完成"), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
+    net.publish_file(g.id, "a.md", b"1", actor=alice)
+    net.publish_file(g.id, "b.md", b"2", actor=alice, agent_id=a.id)
+    net.publish_file(g.id, "a.md", b"3", actor=alice, agent_id=a.id)  # 覆盖：更新人换成 Agent
+    files = {f["name"]: f for f in net.project_detail(g.id, actor=alice)["files"]}
+    assert files["a.md"]["by_agent"] == a.id and files["b.md"]["by_agent"] == a.id
+    net.delete_file(g.id, "b.md", actor=alice)
+    net.publish_file(g.id, "b.md", b"4", actor=alice)
+    files = {f["name"]: f for f in net.project_detail(g.id, actor=alice)["files"]}
+    assert files["b.md"]["by_agent"] is None and files["b.md"]["by_user"] == alice

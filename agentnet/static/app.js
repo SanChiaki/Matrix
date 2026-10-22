@@ -163,7 +163,7 @@ async function start() {
     if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
     S.devicePanel = "new"; renderDeviceDetail();
   });
-  $("#project-new").addEventListener("click", () => { S.projectSel = null; renderProjectEditor(true); renderProjects(); });
+  $("#project-new").addEventListener("click", () => { S.projectSel = null; renderProjectsView(); renderProjectEditor(true); });
   $("#project-quick").addEventListener("click", () => { S.projectSel = null; S.newProject = true; location.hash = "projects"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
   initTheme();
@@ -219,8 +219,11 @@ function route() {
     if (S.conv?.id !== hash) openConv(hash);
   } else {
     // 切到普通视图时清掉选中的对话，否则 URL 与画面会不一致。
+    // #project-<项目> 打开项目页（可收藏、刷新、前进后退）；#projects 是项目列表
+    const page = hash.match(/^project-(.+)$/);
     S.convId = null; S.conv = null;
-    show(PLAIN.includes(hash) ? hash : "network");
+    S.projectSel = page ? page[1] : null;
+    show(page ? "projects" : PLAIN.includes(hash) ? hash : "network");
   }
 }
 
@@ -229,7 +232,7 @@ function show(view) {
   // 对话不是导航 tab：群聊与私聊常驻左栏，点哪个开哪个。
   document.querySelectorAll(".tab").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === view)));
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
-  if (view !== "chats") history.replaceState(null, "", `#${view}`);
+  if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}` : `#${view}`);
   if (view === "agents") loadModels();
   render();
 }
@@ -813,8 +816,10 @@ function renderAgentEditor(isNew = false) {
 
 // ================= 项目管理 =================
 function renderProjectsView() {
+  if (S.newProject) S.projectSel = null;
   renderProjects();
   renderProjectEditor(S.newProject);
+  renderProjectPage();
   if (S.newProject) { S.newProject = false; $("#gf-name")?.focus(); }
 }
 
@@ -824,8 +829,8 @@ const isHost = (g) => !!g && (!g.owner_id || g.owner_id === S.me?.id);
 
 function renderProjects() {
   $("#project-list").innerHTML = S.snap.projects.map((g) => `
-    <li class="${S.projectSel === g.id ? "selected" : ""}"><div class="card">
-      <button type="button" class="card-main" data-id="${esc(g.id)}" aria-label="${isHost(g) ? "编辑" : "查看"} ${esc(g.name)}">
+    <li><div class="card">
+      <button type="button" class="card-main" data-id="${esc(g.id)}" aria-label="打开 ${esc(g.name)}">
         <div class="card-head"><span class="swatch" style="background:${gcolor(g.id)}"></span><span class="name">${esc(g.name)}</span>${kindTag(g)}<span class="pill">${g.member_ids.length} 名成员</span></div>
         <p class="card-desc">${esc(g.description || "没有描述")}</p>
         <div class="card-meta">${tags(g.member_ids.map(aname))}</div>
@@ -833,7 +838,7 @@ function renderProjects() {
       <div class="card-foot"><span>${g.kind === "joint" ? `<span class="muted">${g.participants.length + 1} 人参与</span>` : ""}</span>${chatBtn(`p-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
     </div></li>`).join("") || '<li class="empty">还没有项目。</li>';
   $("#project-list").querySelectorAll(".card-main").forEach((b) =>
-    b.addEventListener("click", () => { S.projectSel = b.dataset.id; renderProjects(); renderProjectEditor(); }));
+    b.addEventListener("click", () => { location.hash = `project-${b.dataset.id}`; }));
 }
 
 function renderProjectEditor(isNew = false) {
@@ -844,7 +849,7 @@ function renderProjectEditor(isNew = false) {
   // 只能加入自己的 Agent；联合项目里别人的成员由他们自己加减（主持人可以移出）
   const mine = S.snap.agents.filter((a) => a.mine);
   const theirs = (x.member_ids || []).filter((id) => !agent(id)?.mine);
-  box.innerHTML = `<h2 class="panel-title">${g ? `<span class="swatch" style="background:${gcolor(g.id)}"></span>${esc(g.name)} ${kindTag(g)}` : "新建项目"}</h2>
+  box.innerHTML = `<h2 class="panel-title">${g ? `项目配置 ${kindTag(g)}` : "新建项目"}</h2>
     <p class="muted">委托只能在项目成员之间进行。</p>
     <form class="editor" id="project-form">
       ${g ? "" : `<fieldset class="seg" aria-label="项目类型">
@@ -871,16 +876,271 @@ function renderProjectEditor(isNew = false) {
     if (!g) body.kind = f.querySelector('[name="kind"]:checked').value;
     try {
       const r = await api(g ? `/api/projects/${g.id}` : "/api/projects", { method: g ? "PATCH" : "POST", body });
-      S.projectSel = r.id; await reload();
+      await reload();
+      if (!g) location.hash = `project-${r.id}`;  // 新建后直接进它的项目页
     } catch (err) { $(".error", f).textContent = err.message; }
   });
   $("#gf-chat")?.addEventListener("click", () => { location.hash = `p-${g.id}`; });
   $("#gf-del")?.addEventListener("click", async () => {
     if (!confirm(`删除项目 ${g.name}？群聊归档为只读（只有你看得到），不再能委托。`)) return;
-    try { await api(`/api/projects/${g.id}`, { method: "DELETE" }); S.projectSel = null; await reload(); }
+    try { await api(`/api/projects/${g.id}`, { method: "DELETE" }); location.hash = "projects"; await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });
   if (g?.kind === "joint") renderPeople($("#gf-people"), g);
+}
+
+// ---- 项目页（主区域，#project-<项目>）：面包屑 + 标签（资产 / 资源引用）；右侧是“项目配置”（renderProjectEditor）
+// 资产 = 项目档案里的文件：所有成员可预览、下载，主持人可上传（也可以拖进来）、删除；“更新人”取日志里最近一次发布它的人 / Agent。
+// 预览只在页面里转义后渲染（Markdown 走 renderMarkdown），不让浏览器直接打开文件：文件可能来自其他参与方或 Agent。
+const ASSET_LIMIT = 200_000;  // 与 models.FILE_LIMIT 一致
+const TEXT_EXT = ["MD", "TXT", "CSV", "TSV", "JSON", "YAML", "YML", "LOG", "XML", "HTML", "PY", "JS", "TS", "SH"];
+const IMAGE_EXT = ["PNG", "JPG", "JPEG", "GIF", "WEBP"];
+const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const fileExt = (name) => (name.includes(".") ? name.split(".").pop().toUpperCase() : "文件");
+const dateTime = (ts) => {
+  const d = new Date(ts * 1000), now = new Date(), day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()) / 864e5;
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return day(now) - day(d) === 0 ? `今天 ${hm}` : day(now) - day(d) === 1 ? `昨天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+};
+const FILE_KIND = { MD: "doc", TXT: "doc", LOG: "doc", CSV: "sheet", TSV: "sheet", JSON: "code", YAML: "code", YML: "code", XML: "code",
+  HTML: "code", PY: "code", JS: "code", TS: "code", SH: "code", PNG: "image", JPG: "image", JPEG: "image", GIF: "image", WEBP: "image" };
+const svgIcon = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const ICON = {
+  file: svgIcon('<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/>'),
+  down: svgIcon('<path d="M12 4v11"/><path d="m7 10 5 5 5-5"/><path d="M5 20h14"/>'),
+  trash: svgIcon('<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>'),
+  link: svgIcon('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
+  copy: svgIcon('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>'),
+  upload: svgIcon('<path d="M12 20V9"/><path d="m7 13 5-5 5 5"/><path d="M5 4h14"/>'),
+};
+const fileIcon = (ext) => `<span class="file-ico ${FILE_KIND[ext] || "other"}">${ICON.file}</span>`;
+const fileUrl = (pid, name) => `/api/projects/${encodeURIComponent(pid)}/files/${encodeURIComponent(name)}`;
+const isTextFile = (file) => file.type.startsWith("text/") || file.type === "application/json" || TEXT_EXT.includes(fileExt(file.name));
+const assetWho = (d) => (f) => f.by_agent ? aname(f.by_agent) : !f.by_user ? "—" : f.by_user === S.me?.id ? "你"
+  : f.by_user === d.owner_id ? d.host : d.participant_emails?.[f.by_user] || "—";
+const ASSET_SORT = { name: (a, b) => a.name.localeCompare(b.name), updated_at: (a, b) => a.updated_at - b.updated_at, size: (a, b) => a.size - b.size };
+
+async function renderProjectPage(force = false) {
+  const index = $("#project-index"), page = $("#project-page"), g = proj(S.projectSel);
+  index.hidden = !!g;
+  page.hidden = !g;
+  if (!g) { page.dataset.sig = ""; return; }
+  // 正在填写时不让事件驱动的刷新重绘（会清掉输入和焦点）；切标签、排序这类人点的操作照常重绘
+  if (!force && page.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
+  const d = await api(`/api/projects/${g.id}`).catch(() => null);
+  if (!d || S.projectSel !== g.id) return;
+  const st = S.assets = S.assets?.pid === g.id ? S.assets
+    : { pid: g.id, tab: "files", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
+  // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
+  const sig = JSON.stringify([d, g.name, g.description, st.tab, st.by, st.asc, st.note]);
+  if (page.dataset.sig === sig) return;
+  page.dataset.sig = sig;
+  const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
+    aria-controls="pp-panel">${label}<span class="count">${n}</span></button>`;
+  page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#projects">项目</a><span aria-hidden="true">/</span>
+      <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
+      <a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
+    ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}</div>
+    <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
+  page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => $(`#pt-${st.tab}`)?.focus());
+  }));
+  (st.tab === "refs" ? renderRefsTab : renderFilesTab)($("#pp-panel", page), d, st);
+}
+
+const assetNote = (st) => st.note ? `<p class="asset-note ${st.bad ? "bad" : ""}" role="status">${esc(st.note)}</p>` : "";
+
+function renderFilesTab(box, d, st) {
+  const host = d.is_host, who = assetWho(d);
+  const types = [...new Set(d.files.map((f) => fileExt(f.name)))].sort();
+  const total = d.files.reduce((n, f) => n + f.size, 0);
+  const rows = () => d.files.filter((f) => (!st.type || fileExt(f.name) === st.type) && f.name.toLowerCase().includes(st.q.toLowerCase()))
+    .sort((a, b) => (st.asc ? 1 : -1) * ASSET_SORT[st.by](a, b));
+  const upBtn = (cls = "") => `<label class="button ${cls} file-up" title="文本文件（md、txt、csv、json…），单个不超过 ${ASSET_LIMIT / 1000} KB；也可以把文件拖进列表">
+    ${ICON.upload}上传文件<input type="file" multiple hidden data-up></label>`;
+  const body = () => {
+    const list = rows();
+    if (list.length) return list.map((f) => `<tr class="${st.fresh.includes(f.name) ? "fresh" : ""}">
+      <td class="name"><div class="cell">${fileIcon(fileExt(f.name))}<button type="button" class="file-open" data-open="${esc(f.name)}" title="预览 ${esc(f.name)}">${esc(f.name)}</button></div></td>
+      <td>${esc(fileExt(f.name))}</td><td>${esc(who(f))}</td>
+      <td title="${esc(new Date(f.updated_at * 1000).toLocaleString())}">${dateTime(f.updated_at)}</td><td>${fmtSize(f.size)}</td>
+      <td class="row-act"><a class="icon-btn" href="${fileUrl(d.id, f.name)}" download title="下载" aria-label="下载 ${esc(f.name)}">${ICON.down}</a>${host
+        ? `<button type="button" class="icon-btn bad" data-rmasset="${esc(f.name)}" title="删除" aria-label="删除 ${esc(f.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("");
+    if (d.files.length) return `<tr><td colspan="6" class="empty">没有匹配的文件 · <button type="button" class="link" data-clear>清除筛选</button></td></tr>`;
+    return `<tr><td colspan="6" class="empty"><div class="empty-state">${fileIcon("")}<b>还没有资产</b>
+      <span>在群聊里让 Agent 把产出发布到项目${host ? "，或者把文件拖到这里" : ""}。发布进来的文件所有成员都能看到。</span>${host ? upBtn() : ""}</div></td></tr>`;
+  };
+  const th = (key, label) => `<th aria-sort="${st.by === key ? (st.asc ? "ascending" : "descending") : "none"}"><button type="button" class="sort" data-sort="${key}">
+    ${label}<span aria-hidden="true">${st.by === key ? (st.asc ? "↑" : "↓") : "↕"}</span></button></th>`;
+  box.innerHTML = `<div class="asset-bar">
+      ${host && d.files.length ? upBtn("ghost") : ""}
+      <span class="muted">${d.files.length} 个文件 · ${fmtSize(total)}</span>
+      <span class="grow"></span>
+      ${d.files.length > 1 || st.q || st.type ? `<label class="sr-only" for="asset-type">文件类型</label>
+        <select id="asset-type"><option value="">全部类型</option>${types.map((t) => `<option ${t === st.type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
+        <label class="sr-only" for="asset-q">搜索文件</label><input id="asset-q" type="search" placeholder="搜索文件名" value="${esc(st.q)}">` : ""}
+    </div>
+    ${assetNote(st)}
+    <div class="table-wrap"><table class="assets"><thead><tr>${th("name", "名称")}<th>类型</th><th>更新人</th>${th("updated_at", "更新时间")}${th("size", "大小")}
+      <th><span class="sr-only">操作</span></th></tr></thead><tbody>${body()}</tbody></table>
+      ${host ? `<div class="drop-mask" aria-hidden="true">${ICON.upload}松开，上传到「${esc(d.name)}」</div>` : ""}</div>
+    ${d.kind === "joint" ? '<p class="hint">联合项目：资产对所有参与者可见。</p>' : ""}`;
+  st.fresh = [];  // 刚上传的行只高亮这一次
+  const bindRows = () => {
+    box.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => previewAsset(d, d.files.find((f) => f.name === b.dataset.open))));
+    box.querySelectorAll("[data-rmasset]").forEach((b) => b.addEventListener("click", async () => {
+      const name = b.dataset.rmasset;
+      if (!confirm(`删除 ${name}？成员之后看不到它，Agent 下一轮也拿不到。`)) return;
+      try { await api(fileUrl(d.id, name), { method: "DELETE" }); st.note = `已删除 ${name}`; st.bad = false; }
+      catch (e) { st.note = `删除失败：${e.message}`; st.bad = true; }
+      await reload();
+    }));
+    box.querySelectorAll("[data-up]").forEach((inp) => inp.addEventListener("change", () => { uploadAssets(d, st, [...inp.files]); inp.value = ""; }));
+    $("[data-clear]", box)?.addEventListener("click", () => {
+      st.q = ""; st.type = ""; $("#asset-q", box).value = ""; $("#asset-type", box).value = ""; refresh();
+    });
+  };
+  const refresh = () => { $("tbody", box).innerHTML = body(); bindRows(); };
+  $("#asset-q", box)?.addEventListener("input", (e) => { st.q = e.target.value; refresh(); });
+  $("#asset-type", box)?.addEventListener("change", (e) => { st.type = e.target.value; refresh(); });
+  box.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
+    st.asc = st.by === b.dataset.sort ? !st.asc : b.dataset.sort === "name"; st.by = b.dataset.sort;
+    renderProjectPage(true).then(() => $(`[data-sort="${st.by}"]`)?.focus());
+  }));
+  if (host) {
+    // 拖文件进列表上传：dragleave 在子元素之间也会触发，按计数判断是否真的离开
+    const wrap = $(".table-wrap", box);
+    let depth = 0;
+    const has = (e) => [...(e.dataTransfer?.types || [])].includes("Files");
+    wrap.addEventListener("dragenter", (e) => { if (!has(e)) return; e.preventDefault(); depth++; wrap.classList.add("dropping"); });
+    wrap.addEventListener("dragover", (e) => { if (has(e)) e.preventDefault(); });
+    wrap.addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; wrap.classList.remove("dropping"); } });
+    wrap.addEventListener("drop", (e) => {
+      e.preventDefault(); depth = 0; wrap.classList.remove("dropping");
+      if (e.dataTransfer.files.length) uploadAssets(d, st, [...e.dataTransfer.files]);
+    });
+  }
+  bindRows();
+}
+
+async function uploadAssets(d, st, files) {
+  if (!files.length) return;
+  const dup = files.filter((f) => d.files.some((x) => x.name === f.name)).map((f) => f.name);
+  if (dup.length && !confirm(`已经有同名文件：${dup.join("、")}。覆盖它们？`)) return;
+  const ok = [], bad = [];
+  const bar = $("#project-page .asset-bar");
+  bar?.insertAdjacentHTML("afterend", `<p class="asset-note" role="status">正在上传 ${files.length} 个文件…</p>`);
+  for (const file of files) {
+    if (!isTextFile(file)) { bad.push(`${file.name}（只支持文本文件）`); continue; }
+    if (file.size > ASSET_LIMIT) { bad.push(`${file.name}（超过 ${ASSET_LIMIT / 1000} KB）`); continue; }
+    try { await api(`/api/projects/${d.id}/files`, { method: "POST", body: { name: file.name, content: await file.text() } }); ok.push(file.name); }
+    catch (e) { bad.push(`${file.name}（${e.message}）`); }
+  }
+  st.note = [ok.length ? `已上传 ${ok.join("、")}` : "", bad.length ? `没有上传：${bad.join("、")}` : ""].filter(Boolean).join("；");
+  st.bad = !ok.length; st.fresh = ok;
+  $("#project-page").dataset.sig = "";  // 结果文字可能和上次一样：强制重绘，换掉“正在上传”
+  await reload();
+}
+
+function renderRefsTab(box, d, st) {
+  const host = d.is_host;
+  const loc = (x) => /^https?:\/\//i.test(x.location)
+    ? `<a href="${esc(x.location)}" target="_blank" rel="noopener noreferrer">${esc(x.location)}</a>` : `<code>${esc(x.location)}</code>`;
+  box.innerHTML = `<p class="muted tab-intro">项目用到的仓库、路径、文档。引用作为背景推送给成员，但不授予任何访问权限：Agent 能不能读，仍由它自身的权限决定。</p>
+    ${assetNote(st)}
+    <div class="table-wrap"><table class="assets"><thead><tr><th>名称</th><th>位置</th><th>说明</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>
+      ${d.refs.map((x) => `<tr><td class="name"><div class="cell"><span class="file-ico ref">${ICON.link}</span><span>${esc(x.name)}</span></div></td><td class="loc">${loc(x)}</td>
+        <td class="ref-note">${esc(x.note) || '<span class="muted">—</span>'}</td>
+        <td class="row-act"><button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
+          ? `<button type="button" class="icon-btn bad" data-rmref="${esc(x.id)}" title="移除" aria-label="移除 ${esc(x.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="empty">还没有引用资源${host ? "，在下面添加" : "，由主持人添加"}。</td></tr>`}
+    </tbody></table></div>
+    ${host ? `<form class="ref-add" id="pp-ref-form" aria-label="添加资源引用">
+      <label class="sr-only" for="pr-name">名称</label><input id="pr-name" required maxlength="200" placeholder="名称，如：前端仓库">
+      <label class="sr-only" for="pr-loc">位置</label><input id="pr-loc" required maxlength="1000" placeholder="路径或 URL">
+      <label class="sr-only" for="pr-note">说明</label><input id="pr-note" maxlength="500" placeholder="说明（可选）">
+      <button type="submit">添加</button></form>` : ""}`;
+  const done = async (path, opts, msg) => {
+    try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    document.activeElement?.blur();
+    await reload();
+  };
+  $("#pp-ref-form", box)?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    done(`/api/projects/${d.id}/refs`, { method: "POST", body: { name: $("#pr-name").value, location: $("#pr-loc").value, note: $("#pr-note").value } },
+      `已添加 ${$("#pr-name").value}`);
+  });
+  box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => {
+    const x = d.refs.find((r) => r.id === b.dataset.rmref);
+    if (confirm(`移除引用「${x?.name}」？`)) done(`/api/projects/${d.id}/refs/${b.dataset.rmref}`, { method: "DELETE" }, `已移除 ${x?.name}`);
+  }));
+  box.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); b.title = "已复制"; b.classList.add("ok"); setTimeout(() => { b.title = "复制位置"; b.classList.remove("ok"); }, 1200); }
+    catch { prompt("复制这个位置：", b.dataset.copy); }
+  }));
+}
+
+// 资产预览：弹层里转义后渲染；图片用 blob URL；其他二进制只给下载
+function parseCsv(text, sep) {
+  const rows = []; let row = [], cell = "", q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) { if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') q = false; else cell += c; }
+    else if (c === '"') q = true;
+    else if (c === sep) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") { if (c === "\r" && text[i + 1] === "\n") i++; row.push(cell); rows.push(row); row = []; cell = ""; }
+    else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+function previewHtml(ext, text) {
+  if (text.includes("\u0000")) return '<p class="muted">这是二进制文件，不能在这里预览，下载后用本地应用打开。</p>';
+  if (ext === "MD") return `<div class="md">${renderMarkdown(text)}</div>`;
+  if (ext === "CSV" || ext === "TSV") {
+    const rows = parseCsv(text, ext === "TSV" ? "\t" : ","), MAX = 500;
+    if (rows.length) return `<div class="csv-wrap"><table class="csv"><thead><tr>${rows[0].map((c) => `<th>${esc(c)}</th>`).join("")}</tr></thead>
+      <tbody>${rows.slice(1, MAX + 1).map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+      ${rows.length > MAX + 1 ? `<p class="hint">只显示前 ${MAX} 行，共 ${rows.length - 1} 行。下载查看全部。</p>` : ""}`;
+  }
+  if (ext === "JSON") { try { text = JSON.stringify(JSON.parse(text), null, 2); } catch { /* 不是合法 JSON：按原文显示 */ } }
+  return text.trim() ? `<pre class="code">${esc(text)}</pre>` : '<p class="muted">空文件。</p>';
+}
+
+async function previewAsset(d, f) {
+  if (!f) return;
+  let dlg = $("#asset-preview");
+  if (!dlg) {
+    dlg = Object.assign(document.createElement("dialog"), { id: "asset-preview", className: "preview" });
+    document.body.append(dlg);
+    // 点遮罩或“关闭”收起；Esc 由 <dialog> 自己处理
+    dlg.addEventListener("click", (e) => { if (e.target === dlg || e.target.closest("[data-close]")) dlg.close(); });
+    dlg.addEventListener("close", () => { if (dlg.dataset.blob) URL.revokeObjectURL(dlg.dataset.blob); dlg.dataset.blob = ""; dlg.dataset.name = ""; });
+  }
+  const ext = fileExt(f.name), url = fileUrl(d.id, f.name);
+  dlg.dataset.name = f.name;
+  dlg.innerHTML = `<div class="preview-card" aria-labelledby="pv-title"><header>${fileIcon(ext)}<div class="pv-title"><h2 id="pv-title">${esc(f.name)}</h2>
+      <span class="muted">${fmtSize(f.size)} · ${esc(assetWho(d)(f))} · ${dateTime(f.updated_at)}</span></div>
+      <a class="button ghost sm" href="${url}" download>${ICON.down}下载</a><button type="button" class="ghost sm" data-close>关闭</button></header>
+    <div class="preview-body"><p class="muted">加载中…</p></div></div>`;
+  if (!dlg.open) dlg.showModal();
+  $("[data-close]", dlg).focus();
+  const body = $(".preview-body", dlg), still = () => dlg.open && dlg.dataset.name === f.name;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(r.status === 404 ? "文件已经不在了，可能刚被删除" : `加载失败（${r.status}）`);
+    if (IMAGE_EXT.includes(ext)) {
+      const u = URL.createObjectURL(await r.blob());
+      if (!still()) { URL.revokeObjectURL(u); return; }
+      dlg.dataset.blob = u;
+      body.innerHTML = `<img src="${u}" alt="${esc(f.name)}">`;
+      return;
+    }
+    const text = await r.text();
+    if (still()) body.innerHTML = previewHtml(ext, text);
+  } catch (e) { if (still()) body.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
 }
 
 // 联合项目的参与者：主持人邀请、撤回、移出
@@ -918,7 +1178,7 @@ async function renderPeople(box, g) {
 // 参与者看联合项目：加减自己的 Agent，退出
 function renderProjectGuest(box, g) {
   const mine = S.snap.agents.filter((a) => a.mine);
-  box.innerHTML = `<h2 class="panel-title"><span class="swatch" style="background:${gcolor(g.id)}"></span>${esc(g.name)} ${kindTag(g)}</h2>
+  box.innerHTML = `<h2 class="panel-title">项目配置 ${kindTag(g)}</h2>
     <p class="muted">${esc(g.description || "")}</p>
     <form class="editor" id="guest-form">
       <fieldset class="checks"><legend>你带进来的 Agent</legend>
@@ -1176,7 +1436,8 @@ async function renderArchive() {
         <button type="submit">记录</button></form>
       ${inactive.length ? `<details><summary>已取代 / 撤销 · ${inactive.length}</summary><ul class="decisions">${inactive.map(decision).join("")}</ul></details>` : ""}
     </section>
-    <section class="archive-sec" aria-labelledby="ar-files"><h3 id="ar-files">文件 · ${d.files.length}</h3>
+    <section class="archive-sec" aria-labelledby="ar-files"><h3 id="ar-files">文件 · ${d.files.length}
+      ${d.files.length ? `<a class="h3-link" href="#project-${esc(d.id)}">在项目页预览</a>` : ""}</h3>
       <ul class="files">${d.files.map((x) => `<li><a href="/api/projects/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
         <span class="muted">${(x.size / 1024).toFixed(1)} KB</span>${host ? `<button type="button" class="link" data-rmfile="${esc(x.name)}">删除</button>` : ""}</li>`).join("")
         || '<li class="empty">还没有文件。Agent 可以用 publish_file 发布，你也可以上传文本文件。</li>'}</ul>
@@ -1341,7 +1602,9 @@ function renderThread() {
     : c.is_host === false ? ""  // 联合项目的群聊只有主持人能清空
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
   const stale = S.convError ? `<span class="net-warn" role="status" title="${esc(S.convError)}">网络不稳定，显示的可能不是最新内容，正在重试…</span>` : "";
-  $("#thread-head").innerHTML = head + stale + actions;
+  const pageBtn = g && !c.archived && (c.kind === "project" || sess)
+    ? `<a class="button ghost" href="#project-${esc(g.id)}" title="资产、资源引用与项目配置">项目页</a>` : "";
+  $("#thread-head").innerHTML = head + stale + pageBtn + actions;
   $("#conv-del")?.addEventListener("click", async () => {
     if (!confirm("删除这个已归档的对话？")) return;
     try { await api(`/api/conversations/${c.id}`, { method: "DELETE" }); S.convId = null; S.conv = null; location.hash = "network"; await reload(); }
@@ -1546,7 +1809,6 @@ async function sendMsg(e) {
 // 参照 dsh 的附件栏（research: deepseek-harness#attachments）：选中、拖进来或粘贴就上传到当前对话，传完的随下一条消息发出。
 // 不按类型区分（图片也是普通文件）；消息上的附件一律点了下载，不在页面里打开。
 S.drafts = [];  // { key, conv, file, name, size, status: uploading | done | failed, meta, error }
-const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const extOf = (name) => (/\.([^.]{1,8})$/.exec(name)?.[1] || "file").toUpperCase();
 const attachLimit = () => S.info?.attachment_limit || 20_000_000;
 const convDrafts = () => S.drafts.filter((d) => d.conv === S.convId);
