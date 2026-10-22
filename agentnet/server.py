@@ -117,11 +117,11 @@ class NoteIn(BaseModel):
     note: str = Field("", max_length=2000)
 
 
-class GroupIn(BaseModel):
+class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field("", max_length=500)
     member_ids: list[str] = Field(default_factory=list)
-    kind: str = "internal"                          # internal（只有你和你的 Agent）| joint（联合群组）
+    kind: str = "internal"                          # internal（只有你和你的 Agent）| joint（联合项目）
 
 
 class ReviewIn(BaseModel):
@@ -162,31 +162,8 @@ class RefIn(BaseModel):
     note: str = Field("", max_length=500)
 
 
-class ProjectIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    description: str = Field("", max_length=500)
-    brief: str = Field("", max_length=4000)
-
-
-class ProjectPatch(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=80)
-    description: str | None = Field(None, max_length=500)
-    brief: str | None = Field(None, max_length=4000)
-
-
-class WorkstreamIn(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    description: str = Field("", max_length=500)
-
-
-class WorkstreamPatch(BaseModel):
-    name: str | None = Field(None, min_length=1, max_length=80)
-    description: str | None = Field(None, max_length=500)
-
-
 class AssignIn(BaseModel):
     project_id: str | None = None        # None = 移出项目
-    workstream_id: str | None = None
 
 
 class FileIn(BaseModel):
@@ -194,44 +171,28 @@ class FileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
-class HandoffApproveIn(BaseModel):
-    text: str | None = Field(default=None, max_length=4000)
-    agent_id: str | None = None
-    group_id: str | None = None          # 交给哪个群组：联合群组提交的交接必须指定（只能是内部群组）
-    after: list[str] | None = None       # 等哪些交接完成后再发出；None = 沿用提交时的，[] = 立即发出
-    replaces: str | None = None          # 替换一条还没发出的交接（旧的作废，等旧的改为等这条）
-
-
-class HandoffDeliverIn(BaseModel):
-    files: list[str] = Field(min_length=1, max_length=40)   # 交回的项目文件：共享给提交它的联合群组
-    note: str = Field("", max_length=2000)
-
-
-class ProjectLeadIn(BaseModel):
-    agent_id: str | None = None          # 项目负责人；None 表示不设
-    group_id: str | None = None          # 负责人在哪个挂载群组里统筹（它在多个群组里时）
-    autonomy: str = "manual"             # manual：交接由你确认；lead：由负责人确认，超出边界时转给你
-
-
-class ShareIn(BaseModel):
-    group_id: str                        # 项目里的联合群组
-    shared: bool = True
-
-
-class PromoteIn(BaseModel):
-    group_id: str
-    name: str = Field(min_length=1, max_length=120)
-
-
-class GroupPatch(BaseModel):
+class ProjectPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=80)
     description: str | None = Field(None, max_length=500)
     member_ids: list[str] | None = None
 
 
+class SessionIn(BaseModel):
+    title: str = Field("", max_length=120)
+
+
+class SessionPatch(BaseModel):
+    title: str | None = Field(None, max_length=120)
+    archived: bool | None = None
+
+
+class AssistantIn(BaseModel):
+    agent_id: str
+
+
 class ConversationIn(BaseModel):
-    """打开对话：group_id → 这个群组的群聊；agent_id → 和它的私聊（第一次打开时创建）。"""
-    group_id: str | None = None
+    """打开对话：project_id → 这个项目的群聊；agent_id → 和它的私聊（第一次打开时创建）。"""
+    project_id: str | None = None
     agent_id: str | None = None
     title: str = Field("", max_length=120)
 
@@ -283,7 +244,6 @@ Me = Annotated[User, Depends(current_user)]
 def create_app(network: Network) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        network.check_stalls()  # 重启前就停住的项目：告诉负责人
         yield
         # 事件流阻塞在线程里等事件，uvicorn 取消不了线程：不主动唤醒，进程会卡在关闭阶段，
         # 浏览器那头的连接也一直不断，EventSource 就不会触发重连。
@@ -382,223 +342,137 @@ def create_app(network: Network) -> FastAPI:
         network.visible_agent(agent_id, user.id)  # 只有所有者
         return network.ledger(agent_id)
 
-    # ---- 群组 ----
-    @app.post("/api/groups")
-    def create_group(body: GroupIn, user: Me) -> dict:
-        return network.create_group(**body.model_dump(), actor=user.id).to_dict()
-
-    @app.patch("/api/groups/{group_id}")
-    def update_group(group_id: str, body: GroupPatch, user: Me) -> dict:
-        return network.update_group(group_id, actor=user.id, **body.model_dump(exclude_unset=True)).to_dict()
-
-    @app.post("/api/groups/{group_id}/members")
-    def add_member(group_id: str, body: MemberIn, user: Me) -> dict:
-        return network.add_member(group_id, body.agent_id, actor=user.id).to_dict()
-
-    @app.delete("/api/groups/{group_id}/members/{agent_id}")
-    def remove_member(group_id: str, agent_id: str, user: Me) -> dict:
-        return network.remove_member(group_id, agent_id, actor=user.id).to_dict()
-
-    @app.delete("/api/groups/{group_id}")
-    def delete_group(group_id: str, user: Me) -> dict:
-        network.delete_group(group_id, actor=user.id)
-        return {"ok": True}
-
-    @app.get("/api/groups/{group_id}")
-    def group_detail(group_id: str, user: Me) -> dict:
-        return network.group_detail(group_id, actor=user.id)
-
-    # ---- 联合群组：邀请 → 接受；退出、移出；私有目录挂载 ----
-    @app.post("/api/groups/{group_id}/invitations")
-    def invite(group_id: str, body: InviteIn, user: Me) -> dict:
-        return network.group_detail(network.invite(group_id, body.email, actor=user.id).id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/invitation")
-    def respond(group_id: str, body: RespondIn, user: Me) -> dict:
-        g = network.respond_invitation(group_id, body.accept, actor=user.id)
-        return network.group_detail(g.id, actor=user.id) if g else {"ok": True}
-
-    @app.post("/api/groups/{group_id}/leave")
-    def leave(group_id: str, user: Me) -> dict:
-        network.leave_group(group_id, actor=user.id)
-        return {"ok": True}
-
-    @app.delete("/api/groups/{group_id}/participants/{user_id}")
-    def remove_participant(group_id: str, user_id: str, user: Me) -> dict:
-        network.remove_participant(group_id, user_id, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.put("/api/groups/{group_id}/members/{agent_id}/home")
-    def home_mount(group_id: str, agent_id: str, body: HomeMountIn, user: Me) -> dict:
-        network.set_home_mount(group_id, agent_id, body.enabled, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    # ---- 群组档案 ----
-    @app.put("/api/groups/{group_id}/brief")
-    def set_brief(group_id: str, body: BriefIn, user: Me) -> dict:
-        network.set_brief(group_id, body.text, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/brief/confirm")
-    def confirm_brief(group_id: str, user: Me) -> dict:
-        network.confirm_brief(group_id, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/suggestions")
-    def suggest(group_id: str, body: SuggestIn, user: Me) -> dict:
-        network.suggest_brief(group_id, body.text, body.reason, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/suggestions/{suggestion_id}")
-    def decide_suggestion(group_id: str, suggestion_id: str, body: RespondIn, user: Me) -> dict:
-        network.decide_suggestion(group_id, suggestion_id, body.accept, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/decisions")
-    def record_decision(group_id: str, body: DecisionRecordIn, user: Me) -> dict:
-        network.record_decision(group_id, body.text, body.reason, body.supersedes, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.delete("/api/groups/{group_id}/decisions/{decision_id}")
-    def revoke_decision(group_id: str, decision_id: str, user: Me) -> dict:
-        network.revoke_decision(group_id, decision_id, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/refs")
-    def add_ref(group_id: str, body: RefIn, user: Me) -> dict:
-        network.add_ref(group_id, body.name, body.location, body.note, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.delete("/api/groups/{group_id}/refs/{ref_id}")
-    def remove_ref(group_id: str, ref_id: str, user: Me) -> dict:
-        network.remove_ref(group_id, ref_id, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.put("/api/groups/{group_id}/project")
-    def assign_group(group_id: str, body: AssignIn, user: Me) -> dict:
-        network.assign_group(group_id, body.project_id, body.workstream_id, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    # ---- 项目（docs/projects.md）：目标与汇总层，只有所有者看得到 ----
-    @app.get("/api/projects")
-    def list_projects(user: Me) -> list[dict]:
-        return network.projects(user.id)
-
+    # ---- 项目 ----
     @app.post("/api/projects")
     def create_project(body: ProjectIn, user: Me) -> dict:
-        p = network.create_project(body.name, body.description, body.brief, actor=user.id)
-        return network.project_detail(p.id, actor=user.id)
-
-    @app.get("/api/projects/{project_id}")
-    def project_detail(project_id: str, user: Me) -> dict:
-        return network.project_detail(project_id, actor=user.id)
+        return network.create_project(**body.model_dump(), actor=user.id).to_dict()
 
     @app.patch("/api/projects/{project_id}")
     def update_project(project_id: str, body: ProjectPatch, user: Me) -> dict:
-        network.update_project(project_id, actor=user.id, **body.model_dump(exclude_unset=True))
-        return network.project_detail(project_id, actor=user.id)
+        return network.update_project(project_id, actor=user.id, **body.model_dump(exclude_unset=True)).to_dict()
+
+    @app.post("/api/projects/{project_id}/members")
+    def add_member(project_id: str, body: MemberIn, user: Me) -> dict:
+        return network.add_member(project_id, body.agent_id, actor=user.id).to_dict()
+
+    @app.delete("/api/projects/{project_id}/members/{agent_id}")
+    def remove_member(project_id: str, agent_id: str, user: Me) -> dict:
+        return network.remove_member(project_id, agent_id, actor=user.id).to_dict()
 
     @app.delete("/api/projects/{project_id}")
     def delete_project(project_id: str, user: Me) -> dict:
         network.delete_project(project_id, actor=user.id)
         return {"ok": True}
 
-    @app.post("/api/projects/{project_id}/workstreams")
-    def add_workstream(project_id: str, body: WorkstreamIn, user: Me) -> dict:
-        network.add_workstream(project_id, body.name, body.description, actor=user.id)
+    @app.get("/api/projects/{project_id}")
+    def project_detail(project_id: str, user: Me) -> dict:
         return network.project_detail(project_id, actor=user.id)
 
-    @app.patch("/api/projects/{project_id}/workstreams/{workstream_id}")
-    def update_workstream(project_id: str, workstream_id: str, body: WorkstreamPatch, user: Me) -> dict:
-        network.update_workstream(project_id, workstream_id, actor=user.id, **body.model_dump(exclude_unset=True))
+    # ---- 联合项目：邀请 → 接受；退出、移出；私有目录挂载 ----
+    @app.post("/api/projects/{project_id}/invitations")
+    def invite(project_id: str, body: InviteIn, user: Me) -> dict:
+        return network.project_detail(network.invite(project_id, body.email, actor=user.id).id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/invitation")
+    def respond(project_id: str, body: RespondIn, user: Me) -> dict:
+        g = network.respond_invitation(project_id, body.accept, actor=user.id)
+        return network.project_detail(g.id, actor=user.id) if g else {"ok": True}
+
+    @app.post("/api/projects/{project_id}/leave")
+    def leave(project_id: str, user: Me) -> dict:
+        network.leave_project(project_id, actor=user.id)
+        return {"ok": True}
+
+    @app.delete("/api/projects/{project_id}/participants/{user_id}")
+    def remove_participant(project_id: str, user_id: str, user: Me) -> dict:
+        network.remove_participant(project_id, user_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    @app.delete("/api/projects/{project_id}/workstreams/{workstream_id}")
-    def remove_workstream(project_id: str, workstream_id: str, user: Me) -> dict:
-        network.remove_workstream(project_id, workstream_id, actor=user.id)
+    @app.put("/api/projects/{project_id}/members/{agent_id}/home")
+    def home_mount(project_id: str, agent_id: str, body: HomeMountIn, user: Me) -> dict:
+        network.set_home_mount(project_id, agent_id, body.enabled, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    # 跨群组交接：Agent 提交，项目所有者确认后以他的名义发进目标群聊（不变量 19）
-    @app.get("/api/handoffs")
-    def handoffs(user: Me) -> list:
-        return network.handoffs(actor=user.id)
+    # ---- 项目档案 ----
+    @app.put("/api/projects/{project_id}/brief")
+    def set_brief(project_id: str, body: BriefIn, user: Me) -> dict:
+        network.set_brief(project_id, body.text, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
-    @app.post("/api/handoffs/{handoff_id}/approve")
-    def approve_handoff(handoff_id: str, body: HandoffApproveIn, user: Me) -> dict:
-        return network.approve_handoff(handoff_id, body.text, body.agent_id, body.after, body.replaces, actor=user.id,
-                                       group_id=body.group_id).to_dict()
+    @app.post("/api/projects/{project_id}/brief/confirm")
+    def confirm_brief(project_id: str, user: Me) -> dict:
+        network.confirm_brief(project_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
-    @app.post("/api/handoffs/{handoff_id}/reject")
-    def reject_handoff(handoff_id: str, body: NoteIn, user: Me) -> dict:
-        return network.reject_handoff(handoff_id, body.note, actor=user.id).to_dict()
+    @app.post("/api/projects/{project_id}/suggestions")
+    def suggest(project_id: str, body: SuggestIn, user: Me) -> dict:
+        network.suggest_brief(project_id, body.text, body.reason, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
-    @app.post("/api/handoffs/{handoff_id}/deliver")
-    def deliver_handoff(handoff_id: str, body: HandoffDeliverIn, user: Me) -> dict:
-        return network.deliver_handoff(handoff_id, body.files, body.note, actor=user.id).to_dict()
+    @app.post("/api/projects/{project_id}/suggestions/{suggestion_id}")
+    def decide_suggestion(project_id: str, suggestion_id: str, body: RespondIn, user: Me) -> dict:
+        network.decide_suggestion(project_id, suggestion_id, body.accept, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
     @app.post("/api/projects/{project_id}/decisions")
-    def record_project_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:
-        network.record_project_decision(project_id, body.text, body.reason, body.supersedes, actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
-
-    @app.put("/api/projects/{project_id}/lead")
-    def set_project_lead(project_id: str, body: ProjectLeadIn, user: Me) -> dict:
-        network.set_project_lead(project_id, body.agent_id, body.autonomy, body.group_id, actor=user.id)
+    def record_decision(project_id: str, body: DecisionRecordIn, user: Me) -> dict:
+        network.record_decision(project_id, body.text, body.reason, body.supersedes, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.delete("/api/projects/{project_id}/decisions/{decision_id}")
-    def revoke_project_decision(project_id: str, decision_id: str, user: Me) -> dict:
-        network.revoke_project_decision(project_id, decision_id, actor=user.id)
+    def revoke_decision(project_id: str, decision_id: str, user: Me) -> dict:
+        network.revoke_decision(project_id, decision_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    # 项目文件：挂载群组的运行时只读读到 project/（不变量 18）
+    @app.post("/api/projects/{project_id}/refs")
+    def add_ref(project_id: str, body: RefIn, user: Me) -> dict:
+        network.add_ref(project_id, body.name, body.location, body.note, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/refs/{ref_id}")
+    def remove_ref(project_id: str, ref_id: str, user: Me) -> dict:
+        network.remove_ref(project_id, ref_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
     @app.post("/api/projects/{project_id}/files")
-    def publish_project_file(project_id: str, body: FileIn, user: Me) -> dict:
-        network.publish_project_file(project_id, body.name, body.content.encode("utf-8"), actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
-
-    @app.post("/api/projects/{project_id}/files/promote")
-    def promote_file(project_id: str, body: PromoteIn, user: Me) -> dict:
-        network.promote_file(project_id, body.group_id, body.name, actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
-
-    @app.put("/api/projects/{project_id}/files/{name}/share")
-    def share_project_file(project_id: str, name: str, body: ShareIn, user: Me) -> dict:
-        network.share_project_file(project_id, name, body.group_id, body.shared, actor=user.id)
+    def publish_file(project_id: str, body: FileIn, user: Me) -> dict:
+        network.publish_file(project_id, body.name, body.content.encode("utf-8"), actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.get("/api/projects/{project_id}/files/{name}")
-    def read_project_file(project_id: str, name: str, user: Me) -> FileResponse:
+    def read_file(project_id: str, name: str, user: Me) -> FileResponse:
         path = network.project_file(project_id, name, actor=user.id)
-        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
-                            headers={"X-Content-Type-Options": "nosniff"})
-
-    @app.delete("/api/projects/{project_id}/files/{name}")
-    def delete_project_file(project_id: str, name: str, user: Me) -> dict:
-        network.delete_project_file(project_id, name, actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
-
-    @app.post("/api/groups/{group_id}/files")
-    def publish_file(group_id: str, body: FileIn, user: Me) -> dict:
-        network.publish_file(group_id, body.name, body.content.encode("utf-8"), actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
-
-    @app.get("/api/groups/{group_id}/files/{name}")
-    def read_file(group_id: str, name: str, user: Me) -> FileResponse:
-        path = network.group_file(group_id, name, actor=user.id)
         # 一律当作附件下载，不在本站点内渲染（文件可能来自其他参与方或 Agent）
         return FileResponse(path, filename=path.name, content_disposition_type="attachment",
                             headers={"X-Content-Type-Options": "nosniff"})
 
-    @app.delete("/api/groups/{group_id}/files/{name}")
-    def delete_file(group_id: str, name: str, user: Me) -> dict:
-        network.delete_file(group_id, name, actor=user.id)
-        return network.group_detail(group_id, actor=user.id)
+    @app.delete("/api/projects/{project_id}/files/{name}")
+    def delete_file(project_id: str, name: str, user: Me) -> dict:
+        network.delete_file(project_id, name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
     # ---- 对话 ----
+    # ---- 项目会话：人和自己的助理在项目里的私下对话，只有这个人看得到（不变量 18） ----
+    @app.get("/api/projects/{project_id}/sessions")
+    def list_sessions(project_id: str, user: Me) -> list:
+        return network.sessions(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/sessions")
+    def create_session(project_id: str, body: SessionIn, user: Me) -> dict:
+        return network.create_session(project_id, body.title, actor=user.id).to_dict(full=False)
+
+    @app.patch("/api/sessions/{conv_id}")
+    def update_session(conv_id: str, body: SessionPatch, user: Me) -> dict:
+        return network.update_session(conv_id, body.title, body.archived, actor=user.id).to_dict(full=False)
+
+    @app.put("/api/me/assistant")
+    def set_assistant(body: AssistantIn, user: Me) -> dict:
+        network.set_assistant(body.agent_id, actor=user.id)
+        return network.store.users[user.id].public()
+
     @app.post("/api/conversations")
     def create_conversation(body: ConversationIn, user: Me) -> dict:
-        return network.create_conversation(body.group_id, body.agent_id, body.title, actor=user.id).to_dict(full=False)
+        return network.create_conversation(body.project_id, body.agent_id, body.title, actor=user.id).to_dict(full=False)
 
     @app.get("/api/conversations/{conv_id}")
     def conversation(conv_id: str, user: Me) -> dict:
@@ -635,7 +509,7 @@ def create_app(network: Network) -> FastAPI:
 
     @app.put("/api/requests/{request_id}/project")
     def assign_request(request_id: str, body: AssignIn, user: Me) -> dict:
-        network.assign_request(request_id, body.project_id, body.workstream_id, actor=user.id)
+        network.assign_request(request_id, body.project_id, actor=user.id)
         return network.request_detail(request_id, actor=user.id)
 
     @app.post("/api/requests/{request_id}/cancel")

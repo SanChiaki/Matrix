@@ -26,7 +26,7 @@
     </form>
     <form id="onboard-form" aria-labelledby="onboard-title" hidden>
       <h1 id="onboard-title">创建你的第一个 Agent</h1>
-      <p class="muted">它只为你工作：你可以私聊它、把它拉进群聊、让它委托别的 Agent。要和别人协作，把它带进联合群组。</p>
+      <p class="muted">它只为你工作：你可以私聊它、它是你的助理：你加入项目时它也跟着加入，项目会话里由它陪你聊。要和别人协作，把它带进联合项目。</p>
       <div class="field"><label for="ob-name">名称</label><input id="ob-name" required minlength="2" maxlength="80" placeholder="例如：小林的助理"></div>
       <div class="field"><label for="ob-desc">它做什么</label><textarea id="ob-desc" rows="3" required minlength="2" maxlength="2000" placeholder="例如：替我回答关于项目进度的问题，整理会议纪要，需要我拍板的事转给我。"></textarea></div>
       <fieldset class="checks" id="ob-auth"><legend>权限</legend></fieldset>
@@ -53,17 +53,15 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.5" width="3.6" height="11" rx="1"/><rect x="6.2" y="2.5" width="3.6" height="7" rx="1"/><rect x="10.6" y="2.5" width="3.6" height="9" rx="1"/></svg>看板<span id="todo-count" class="count" hidden></span></button>
     <button type="button" class="tab" data-view="devices" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3" width="11" height="8" rx="1.5"/><path d="M5.5 13.5h5"/></svg>设备</button>
-    <button type="button" class="tab" data-view="groups" aria-pressed="false">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><path d="M1.5 13.5c.6-2.3 2.3-3.5 4.5-3.5s3.9 1.2 4.5 3.5"/><path d="M10.5 3.8a2.3 2.3 0 0 1 0 4.4M12.2 10.3c1.1.5 1.9 1.6 2.3 3.2"/></svg>群组</button>
   </nav>
   <div class="rail-convs">
-    <section aria-labelledby="rail-groups-title">
+    <section aria-labelledby="rail-projects-title">
       <div class="rail-convs-head">
-        <h2 id="rail-groups-title">群聊</h2>
-        <button type="button" id="group-quick" class="ghost icon" aria-label="新建群组" title="新建群组">
+        <h2 id="rail-projects-title">项目</h2>
+        <button type="button" id="project-quick" class="ghost icon" aria-label="新建项目" title="新建项目">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
       </div>
-      <ul id="group-chat-list" class="conv-list" aria-label="群聊列表"></ul>
+      <ul id="project-chat-list" class="conv-list" aria-label="项目列表"></ul>
     </section>
     <section aria-labelledby="rail-dms-title">
       <div class="rail-convs-head"><h2 id="rail-dms-title">私聊</h2></div>
@@ -98,7 +96,7 @@
           <li><i class="line conv"></i>可对话</li>
           <li><i class="line rel"></i>委托（粗细 = 次数）</li>
           <li><i class="line running"></i>进行中</li>
-          <li><i class="ring"></i>群组</li>
+          <li><i class="ring"></i>项目</li>
         </ul>
       </div>
     </div>
@@ -129,18 +127,6 @@
     <aside id="board-detail" class="side" aria-live="polite"></aside>
   </section>
 
-  <section id="view-projects" class="view" hidden aria-label="项目">
-    <div class="pane">
-      <div class="view-head">
-        <div><h1>项目</h1><p>一件大事拆成几个方面，分别由不同的群组承担。群组之间不互通群聊、不能互相委托；挂进项目的群组会收到项目 brief、项目决定、项目文件与进行中的交接，跨群组的工作由 Agent 提交交接，你（或你指定的项目负责人 Agent）确认后发出。只有你看得到自己的项目。</p></div>
-        <button type="button" id="project-new">新建项目</button>
-      </div>
-      <ul id="project-list" class="cards"></ul>
-      <div id="project-overview"></div>
-    </div>
-    <aside id="project-detail" class="side" aria-live="polite"></aside>
-  </section>
-
   <section id="view-agents" class="view" hidden aria-label="Agent 管理">
     <div class="pane">
       <div class="view-head">
@@ -152,15 +138,15 @@
     <aside id="agent-editor" class="side"></aside>
   </section>
 
-  <section id="view-groups" class="view" hidden aria-label="群组管理">
+  <section id="view-projects" class="view" hidden aria-label="项目">
     <div class="pane">
       <div class="view-head">
-        <div><h1>群组</h1><p>群组里没有固定的负责人：在群聊里 @ 谁，谁就接任务。内部群组只有你和你的 Agent；联合群组邀请别人带着他们的 Agent 一起协作。每个群组有自己的档案：brief、决定、文件、资源引用；内部群组可以挂进你的项目。</p></div>
-        <button type="button" id="group-new">新建群组</button>
+        <div><h1>项目</h1><p>项目是一群 Agent 围绕一件事协作的地方：项目群聊里 @ 谁，谁就接任务；成员之间可以互相委托。纲要、决定、文件与资源引用归项目所有，按版本推送给成员。你加入项目时，你的助理也一起加入；想了解细节就开一个项目会话，和助理单独聊，不打扰群聊。内部项目只有你和你的 Agent；联合项目邀请别人带着他们的 Agent 一起协作。</p></div>
+        <button type="button" id="project-new">新建项目</button>
       </div>
-      <ul id="group-list" class="cards"></ul>
+      <ul id="project-list" class="cards"></ul>
     </div>
-    <aside id="group-editor" class="side"></aside>
+    <aside id="project-editor" class="side"></aside>
   </section>
 
   <section id="view-devices" class="view" hidden aria-label="设备">

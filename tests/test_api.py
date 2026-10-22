@@ -99,9 +99,9 @@ def test_api_flow(tmp_path: Path):
     me = login(c)
     assert me["claimed_existing"] is True  # 第一个用户认领种子数据
     snap = c.get("/api/network").json()
-    assert len(snap["agents"]) == 5 and len(snap["groups"]) == 1
+    assert len(snap["agents"]) == 5 and len(snap["projects"]) == 1
     names = {a["name"]: a["id"] for a in snap["agents"]}
-    group = snap["groups"][0]
+    group = snap["projects"][0]
 
     # Agent 管理
     new = c.post("/api/agents", json={"name": "Finance Agent", "description": "财务测算",
@@ -117,14 +117,16 @@ def test_api_flow(tmp_path: Path):
     assert c.patch(f"/api/agents/{new['id']}", json={"description": "财务测算与预算"}).json()["model"] == m
     assert c.patch(f"/api/agents/{new['id']}", json={"model": None}).json()["model"] is None
 
-    # 群组管理
-    g2 = c.post("/api/groups", json={"name": "财务组", "member_ids": [names["Product Strategy Agent"], new["id"]]}).json()
-    assert c.patch(f"/api/groups/{g2['id']}", json={"member_ids": [new["id"]]}).json()["member_ids"] == [new["id"]]
-    assert c.post("/api/groups", json={"name": "x", "member_ids": ["agent-nope"]}).status_code == 404
+    # 项目管理
+    g2 = c.post("/api/projects", json={"name": "财务组", "member_ids": [names["Product Strategy Agent"], new["id"]]}).json()
+    assert c.patch(f"/api/projects/{g2['id']}", json={"member_ids": [new["id"]]}).status_code == 409  # 助理不能移出
+    assert c.patch(f"/api/projects/{g2['id']}", json={"member_ids": [names["Product Strategy Agent"]]}).json()["member_ids"] \
+        == [names["Product Strategy Agent"]]
+    assert c.post("/api/projects", json={"name": "x", "member_ids": ["agent-nope"]}).status_code == 404
 
     # 群聊：@ 谁谁接
-    conv = c.post("/api/conversations", json={"group_id": group["id"]}).json()
-    assert conv["kind"] == "group" and conv["seats"] == {}
+    conv = c.post("/api/conversations", json={"project_id": group["id"]}).json()
+    assert conv["kind"] == "project" and conv["seats"] == {}
     lead = names["Product Strategy Agent"]
     r = c.post(f"/api/conversations/{conv['id']}/messages", json={"text": "研究 AI 产品机会", "mentions": [lead]})
     assert r.status_code == 200 and r.json()["mentions"] == [lead]
@@ -148,7 +150,7 @@ def test_api_flow(tmp_path: Path):
     c.post(f"/api/conversations/{conv['id']}/messages", json={"text": "收到，谢谢"})
     net.wait_idle(conv["id"], timeout=10)
     assert len(c.get(f"/api/conversations/{conv['id']}").json()["messages"]) == before + 1
-    # 只能 @ 群组成员
+    # 只能 @ 项目成员
     assert c.post(f"/api/conversations/{conv['id']}/messages",
                   json={"text": "x", "mentions": [new["id"]]}).status_code == 409
     # 私聊
@@ -161,7 +163,7 @@ def test_api_flow(tmp_path: Path):
     assert c.post(f"/api/conversations/{conv['id']}/resume", json={}).status_code == 409  # 没有中断
     assert c.post(f"/api/tasks/{t['id']}/retry", json={}).status_code == 409             # 不是失败任务
     assert c.delete(f"/api/agents/{new['id']}").json()["ok"]
-    assert new["id"] not in c.get("/api/network").json()["groups"][1]["member_ids"]
+    assert new["id"] not in c.get("/api/network").json()["projects"][1]["member_ids"]
 
 
 def test_api_proposal_review(tmp_path: Path):
@@ -177,7 +179,7 @@ def test_api_proposal_review(tmp_path: Path):
     c = TestClient(create_app(net))
     login(c)
     lead = net.store.agent_by_name("Product Strategy Agent")
-    group = next(iter(net.store.groups.values()))
+    group = next(iter(net.store.projects.values()))
     conv = net.create_conversation(group.id)
     net.send_message(conv.id, f"@{lead.name} 需要合规", background=False)
     props = c.get("/api/network").json()["proposals"]
@@ -186,7 +188,7 @@ def test_api_proposal_review(tmp_path: Path):
     assert c.post(f"/api/proposals/{pid}/approve", json={"authority": ["shell.exec"]}).status_code == 409
     a = c.post(f"/api/proposals/{pid}/approve", json={"description": "合规与隐私", "note": "ok"}).json()
     assert a["description"] == "合规与隐私" and a["authority"] == ["web.research"]
-    assert a["id"] in c.get("/api/network").json()["groups"][0]["member_ids"]
+    assert a["id"] in c.get("/api/network").json()["projects"][0]["member_ids"]
     assert c.post(f"/api/proposals/{pid}/reject", json={}).status_code == 409
     assert c.post("/api/proposals/nope/approve", json={}).status_code == 404
 
@@ -207,12 +209,12 @@ def test_mcp_server_calls_back_into_network(tmp_path: Path):
         time.sleep(0.05)
     try:
         lead = net.store.agent_by_name("Product Strategy Agent")
-        group = next(iter(net.store.groups.values()))
+        group = next(iter(net.store.projects.values()))
         conv = net.create_conversation(group.id)
         with net.store.lock:
             net._seat(conv, lead.id)  # 委托方的席位：交付通知会送到这里
         net._contexts["tok"] = ExecContext(kind="seat", id=f"{conv.id}/{lead.id}", agent_id=lead.id,
-                                           conversation_id=conv.id, group_id=group.id, authority=lead.authority,
+                                           conversation_id=conv.id, project_id=group.id, authority=lead.authority,
                                            constraints=[], depth=0, chain=[lead.id])
         msgs = [
             {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},

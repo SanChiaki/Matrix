@@ -29,7 +29,7 @@ def device_net(tmp_path: Path, file_write: str = ENFORCED):
         seat = net.store.conversations[conv_id].seats[agent_id]
         wd = net.store.root / seat.workdir
         seen.append({"home": msg["home"], "server_home": (wd / "agent-home").exists(),
-                     "server_group": (wd / "group").exists(), "materials": [m["path"] for m in msg["materials"]]})
+                     "server_group": (wd / "project").exists(), "materials": [m["path"] for m in msg["materials"]]})
         deliver({"type": RUN_RESULT, "run_id": msg["run_id"], "session_id": "s", "final_text": "ok"})
 
     connector(rt, script=script)
@@ -42,12 +42,12 @@ def test_device_home_is_mounted_by_the_connector_not_the_server(tmp_path):
     """端侧 Agent：服务器不把 agents/<id>/ 拷进服务器侧工作目录，只在 run.request 里说明挂载方式。"""
     net, alice, _, a, seen = device_net(tmp_path)
     net.send_message(net.direct_chat(a.id, actor=alice).id, "记一下", actor=alice, background=False)
-    g = net.create_group("G", "", [a.id], actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
     net.publish_file(g.id, "brief.md", "档案".encode(), agent_id=None)
-    net.send_message(net.group_chat(g.id, actor=alice).id, "@A 看看档案", actor=alice, background=False)
+    net.send_message(net.project_chat(g.id, actor=alice).id, "@A 看看档案", actor=alice, background=False)
     assert [s["home"] for s in seen] == ["rw", "rw"]
     assert not any(s["server_home"] or s["server_group"] for s in seen)
-    assert seen[1]["materials"] == ["group/brief.md"]  # 群组文件照常随 run.request 下发
+    assert seen[1]["materials"] == ["project/brief.md"]  # 项目文件照常随 run.request 下发
 
 
 def test_device_home_is_read_only_without_enforced_file_write(tmp_path):
@@ -58,10 +58,10 @@ def test_device_home_is_read_only_without_enforced_file_write(tmp_path):
 
 
 def test_device_home_not_mounted_in_joint_group_by_default(tmp_path):
-    """不变量 16：联合群组里端侧私有目录同样默认不挂载，所有者打开后才挂载。"""
+    """不变量 16：联合项目里端侧私有目录同样默认不挂载，所有者打开后才挂载。"""
     net, alice, bob, a, seen = device_net(tmp_path)
     g, chat = joint(net, bob, "alice@x.io", alice)
-    net.add_member(g.id, a.id, actor=alice)
+    assert a.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     net.send_message(chat.id, "@A 1", actor=bob, background=False)
     net.set_home_mount(g.id, a.id, True, actor=alice)
     net.send_message(chat.id, "@A 2", actor=bob, background=False)
@@ -176,8 +176,8 @@ def test_connector_refuses_to_expose_homes(tmp_path):
     wd = c.workdir_of("a/c")
     (wd / "agent-home").mkdir(parents=True)
     (wd / "agent-home" / "secret.md").write_text("私密", encoding="utf-8")
-    (wd / "group").mkdir()
-    (wd / "group" / "brief.md").write_text("档案", encoding="utf-8")
+    (wd / "project").mkdir()
+    (wd / "project" / "brief.md").write_text("档案", encoding="utf-8")
     (wd / "out.md").write_text("产物", encoding="utf-8")
     try:
         (wd / "link.md").symlink_to(wd / "agent-home" / "secret.md")
@@ -188,10 +188,10 @@ def test_connector_refuses_to_expose_homes(tmp_path):
     c._runs["run-f"] = run
     replies: list[dict] = []
     c.send = replies.append
-    for path in ("agent-home/secret.md", "group/brief.md", "link.md", "out.md"):
+    for path in ("agent-home/secret.md", "project/brief.md", "link.md", "out.md"):
         c._fetch({"type": FILE_FETCH, "run_id": "run-f", "call_id": path, "path": path})
     got = {r["reply_to"]: r for r in replies}
-    assert all("error" in got[p] for p in ("agent-home/secret.md", "group/brief.md", "link.md"))
+    assert all("error" in got[p] for p in ("agent-home/secret.md", "project/brief.md", "link.md"))
     assert base64.b64decode(got["out.md"]["data"]) == "产物".encode()
     c.close()
 

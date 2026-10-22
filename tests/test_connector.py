@@ -178,11 +178,11 @@ def test_materials_are_written_and_group_is_refreshed(tmp_path):
     import base64
     c = Connector(ClaudeDriver(), tmp_path)
     wd = c.workdir_of("a/c")
-    (wd / "group").mkdir(parents=True)
-    (wd / "group" / "stale.md").write_text("old", encoding="utf-8")
-    c._write_materials(wd, [{"path": "group/brief.md", "data": base64.b64encode("新档案".encode()).decode()}])
-    assert (wd / "group" / "brief.md").read_text(encoding="utf-8") == "新档案"
-    assert not (wd / "group" / "stale.md").exists()  # 上一轮的只读副本不残留
+    (wd / "project").mkdir(parents=True)
+    (wd / "project" / "stale.md").write_text("old", encoding="utf-8")
+    c._write_materials(wd, [{"path": "project/brief.md", "data": base64.b64encode("新档案".encode()).decode()}])
+    assert (wd / "project" / "brief.md").read_text(encoding="utf-8") == "新档案"
+    assert not (wd / "project" / "stale.md").exists()  # 上一轮的只读副本不残留
     for bad in ({"path": p, "data": ""} for p in ("/etc/passwd", "../x", r"\x", "C:x", r"C:\x", r"\\srv\share\x",
                                                     r"group\..\..\x")):
         with pytest.raises(Exception):
@@ -258,7 +258,7 @@ def test_run_request_carries_materials_to_the_connector(tmp_path):
     with c._send_lock:
         pass
     import base64
-    materials = [{"path": "group/brief.md", "data": base64.b64encode("目标：调研".encode()).decode()}]
+    materials = [{"path": "project/brief.md", "data": base64.b64encode("目标：调研".encode()).decode()}]
     # 直接走连接器入口，避免真实 WebSocket
     c.send = lambda payload: None
     c._start({"run_id": "run-m", "agent_id": "a", "context_id": "conv", "prompt": "p",
@@ -266,10 +266,10 @@ def test_run_request_carries_materials_to_the_connector(tmp_path):
     wd = c.workdir_of("a/conv")
     import time
     for _ in range(100):
-        if (wd / "group" / "brief.md").exists():
+        if (wd / "project" / "brief.md").exists():
             break
         time.sleep(0.01)
-    assert (wd / "group" / "brief.md").read_text(encoding="utf-8") == "目标：调研"
+    assert (wd / "project" / "brief.md").read_text(encoding="utf-8") == "目标：调研"
     c.close()
 
 

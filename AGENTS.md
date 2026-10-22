@@ -12,31 +12,30 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 ## 项目描述
 
-**Matrix**（代码包名 `agentnet`）：一个本地运行的 Agent Network（Agent 协作网络）Demo。人在群聊里 @ Agent 交代任务（或和单个 Agent 私聊）；被 @ 的 Agent 自己做，或通过网络工具（MCP）把子任务委托给同组成员，网络负责授权、隔离、追踪与知识沉淀。
+**Matrix**（代码包名 `agentnet`）：一个本地运行的 Agent Network（Agent 协作网络）Demo。人在项目群聊里 @ Agent 交代任务（或在项目会话里和自己的助理单独聊、和单个 Agent 私聊）；被 @ 的 Agent 自己做，或通过网络工具（MCP）把子任务委托给同一项目的成员，网络负责授权、隔离、追踪与知识沉淀。
 
 - 语言 / 依赖：Python ≥ 3.14，FastAPI + uvicorn，包管理用 `uv`，测试用 pytest。
 - 运行时：默认以 DeepSeek Harness（DSH）headless 为 Agent 运行时；`scripted` 运行时是确定性脚本，用于测试与离线演练。
-- 状态：全部持久化在 `--data` 目录（默认 `.agentnet/`，已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个群组有档案目录 `groups/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何项目仓库。
+- 状态：全部持久化在 `--data` 目录（默认 `.agentnet/`，已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个项目有档案目录 `projects/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何代码仓库。
 
 核心概念（定义见 [domain.md](docs/reference/domain.md)）：
 
-- **Agent**：网络里的节点，只属于、只为它的所有者工作；有自身权限上限，可跑在云侧或用户端侧。
-- **群组**：成员集合与委托边界，没有主 Agent。`internal` 只有所有者；`joint`（联合群组）是跨用户协作的唯一途径。
-- **对话**：每个群组一个群聊（被 @ 的成员接任务），每个 Agent 一个私聊。**席位**是 Agent 在一个对话里的执行上下文。
+- **Agent**：网络里的节点，只属于、只为它的所有者工作；有自身权限上限，可跑在云侧或用户端侧。每个人有一个**助理**（自己的一个 Agent），进项目时自动加入。
+- **项目**：成员集合与委托边界，没有主 Agent。`internal` 只有所有者；`joint`（联合项目）是跨用户协作的唯一途径。
+- **对话**：每个项目一个群聊（被 @ 的成员接任务）；人在项目里可以开多个**项目会话**，和自己的助理私下聊、带项目上下文；每个 Agent 一个私聊。**席位**是 Agent 在一个对话里的执行上下文。
 - **委托（Task）**：Agent ↔ Agent 的一次授权，异步执行、收件箱唤醒，由委托方验收。
 - **用户任务（UserRequest）**：人交代的有交付目标的事，看板上只有它。
-- **群组档案**：brief、决定、文件、资源引用，归群组所有，按版本推送给成员。
-- **项目**：把多个群组的工作汇总到一个目标下，不打通群组；跨群组只能交接。
+- **项目档案**：纲要、决定、文件、资源引用，归项目所有，按版本推送给成员。
 
 ## 按需阅读
 
 | 要改 / 要了解 | 先读 |
 | --- | --- |
 | 模型字段、状态结构、权限词表 | [docs/reference/domain.md](docs/reference/domain.md) |
-| 群聊、私聊、@ 唤醒、成员变动、联合群组与可见性 | [docs/reference/conversations.md](docs/reference/conversations.md) |
+| 群聊、项目会话、私聊、@ 唤醒、成员变动、联合项目与可见性 | [docs/reference/conversations.md](docs/reference/conversations.md) |
 | 委托、收件箱、失败与续接、看板与用户任务 | [docs/reference/execution.md](docs/reference/execution.md) |
-| 群组档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
-| 项目、交接、负责人统筹 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
+| 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
+| 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 端侧运行时、连接器、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
@@ -46,7 +45,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 | 文件 | 职责 |
 | --- | --- |
-| `agentnet/engine.py` | `Network` 核心：Agent/群组/对话管理、联合群组的参与者与可见性、群组档案、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测 |
+| `agentnet/engine.py` | `Network` 核心：Agent/项目/对话管理、联合项目的参与者与可见性、项目档案、助理与项目会话、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测 |
 | `agentnet/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
 | `agentnet/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
 | `agentnet/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
@@ -57,16 +56,16 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `AGENTNET_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
 | `agentnet/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
-| `agentnet/store.py` | 持久化、旧数据迁移（`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 「AI 产品机会研究组」；服务默认不预置，CLI 与测试预置） |
+| `agentnet/store.py` | 持久化、旧数据迁移（`_merge_groups`：群组 + 项目两层合成一层，`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 一个研究项目；服务默认不预置，CLI 与测试预置） |
 | `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `agentnet/static/` | 单页前端（原生 JS） |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合群组、群组档案）、`test_projects.py`（项目） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_migration.py`（旧数据迁移） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
-| `docs/projects.md` | 项目：目标与汇总层的设计与分阶段计划 |
+| `docs/projects.md` | 项目与项目会话的设计、旧数据迁移 |
 
 ## 常用命令
 
@@ -76,7 +75,7 @@ uv run pytest -q                                # 全部测试（离线，不需
 uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
 uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
 uv run agentnet --models models.json            # 云侧只允许 models.json 里的预置模型（改文件即生效）
-uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在群聊里 @ Product Strategy Agent
+uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect run                                        # 前台运行已配对的连接器
 uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 手动令牌（备用）
@@ -90,7 +89,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 改动碰到哪一条，先读那一条的全文。
 
 1. **权限只收窄不放大**：有效权限 = 自身权限 ∩ 委托授予 ∩ 运行时能强制的权限。
-2. **只委托群组成员**：网络不自动创建 Agent，只接受提议、由人批准。
+2. **只委托项目成员**：网络不自动创建 Agent，只接受提议、由人批准。
 3. **约束沿委托链累加**。
 4. **防环与限深**：委托链成环、超深度、超次数一律拒绝。
 5. **只有直接委托方能验收**。
@@ -104,11 +103,9 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 13. **归属与可见性**：无权限一律按“不存在”（404）。
 14. **工作区外溢由所有者批准**：逐次批准，只对那一次调用生效。
 15. **并发不抢占**：私有目录写回按文件三方合并。
-16. **Agent 不跨信任域**：跨用户协作只能通过联合群组。
-17. **群组档案只走网络**：写入只经人的操作或档案工具。
-18. **项目推送只到挂载群组，联合群组只拿共享部分**。
-19. **跨群组只经人或项目负责人**：Agent 只能提交交接。
-20. **负责人统筹有边界，越界转给人**。
+16. **Agent 不跨信任域**：跨用户协作只能通过联合项目。
+17. **项目档案只走网络**：写入只经人的操作或档案工具。
+18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
 
 ### 二、工作方式
 

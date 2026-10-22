@@ -16,7 +16,7 @@ def build(tmp_path: Path, handler):
     eng = net.create_agent("Eng", "eng", [], ["file.write", "delegate"], actor=alice)
     helper = net.create_agent("Helper", "helper", [], ["file.write"], actor=alice)
     other = net.create_agent("Other", "other", [], [], actor=alice)
-    g = net.create_group("开发组", "", [lead.id, eng.id, helper.id, other.id], actor=alice)
+    g = net.create_project("开发组", "", [lead.id, eng.id, helper.id, other.id], actor=alice)
     return net, alice, bob, lead, eng, helper, other, g
 
 
@@ -51,7 +51,7 @@ def test_delivery_hands_files_to_direct_delegator(tmp_path: Path):
             return "文档完成"
         return "ok"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
-    chat = net.group_chat(g.id, actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@Lead 实现 pkg", actor=alice, background=False)
     net.wait_quiet()
     t_eng = next(t for t in net.store.tasks.values() if t.delegatee_id == eng.id)
@@ -84,10 +84,10 @@ def test_workdir_browsing_and_directory_publish(tmp_path: Path):
         out.append(call.tool("publish_file", path="site"))
         return "ok"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
-    chat = net.group_chat(g.id, actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@Lead 做个网站", actor=alice, background=False)
     assert "site.zip" in out[0]
-    z = zipfile.ZipFile(io.BytesIO(net.group_file(g.id, "site.zip").read_bytes()))
+    z = zipfile.ZipFile(io.BytesIO(net.project_file(g.id, "site.zip").read_bytes()))
     assert z.namelist() == ["site/index.html"]
 
     ca, cb = client(net, "alice@x.io"), client(net, "bob@x.io")
@@ -122,7 +122,7 @@ def test_redelivery_replaces_files(tmp_path: Path):
             (cwd / "v2.txt").write_text("2", encoding="utf-8")
         return "交付"
     net, alice, bob, lead, eng, helper, other, g = build(tmp_path, handler)
-    chat = net.group_chat(g.id, actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@Lead 写", actor=alice, background=False)
     net.wait_quiet()
     t = next(iter(net.store.tasks.values()))

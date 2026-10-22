@@ -20,7 +20,7 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("text")
     p.add_argument("--agent", default="Product Strategy Agent")
-    p.add_argument("--group", default=None, help="群组名称；默认取该 Agent 所在的第一个群组")
+    p.add_argument("--project", default=None, help="项目名称；默认取该 Agent 所在的第一个项目")
     p.add_argument("--runtime", choices=["dsh", "scripted"], default="dsh")
     p.add_argument("--data", default=".agentnet")
     p.add_argument("--port", type=int, default=8766)
@@ -35,14 +35,15 @@ def main() -> None:
     agent = net.store.agent_by_name(args.agent)
     if agent is None:
         raise SystemExit(f"unknown agent {args.agent}")
-    groups = net.store.groups_of(agent.id)
-    group = next((g for g in groups if g.name == args.group), None) if args.group else (groups[0] if groups else None)
-    # 在群组里：开一个群聊，@ 这个 Agent；不在群组里：私聊
-    conv = net.create_conversation(group.id) if group else net.create_conversation(agent_id=agent.id)
+    projects = net.store.projects_of(agent.id)
+    project = next((g for g in projects if g.name == args.project), None) if args.project \
+        else (projects[0] if projects else None)
+    # 在项目里：在项目群聊里 @ 这个 Agent；不在项目里：私聊
+    conv = net.create_conversation(project.id) if project else net.create_conversation(agent_id=agent.id)
     name = lambda i: net.store.agents[i].name if i in net.store.agents else i  # noqa: E731
 
     seq = net.bus.last_seq
-    net.send_message(conv.id, args.text, mentions=[agent.id] if group else None)
+    net.send_message(conv.id, args.text, mentions=[agent.id] if project else None)
     # 委托是异步的：一直跑到对话回到 idle（没有在跑的轮次，也没有进行中的委托）
     while True:
         with net.store.lock:
