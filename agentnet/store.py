@@ -234,6 +234,13 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def attachment_dir(self, conv_id: str) -> Path:
+        """对话的附件区：按 sha256 存放、只读。不在任何工作目录里（私聊的席位工作目录就是对话目录），
+        运行时只拿到拷贝。"""
+        d = self.root / "attachments" / conv_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def task_dir(self, task_id: str) -> Path:
         d = self.root / "tasks" / task_id
         d.mkdir(parents=True, exist_ok=True)

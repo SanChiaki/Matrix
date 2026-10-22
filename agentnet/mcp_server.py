@@ -42,6 +42,8 @@ TOOLS = [
                 "expected_outcome": {"type": "string", "description": "需要交回什么、以什么形式交付"},
                 "share": {"type": "array", "items": {"type": "string"},
                           "description": "显式共享给对方的知识 key（只能是你可见的知识）"},
+                "attachments": {"type": "string",
+                                "description": "转交给对方的附件：你工作目录里 attachments/ 下的相对路径，每行一个"},
             },
             "required": ["agent", "mission", "expected_outcome"],
             "additionalProperties": False,

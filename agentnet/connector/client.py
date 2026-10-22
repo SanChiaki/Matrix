@@ -22,7 +22,7 @@ from .. import homedir
 from ..workdir import safe_rel
 from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
-from ..models import AGENT_HOME, PROJECT_FILES
+from ..models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
 
@@ -217,7 +217,7 @@ class Connector:
     @staticmethod
     def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
         """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        for top in ("group", PROJECT_FILES, "materials"):  # group/：旧版下发的
+        for top in ("group", PROJECT_FILES, ATTACHMENTS, "materials"):  # group/：旧版下发的
             shutil.rmtree(workdir / top, ignore_errors=True)
         for item in materials:
             rel = str(item.get("path", ""))

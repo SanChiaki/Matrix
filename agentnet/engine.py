@@ -12,7 +12,10 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import mimetypes
+import os
 import re
 import secrets
 import shutil
@@ -24,10 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT,
-                     FILE_LIMIT, HARNESSES, MCP_PREFIX, PROJECT_FILES, PROJECT_KINDS, REQUEST_TOOLS, SESSION_TOOLS,
+from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS, ATTACHMENTS_PER_MESSAGE,
+                     AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, MCP_PREFIX, PROJECT_FILES, PROJECT_KINDS, REQUEST_TOOLS, SESSION_TOOLS,
                      TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision, Delegation, KnowledgeItem, Message,
-                     Project, Proposal, ResourceRef, Seat, Task, TaskStatus, UserRequest, new_id, seat_id)
+                     Project, Proposal, ResourceRef, Seat, Task, TaskStatus, UserRequest, attachment_rel, new_id,
+                     seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_decision, format_delivery, format_request_detail, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
@@ -922,6 +926,7 @@ class Network:
                 raise NetworkError("对话进行中或还有进行中的委托，不能清空")
             conv.messages, conv.seats = [], {}
             conv.updated_at = time.time()
+            self._prune_attachments(conv.id)
             self.store.save()
         self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
 
@@ -932,6 +937,7 @@ class Network:
             if not conv.archived:
                 raise NetworkError("群聊随项目存在、私聊随 Agent 存在，不能删除；可以清空聊天记录")
             del self.store.conversations[conv_id]
+            self._prune_attachments(conv_id)
             self.store.save()
         self.bus.emit("conversation.deleted", conversation_id=conv_id)
 
@@ -956,11 +962,16 @@ class Network:
         return found
 
     def send_message(self, conv_id: str, text: str, mentions: list[str] | None = None,
-                     background: bool = True, actor: str | None = None) -> Message:
+                     background: bool = True, actor: str | None = None,
+                     attachments: list[dict[str, Any]] | None = None) -> Message:
         """人发消息。群聊里只唤醒被 @ 的成员；没 @ 任何人的消息留在对话里，之后被 @ 的成员能看到。
-        联合项目里任何参与者都能 @ 任何成员；被 @ 的 Agent 仍以它的所有者的名义、用所有者的资源运行。"""
+        联合项目里任何参与者都能 @ 任何成员；被 @ 的 Agent 仍以它的所有者的名义、用所有者的资源运行。
+        attachments：先经 upload_attachment 上传到这个对话的附件（只认已上传的内容）。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
+            files = self._clean_attachments(conv, attachments or [])
+            if not text.strip() and not files:
+                raise NetworkError("消息不能为空")
             if conv.archived:
                 raise NetworkError("这个对话已归档（项目或 Agent 已被删除，或是旧版本遗留的对话），只读")
             if conv.kind == "dm":
@@ -974,7 +985,8 @@ class Network:
                 if g is None or conv.agent_id not in g.member_ids:
                     raise NetworkError("这个会话的助理已不在项目里：新开一个会话")
             targets = self.resolve_mentions(conv, text, mentions)
-            msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets, user_id=actor)
+            msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets, user_id=actor,
+                          attachments=files)
             conv.messages.append(msg)
             for aid in targets:
                 seat = self._seat(conv, aid)
@@ -990,6 +1002,94 @@ class Network:
         if not background:
             self.wait_quiet()
         return msg
+
+    # ================= 对话附件 =================
+    # 参照 dsh 的附件（research: deepseek-harness#attachments）：上传的文件按内容寻址、只读保存，模型那边只拿到
+    # 一行路径，用自己的工具去读。附件区不在任何工作目录里，席位每轮拿到拷贝（attachments/，运行后丢弃，同 project/）；
+    # 进委托任务只能由委托方显式转交（delegate 的 attachments）。不按文件类型区分，只限大小。
+    def upload_attachment(self, conv_id: str, name: str, data: bytes, mime: str = "",
+                          actor: str | None = None) -> dict[str, Any]:
+        """存进对话的附件区，返回附件说明 {sha, name, size, mime}；发消息时带上它。看不到对话的人一律 404。"""
+        with self._lock:
+            conv = self.visible_conv(conv_id, actor)
+            if conv.archived:
+                raise NetworkError("这个对话已归档，只读")
+        if len(data) > ATTACHMENT_LIMIT:
+            raise NetworkError(f"附件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB")
+        fname = _safe_filename(name)
+        sha = hashlib.sha256(data).hexdigest()
+        dest = self.store.attachment_dir(conv.id) / sha
+        if not dest.exists():
+            tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
+            tmp.write_bytes(data)
+            tmp.chmod(0o444)
+            os.replace(tmp, dest)
+        return {"sha": sha, "name": fname, "size": len(data), "mime": _clean_mime(mime, fname)}
+
+    def _clean_attachments(self, conv: Conversation, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """调用方持有锁。消息上的附件：只认这个对话里已上传的内容；大小以文件为准，名称与类型重新清洗。"""
+        if len(items) > ATTACHMENTS_PER_MESSAGE:
+            raise NetworkError(f"一条消息最多 {ATTACHMENTS_PER_MESSAGE} 个附件")
+        out: list[dict[str, Any]] = []
+        for it in items:
+            sha = str(it.get("sha", "")).lower()
+            f = self.store.attachment_dir(conv.id) / sha if re.fullmatch(r"[0-9a-f]{64}", sha) else None
+            if f is None or not f.is_file():
+                raise NetworkError(f"附件 {it.get('name', '')} 不存在：先上传到这个对话")
+            fname = _safe_filename(str(it.get("name", "")) or sha[:8])
+            a = {"sha": sha, "name": fname, "size": f.stat().st_size, "mime": _clean_mime(str(it.get("mime", "")), fname)}
+            if all(attachment_rel(x) != attachment_rel(a) for x in out):
+                out.append(a)
+        return out
+
+    def attachment_file(self, conv_id: str, sha: str, actor: str | None = None) -> tuple[Path, dict[str, Any]]:
+        """下载：只有看得到带这个附件的消息（或转交了它的委托）的人能拿到，其余 404。"""
+        with self._lock:
+            conv = self.visible_conv(conv_id, actor)
+            meta = next((a for m in conv.messages if self.can_see_message(m, actor)
+                         for a in m.attachments if a["sha"] == sha), None) or next(
+                (a for t in self.store.tasks.values() if t.conversation_id == conv.id and self.can_see_task(t, actor)
+                 for a in t.attachments if a["sha"] == sha), None)
+            f = self.store.attachment_dir(conv.id) / sha if meta is not None else None
+            self._check(f is not None and f.is_file(), f"attachment {sha}")
+            return f, meta
+
+    def _attachments_for(self, ctx: ExecContext) -> list[dict[str, Any]]:
+        """调用方持有锁。这个执行上下文能拿到的附件：席位是对话里它能看到的消息上的，任务是委托方转交的。"""
+        if ctx.kind == "task":
+            t = self.store.tasks.get(ctx.id)
+            return list(t.attachments) if t else []
+        conv = self.store.conversations.get(ctx.conversation_id)
+        agent = self.store.agents.get(ctx.agent_id)
+        owner = agent.owner_id if agent else None
+        out: dict[str, dict[str, Any]] = {}
+        for m in conv.messages if conv else []:
+            if not m.audience or owner in m.audience:
+                for a in m.attachments:
+                    out.setdefault(attachment_rel(a), a)
+        return list(out.values())
+
+    def _mount_attachments(self, ctx: ExecContext, workdir: Path) -> None:
+        """附件拷进工作目录的 attachments/（每轮刷新，只读副本）。"""
+        shutil.rmtree(workdir / ATTACHMENTS, ignore_errors=True)
+        with self._lock:
+            items = self._attachments_for(ctx)
+        src = self.store.attachment_dir(ctx.conversation_id)
+        for a in items:
+            if (src / a["sha"]).is_file():
+                dst = workdir / attachment_rel(a)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src / a["sha"], dst)
+
+    def _prune_attachments(self, conv_id: str) -> None:
+        """调用方持有锁。清空 / 删除对话后，删掉不再被消息或委托引用的附件。"""
+        conv = self.store.conversations.get(conv_id)
+        keep = {a["sha"] for m in (conv.messages if conv else []) for a in m.attachments}
+        keep |= {a["sha"] for t in self.store.tasks.values() if t.conversation_id == conv_id for a in t.attachments}
+        d = self.store.root / "attachments" / conv_id
+        for f in d.iterdir() if d.is_dir() else []:
+            if f.name not in keep:
+                f.unlink(missing_ok=True)
 
     def _seat(self, conv: Conversation, agent_id: str) -> Seat:
         """调用方持有锁。席位第一次被用到时创建。"""
@@ -1568,6 +1668,7 @@ class Network:
                 home = "rw" if "file.write" in ctx.authority else "ro"
         else:
             self._mount_project_files(ctx, workdir)
+            self._mount_attachments(ctx, workdir)
             before = self._mount_home(agent, workdir) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
         stop = threading.Event()
@@ -1590,6 +1691,7 @@ class Network:
             with self._lock:
                 self._stops.pop(ctx.id, None)
             shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
+            shutil.rmtree(workdir / ATTACHMENTS, ignore_errors=True)
             if before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx.id)
                 if conflicts:
@@ -1670,13 +1772,16 @@ class Network:
         return out
 
     def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
-        """端侧运行时每轮要收到的只读材料：项目档案文件（运行时当只读副本用）。
+        """端侧运行时每轮要收到的只读材料（base64）：项目档案文件与对话附件（运行时当只读副本用）。
         私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
+        out: list[tuple[str, Path]] = []
         p = self.store.projects.get(ctx.project_id or "")
-        if p is None:
-            return []
-        return [{"path": f"{PROJECT_FILES}/{f.name}", "data": f.read_bytes()}
-                for f in sorted(self.store.project_dir(p.id).iterdir()) if f.is_file() and f.stat().st_size <= 2_000_000]
+        if p is not None:
+            out += [(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
+                    if f.is_file() and f.stat().st_size <= 2_000_000]
+        src = self.store.attachment_dir(ctx.conversation_id)
+        out += [(attachment_rel(a), src / a["sha"]) for a in self._attachments_for(ctx) if (src / a["sha"]).is_file()]
+        return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out]
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float | None, on_session: Any = None, home: str | None = None,
@@ -1944,11 +2049,12 @@ class Network:
         target = self._resolve_member(g, str(args.get("agent", "")))
         if target is not None and target.id == ctx.agent_id:
             raise NetworkError("不能委托给自己；自己能做的直接做")
+        passed = self._pass_attachments(ctx, args.get("attachments"))
         parent_task_id = ctx.id if ctx.kind == "task" else None
         task = Task(id=new_id("task"), conversation_id=ctx.conversation_id, project_id=g.id,
                     delegator_id=delegator.id, delegatee_id=target.id if target else None,
                     parent_task_id=parent_task_id, depth=ctx.depth + 1, delegation=delegation,
-                    effective_constraints=_dedup(ctx.constraints + delegation.constraints),
+                    effective_constraints=_dedup(ctx.constraints + delegation.constraints), attachments=passed,
                     owners=_dedup([o for o in (delegator.owner_id, target.owner_id if target else None) if o]))
 
         reason = None
@@ -1987,6 +2093,19 @@ class Network:
                           keys=[k.key for k in shared], denied=denied_keys)
         self._kick("task", task.id)
         return format_task_result(task, target.name), False
+
+    def _pass_attachments(self, ctx: ExecContext, value: Any) -> list[dict[str, Any]]:
+        """委托方转交的附件：每行一个工作目录里 attachments/ 下的路径，只能是这个上下文自己拿得到的。"""
+        with self._lock:
+            mine = {attachment_rel(a): a for a in self._attachments_for(ctx)}
+        out: list[dict[str, Any]] = []
+        for raw in _as_lines(value):
+            rel = raw.strip("`'\" ").removeprefix("./")
+            if rel not in mine:
+                raise NetworkError(f"附件 {raw} 不存在：只能转交你工作目录里 {ATTACHMENTS}/ 下的文件（写它的相对路径）")
+            if mine[rel] not in out:
+                out.append(mine[rel])
+        return out
 
     def _own_task(self, ctx: ExecContext, args: dict[str, Any]) -> Task:
         """只有直接委托方能验收、退回、续接一个任务。"""
@@ -2761,6 +2880,14 @@ def _clean_limit(v: Any) -> int | None:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v or v < 1:
         raise NetworkError(f"上限要是正整数：{v!r}")
     return int(v)
+
+
+def _clean_mime(mime: str, name: str) -> str:
+    """附件的类型只用于展示与下载：不合格式的按文件名猜，猜不出就是 application/octet-stream。"""
+    m = mime.split(";")[0].strip().lower()
+    if re.fullmatch(r"[\w.+-]+/[\w.+-]+", m) and len(m) <= 100:
+        return m
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
 
 
 def _safe_filename(name: str) -> str:

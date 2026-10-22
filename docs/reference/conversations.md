@@ -12,6 +12,12 @@
 - 委托回报回到委托方的席位（或上一级任务），由它验收。执行者工作目录里的**产物**（除去运行时文件、只读副本、`tmp/`、缓存）
   在交付时快照进委托方工作目录的 `deliveries/<task_id>/`（`agentnet/workdir.py`），重新交付时整体替换。
   Agent 的所有者可以在 UI 里浏览、下载自己 Agent 的席位与任务工作目录（只读）。
+- **附件**（参照 dsh，research: deepseek-harness#attachments）：人先把文件上传到对话（`POST /api/conversations/<id>/attachments`，
+  请求体就是文件内容，单个 ≤20 MB），再随消息发出（`Message.attachments`：sha、name、size、mime）。文件按 sha256 只读存在
+  `<data>/attachments/<对话>/`，不在任何席位工作目录或私有目录里。席位每轮把它看得到的消息上的附件拷进工作目录的
+  `attachments/<sha 前 8 位>/<文件名>`（只读副本，同 `project/`，运行后丢弃，不算产物），新消息里每个附件一行路径，模型用自己的工具读；
+  端侧随 `run.request.materials` 下发。进委托任务只能由委托方用 `delegate` 的 `attachments`（每行一个路径）显式转交。
+  上传、下载按对话可见性，看不到的一律 404（不变量 13）；下载一律以附件返回。不按文件类型区分，图片也是普通文件。
 - 群成员随时可以加减（`POST /api/projects/<id>/members`、`DELETE …/members/<agent>`），变动作为 `event` 消息写进群聊，
   之后被唤醒的成员也能看到。移出项目不打断已经接下的任务，只是不能再被 @、被委托。
 - 群聊、私聊不能删除，只能清空记录（`/clear`，席位会话从头开始，委托与知识不受影响）；只有归档的对话可以删除。
