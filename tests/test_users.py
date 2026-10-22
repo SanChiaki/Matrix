@@ -469,3 +469,26 @@ def test_request_rules(tmp_path: Path):
     net.wait_quiet()
     with pytest.raises(NetworkError, match="只有下发"):
         net.cancel_request(r.id, actor=alice)
+
+
+def test_only_owner_can_stop_a_run(tmp_path: Path):
+    """只有正在跑的 Agent 的所有者能终止它的一轮（它用的是所有者的资源）；别人看不到的按不存在处理。"""
+    net = None
+    seen: list[str] = []
+
+    def handler(call):
+        try:
+            net.stop_run(call.context_id, actor=bob)
+        except NetworkError as e:
+            seen.append(str(e))
+        return "ok"
+
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, bob = users(net, "alice@example.com", "bob@example.com")
+    a = net.create_agent("A", "A", ["a"], ["web.research"], actor=alice)
+    g = net.create_project("G", "", [a.id], actor=alice)
+    chat = net.create_conversation(g.id, actor=alice)
+    net.send_message(chat.id, "@A 看看", actor=alice, background=False)
+    assert seen and "unknown" in seen[0]  # bob 看不到这个群聊
+    with pytest.raises(NetworkError, match="没有在运行"):
+        net.stop_run(f"{chat.id}/{a.id}", actor=alice)

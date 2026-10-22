@@ -342,10 +342,11 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *_home(home_writable, home),
         *_writing(),
         "", "## 交付",
-        "- 第一行写一句话结论，然后是正文（精炼，800 字以内），最后列出证据来源（URL / 文件 / 子任务 id）。",
+        "- 第一行写一句话结论：做成了什么、没做成什么。然后说明交付了什么、在哪里（工作目录里的文件，"
+        "或工作目录之外的位置）、委托方怎么确认；无法确认的内容要标注。",
+        "- 篇幅、形式与依据的要求以上面的输出要求和约束为准。",
         "- 你在工作目录里写的文件会在交付时整体拷给委托方（`deliveries/<任务 id>/`），不用把文件内容贴进回复；"
         "草稿与临时文件放在 `tmp/` 下或删掉，它们不随交付。",
-        "- 工具调用控制在 6 次以内；无法确认的内容要标注。",
     ]
     if can_delegate:
         parts.append("- 你委托出去的子任务全部有了结果（交付或失败）之后，你的最终回复才会作为交付；"
@@ -412,6 +413,8 @@ def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
         f"## 网络通知：{agent_name} 的任务 {task.id} 失败",
         f"目标：{task.delegation.mission}",
         f"原因：{(task.error or '未知')[:400]}",
+        *(["这一轮是人终止的：没有新的指示前不要续接，也不要把同样的事重新委托出去。"]
+          if "STOPPED" in (task.error or "") else []),
         (f"可以用 retry_task 续接原会话（还能续接 {left} 次），或换一个成员重新委托，或亲自处理。" if left
          else "续接次数已用完：换一个成员重新委托，或亲自处理。"),
     ])
@@ -434,6 +437,7 @@ def format_failure(agent_name: str, error: str, error_class: str, tasks: list[Ta
         "malformed_tool_call": "模型写出的工具参数不是合法 JSON，网络已自动续接一次仍未成功",
         "empty_response": "模型返回了空响应，网络已自动续接一次仍未成功",
         "timeout": "运行超时",
+        "stopped": "被人终止",
         "rate_limited": "模型服务限流",
     }.get(error_class, "运行时出错")
     lines = [f"（{agent_name} 这一轮中断：{hint}。）", f"原因：{error[:300]}"]

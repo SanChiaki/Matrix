@@ -21,7 +21,7 @@ from pathlib import Path
 import sys
 
 from ...runtime import MCP_SERVER_SCRIPT, ENFORCED, UNAVAILABLE, RuntimeCapabilities, argv, no_window
-from .base import RunOutcome, RunSpec
+from .base import RunOutcome, RunSpec, guard
 
 # 宿主环境里这些变量会让子进程里的 claude 改用宿主进程的凭据 / 网关，而不是用户自己的登录，
 # 表现为 "Not logged in"。连接器要跑的是"用户的 Claude Code"，所以启动前清掉它们。
@@ -96,6 +96,7 @@ class ClaudeDriver:
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="replace", creationflags=no_window())
         assert proc.stdin is not None and proc.stdout is not None
+        timed_out = guard(proc, spec.timeout_s, cancel)
         proc.stdin.write(spec.prompt)
         proc.stdin.close()
         session_id, final = spec.session_id or "", ""
@@ -125,6 +126,9 @@ class ClaudeDriver:
                     result_error = ev.get("result") or ev.get("subtype") or "claude reported an error"
         code = proc.wait()
         err = (proc.stderr.read() if proc.stderr else "")[-2000:]
+        if timed_out.is_set():
+            return RunOutcome(session_id=session_id, tool_calls=tools, ok=False,
+                              error=f"TIMEOUT: 超过 {int(spec.timeout_s or 0)} 秒，连接器终止了这次运行")
         if code != 0 or result_error:
             # 退出码之外，harness 自己的 result 事件通常说清了原因（如未登录）；空 stderr 时尤其重要
             detail = err.strip() or result_error or "（没有输出）"

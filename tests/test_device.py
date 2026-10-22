@@ -1,4 +1,6 @@
 """端侧连接器协议（docs/device-runtimes.md 第 2 节）：一轮的收发、工具回传、审批上行、能力握手。"""
+import threading
+
 from agentnet.device import (APPROVAL_REQUEST, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST, RUN_RESULT, TOOL_CALL,
                              DeviceError, DeviceRuntime, MemoryLink, capabilities_from_hello)
 from agentnet.runtime import ADVISORY, ENFORCED, RunRequest, RuntimeCapabilities, ToolBridge
@@ -71,6 +73,53 @@ def test_run_times_out_and_cancels():
     res = rt.run(req(timeout_s=0.05))
     assert not res.ok and "TIMEOUT" in (res.error or "")
     assert calls[-1]["type"] == "cancel" and calls[-1]["run_id"].startswith("run-")
+
+
+def test_run_without_timeout_waits_and_sends_limit():
+    """超时默认不限制：一直等到结果；超时设置随 run.request 发给连接器，端侧 harness 自己执行。"""
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), hello())
+    pending = {}
+    calls = connector(rt, script=lambda msg, deliver: pending.update(msg=msg, deliver=deliver))
+    box = {}
+    t = threading.Thread(target=lambda: box.update(res=rt.run(req())))
+    t.start()
+    t.join(0.2)
+    assert t.is_alive() and calls[0]["timeout_s"] is None
+    pending["deliver"]({"type": RUN_RESULT, "run_id": pending["msg"]["run_id"], "final_text": "late"})
+    t.join(2)
+    assert box["res"].ok and box["res"].final_text == "late"
+    calls = connector(rt)
+    rt.run(req(timeout_s=30))
+    assert calls[0]["timeout_s"] == 30
+
+
+def test_stop_cancels_device_run():
+    """人终止：网络立刻结束这一轮并通知连接器取消，不等端侧回结果。"""
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), hello())
+    calls = connector(rt, script=lambda msg, deliver: None)  # 永远不回
+    stop = threading.Event()
+    box = {}
+    t = threading.Thread(target=lambda: box.update(res=rt.run(req(cancel=stop))))
+    t.start()
+    t.join(0.1)
+    stop.set()
+    t.join(3)
+    assert not box["res"].ok and "STOPPED" in box["res"].error
+    assert calls[-1]["type"] == "cancel"
+
+
+def test_disconnect_releases_pending_runs():
+    """连接断开：等结果的轮次立刻以传输错误结束（引擎据此让端侧任务回到等待），不靠超时。"""
+    rt = DeviceRuntime(MemoryLink(serve=lambda m: None), hello())
+    connector(rt, script=lambda msg, deliver: None)  # 永远不回
+    box = {}
+    t = threading.Thread(target=lambda: box.update(res=rt.run(req())))
+    t.start()
+    t.join(0.1)
+    rt.abort_all()
+    t.join(2)
+    res = box["res"]
+    assert not res.ok and "TRANSPORT" in res.error and res.error_class == "provider_connection"
 
 
 def test_events_are_streamed_to_the_engine():

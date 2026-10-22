@@ -64,7 +64,7 @@
 | 项目文件共享给联合群组 | 联合项目全可见 |
 
 接受的代价：中间环节不上看板（在任务详情里看）；协调的 Agent 需要 `delegate`；群聊噪音随成员增长；
-“开发 → 测试 → 文档”加返工可能碰到 `max_delegations`（每次被 @ 8 次），试跑时观察；联合项目里合作方 Agent 能直接委托你的 Agent
+委托次数默认不限制，需要时由所有者在 Agent 设置里设上限（`max_delegations`）；联合项目里合作方 Agent 能直接委托你的 Agent
 （外溢审批仍找所有者）。
 
 ## 5. 旧数据迁移（`Store._load`，测试见 `tests/test_migration.py`）

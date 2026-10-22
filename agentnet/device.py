@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from .models import AUTHORITIES
-from .runtime import (ENFORCED, RunRequest, RunResult, RuntimeCapabilities)
+from .runtime import (ENFORCED, STOPPED_ERROR, RunRequest, RunResult, RuntimeCapabilities)
 
 # ---- 消息（服务器 → 连接器）----
 HELLO = "hello"                    # {protocol, token, runtime}
@@ -131,10 +131,11 @@ class DeviceRuntime:
             "tool_names": list(req.tools.names or []) if req.tools else [],
             "model": req.model, "materials": list(getattr(req, "materials", None) or []),
             "home": getattr(req, "home", None), "harness": req.harness,
+            "timeout_s": req.timeout_s,
         }
         try:
             self.link.send(payload)
-            replied = done.wait(req.timeout_s)
+            replied = self._await(done, req)
         except DeviceError as e:
             return RunResult("", "", ok=False, error=f"TRANSPORT device unreachable: {e}")
         finally:
@@ -143,11 +144,16 @@ class DeviceRuntime:
                 self._reqs.pop(run_id, None)
                 if self._by_context.get(req.context_id) == run_id:
                     self._by_context.pop(req.context_id, None)
+        if req.cancel is not None and req.cancel.is_set() and not replied:
+            self.cancel(run_id)  # 人终止：通知连接器结束 harness，不等它回结果
+            return RunResult(req.session_id or "", "", ok=False, error=STOPPED_ERROR)
         if not replied:
             self.cancel(run_id)
             return RunResult("", "", ok=False, error=f"TIMEOUT device did not answer in {req.timeout_s:.0f}s")
         with self._lock:
             data = self._results.pop(run_id, {})
+        if data.get("aborted"):
+            return RunResult("", "", ok=False, error="TRANSPORT device disconnected")
         return RunResult(
             session_id=data.get("session_id") or req.session_id or "",
             final_text=data.get("final_text", ""),
@@ -156,6 +162,29 @@ class DeviceRuntime:
             ok=bool(data.get("ok", True)),
             error=data.get("error"),
         )
+
+    @staticmethod
+    def _await(done: threading.Event, req: RunRequest) -> bool:
+        """等结果；超时（None 不限制）或人终止时返回 False。"""
+        if req.cancel is None:
+            return done.wait(req.timeout_s)
+        deadline = time.monotonic() + req.timeout_s if req.timeout_s else None
+        while not req.cancel.is_set():
+            step = 0.2 if deadline is None else min(0.2, max(0.0, deadline - time.monotonic()))
+            if done.wait(step):
+                return True
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+        return done.is_set()
+
+    def abort_all(self) -> None:
+        """连接断开：正在等结果的轮次立刻以传输错误结束（不再等超时；超时默认不限制）。"""
+        with self._lock:
+            pending = list(self._runs.items())
+            for run_id, _ in pending:
+                self._results[run_id] = {"aborted": True}
+        for _, done in pending:
+            done.set()
 
     def cancel(self, run_id: str) -> None:
         try:

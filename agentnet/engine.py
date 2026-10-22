@@ -38,18 +38,17 @@ from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import ModelCatalog
-from .runtime import AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities, ToolBridge
+from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities,
+                      ToolBridge)
 from .store import Store
 
 
 @dataclass
 class Limits:
     max_depth: int = 3              # 对话直接发起的委托 depth=1；depth >= max_depth 的任务不能再委托
-    max_delegations: int = 8        # 每条用户消息（对话）/ 每个任务最多发起几次委托
     max_revisions: int = 3          # 一个任务最多被退回修改几次
     max_retries: int = 3            # 一个失败任务最多被续接几次
-    turn_timeout_s: float = 1800
-    task_timeout_s: float = 900
+    tool_timeout_s: float = 900     # 一次网络工具调用最长等多久（委托的运行超时与次数上限在 Agent 设置里）
     approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
 
 
@@ -112,6 +111,7 @@ class Network:
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
+        self._stops: dict[str, threading.Event] = {}  # 正在跑的一轮 -> 人终止它的信号（stop_run）
         self._approval_waits: dict[str, threading.Event] = {}
         self._home_locks: dict[str, threading.Lock] = {}
         self._lock = self.store.lock
@@ -196,6 +196,7 @@ class Network:
                      chat_enabled: bool = True, model: dict[str, str] | None = None,
                      model_preset: str | None = None,
                      device_runtime: str | None = None, harness: str | None = None,
+                     timeout_s: int | None = None, max_delegations: int | None = None,
                      actor: str | None = None) -> AgentNode:
         with self._lock:
             self._check_device_runtime(device_runtime, actor)
@@ -203,6 +204,8 @@ class Network:
             a = self._new_agent(name, description, capabilities, authority, chat_enabled, model, "human", actor,
                                 model_preset=model_preset, device_runtime=device_runtime or None,
                                 harness=harness or None)
+            a.timeout_s, a.max_delegations = _clean_limit(timeout_s), _clean_limit(max_delegations)
+            self.store.save()
         self.bus.emit("agent.updated", agent=a.to_dict())
         return a
 
@@ -245,6 +248,9 @@ class Network:
                     self._set_model(a, a.model, None if device else a.model_preset, strict=False)
             if "model" in fields or "model_preset" in fields:  # 两个都没给 / 为空 = 改回默认模型
                 self._set_model(a, fields.pop("model", None), fields.pop("model_preset", None))
+            for k in LIMIT_FIELDS:  # 运行上限：显式传 None = 改回不限制
+                if k in fields:
+                    setattr(a, k, _clean_limit(fields.pop(k)))
             for k, v in fields.items():
                 if v is None:
                     continue
@@ -1186,8 +1192,15 @@ class Network:
                              else {"conversation": self.store.conversations[cid.partition("/")[0]].to_dict(full=False)}))
             self._kick(kind, cid)
 
-    def unregister_runtime(self, name: str) -> None:
-        self._runtimes.pop(name, None)
+    def unregister_runtime(self, name: str, rt: AgentRuntime | None = None) -> None:
+        """设备下线。传了 rt 时只摘掉这一条连接（已经重连上的新连接不动）；
+        这条连接上还在等结果的轮次立刻以传输错误结束，端侧任务回到等待（超时默认不限制，不能靠它兜底）。"""
+        current = self._runtimes.get(name)
+        if rt is None or current is rt:
+            self._runtimes.pop(name, None)
+        gone = rt or current
+        if gone is not None and hasattr(gone, "abort_all"):
+            gone.abort_all()
 
     def runtime_for(self, agent: AgentNode | None = None) -> AgentRuntime | None:
         """Agent 绑定的运行时；未绑定用默认运行时；绑定了但不在线、或设备上没有它要的 harness 时
@@ -1288,7 +1301,7 @@ class Network:
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
                                    home_writable="file.write" in ctx.authority, archive=archive,
                                    home=mount_home, joint=joint)
-        res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, self.limits.turn_timeout_s,
+        res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home)
         steps = self._live.pop(sid, [])
         owner_only = [agent.owner_id] if agent.owner_id else []
@@ -1357,7 +1370,7 @@ class Network:
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
             prompt = build_notice_prompt("\n\n".join(filter(None, [inbox, archive])))
-        res = self._run(ctx, agent, prompt, workdir, task, self.limits.task_timeout_s, mount_home=mount_home)
+        res = self._run(ctx, agent, prompt, workdir, task, agent.timeout_s, mount_home=mount_home)
         if res.ok:
             with self._lock:
                 task.archive_seen = archive_rev
@@ -1543,7 +1556,7 @@ class Network:
 
     # ================= 运行时调用 =================
     def _run(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, holder: Seat | Task,
-             timeout_s: float, mount_home: bool = True) -> RunResult:
+             timeout_s: float | None, mount_home: bool = True) -> RunResult:
         """跑一轮；可恢复的运行时错误（如工具参数 JSON 损坏）用同一个会话自动续接一次。"""
         others, hidden = self._ledger_for(ctx)
         if others or hidden:  # 工作台账：同时在做的其他工作（联合项目里不列出别处的细节）
@@ -1557,12 +1570,15 @@ class Network:
             self._mount_project_files(ctx, workdir)
             before = self._mount_home(agent, workdir) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
+        stop = threading.Event()
+        with self._lock:
+            self._stops[ctx.id] = stop
         invoke = lambda p: self._invoke(ctx, agent, p, workdir, holder.dsh_session_id, timeout_s,  # noqa: E731
-                                        on_session, home=home)
+                                        on_session, home=home, cancel=stop)
         try:
             res = invoke(prompt)
             holder.dsh_session_id = res.session_id or holder.dsh_session_id
-            if res.retryable:
+            if res.retryable and not stop.is_set():
                 self.bus.emit("run.retry", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
                               error_class=res.error_class, error=_short(res.error, 300))
                 again = retry_prompt(None, res.error) if holder.dsh_session_id else prompt
@@ -1571,6 +1587,8 @@ class Network:
                 res2.tool_calls = res.tool_calls + res2.tool_calls
                 res = res2
         finally:
+            with self._lock:
+                self._stops.pop(ctx.id, None)
             shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
             if before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx.id)
@@ -1661,13 +1679,14 @@ class Network:
                 for f in sorted(self.store.project_dir(p.id).iterdir()) if f.is_file() and f.stat().st_size <= 2_000_000]
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
-                timeout_s: float, on_session: Any = None, home: str | None = None) -> RunResult:
+                timeout_s: float | None, on_session: Any = None, home: str | None = None,
+                cancel: threading.Event | None = None) -> RunResult:
         token = secrets.token_urlsafe(18)
         tools = None
         if ctx.tools:  # 席位有用户任务工具；项目里有档案工具；协作工具（委托等）另外要求 delegate
             tools = ToolBridge(url=self.tool_url, token=token,
                                handler=lambda name, args: self.handle_tool(token, name, args),
-                               timeout_s=self.limits.task_timeout_s, names=ctx.tools)
+                               timeout_s=self.limits.tool_timeout_s, names=ctx.tools)
         # 审批通道总是挂载：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请
         approvals = ApprovalBridge(url=self.approval_url, token=token,
                                    handler=lambda tool, reason: self.request_approval(token, tool, reason),
@@ -1721,7 +1740,7 @@ class Network:
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
                                               approvals=approvals, materials=materials, home=home,
-                                              harness=agent.harness))
+                                              harness=agent.harness, cancel=cancel))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -1729,6 +1748,9 @@ class Network:
                 self._contexts.pop(token, None)
                 agent.active = max(0, agent.active - 1)
             self.bus.emit("agent.updated", agent=agent.to_dict())
+        if cancel is not None and cancel.is_set() and res.error_class != "stopped":
+            # 人终止了这一轮：不管运行时最后报的是什么，都按终止处理（不自动续接，不当成交付）
+            res = RunResult(res.session_id, res.final_text, res.tool_calls, res.usage, ok=False, error=STOPPED_ERROR)
         return res
 
     # ================= 网络工具（MCP） =================
@@ -1895,13 +1917,16 @@ class Network:
         return a if a and a.id in g.member_ids else None
 
     def _count_delegation(self, ctx: ExecContext) -> str | None:
-        """委托次数按“一次被 @ 引出的工作 / 每个任务”累计，跨轮次有效（异步后一个上下文会跑很多轮）。"""
+        """委托次数按“一次被 @ 引出的工作 / 每个任务”累计，跨轮次有效（异步后一个上下文会跑很多轮）。
+        上限是委托方 Agent 自己的设置，没设不限制。"""
         holder = self._holder(ctx.kind, ctx.id)
+        agent = self.store.agents.get(ctx.agent_id)
+        cap = agent.max_delegations if agent else None
         with self._lock:
             if holder is None:
                 return "执行上下文已不存在"
-            if holder.delegations >= self.limits.max_delegations:
-                return f"委托次数已达上限 {self.limits.max_delegations}"
+            if cap is not None and holder.delegations >= cap:
+                return f"委托次数已达上限 {cap}（{agent.name} 的设置）"
             holder.delegations += 1
         return None
 
@@ -2322,6 +2347,26 @@ class Network:
         return r
 
     # ================= 人：续接 =================
+    def stop_run(self, context_id: str, actor: str | None = None) -> None:
+        """人终止一个席位（`对话/Agent`）或一个任务正在跑的这一轮。只有正在跑的 Agent 的所有者能终止
+        （它用的是所有者的资源）。运行时收到信号后尽快结束；这一轮按 STOPPED 处理：不自动续接，
+        席位中断、等人“继续”，任务失败、可续接；会话都保留。"""
+        kind = "seat" if "/" in context_id else "task"
+        with self._lock:
+            if kind == "seat":
+                conv_id, _, agent_id = context_id.partition("/")
+                self.visible_conv(conv_id, actor)
+            else:
+                agent_id = self.visible_task(context_id, actor).delegatee_id or ""
+            agent = self.store.agents.get(agent_id)
+            if agent is None or (actor is not None and agent.owner_id not in (None, actor)):
+                raise NetworkError("只有这个 Agent 的所有者能终止它的运行")
+            stop = self._stops.get(context_id)
+            if stop is None:
+                raise NetworkError("这一轮已经结束，没有在运行")
+            stop.set()
+        self.bus.emit("run.stopping", context=kind, context_id=context_id, agent_id=agent_id)
+
     def resume_conversation(self, conv_id: str, agent_id: str | None = None, note: str = "",
                             actor: str | None = None) -> list[str]:
         """某个席位这一轮失败后，人点“继续”：同一个会话接着做，已完成的委托与知识都还在。
@@ -2566,7 +2611,9 @@ class Network:
     def task_detail(self, task_id: str, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             t = self.visible_task(task_id, actor)
-            return {**t.to_dict(full=True), "live": list(self._live.get(task_id, []))}
+            a = self.store.agents.get(t.delegatee_id or "")
+            stoppable = task_id in self._stops and a is not None and (actor is None or a.owner_id in (None, actor))
+            return {**t.to_dict(full=True), "live": list(self._live.get(task_id, [])), "stoppable": stoppable}
 
     def knowledge_item(self, key: str, actor: str | None = None) -> KnowledgeItem:
         with self._lock:
@@ -2611,7 +2658,7 @@ class Network:
                 t = self.store.tasks[task_id]
                 if not self.can_see_task(t, actor):
                     return None
-                if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry"):  # 执行过程：执行方所有者
+                if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry", "run.stopping"):  # 执行过程：执行方所有者
                     a = self.store.agents.get(t.delegatee_id or "")
                     return data if a is None or self.can_use_agent(a, actor) else None
                 return data
@@ -2704,6 +2751,16 @@ APPROVAL_CN = {"allowed": "批准", "rejected": "拒绝", "cancelled": "作废",
 SESSION_MESSAGES = 20  # 项目会话推送的群聊最近消息条数
 SESSION_REQUESTS = 15  # 项目会话推送的没结束的用户任务条数
 UPDATABLE_AGENT_FIELDS = ("name", "description", "capabilities", "authority", "chat_enabled")
+LIMIT_FIELDS = ("timeout_s", "max_delegations")
+
+
+def _clean_limit(v: Any) -> int | None:
+    """运行上限：正整数；None / 空 = 不限制。"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or int(v) != v or v < 1:
+        raise NetworkError(f"上限要是正整数：{v!r}")
+    return int(v)
 
 
 def _safe_filename(name: str) -> str:

@@ -330,3 +330,45 @@ print(json.dumps({"type":"item.completed","item":{"type":"agent_message","text":
 """
     out = CodexDriver(fake_bin(tmp_path, "codex", body)).run(spec(tmp_path), Ctx(), threading.Event())
     assert out.ok and out.final_text == "ok" and out.session_id == "th-8"
+
+
+def test_driver_guard_enforces_timeout_and_cancel():
+    """端侧驱动按这一轮的超时（Agent 设置）或网络取消结束 harness 进程；不设超时就一直跑。"""
+    import subprocess
+    import time
+
+    from agentnet.runtime import watch_process as guard
+
+    sleep = [sys.executable, "-c", "import time; time.sleep(30)"]
+    p = subprocess.Popen(sleep)
+    timed_out = guard(p, 0.3, threading.Event())
+    p.wait(10)
+    assert timed_out.is_set()
+
+    cancel = threading.Event()
+    p = subprocess.Popen(sleep)
+    timed_out = guard(p, None, cancel)
+    time.sleep(0.6)
+    assert p.poll() is None  # 不限制：还在跑
+    cancel.set()
+    p.wait(10)
+    assert not timed_out.is_set()
+
+
+def test_dsh_runtime_stops_on_cancel(tmp_path):
+    """云侧 dsh：人终止时结束进程，这一轮以 STOPPED 结束，拿到的会话 id 保留。"""
+    import time
+
+    from agentnet.runtime import DshRuntime, RunRequest
+
+    fake = tmp_path / "fake-dsh"
+    fake.write_text("#!" + sys.executable + "\nimport json, sys, time\nsys.stdin.read()\n"
+                    "print(json.dumps({'type': 'session', 'sessionId': 's-1'}), flush=True)\ntime.sleep(30)\n")
+    fake.chmod(0o755)
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    t0 = time.monotonic()
+    res = DshRuntime(dsh_bin=str(fake)).run(RunRequest(agent_id="a", context_id="c", prompt="hi",
+                                                      cwd=tmp_path / "w", authority=[], cancel=stop))
+    assert time.monotonic() - t0 < 10
+    assert not res.ok and "STOPPED" in res.error and res.session_id == "s-1"

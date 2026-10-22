@@ -89,6 +89,9 @@ class AgentNode:
     # 该运行时最近一次握手声明的强制能力（权限 -> enforced/advisory/unavailable）。
     # 设备离线时用它，避免把"未知"当成"全都不行"而误收窄委托权限。
     enforcement: dict[str, str] = field(default_factory=dict)
+    # 运行上限（所有者设置）：每轮运行的超时秒数；每次被 @ 引出的工作 / 每个任务最多发起几次委托。None = 不限制
+    timeout_s: int | None = None
+    max_delegations: int | None = None
     created_by: str = "seed"             # seed | human | proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)

@@ -116,6 +116,14 @@ def test_api_flow(tmp_path: Path):
     assert c.patch(f"/api/agents/{new['id']}", json={"model": m}).json()["model"] == m
     assert c.patch(f"/api/agents/{new['id']}", json={"description": "财务测算与预算"}).json()["model"] == m
     assert c.patch(f"/api/agents/{new['id']}", json={"model": None}).json()["model"] is None
+    # 每轮超时与委托次数上限是 Agent 设置，默认不限制（null）；设成 null 改回不限制
+    assert new["timeout_s"] is None and new["max_delegations"] is None
+    lim = c.patch(f"/api/agents/{new['id']}", json={"timeout_s": 600, "max_delegations": 5}).json()
+    assert lim["timeout_s"] == 600 and lim["max_delegations"] == 5
+    assert c.patch(f"/api/agents/{new['id']}", json={"description": "财务"}).json()["max_delegations"] == 5
+    assert c.patch(f"/api/agents/{new['id']}", json={"max_delegations": 0}).status_code == 422
+    lim = c.patch(f"/api/agents/{new['id']}", json={"timeout_s": None, "max_delegations": None}).json()
+    assert lim["timeout_s"] is None and lim["max_delegations"] is None
 
     # 项目管理
     g2 = c.post("/api/projects", json={"name": "财务组", "member_ids": [names["Product Strategy Agent"], new["id"]]}).json()
@@ -143,6 +151,10 @@ def test_api_flow(tmp_path: Path):
     assert len(d["tasks"]) == 5
     t = next(t for t in d["tasks"] if t["status"] == "completed")
     full = c.get(f"/api/tasks/{t['id']}").json()
+    assert full["stoppable"] is False  # 没在跑：不能停
+    assert c.post(f"/api/tasks/{t['id']}/stop").status_code == 409
+    assert c.post(f"/api/conversations/{conv['id']}/seats/{lead}/stop").status_code == 409
+    assert c.post(f"/api/tasks/task-nope/stop").status_code == 404
     assert full["result"]["report"] and c.get(f"/api/knowledge/{full['result']['knowledge_key']}").json()["content"]
     assert c.get("/api/network").json()["relations"]
     # 没 @ 任何人：发出但不唤醒

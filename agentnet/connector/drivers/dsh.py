@@ -42,9 +42,8 @@ class DshDriver:
         req = RunRequest(agent_id=spec.agent_id, context_id=spec.context_id, prompt=spec.prompt,
                          cwd=Path(spec.workdir), authority=list(spec.authority),
                          session_id=spec.session_id, tools=tools, on_event=ctx.emit,
-                         timeout_s=3600, model=spec.model, approvals=approvals)
-        # 取消：DshRuntime 自己按 timeout 杀进程；连接器收到 cancel 时只能等这一轮结束
-        # （没有跨进程句柄）。返回值里保留 session，下一轮可以续接，不会丢上下文。
+                         timeout_s=spec.timeout_s, model=spec.model, approvals=approvals, cancel=cancel)
+        # 超时与取消（人终止）都由 DshRuntime 结束进程；返回值里保留 session，下一轮可以续接，不会丢上下文。
         res = self._runtime.run(req)
         return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,
                           usage=res.usage, ok=res.ok, error=res.error)

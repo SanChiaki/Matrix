@@ -299,12 +299,74 @@ def test_delegation_limit_spans_rounds(tmp_path: Path):
             results.append("rejected" if "上限" in r else "ok")
         return "next"
 
-    net = Network(ScriptedRuntime(handler), tmp_path, Limits(max_delegations=2))
+    net = Network(ScriptedRuntime(handler), tmp_path)
     a, b, g = pair(net)
+    net.update_agent(a.id, max_delegations=2)  # 上限是 Agent 自己的设置
     conv = talk(net, a, g, "go")
     assert results[:3] == ["ok", "ok", "rejected"]
     talk(net, a, g, "再来", conv)  # 再次被 @：重新计数
     assert "ok" in results[3:]
+
+
+def test_delegation_count_unlimited_by_default(tmp_path: Path):
+    """不变量 4：Agent 没设委托次数上限时不限次数（成环与深度仍拒绝）。"""
+    results: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        if is_task(call):
+            return "ok"
+        if "（@ 你）" in call.prompt:
+            for _ in range(12):
+                r = call.tool("delegate", agent="B", mission="m", expected_outcome="o")
+                results.append("rejected" if "上限" in r else "ok")
+        return "next"
+
+    net = Network(ScriptedRuntime(handler), tmp_path)
+    a, b, g = pair(net)
+    assert a.max_delegations is None and a.timeout_s is None
+    talk(net, a, g, "go")
+    assert results == ["ok"] * 12
+
+
+def test_run_timeout_comes_from_agent(tmp_path: Path):
+    """每轮运行的超时取 Agent 自己的设置，默认不限制（None）。"""
+    def handler(call: ScriptCall) -> str:
+        if not is_task(call) and "（@ 你）" in call.prompt:
+            call.tool("delegate", agent="B", mission="m", expected_outcome="o")
+        return "ok"
+
+    rt = ScriptedRuntime(handler)
+    net = Network(rt, tmp_path)
+    a, b, g = pair(net)
+    talk(net, a, g, "go")
+    assert rt.calls and all(c.timeout_s is None for c in rt.calls)
+    net.update_agent(a.id, timeout_s=120)
+    net.update_agent(b.id, timeout_s=60)
+    n = len(rt.calls)
+    talk(net, a, g, "再来")
+    new = rt.calls[n:]
+    assert {c.timeout_s for c in new if is_task(c)} == {60}
+    assert {c.timeout_s for c in new if not is_task(c)} == {120}
+    net.update_agent(a.id, timeout_s=None)  # 改回不限制
+    assert net.store.agents[a.id].timeout_s is None
+
+
+def test_task_prompt_has_no_domain_constraints(tmp_path: Path):
+    """任务提示词不写死某个领域的约束（字数、工具调用次数、证据来源）；交付要求跟随委托的预期结果与约束。"""
+    def handler(call: ScriptCall) -> str:
+        if not is_task(call) and "（@ 你）" in call.prompt:
+            call.tool("delegate", agent="B", mission="整理会议纪要", expected_outcome="一页纪要",
+                      constraints="只用中文")
+        return "ok"
+
+    rt = ScriptedRuntime(handler)
+    net = Network(rt, tmp_path)
+    a, b, g = pair(net)
+    talk(net, a, g, "go")
+    p = next(c.prompt for c in rt.calls if is_task(c))
+    assert "一页纪要" in p and "只用中文" in p
+    for s in ("800 字", "6 次", "证据来源", "URL"):
+        assert s not in p
 
 
 def test_dm_has_no_network_tools(tmp_path: Path):
@@ -1057,3 +1119,56 @@ def test_mcp_server_stdio(tmp_path: Path):
     assert {t["name"] for t in res[1]["result"]["tools"]} == {t["name"] for t in TOOLS}
     assert res[2]["result"]["isError"] is True
     assert MCP_PREFIX == "mcp__agentnet__"
+
+
+# ================= 人主动终止一轮 =================
+def test_owner_stops_running_seat_round(tmp_path: Path):
+    """人终止正在跑的一轮：运行时收到停止信号，这一轮不自动续接，席位中断待人“继续”，会话保留。"""
+    net = None
+
+    def handler(call: ScriptCall) -> str:
+        if call.turn == 1:
+            net.stop_run(call.context_id)  # 人在这一轮跑的时候点了停止
+            assert call.stopped.wait(2)
+            return "做了一半"
+        return "接着做完了"
+
+    rt = ScriptedRuntime(handler)
+    net = Network(rt, tmp_path)
+    a, b, g = pair(net)
+    conv = talk(net, a, g, "go")
+    s = seat(net, conv, a)
+    assert len(rt.calls) == 1  # 不自动续接
+    assert s.blocked and "STOPPED" in s.blocked
+    assert "终止" in conv.messages[-1].text and conv.messages[-1].role == "system"
+    with pytest.raises(NetworkError, match="没有在运行"):
+        net.stop_run(f"{conv.id}/{a.id}")
+    net.resume_conversation(conv.id, a.id)
+    net.wait_quiet(10)
+    assert rt.calls[-1].resumed and conv.messages[-1].text == "接着做完了"
+
+
+def test_owner_stops_running_task(tmp_path: Path):
+    """终止一个委托的这一轮：任务失败（可续接），委托方收到的通知写明是人终止的、不要直接续接。"""
+    net = None
+    notices: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        if is_task(call):
+            net.stop_run(call.context_id)
+            call.stopped.wait(2)
+            return "半成品"
+        if "（@ 你）" in call.prompt:
+            call.tool("delegate", agent="B", mission="m", expected_outcome="o")
+        elif "失败" in call.prompt:
+            notices.append(call.prompt)
+        return "ok"
+
+    rt = ScriptedRuntime(handler)
+    net = Network(rt, tmp_path)
+    a, b, g = pair(net)
+    talk(net, a, g, "go")
+    t = by_target(net, "B")[0]
+    assert t.status == TaskStatus.FAILED and "STOPPED" in t.error
+    assert sum(is_task(c) for c in rt.calls) == 1
+    assert notices and "人终止" in notices[0]
