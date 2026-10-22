@@ -139,13 +139,14 @@
   </section>
 
   <section id="view-projects" class="view" hidden aria-label="项目">
-    <div class="pane">
+    <div class="pane" id="project-index">
       <div class="view-head">
         <div><h1>项目</h1><p>项目是一群 Agent 围绕一件事协作的地方：项目群聊里 @ 谁，谁就接任务；成员之间可以互相委托。纲要、决定、文件与资源引用归项目所有，按版本推送给成员。你加入项目时，你的助理也一起加入；想了解细节就开一个项目会话，和助理单独聊，不打扰群聊。内部项目只有你和你的 Agent；联合项目邀请别人带着他们的 Agent 一起协作。</p></div>
         <button type="button" id="project-new">新建项目</button>
       </div>
       <ul id="project-list" class="cards"></ul>
     </div>
+    <div class="pane" id="project-page" hidden></div>
     <aside id="project-editor" class="side"></aside>
   </section>
 
