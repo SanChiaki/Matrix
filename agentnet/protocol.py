@@ -9,9 +9,9 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, AUTHORITIES, DECISIONS_PUSHED, MCP_PREFIX, PROJECT_FILES,
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, DECISIONS_PUSHED, MCP_PREFIX, PROJECT_FILES,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
-                     Proposal, Task, UserRequest)
+                     Proposal, Task, UserRequest, attachment_rel)
 
 
 def authority_lines(authority: list[str]) -> str:
@@ -43,6 +43,21 @@ def _home(writable: bool, mounted: bool = True) -> list[str]:
             "申请会交给你的所有者审批。被拒绝就停下来说明，不要绕过。"]
 
 
+def _size(n: int) -> str:
+    return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB" if n < 1024 * 1024 else f"{n / 1024 / 1024:.1f} MB"
+
+
+def format_attachments(items: list[dict]) -> list[str]:
+    """附件只给一行路径（只读副本，在工作目录里），内容由模型用自己的工具去读。"""
+    return [f"- 附件 `{attachment_rel(a)}`（{a.get('mime', '')}，{_size(int(a.get('size', 0)))}）" for a in items]
+
+
+def _attachments_note() -> list[str]:
+    return ["", "## 附件",
+            f"- 人发来的附件以只读副本放在 `./{ATTACHMENTS}/` 下，消息里写明每个文件的路径；需要时用你自己的工具读。"
+            "这里的改动不会保存。"]
+
+
 def format_ledger(items: list[dict], hidden: int = 0) -> str:
     """工作台账：这个 Agent 此刻同时在做的其他工作。hidden：不在这个信任域里、不列细节的条目数。"""
     lines = ["## 你同时还在处理（工作台账）",
@@ -62,7 +77,8 @@ def format_ledger(items: list[dict], hidden: int = 0) -> str:
 TOOL_GUIDE: dict[str, str] = {
     "list_members": "查看项目成员及其能力；只能委托这些成员。",
     "delegate": ("委托一个成员：写清 mission、expected_outcome（交回什么、以什么形式），可选 authority（只能收窄对方自身权限）、"
-                 "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）。**立即返回任务 id，不等待结果**。"),
+                 "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）、"
+                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个）。**立即返回任务 id，不等待结果**。"),
     "list_tasks": "查看你发起的委托及其状态。",
     "accept_task": "接受一个已交付（in_review）的委托。",
     "request_changes": "退回一个已交付的委托并写明要改什么，对方会在原会话里修改后重新交付。",
@@ -226,7 +242,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
                   "- 每轮会带上项目现状的摘要（有变化时）；更早或更细的内容用上面的工具读，不要凭印象回答。"]
     parts += _requests()
-    parts += [*_home(home_writable, home), *_writing(), "",
+    parts += [*_attachments_note(), *_home(home_writable, home), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
 
@@ -305,7 +321,7 @@ def format_transcript(messages: list[Message], me: str, name: Callable[[str | No
             tag = "（@ 你）" if me in m.mentions else (
                 f"（@ {'、'.join(name(a) for a in m.mentions)}）" if m.mentions else "")
             who = f"用户 {email(m.user_id)}" if email and m.user_id else "用户"
-            lines.append(f"**{who}**{tag}：{m.text}")
+            lines.append("\n".join([f"**{who}**{tag}：{m.text}", *format_attachments(m.attachments)]))
         elif m.role == "agent" and m.agent_id != me:
             lines.append(f"**{name(m.agent_id)}**：{m.text[:4000]}")
         elif m.role == "event":
@@ -337,6 +353,8 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         "", "## 约束（Constraints，累加自整条委托链）",
         *(f"- {c}" for c in task.effective_constraints or ["（无）"]),
         *([ "", archive] if archive else []),
+        *(["", f"## 附件（委托方转交，只读副本，改动不会保存）", *format_attachments(task.attachments)]
+          if task.attachments else []),
         *_network_tools(project, can_delegate),
         *_knowledge(knowledge),
         *_home(home_writable, home),

@@ -18,17 +18,18 @@ from typing import Any
 
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 import uvicorn
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from . import auth
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
 from .model_catalog import ModelCatalog
-from .models import DESCRIPTION_LIMIT, HARNESSES, User
+from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
@@ -201,9 +202,23 @@ class ConversationIn(BaseModel):
     title: str = Field("", max_length=120)
 
 
+class AttachmentIn(BaseModel):
+    """上传附件时拿到的说明；网络只认 sha 对应的已上传内容，大小以文件为准。"""
+    sha: str = Field(min_length=64, max_length=64)
+    name: str = Field(min_length=1, max_length=200)
+    mime: str = Field("", max_length=100)
+
+
 class MessageIn(BaseModel):
-    text: str = Field(min_length=1, max_length=8000)
+    text: str = Field("", max_length=8000)  # 只有附件时可以为空
     mentions: list[str] = Field(default_factory=list, max_length=20)  # 显式 @ 的成员 id；文本里的 @名称 也会识别
+    attachments: list[AttachmentIn] = Field(default_factory=list, max_length=ATTACHMENTS_PER_MESSAGE)
+
+    @model_validator(mode="after")
+    def not_empty(self) -> "MessageIn":
+        if not self.text.strip() and not self.attachments:
+            raise ValueError("消息不能为空")
+        return self
 
 
 class ResumeIn(BaseModel):
@@ -285,7 +300,7 @@ def create_app(network: Network) -> FastAPI:
         return {"runtime": network.runtime.name, "limits": network.limits.__dict__,
                 "default_model": getattr(network.runtime, "default_model", lambda: None)(),
                 "has_users": bool(store.users), "has_unclaimed": not store.users and bool(store.agents),
-                "harnesses": HARNESSES}
+                "harnesses": HARNESSES, "attachment_limit": ATTACHMENT_LIMIT}
 
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
@@ -494,8 +509,35 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/conversations/{conv_id}/messages")
     def send(conv_id: str, body: MessageIn, user: Me) -> dict:
-        m = network.send_message(conv_id, body.text, body.mentions, actor=user.id)
-        return {"id": m.id, "role": m.role, "text": m.text, "mentions": m.mentions, "ts": m.ts}
+        m = network.send_message(conv_id, body.text, body.mentions, actor=user.id,
+                                 attachments=[a.model_dump() for a in body.attachments])
+        return {"id": m.id, "role": m.role, "text": m.text, "mentions": m.mentions, "ts": m.ts,
+                "attachments": m.attachments}
+
+    # ---- 对话附件：先上传，再随消息发出；看不到对话的人上传、下载一律 404 ----
+    @app.post("/api/conversations/{conv_id}/attachments")
+    async def upload_attachment(conv_id: str, request: Request, user: Me,
+                                name: str = Query(min_length=1, max_length=200)) -> dict:
+        """请求体就是文件内容（不用 multipart，少一个依赖），类型取 Content-Type。超过上限 413。"""
+        await run_in_threadpool(network.visible_conv, conv_id, user.id)  # 先查可见性，不收看不到的对话的内容
+        too_big = HTTPException(413, f"附件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB")
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > ATTACHMENT_LIMIT:
+            raise too_big
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > ATTACHMENT_LIMIT:
+                raise too_big
+        return await run_in_threadpool(network.upload_attachment, conv_id, name, bytes(buf),
+                                       request.headers.get("content-type", ""), user.id)
+
+    @app.get("/api/conversations/{conv_id}/attachments/{sha}")
+    def attachment(conv_id: str, sha: str, user: Me) -> FileResponse:
+        path, meta = network.attachment_file(conv_id, sha, actor=user.id)
+        # 一律当作附件下载，不在本站点内渲染（内容来自别的参与者）
+        return FileResponse(path, filename=meta["name"], media_type=meta["mime"], content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
 
     @app.post("/api/conversations/{conv_id}/resume")
     def resume(conv_id: str, body: ResumeIn, user: Me) -> dict:

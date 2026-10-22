@@ -167,11 +167,19 @@
       <div class="composer">
         <form id="msg-form" aria-label="发送消息" hidden>
           <label for="msg" class="sr-only">消息</label>
-          <textarea id="msg" rows="3" required aria-describedby="msg-hint"></textarea>
+          <textarea id="msg" rows="3" aria-describedby="msg-hint"></textarea>
           <ul id="mention-pop" class="mention-pop" role="listbox" aria-label="选择要 @ 的成员" hidden></ul>
-          <div class="bar"><span class="hint" id="msg-hint"></span><button type="submit">发送</button></div>
+          <ul id="msg-files" class="att-rail" aria-label="待发送的附件" hidden></ul>
+          <div class="bar">
+            <button type="button" class="ghost icon" id="msg-attach" title="添加附件（也可以把文件拖进来或粘贴）" aria-label="添加附件">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M20 11.5 12.2 19.3a5 5 0 0 1-7.1-7.1l8-8a3.3 3.3 0 0 1 4.7 4.7l-8 8a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4"/></svg>
+            </button>
+            <input type="file" id="msg-file" multiple hidden>
+            <span class="hint" id="msg-hint"></span><button type="submit">发送</button>
+          </div>
         </form>
       </div>
+      <div id="drop-overlay" class="drop-overlay" hidden aria-hidden="true"><div><b>松开即可添加附件</b><span id="drop-limit"></span></div></div>
     </div>
     <aside class="side chat-side">
       <div class="side-tabs" role="tablist" aria-label="侧栏">

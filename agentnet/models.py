@@ -48,6 +48,15 @@ MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 
 AGENT_HOME = "agent-home"  # Agent 私有目录在每次运行的工作目录里的挂载名
 PROJECT_FILES = "project"  # 项目档案的文件区在工作目录里的挂载名（只读副本，运行后丢弃）
+ATTACHMENTS = "attachments"  # 对话附件在工作目录里的挂载名（只读副本，每轮刷新，运行后丢弃）
+ATTACHMENT_LIMIT = 20_000_000  # 单个附件上限（字节）
+ATTACHMENTS_PER_MESSAGE = 10
+
+
+def attachment_rel(a: dict[str, Any]) -> str:
+    """附件在工作目录里的相对路径：attachments/<sha 前 8 位>/<原文件名>。文件名保留扩展名，前缀避免同名冲突。"""
+    return f"{ATTACHMENTS}/{a['sha'][:8]}/{a['name']}"
+
 
 # 项目档案工具：项目成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
@@ -204,6 +213,7 @@ class Message:
     user_id: str | None = None           # user：哪个用户发的（联合项目里有多个人）
     audience: list[str] = field(default_factory=list)  # 只给这些用户看（空 = 对话里的所有人），如席位的失败说明
     private_to: list[str] = field(default_factory=list)  # steps / wake 只给这些用户看（Agent 的所有者）
+    attachments: list[dict[str, Any]] = field(default_factory=list)  # user：附件 {sha, name, size, mime}，文件在对话的附件区
     ts: float = field(default_factory=time.time)
 
 
@@ -312,6 +322,7 @@ class Task:
     delegations: int = 0                 # 执行者在这个任务里发起的委托数
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
     archive_seen: int = -1               # 已经送达过的项目档案版本
+    attachments: list[dict[str, Any]] = field(default_factory=list)  # 委托方显式转交的对话附件（同 Message.attachments）
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
     finished_at: float | None = None

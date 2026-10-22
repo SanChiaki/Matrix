@@ -26,12 +26,12 @@ const API_TIMEOUT_MS = 30000;
 const httpError = (message, status) => Object.assign(new Error(message), { status });
 
 async function api(path, opts = {}) {
-  if (opts.body && typeof opts.body !== "string") {
+  if (opts.body && typeof opts.body !== "string" && !(opts.body instanceof Blob)) {  // 文件（附件上传）原样发送
     opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
   }
   let r;
   try {
-    r = await fetch(path, { ...opts, signal: AbortSignal.timeout(API_TIMEOUT_MS) });
+    r = await fetch(path, { ...opts, signal: AbortSignal.timeout(opts.timeoutMs || API_TIMEOUT_MS) });
   } catch (e) {
     throw httpError(e?.name === "TimeoutError" ? "请求超时，请检查网络" : "网络连接失败，请检查网络", 0);
   }
@@ -170,6 +170,7 @@ async function start() {
   $("#tab-task").addEventListener("click", () => sideTab("task"));
   $("#tab-archive").addEventListener("click", () => sideTab("archive"));
   bindComposer();
+  bindAttachments();
   $("#msg-form").addEventListener("submit", sendMsg);
   window.addEventListener("resize", () => S.view === "network" && renderGraph());
   window.addEventListener("hashchange", route);
@@ -1400,7 +1401,8 @@ function renderThread() {
       // 被认定为任务的消息：标出任务与状态，点开到看板
       const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
         `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPillOf(r)}</a>`).join("");
-      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${to}${time(m.ts)}</div><div class="body">${mentionHtml(m.text)}</div>${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
+      const body = m.text ? `<div class="body">${mentionHtml(m.text)}</div>` : "";
+      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
       <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`;
@@ -1494,6 +1496,7 @@ async function renderTask(target) {
     <dt>实际权限</dt><dd>${tags(t.granted_authority, "ok")} ${tags(t.denied_authority, "no")}</dd>
     <dt>约束</dt><dd>${(t.effective_constraints.map(esc).join("<br>")) || "—"}</dd>
     <dt>共享知识</dt><dd>${tags(d.share)}</dd>
+    ${(t.attachments || []).length ? `<dt>转交的附件</dt><dd>${attachmentsHtml(t.conversation_id, t.attachments)}</dd>` : ""}
     <dt>DSH 会话</dt><dd>${esc(t.dsh_session_id || "—")}</dd>
     ${t.revisions || t.retries ? `<dt>返工</dt><dd>退回 ${t.revisions} 次 · 续接 ${t.retries} 次</dd>` : ""}
     ${t.auto_accepted ? `<dt>验收</dt><dd class="muted">委托方没有显式验收，视为接受</dd>` : ""}
@@ -1525,14 +1528,102 @@ async function renderTask(target) {
 
 async function sendMsg(e) {
   e.preventDefault();
-  const text = $("#msg").value.trim();
-  if (!text || !S.convId) return;
+  const text = $("#msg").value.trim(), drafts = convDrafts();
+  if ((!text && !drafts.length) || !S.convId) return;
+  if (drafts.some((d) => d.status === "uploading")) return alert("附件还在上传，传完再发送");
+  if (drafts.some((d) => d.status === "failed")) return alert("有附件没传上去：重试或移除后再发送");
   $("#msg-form button[type=submit]").disabled = true;
   try {
-    await api(`/api/conversations/${S.convId}/messages`, { method: "POST", body: { text } });  // @名称 由服务端识别
-    $("#msg").value = ""; composerHint(); await reload();
+    await api(`/api/conversations/${S.convId}/messages`, { method: "POST",  // @名称 由服务端识别
+      body: { text, attachments: drafts.map((d) => d.meta) } });
+    $("#msg").value = ""; S.drafts = S.drafts.filter((d) => !drafts.includes(d));
+    renderDrafts(); composerHint(); await reload();
   } catch (err) { alert(err.message); }
   $("#msg-form button[type=submit]").disabled = false;
+}
+
+// ---------- 输入框：附件 ----------
+// 参照 dsh 的附件栏（research: deepseek-harness#attachments）：选中、拖进来或粘贴就上传到当前对话，传完的随下一条消息发出。
+// 不按类型区分（图片也是普通文件）；消息上的附件一律点了下载，不在页面里打开。
+S.drafts = [];  // { key, conv, file, name, size, status: uploading | done | failed, meta, error }
+const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+const extOf = (name) => (/\.([^.]{1,8})$/.exec(name)?.[1] || "file").toUpperCase();
+const attachLimit = () => S.info?.attachment_limit || 20_000_000;
+const convDrafts = () => S.drafts.filter((d) => d.conv === S.convId);
+const fileGlyph = '<svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/></svg>';
+
+function attachmentsHtml(convId, list) {
+  if (!(list || []).length) return "";
+  return `<div class="atts">${list.map((a) => `<a class="att" href="/api/conversations/${esc(convId)}/attachments/${esc(a.sha)}"
+    download="${esc(a.name)}" title="下载 ${esc(a.name)}">${fileGlyph}<span class="n">${esc(a.name)}</span>
+    <span class="s">${esc(extOf(a.name))} · ${fmtSize(a.size)}</span></a>`).join("")}</div>`;
+}
+
+function addFiles(files) {
+  const c = S.conv;
+  if (!c || c.archived || $("#msg-form").hidden) return;
+  for (const file of files) {
+    const d = { key: Math.random().toString(36).slice(2), conv: c.id, file, name: file.name, size: file.size, status: "uploading" };
+    S.drafts.push(d);
+    if (file.size > attachLimit()) { d.status = "failed"; d.error = `超过 ${attachLimit() / 1e6} MB 上限`; d.file = null; }
+    else uploadDraft(d);
+  }
+  renderDrafts();
+  const rail = $("#msg-files");
+  rail.scrollLeft = rail.scrollWidth;  // 新加的露在最右边
+}
+
+async function uploadDraft(d) {
+  d.status = "uploading"; d.error = ""; renderDrafts();
+  try {
+    d.meta = await api(`/api/conversations/${d.conv}/attachments?name=${encodeURIComponent(d.name)}`, { method: "POST",
+      body: d.file, headers: { "Content-Type": d.file.type || "application/octet-stream" }, timeoutMs: 300000 });
+    d.status = "done";
+  } catch (e) { d.status = "failed"; d.error = e.message; }
+  renderDrafts();
+}
+
+function renderDrafts() {
+  const ul = $("#msg-files"), list = convDrafts();
+  ul.hidden = !list.length;
+  ul.innerHTML = list.map((d) => `<li class="att draft ${d.status}" data-key="${d.key}">
+    ${d.status === "uploading" ? '<span class="spin" aria-hidden="true"></span>' : fileGlyph}
+    <span class="n" title="${esc(d.name)}">${esc(d.name)}</span>
+    <span class="s">${d.status === "uploading" ? "上传中…" : d.status === "failed" ? esc(d.error || "上传失败") : `${esc(extOf(d.name))} · ${fmtSize(d.size)}`}</span>
+    ${d.status === "failed" && d.file ? `<button type="button" class="ghost sm" data-retry aria-label="重新上传 ${esc(d.name)}">重试</button>` : ""}
+    <button type="button" class="ghost icon sm rm" data-rm aria-label="移除 ${esc(d.name)}">×</button></li>`).join("");
+  ul.querySelectorAll("li").forEach((li) => {
+    const d = S.drafts.find((x) => x.key === li.dataset.key);
+    $("[data-rm]", li).addEventListener("click", () => { S.drafts = S.drafts.filter((x) => x !== d); renderDrafts(); });
+    $("[data-retry]", li)?.addEventListener("click", () => uploadDraft(d));
+  });
+}
+
+function bindAttachments() {
+  const input = $("#msg-file"), overlay = $("#drop-overlay");
+  $("#msg-attach").addEventListener("click", () => input.click());
+  input.addEventListener("change", () => { addFiles([...input.files]); input.value = ""; });
+  $("#msg").addEventListener("paste", (e) => {
+    const files = [...(e.clipboardData?.files || [])];
+    if (files.length) { e.preventDefault(); addFiles(files); }
+  });
+  // 拖放：只在对话页、能发消息时接；目录不接（拿不到内容）
+  const accepts = (e) => S.view === "chats" && !$("#msg-form").hidden && [...(e.dataTransfer?.types || [])].includes("Files");
+  let depth = 0;
+  $("#drop-limit").textContent = `单个文件不超过 ${attachLimit() / 1e6} MB，一条消息最多 10 个`;
+  document.addEventListener("dragenter", (e) => { if (accepts(e)) { depth++; overlay.hidden = false; } });
+  document.addEventListener("dragleave", () => { if (depth && --depth === 0) overlay.hidden = true; });
+  document.addEventListener("dragover", (e) => { if (accepts(e)) e.preventDefault(); });
+  document.addEventListener("drop", (e) => {
+    depth = 0; overlay.hidden = true;
+    if (!accepts(e)) return;
+    e.preventDefault();
+    const items = [...(e.dataTransfer.items || [])];
+    const dirs = items.filter((it) => it.webkitGetAsEntry?.()?.isDirectory).map((it) => it.getAsFile()?.name);
+    const files = [...e.dataTransfer.files].filter((f) => !dirs.includes(f.name));
+    if (dirs.length) alert(`文件夹不能作为附件：${dirs.join("、")}。可以先打成压缩包。`);
+    addFiles(files);
+  });
 }
 
 // ---------- 输入框：@ 成员 ----------
@@ -1542,6 +1633,7 @@ const mentionedIn = (text) => members().filter((a) => text.toLowerCase().include
 
 function renderComposer() {
   composerHint();
+  renderDrafts();
 }
 
 function composerHint() {
