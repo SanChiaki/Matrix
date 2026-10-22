@@ -1055,6 +1055,15 @@ def test_invariants_have_tests():
     assert declared and declared <= covered, f"没有测试标注的不变量：{sorted(declared - covered)}"
 
 
+def test_about_page_matches_invariants():
+    """产品介绍页写的不变量条数要和 docs/reference/invariants.md 一致；架构其余部分的刷新见 AGENTS.md 工作方式第 12 条。"""
+    import re
+    root = Path(__file__).parent.parent
+    declared = re.findall(r"^\d+\. \*\*", (root / "docs" / "reference" / "invariants.md").read_text(encoding="utf-8"), re.M)
+    about = (root / "agentnet" / "static" / "about.html").read_text(encoding="utf-8")
+    assert re.findall(r"(\d+) 条不变量", about) == [str(len(declared))], "about.html 的不变量条数过期了"
+
+
 def test_research_refs_resolve():
     """文档与代码里的 `research: <笔记>#<锚点>` 都要能在旁边的私有调研仓库里找到；调研仓库不在（CI、别人克隆）时跳过。"""
     root = Path(__file__).parent.parent

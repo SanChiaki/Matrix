@@ -60,7 +60,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
-| `agentnet/static/` | 单页前端（原生 JS） |
+| `agentnet/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
 | `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_migration.py`（旧数据迁移）、`test_attachments.py`（对话附件） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
@@ -126,6 +126,9 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 10. 依赖使用精确或下限版本，经 `uv add` 写入 `pyproject.toml` 与 `uv.lock`。
 11. 设计借鉴了别的产品时写“参照 X”并带 `research: <笔记>#<锚点>`（见文首），调研笔记里没有的先补笔记。
     `test_research_refs_resolve` 在调研仓库就位时检查每个引用都能找到对应的笔记与锚点，不在时跳过。
+12. 系统架构或设计有变化（新增或拆分模块、运行时、接口、状态目录、不变量，改变协作方式）时，同一个改动里刷新
+    [about.html](agentnet/static/about.html) 的架构图与相关段落。架构图是唯一的对外架构说明，不另放静态架构图。
+    `test_about_page_matches_invariants` 只能核对不变量条数，其余靠改动者对照这一条自查（内容是给人看的介绍，逐项机器核对得不偿失）。
 
 ### 三、安全红线
 
