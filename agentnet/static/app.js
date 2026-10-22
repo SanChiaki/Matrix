@@ -747,6 +747,13 @@ function renderAgentEditor(isNew = false) {
         </div>
         <p class="hint" id="af-free-hint">留空则使用${catalogOn() ? " harness 自己的默认模型。端侧用的是你本机 harness 里的模型" : `运行时默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。provider 必须是运行时里已配置的`}。</p>
       </fieldset>
+      <fieldset class="model"><legend>运行上限</legend>
+        <div class="model-fields">
+          <div class="field"><label for="af-timeout">每轮超时（秒）</label><input id="af-timeout" name="timeout_s" type="number" min="1" step="1" value="${x.timeout_s ?? ""}" placeholder="不限制"></div>
+          <div class="field"><label for="af-maxdel">委托次数上限</label><input id="af-maxdel" name="max_delegations" type="number" min="1" step="1" value="${x.max_delegations ?? ""}" placeholder="不限制"></div>
+        </div>
+        <p class="hint">留空不限制。超时到了这一轮会被终止（任务可续接）；委托次数按每次被 @ 引出的工作、每个任务分别计。</p>
+      </fieldset>
       <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
       ${a ? (S.me?.assistant_id === a.id
         ? '<p class="hint"><span class="tag ok">你的助理</span> 你加入项目时它跟着加入，项目会话里由它陪你聊。</p>'
@@ -773,6 +780,8 @@ function renderAgentEditor(isNew = false) {
       capabilities: f.capabilities.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean),
       authority: [...f.querySelectorAll('[name="authority"]:checked')].map((c) => c.value),
       chat_enabled: f.chat_enabled.checked,
+      timeout_s: f.timeout_s.value ? Number(f.timeout_s.value) : null,
+      max_delegations: f.max_delegations.value ? Number(f.max_delegations.value) : null,
       ...placementOf(f.device_runtime.value),
     };
     if (usePreset()) {
@@ -1412,7 +1421,8 @@ function renderThread() {
   Object.entries(c.live || {}).forEach(([aid, live]) => {
     const who = agent(aid);
     const pending = c.tasks.filter((t) => !t.parent_task_id && !assigned.has(t.id) && t.delegator_id === aid).map((t) => t.id);
-    items.push(`<li class="msg agent">${avatar(who?.name, "sm")}<div class="content"><div class="who"><b>${esc(who?.name)}</b>运行中</div>
+    items.push(`<li class="msg agent">${avatar(who?.name, "sm")}<div class="content"><div class="who"><b>${esc(who?.name)}</b>运行中
+      <button type="button" class="ghost sm stop-run" data-agent="${esc(aid)}" title="终止这一轮；会话保留，之后可以点“继续”接着做">停止</button></div>
       ${stepsHtml(live, true)}${pending.length ? `<div class="delegs">${treeOf(pending)}</div>` : ""}
       <span class="typing" aria-label="处理中"><i></i><i></i><i></i></span></div></li>`);
   });
@@ -1426,6 +1436,11 @@ function renderThread() {
     : "@ 一个成员把任务交给它。它可以自己做，也可以在项目里找合适的成员委托。")}</li>`;
   [...th.children].forEach((li, i) => { li.dataset.i = i; if (open.has(String(i))) li.querySelector("details")?.setAttribute("open", ""); });
   if (atBottom) th.scrollTop = th.scrollHeight;
+  th.querySelectorAll(".stop-run").forEach((b) => b.addEventListener("click", async () => {
+    b.disabled = true; b.textContent = "正在停止…";
+    try { await api(`/api/conversations/${c.id}/seats/${b.dataset.agent}/stop`, { method: "POST" }); }
+    catch (err) { b.disabled = false; b.textContent = "停止"; alert(err.message); }
+  }));
   th.querySelectorAll(".deleg").forEach((b) => b.addEventListener("click", () => {
     S.taskSel = b.dataset.id;
     th.querySelectorAll(".deleg").forEach((x) => x.classList.toggle("selected", x === b));
@@ -1488,12 +1503,19 @@ async function renderTask(target) {
       <span class="hint">执行者在原会话里接着做</span></div><p class="error" role="alert"></p>` : ""}
     ${t.notes.length ? `<h3>进展说明</h3>${t.notes.map((n) => `<div class="md note">${renderMarkdown(n)}</div>`).join("")}` : ""}
     ${t.status === "running" ? `<h3>实时过程</h3>${stepsHtml(t.live || [], true) || '<span class="typing" aria-label="处理中"><i></i><i></i><i></i></span>'}` : ""}
+    ${t.stoppable ? `<div class="actions"><button type="button" class="ghost" id="task-stop">停止这一轮</button>
+      <span class="hint">任务记为失败，会话保留，之后可以续接</span></div><p class="error" role="alert"></p>` : ""}
     ${t.result ? `<h3>交付结果</h3><div class="md report">${renderMarkdown(t.result.report)}</div>` : ""}
     ${wd ? `<h3>执行者工作目录 · ${wd.files.length}</h3>${filesHtml(`/api/tasks/${t.id}/files`, wd)}
       ${t.result?.files?.length ? `<p class="hint">交付时已拷给委托方：<code>${esc(t.result.files_dir)}/</code></p>` : ""}` : ""}
     ${t.evidence.length ? `<h3>工具调用证据（${t.evidence.length}）</h3><pre>${esc(t.evidence.map((e) => `${e.status} ${e.tool} ${e.input}`).join("\n"))}</pre>` : ""}
     <details><summary>执行者收到的提示词</summary><pre>${esc(t.prompt)}</pre></details>`;
   box.scrollTop = keep;
+  $("#task-stop", box)?.addEventListener("click", async (e) => {
+    e.target.disabled = true; e.target.textContent = "正在停止…";
+    try { await api(`/api/tasks/${t.id}/stop`, { method: "POST" }); }
+    catch (err) { $(".error", box).textContent = err.message; e.target.disabled = false; e.target.textContent = "停止这一轮"; }
+  });
   $("#task-retry", box)?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try { await api(`/api/tasks/${t.id}/retry`, { method: "POST", body: {} }); await reload(); }

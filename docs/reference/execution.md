@@ -10,6 +10,12 @@
 - 任务状态：`running → in_review → completed`，另有 `failed`（可续接）、`rejected`（授权阶段被拒）。交付进入 `in_review`，交付通知送进委托方收件箱；委托方 `accept_task` 或 `request_changes`（执行者在原会话返工）。送达那一轮结束仍未处理的交付视为接受（`auto_accepted`）。
 - 执行者自己还有进行中的子任务或待审核提议时，这一轮的回复只记为进展（`task.notes`），等回报唤醒后再交付。
 - 对话状态：`thinking`（有席位在跑一轮）/ `waiting`（有进行中的委托）/ `idle`。
+- 运行上限在 Agent 设置里（`timeout_s`、`max_delegations`，默认不限制）：超时由运行时执行（云侧 dsh 杀进程；端侧随 `run.request.timeout_s`
+  下发，连接器的驱动执行），按 `TIMEOUT` 处理。端侧连接断开时，等结果的轮次立刻按传输错误结束（`DeviceRuntime.abort_all`），任务回到等待。
+- 人终止一轮（`Network.stop_run`，`POST /api/conversations/<id>/seats/<agent>/stop`、`POST /api/tasks/<id>/stop`）：只有正在跑的
+  Agent 的所有者能终止。运行时收到 `RunRequest.cancel` 后结束（云侧 dsh 杀进程；端侧发 `cancel`，连接器的驱动结束 harness），
+  这一轮按 `STOPPED` 处理：不自动续接；席位中断、等人“继续”；任务失败、可续接，委托方收到的通知写明是人终止的。会话都保留。
+- 任务提示词里的交付要求是通用的（结论、交付了什么、在哪里、怎么确认）；篇幅、形式、依据由委托的输出要求与约束决定，本体不写死领域约束。
 - 失败语义：运行时错误按类别处理（`runtime.classify_error`）；`MALFORMED_RESPONSE`、`EMPTY_RESPONSE`、`TIMEOUT` 用同一会话自动续接一次（超时的续接提示收尾）。仍失败时这个**席位**进入 `blocked`（其他席位不受影响），失败消息列出它已完成的委托与已入库知识；人点“继续”或再 @ 它，同一会话从中断处接着做。失败的任务由委托方 `retry_task` 或人在 UI 上续接。
 
 ## 看板：只有人交代的任务

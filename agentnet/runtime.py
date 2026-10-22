@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,7 +110,8 @@ class RunRequest:
     session_id: str | None = None  # 非空表示续接已有会话
     tools: ToolBridge | None = None
     on_event: EventSink | None = None
-    timeout_s: float = 900
+    timeout_s: float | None = None  # 这一轮最长跑多久；None = 不限制（Agent 设置）
+    cancel: threading.Event | None = None  # 人终止这一轮：置位后运行时尽快结束，按 STOPPED 返回
     model: dict[str, str] | None = None  # {provider, model, reasoning_effort?}；None 用运行时默认
     approvals: ApprovalBridge | None = None
     # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：
@@ -130,7 +132,29 @@ ERROR_CLASSES: dict[str, tuple[str, bool]] = {
     "TIMEOUT": ("timeout", True),  # 一轮做得太久：会话还在，续接一次收尾（再超时才中断，交给人）
     "TRANSPORT": ("provider_connection", False),
     "SERVER": ("provider_server", False),
+    "STOPPED": ("stopped", False),  # 人终止了这一轮：不自动续接，等人决定
 }
+
+
+STOPPED_ERROR = "STOPPED: 人终止了这一轮"
+
+
+def watch_process(proc: Any, timeout_s: float | None, cancel: threading.Event) -> threading.Event:
+    """看住一次 harness 进程：超过这一轮的超时（Agent 设置，None 不限制）或人终止（cancel）时结束它。
+    返回的事件表示“因超时结束”；因 cancel 结束的由调用方看 cancel 判断。"""
+    timed_out = threading.Event()
+    deadline = time.monotonic() + timeout_s if timeout_s else None
+
+    def watch() -> None:
+        while proc.poll() is None:
+            if cancel.wait(0.5) or (deadline is not None and time.monotonic() >= deadline):
+                if not cancel.is_set():
+                    timed_out.set()
+                proc.kill()
+                return
+
+    threading.Thread(target=watch, daemon=True).start()
+    return timed_out
 
 
 def classify_error(error: str | None) -> tuple[str, bool]:
@@ -350,14 +374,8 @@ class DshRuntime:
 
         t_err = threading.Thread(target=drain_stderr, daemon=True)
         t_err.start()
-        timed_out = threading.Event()
-
-        def kill() -> None:
-            timed_out.set()
-            proc.kill()
-
-        timer = threading.Timer(req.timeout_s, kill)
-        timer.start()
+        cancel = req.cancel or threading.Event()
+        timed_out = watch_process(proc, req.timeout_s, cancel)
         try:
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(req.prompt)
@@ -384,14 +402,17 @@ class DshRuntime:
                         req.on_event(ev)
             proc.wait()
         finally:
-            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
         t_err.join(timeout=2)
 
         if not final_text and texts:
             final_text = texts[-1]
+        if cancel.is_set():
+            return RunResult(session_id, final_text, tool_calls, usage, ok=False, error=STOPPED_ERROR)
         if timed_out.is_set():
             return RunResult(session_id, final_text, tool_calls, usage, ok=False,
-                             error=f"TIMEOUT: 超过 {int(req.timeout_s)} 秒，网络终止了这次运行")
+                             error=f"TIMEOUT: 超过 {int(req.timeout_s or 0)} 秒，网络终止了这次运行")
         if proc.returncode != 0:
             err = f"dsh exited {proc.returncode}: " + " | ".join(stderr_tail[-5:])
             return RunResult(session_id, final_text, tool_calls, usage, ok=False, error=err)
@@ -412,6 +433,8 @@ class ScriptCall:
         self.authority = list(req.authority)
         self.cwd = req.cwd
         self.turn = turn                 # 同一会话中的第几次调用（从 1 开始）
+        self.timeout_s = req.timeout_s   # 这一轮的运行超时（None = 不限制）
+        self.stopped = req.cancel or threading.Event()  # 人终止了这一轮（脚本里可以等它）
         self.tool_names = [MCP_PREFIX + t["name"] for t in NETWORK_TOOLS
                            if req.tools.names is None or t["name"] in req.tools.names] if req.tools else []
         self._req = req
@@ -501,4 +524,6 @@ class ScriptedRuntime:
         call._emit({"type": "final", "text": final})
         for ev in call.events:
             _accumulate(ev, tool_calls, usage)
+        if call.stopped.is_set():
+            return RunResult(sid, final, tool_calls, usage, ok=False, error=STOPPED_ERROR)
         return RunResult(sid, final, tool_calls, usage)

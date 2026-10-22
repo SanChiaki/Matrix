@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from ...runtime import RuntimeCapabilities
+from ...runtime import watch_process as guard  # noqa: F401 —— 驱动用它执行超时与取消
 
 
 @dataclass
@@ -28,6 +29,7 @@ class RunSpec:
     session_id: str | None = None
     model: dict[str, str] | None = None
     harness: str | None = None        # 用哪个驱动；None = 连接器的默认驱动
+    timeout_s: float | None = None    # 这一轮最长跑多久（Agent 设置）；None = 不限制
 
 
 @dataclass

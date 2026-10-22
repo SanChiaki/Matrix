@@ -70,6 +70,8 @@ class AgentIn(BaseModel):
     model_preset: str | None = Field(None, max_length=64)  # 预置模型 id（启用模型目录时云侧只能用它）
     device_runtime: str | None = None   # 绑定的设备 id；None = 平台云侧（默认运行时）
     harness: str | None = Field(None, max_length=40)  # 设备上的哪个 harness；None = 设备默认
+    timeout_s: int | None = Field(None, ge=1)        # 每轮运行超时（秒）；None = 不限制
+    max_delegations: int | None = Field(None, ge=1)  # 每次被 @ / 每个任务最多委托几次；None = 不限制
 
 
 class AgentPatch(BaseModel):
@@ -82,6 +84,8 @@ class AgentPatch(BaseModel):
     model_preset: str | None = Field(None, max_length=64)
     device_runtime: str | None = None   # 显式传 null 表示改回平台云侧
     harness: str | None = Field(None, max_length=40)
+    timeout_s: int | None = Field(None, ge=1)        # 显式传 null 表示改回不限制
+    max_delegations: int | None = Field(None, ge=1)
 
 
 class ProposalApprove(BaseModel):
@@ -543,6 +547,18 @@ def create_app(network: Network) -> FastAPI:
     def seat_file(conv_id: str, agent_id: str, path: str, user: Me) -> FileResponse:
         return _download(network.workdir_file("seat", f"{conv_id}/{agent_id}", path, actor=user.id))
 
+    @app.post("/api/conversations/{conv_id}/seats/{agent_id}/stop")
+    def stop_seat(conv_id: str, agent_id: str, user: Me) -> dict:
+        """终止这个席位正在跑的一轮（只有 Agent 的所有者能）。"""
+        network.stop_run(f"{conv_id}/{agent_id}", actor=user.id)
+        return {"ok": True}
+
+    @app.post("/api/tasks/{task_id}/stop")
+    def stop_task(task_id: str, user: Me) -> dict:
+        """终止这个委托正在跑的一轮（只有执行者 Agent 的所有者能）。"""
+        network.stop_run(task_id, actor=user.id)
+        return {"ok": True}
+
     @app.post("/api/tasks/{task_id}/retry")
     def retry(task_id: str, body: NoteIn, user: Me) -> dict:
         return network.retry_task(task_id, body.note, actor=user.id).to_dict()
@@ -694,7 +710,7 @@ def create_app(network: Network) -> FastAPI:
         except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
-            network.unregister_runtime(dev.id)
+            network.unregister_runtime(dev.id, rt)
             network.bus.emit("device.disconnected", device_id=dev.id)
 
     # ---- 运行时回调（凭执行上下文令牌，不走登录） ----

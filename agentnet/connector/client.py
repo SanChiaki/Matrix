@@ -208,7 +208,8 @@ class Connector:
             prompt=str(msg.get("prompt", "")), workdir=workdir,
             authority=list(msg.get("authority") or []), tool_names=list(msg.get("tool_names") or []),
             session_id=msg.get("session_id"), model=msg.get("model"),
-            harness=str(msg["harness"]) if msg.get("harness") else None)
+            harness=str(msg["harness"]) if msg.get("harness") else None,
+            timeout_s=_limit(msg.get("timeout_s")))
         run.workdir = workdir
         run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
@@ -289,3 +290,8 @@ class Connector:
         self.send({"type": RUN_RESULT, "run_id": run.run_id, "session_id": outcome.session_id,
                    "final_text": outcome.final_text, "tool_calls": outcome.tool_calls,
                    "usage": outcome.usage, "ok": outcome.ok, "error": outcome.error})
+
+
+def _limit(v: Any) -> float | None:
+    """run.request 里的超时：正数；没有 / 不合法 = 不限制（旧服务端不发这个字段）。"""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None

@@ -18,7 +18,7 @@ import threading
 from pathlib import Path
 
 from ...runtime import ADVISORY, ENFORCED, RuntimeCapabilities, argv, no_window
-from .base import RunOutcome, RunSpec
+from .base import RunOutcome, RunSpec, guard
 
 
 def toml_key(s: str) -> str:
@@ -63,6 +63,7 @@ class CodexDriver:
                                 encoding="utf-8", errors="replace",  # Windows 上子进程的提示可能是 GBK
                                 creationflags=no_window())
         assert proc.stdin is not None and proc.stdout is not None
+        timed_out = guard(proc, spec.timeout_s, cancel)
         proc.stdin.write(spec.prompt)
         proc.stdin.close()
         final, session_id, tools = "", spec.session_id or "", []
@@ -90,6 +91,9 @@ class CodexDriver:
                 final = ev.get("last_agent_message") or final
         code = proc.wait()
         err = (proc.stderr.read() if proc.stderr else "")[-2000:]
+        if timed_out.is_set():
+            return RunOutcome(session_id=session_id, tool_calls=tools, ok=False,
+                              error=f"TIMEOUT: 超过 {int(spec.timeout_s or 0)} 秒，连接器终止了这次运行")
         if code != 0:
             return RunOutcome(session_id=session_id, tool_calls=tools, ok=False,
                               error=f"SERVER codex exited {code}: {err}")
