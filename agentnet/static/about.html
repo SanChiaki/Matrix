@@ -6,6 +6,7 @@
 <title>Matrix · 由智能节点组成的协作网络</title>
 <meta name="description" content="Matrix 让任意 Agent 成为网络中的一个智能节点，通过能力暴露、权限授权、任务委托和知识协作动态连接，形成可以持续运行和演化的 Agent 网络。">
 <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+<script>document.documentElement.classList.add("js")</script>
 <noscript><style>.reveal { opacity: 1 !important; transform: none !important; }</style></noscript>
 <style>
 :root {
@@ -131,6 +132,68 @@ h2 { font-size: clamp(30px, 4.4vw, 50px); line-height: 1.2; letter-spacing: -.02
 .place li { margin: 6px 0; }
 .place .card h3 small { display: block; font-family: var(--mono); font-size: 12px; color: var(--muted); font-weight: 400; margin-top: 4px; }
 
+/* ---------- 架构图：默认三层，点开看内部 ---------- */
+.arch-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin: 48px 0 20px; font-size: 13px; color: var(--muted); }
+.arch-bar button { font: inherit; font-size: 13px; color: var(--text); background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 6px 16px; cursor: pointer; transition: border-color .2s; }
+.arch-bar button:hover { border-color: var(--accent); }
+.diagram { display: grid; grid-template-columns: 1fr 1fr 300px; column-gap: 16px;
+  grid-template-areas: "human human ." "l1 l1 ." "net net store" "l2a l2b store" "cloud device store"; }
+.diagram > .node { align-self: start; }
+.a-human { grid-area: human; } .a-net { grid-area: net; } .a-store { grid-area: store; }
+.a-store { position: relative; }
+.a-store::before { content: ""; position: absolute; left: -17px; top: 56px; width: 16px; border-top: 1.5px dashed var(--border-strong); }
+.a-cloud { grid-area: cloud; } .a-device { grid-area: device; }
+.a-l1 { grid-area: l1; } .a-l2a { grid-area: l2a; } .a-l2b { grid-area: l2b; }
+.node { --c: var(--accent); border: 1px solid color-mix(in srgb, var(--c) 38%, transparent); border-radius: 16px;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--c) 8%, var(--surface)), var(--surface)); transition: border-color .3s, box-shadow .3s; }
+.node.k-human { --c: var(--human); } .node.k-device { --c: var(--peer); } .node.k-store { --c: var(--muted); }
+.node.k-net { border-width: 1.5px; }
+.node.open { border-color: color-mix(in srgb, var(--c) 72%, transparent); box-shadow: 0 24px 70px color-mix(in srgb, var(--c) 16%, transparent); }
+.node-head { all: unset; box-sizing: border-box; display: grid; grid-template-columns: 1fr auto; column-gap: 16px; width: 100%; padding: 20px 22px; cursor: pointer; border-radius: 16px; }
+.node-head:focus-visible { outline: 2px solid var(--c); outline-offset: -2px; }
+.node-kind { font-family: var(--mono); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; color: var(--c); }
+.node-head b { display: block; font-size: 19px; font-weight: 640; margin: 4px 0 2px; }
+.node-sum { display: block; color: var(--text-2); font-size: 14.5px; line-height: 1.6; }
+.pillars { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pillars span { font-size: 13px; padding: 3px 12px; border-radius: 999px; background: var(--accent-soft); color: #c9cdff; }
+.plus { grid-column: 2; grid-row: 1 / span 4; align-self: center; width: 30px; height: 30px; border-radius: 50%; border: 1px solid var(--border-strong); position: relative; transition: transform .35s, border-color .35s; }
+.plus::before, .plus::after { content: ""; position: absolute; left: 50%; top: 50%; width: 11px; height: 1.5px; background: var(--text-2); transform: translate(-50%, -50%); }
+.plus::after { transform: translate(-50%, -50%) rotate(90deg); transition: opacity .35s; }
+.node.open .plus { transform: rotate(180deg); border-color: var(--c); }
+.node.open .plus::after { opacity: 0; }
+.node-detail { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .45s ease; }
+.js .node:not(.open) .node-detail { grid-template-rows: 0fr; }
+.node-detail > div { overflow: hidden; min-height: 0; }
+.parts { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 2px 22px 22px; }
+.k-store .parts, .a-cloud .parts, .a-device .parts { grid-template-columns: 1fr; }
+.a-human .parts, .a-net .parts { grid-template-columns: repeat(2, 1fr); }
+.part { border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; background: var(--surface-2); }
+.part h4 { margin: 0 0 4px; font-size: 14.5px; font-weight: 620; }
+.part p { margin: 0; font-size: 13px; color: var(--muted); line-height: 1.65; }
+.part code, .ends code, .link code { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
+.ends { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 22px 22px; font-size: 12px; color: var(--muted); }
+.ends code { padding: 2px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
+.files { list-style: none; margin: 0; padding: 2px 22px 22px; display: grid; gap: 8px; }
+.files li { padding: 9px 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12.5px; color: var(--muted); }
+.files code { font-family: var(--mono); font-size: 12.5px; color: var(--text); }
+.files li > code:first-child { display: block; margin-bottom: 1px; }
+.link { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 76px; padding: 12px 0; font-size: 13px; color: var(--muted); text-align: center; }
+.link::before { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; border-left: 1.5px dashed var(--border-strong); }
+.link::after { content: ""; position: absolute; left: calc(50% - 2.5px); top: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: drop 2.6s linear infinite; }
+.link.up::after { animation-direction: reverse; background: var(--peer); box-shadow: 0 0 10px var(--peer); }
+.a-l1::after { background: var(--human); box-shadow: 0 0 10px var(--human); }
+.link span { position: relative; z-index: 1; background: var(--bg); padding: 1px 10px; }
+.link .more { display: none; }
+.diagram.deep .link .more { display: inline; }
+@keyframes drop { from { top: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { top: calc(100% - 6px); opacity: 0; } }
+.arch-legend { justify-content: flex-start; margin-top: 22px; }
+.no-js-hide { display: none; }
+.js .no-js-hide { display: inline-flex; }
+
+/* ---------- 上手 ---------- */
+.steps .tag { display: block; margin-bottom: 10px; color: var(--accent); }
+.steps pre { margin: 18px 0 0; padding: 13px 16px; background: #0b0c12; border: 1px solid var(--border); border-radius: 12px; font-family: var(--mono); font-size: 12.5px; line-height: 1.75; color: var(--text); overflow-x: auto; }
+
 /* ---------- 不变量 ---------- */
 .inv { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 56px; }
 .inv div { padding: 20px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); }
@@ -183,12 +246,20 @@ footer a { color: var(--text-2); }
   .phase { padding: 0 0 28px 36px; }
   .top nav { display: none; }
   .top .btn { margin-left: auto; }
+  .diagram { grid-template-columns: 1fr; grid-template-areas: "human" "l1" "net" "store" "l2a" "cloud" "device"; row-gap: 0; }
+  .a-l2b { display: none; }
+  .a-store { margin-top: 16px; }
+  .a-store::before { display: none; }
+  .a-human .parts, .a-net .parts { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .a-device { margin-top: 16px; }
 }
 @media (max-width: 560px) { .contract { font-size: 12.5px; padding: 20px; } .contract .k { width: 78px; } .inv { grid-template-columns: 1fr; } section { padding: 88px 0; } .qs li { grid-template-columns: 52px 1fr; } }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .reveal { opacity: 1; transform: none; transition: none; }
   .btn { transition: none; }
+  .link::after { display: none; }
+  .node-detail, .plus { transition: none; }
 }
 </style>
 </head>
@@ -202,7 +273,9 @@ footer a { color: var(--text-2); }
       <a href="#delegation">委托</a>
       <a href="#trust">信任</a>
       <a href="#runtime">运行位置</a>
+      <a href="#architecture">架构</a>
       <a href="#vision">远景</a>
+      <a href="#start">上手</a>
     </nav>
     <a class="btn small" href="/">进入 Matrix</a>
   </div>
@@ -404,11 +477,125 @@ footer a { color: var(--text-2); }
   </div>
 </section>
 
+<section id="architecture" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Architecture · 架构</p>
+      <h2>一张网，三层结构。</h2>
+      <p class="sub">人只和网络说话，Agent 之间也只经网络协作，没有直连。默认只画最核心的三层；点开任意一块，看它里面怎么设计。</p>
+    </div>
+    <div class="arch-bar reveal">
+      <button type="button" id="arch-all" class="no-js-hide" aria-pressed="false">全部展开</button>
+      <span class="no-js-hide">点击方块展开细节，再点一次收起</span>
+    </div>
+
+    <div class="diagram reveal" id="diagram" role="group" aria-label="Matrix 架构图">
+      <div class="node k-human a-human">
+        <button type="button" class="node-head" aria-expanded="false" aria-controls="d-human">
+          <span><span class="node-kind">Human · 人</span>
+            <b>人与客户端</b>
+            <span class="node-sum">在项目群聊里 @ 成员交代目标；批准越界；验收结果。</span></span>
+          <span class="plus" aria-hidden="true"></span>
+        </button>
+        <div class="node-detail" id="d-human"><div><div class="parts">
+          <div class="part"><h4>单页前端</h4><p>看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（档案、文件预览）· 网络图 · 设备配对</p></div>
+          <div class="part"><h4>CLI</h4><p><code>agentnet.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP</p></div>
+          <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt）、HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
+          <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准工作区外溢与沙箱升权 · 验收、退回、取消自己下发的用户任务</p></div>
+        </div></div></div>
+      </div>
+
+      <div class="link a-l1"><span>@ 交代 · 审批 · 验收</span><span class="more"><code>REST · SSE 事件流 · 附件上传</code></span></div>
+
+      <div class="node k-net a-net">
+        <button type="button" class="node-head" aria-expanded="false" aria-controls="d-net">
+          <span><span class="node-kind">Network · 网络</span>
+            <b>Matrix 网络</b>
+            <span class="node-sum">唯一的核心。项目是成员集合与委托边界，没有主 Agent。</span>
+            <span class="pillars"><span>授权</span><span>隔离</span><span>追踪</span><span>知识沉淀</span></span></span>
+          <span class="plus" aria-hidden="true"></span>
+        </button>
+        <div class="node-detail" id="d-net"><div>
+          <div class="parts">
+            <div class="part"><h4>对话与席位</h4><p>群聊里被 @ 的成员接任务；项目会话只属于开它的人；每个 Agent 一个私聊。席位 = Agent 在一个对话里的执行上下文</p></div>
+            <div class="part"><h4>收件箱调度</h4><p>每个席位、每个委托各有收件箱；有内容且没在跑，就续接它的会话跑一轮。同一上下文同时只跑一轮</p></div>
+            <div class="part"><h4>委托与验收</h4><p><code>delegate</code> 立即返回；有效权限 = 自身 ∩ 授予 ∩ 可强制；约束沿链累加；防环、限深（默认 3）；只有直接委托方验收</p></div>
+            <div class="part"><h4>失败与续接</h4><p>运行时错误分类；格式错、空回复、超时自动续接一次，仍失败只阻塞这一个席位，人点“继续”从中断处接着做</p></div>
+            <div class="part"><h4>治理与审批</h4><p>网络不自动建 Agent，只接受提议、由人批准；工作区外溢由所有者逐次批准；每次越权都留痕</p></div>
+            <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（纲要、决定、文件、资源引用）按版本推送给成员</p></div>
+            <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经联合项目</p></div>
+            <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
+          </div>
+          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/internal/tools</code><code>/internal/approval</code><code>/api/devices/connect</code></div>
+        </div></div>
+      </div>
+
+      <div class="node k-store a-store">
+        <button type="button" class="node-head" aria-expanded="false" aria-controls="d-store">
+          <span><span class="node-kind">State · 状态</span>
+            <b>状态与档案</b>
+            <span class="node-sum">全部在 <code>--data</code> 目录里，不进任何代码仓库。</span></span>
+          <span class="plus" aria-hidden="true"></span>
+        </button>
+        <div class="node-detail" id="d-store"><div><ul class="files">
+          <li><code>state.json</code>Agent · 项目 · 对话 · 任务 · 用户 · 设备</li>
+          <li><code>conversations/&lt;id&gt;/</code>每个席位独立的工作目录</li>
+          <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
+          <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
+          <li><code>projects/&lt;id&gt;/</code>档案文件与变更日志 <code>log.jsonl</code></li>
+          <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
+          <li><code>models.json</code>云侧预置模型目录，改文件即生效</li>
+        </ul></div></div>
+      </div>
+
+      <div class="link a-l2a"><span>↓ 跑一轮 · ↑ 调网络工具</span><span class="more"><code>RunRequest → RunResult</code></span><span class="more">运行时声明能强制哪些权限</span></div>
+      <div class="link up a-l2b"><span>同一份运行时契约</span><span class="more"><code>出站 WebSocket · 设备令牌</code></span><span class="more">离线是等待，不是失败</span></div>
+
+      <div class="node a-cloud">
+        <button type="button" class="node-head" aria-expanded="false" aria-controls="d-cloud">
+          <span><span class="node-kind">Cloud · 云侧</span>
+            <b>云侧 Agent</b>
+            <span class="node-sum">服务机上每轮起一个 dsh 子进程，权限由网络算好再下发。</span></span>
+          <span class="plus" aria-hidden="true"></span>
+        </button>
+        <div class="node-detail" id="d-cloud"><div><div class="parts">
+          <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型</p></div>
+          <div class="part"><h4>网络工具</h4><p>stdio MCP 服务回调 <code>/internal/tools</code>，凭这一轮的执行上下文令牌</p></div>
+          <div class="part"><h4>审批应答</h4><p>沙箱升权申请转给 Agent 所有者决定，从不自动批准</p></div>
+          <div class="part"><h4>私有目录</h4><p>每轮挂载进工作目录，写回时按文件三方合并，冲突另存副本</p></div>
+        </div></div></div>
+      </div>
+
+      <div class="node k-device a-device">
+        <button type="button" class="node-head" aria-expanded="false" aria-controls="d-device">
+          <span><span class="node-kind">Device · 端侧</span>
+            <b>你电脑上的 Agent</b>
+            <span class="node-sum">用你自己的 Claude Code、Codex 或 dsh，经连接器接进网络。</span></span>
+          <span class="plus" aria-hidden="true"></span>
+        </button>
+        <div class="node-detail" id="d-device"><div><div class="parts">
+          <div class="part"><h4>matrix-connect 连接器</h4><p>只出站，不开入站端口；一个连接器同时提供多个 harness</p></div>
+          <div class="part"><h4>本机桥</h4><p>harness 的网络工具调本机 <code>127.0.0.1</code> 的桥，再经 WebSocket 转给网络</p></div>
+          <div class="part"><h4>设备码配对</h4><p>在浏览器里批准；令牌只存哈希，可单独吊销；可装成后台服务</p></div>
+          <div class="part"><h4>私有目录留在本机</h4><p>网络不读、不注入；离线时任务排队，上线后接着消费</p></div>
+        </div></div></div>
+      </div>
+    </div>
+
+    <div class="legend arch-legend">
+      <span><i style="background:var(--human)"></i>人</span>
+      <span><i style="background:var(--accent)"></i>网络 · 云侧</span>
+      <span><i style="background:var(--peer)"></i>端侧</span>
+      <span><i style="background:var(--muted)"></i>状态</span>
+    </div>
+  </div>
+</section>
+
 <section class="line">
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>17 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>18 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -482,6 +669,33 @@ footer a { color: var(--text-2); }
   </div>
 </section>
 
+<section id="start" class="line">
+  <div class="wrap">
+    <div class="reveal">
+      <p class="eyebrow">Start · 上手</p>
+      <h2>三步，在自己电脑上<br>跑起一张网。</h2>
+      <p class="sub">Matrix 在本机运行，只监听 127.0.0.1，状态都在 <code>--data</code> 目录里。没装 dsh 也能用脚本运行时离线体验。</p>
+    </div>
+    <div class="grid3 steps">
+      <article class="card reveal"><span class="tag">01 · 起服务</span>
+        <h3>启动网络</h3>
+        <p>打开 127.0.0.1:8765 注册账号。没有 dsh 时加 <code>--runtime scripted</code>。</p>
+        <pre><code>uv sync
+uv run agentnet</code></pre></article>
+      <article class="card reveal"><span class="tag">02 · 建项目</span>
+        <h3>@ 成员交代任务</h3>
+        <p>新建项目，你的助理自动加入；拉进需要的 Agent，在群聊里 @ 它。进度和交付在看板上跟进、验收。</p>
+        <pre><code>@Product Strategy
+研究一个新的 AI 产品机会</code></pre></article>
+      <article class="card reveal"><span class="tag">03 · 接入电脑</span>
+        <h3>让本机 harness 成为节点</h3>
+        <p>连接器检测本机的 Claude Code、Codex、dsh，在浏览器里批准配对后，它们就能作为 Agent 加入项目。</p>
+        <pre><code>uv run matrix-connect setup \
+  http://127.0.0.1:8765</code></pre></article>
+    </div>
+  </div>
+</section>
+
 <section class="closing line">
   <div class="wrap reveal">
     <div class="nots"><span>聊天机器人</span><span>固定流程编排器</span><span>简单的 Agent 调度平台</span></div>
@@ -511,6 +725,31 @@ footer a { color: var(--text-2); }
     }), { rootMargin: "0px 0px -8% 0px" });
     items.forEach(el => io.observe(el));
   }
+
+  // 架构图：点方块展开 / 收起；有任一块展开时，连线上也显示细节
+  const diagram = document.getElementById("diagram"), all = document.getElementById("arch-all");
+  const archNodes = [...diagram.querySelectorAll(".node")];
+  function setOpen(node, open) {
+    node.classList.toggle("open", open);
+    node.querySelector(".node-head").setAttribute("aria-expanded", open);
+    node.querySelector(".node-detail").inert = !open;
+  }
+  function syncArch() {
+    const n = archNodes.filter(el => el.classList.contains("open")).length;
+    diagram.classList.toggle("deep", n > 0);
+    const full = n === archNodes.length;
+    all.textContent = full ? "全部收起" : "全部展开";
+    all.setAttribute("aria-pressed", full);
+  }
+  archNodes.forEach(el => {
+    setOpen(el, false);
+    el.querySelector(".node-head").addEventListener("click", () => { setOpen(el, !el.classList.contains("open")); syncArch(); });
+  });
+  all.addEventListener("click", () => {
+    const open = !archNodes.every(el => el.classList.contains("open"));
+    archNodes.forEach(el => setOpen(el, open));
+    syncArch();
+  });
 
   // 首屏背景：节点缓慢漂移，近的节点之间连线；委托脉冲沿边传递，到达后有概率继续向下委托
   const cv = document.getElementById("net"), ctx = cv.getContext("2d");
