@@ -23,6 +23,7 @@ AUTHORITIES: dict[str, str] = {
     "file.write": "在工作目录内创建或修改文件",
     "shell.exec": "执行 shell 命令",
     "delegate": "在所在项目内把子任务委托给其他成员",
+    "connector.use": "使用所有者授权、并勾选给它的连接器（外部服务）",
 }
 
 # DSH 工具 -> 所需权限。None 表示只读、默认允许。
@@ -45,12 +46,24 @@ HARNESSES: dict[str, str] = {
 
 MCP_SERVER = "agentnet"
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
+# 云端连接器：网络代调用的那一组工具挂在另一个 MCP 服务下，工具名是 <连接器 id>__<工具名>（docs/connectors-and-skills.md）
+CONNECTOR_SERVER = "connectors"
+CONNECTOR_PREFIX = f"mcp__{CONNECTOR_SERVER}__"
 
 AGENT_HOME = "agent-home"  # Agent 私有目录在每次运行的工作目录里的挂载名
 PROJECT_FILES = "project"  # 项目档案的文件区在工作目录里的挂载名（只读副本，运行后丢弃）
 ATTACHMENTS = "attachments"  # 对话附件在工作目录里的挂载名（只读副本，每轮刷新，运行后丢弃）
 ATTACHMENT_LIMIT = 20_000_000  # 单个附件上限（字节）
 ATTACHMENTS_PER_MESSAGE = 10
+SKILLS = "skills"  # 本轮生效的技能在工作目录里的挂载名（只读副本，项目技能 > 我的技能，运行后丢弃）
+
+# 技能（docs/connectors-and-skills.md）：一个目录 <名字>/SKILL.md，可带模板、脚本。名字是 kebab-case 英文
+# （dsh 的技能名规则），中文写在描述里。
+SKILL_NAME_RE = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+SKILL_NAME_MAX = 64
+SKILL_LIMIT = 256_000      # 单个技能目录的总大小上限（字节）
+SKILLS_TOTAL = 2_000_000   # 每轮下发到端侧的技能合计上限
+SKILLS_PER_AGENT = 50
 
 
 def attachment_rel(a: dict[str, Any]) -> str:
@@ -59,11 +72,13 @@ def attachment_rel(a: dict[str, Any]) -> str:
 
 
 # 项目档案工具：项目成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
-ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief")
+ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief", "propose_skill")
 # 用户任务工具：席位（项目群聊、项目会话、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 # 项目会话工具：只有项目会话里的助理有，读项目的现状（按会话主人的可见性过滤）。
 SESSION_TOOLS = ("read_chat", "read_request")
+# 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
+ABILITY_TOOLS = ("suggest_connector",)
 
 
 class TaskStatus(StrEnum):
@@ -101,6 +116,9 @@ class AgentNode:
     # 运行上限（所有者设置）：每轮运行的超时秒数；每次被 @ 引出的工作 / 每个任务最多发起几次委托。None = 不限制
     timeout_s: int | None = None
     max_delegations: int | None = None
+    # 所有者勾给它的“我的连接器”（Connection id）与“我的技能”（技能名）。只能是同一所有者的
+    connections: list[str] = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
     created_by: str = "seed"             # seed | human | proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
@@ -155,15 +173,28 @@ class ResourceRef:
 
 @dataclass
 class BriefSuggestion:
-    """参与者或 Agent 提议的纲要修改：由主持人采纳或拒绝。"""
+    """参与者或 Agent 提议的纲要修改（kind=brief），或 Agent 提议沉淀的项目技能（kind=skill）：由主持人采纳或拒绝。"""
 
     id: str
-    text: str
+    text: str                            # brief：新纲要；skill：技能正文
     reason: str = ""
     by_user: str | None = None
     by_agent: str | None = None
     status: str = "pending"              # pending | accepted | rejected
+    kind: str = "brief"                  # brief | skill
+    skill_name: str = ""                 # kind=skill：技能名与一句描述
+    skill_description: str = ""
     created_at: float = field(default_factory=time.time)
+
+
+@dataclass
+class ConnectorNeed:
+    """项目声明需要的连接器：不持有凭证。每个成员 Agent 用它所有者自己的授权（不变量 16）。"""
+
+    id: str
+    connector_id: str                    # 连接器目录 id（云端），或电脑上的服务名
+    purpose: str = ""
+    ref_id: str | None = None            # 范围：项目里的一条资源引用（只是指针，不授予访问权限）
 
 
 @dataclass
@@ -188,6 +219,11 @@ class Project:
     refs: list[ResourceRef] = field(default_factory=list)
     suggestions: list[BriefSuggestion] = field(default_factory=list)
     home_enabled: list[str] = field(default_factory=list)  # 联合项目里由所有者打开了私有目录挂载的 Agent
+    # 项目技能的记录（正文在 projects/<id>/skills/<名字>/）：{名字: {description, by_user, by_agent, approved_by, updated_at}}
+    skills: dict[str, dict[str, Any]] = field(default_factory=dict)
+    connector_needs: list[ConnectorNeed] = field(default_factory=list)
+    # 联合项目里由所有者逐个打开的连接器：{agent_id: [connection_id]}。默认没有（不变量 19）
+    connections_enabled: dict[str, list[str]] = field(default_factory=dict)
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 
@@ -234,6 +270,7 @@ class Seat:
     delegations: int = 0                 # 自最近一次被 @ 以来发起的委托数
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
     archive_seen: int = -1               # 已经送达过的项目档案版本（Project.archive_rev）
+    abilities_seen: str = ""             # 已经送达过的“本轮可用的连接器 / 技能”说明的指纹，没变就不再送
     state_seen: str = ""                 # 项目会话：已经送达过的项目现状（摘要的指纹），没变就不再送
     created_at: float = field(default_factory=time.time)
 
@@ -322,6 +359,7 @@ class Task:
     delegations: int = 0                 # 执行者在这个任务里发起的委托数
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
     archive_seen: int = -1               # 已经送达过的项目档案版本
+    abilities_seen: str = ""             # 同 Seat.abilities_seen
     attachments: list[dict[str, Any]] = field(default_factory=list)  # 委托方显式转交的对话附件（同 Message.attachments）
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
@@ -417,6 +455,26 @@ class Device:
         return {"id": self.id, "name": self.name, "created_at": self.created_at,
                 "last_seen_at": self.last_seen_at, "revoked": self.revoked,
                 "harnesses": list(self.harnesses), "hostname": self.hostname}
+
+
+@dataclass
+class Connection:
+    """“我的连接器”：一个人授权的一个外部服务（docs/connectors-and-skills.md）。凭证不在这里：
+    云端的加密存在 vault/（只有网络代调用时解开），电脑上的留在那台电脑，网络只知道名字与状态。"""
+
+    id: str
+    owner_id: str
+    connector_id: str                    # 云端：目录 id；电脑上：那个 AI 工具里配置的服务名
+    name: str                            # 显示名
+    where: str = "cloud"                 # cloud | <设备 id>
+    harness: str | None = None           # 电脑上的：哪个 AI 工具里配置的
+    status: str = "ok"                   # ok | error | missing（电脑上这次没报告）
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
+
+    def public(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass

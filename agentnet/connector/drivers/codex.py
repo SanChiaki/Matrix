@@ -7,11 +7,15 @@
 - `web.research`：Codex 的联网开关不在 exec 的参数里（走 config / 运行时），本驱动按 `advisory` 处理，
   也就是**不进入有效权限**。要放开需要在 `~/.codex/config.toml` 里自行开启，这属于所有者自己的环境决定。
 - 审批：`-s` 沙箱拒绝即失败，没有逐次上行（`approval: none`）。
+- `connector.use`：用户在 Codex 里配置的 MCP 服务（`codex mcp list --json`）里，网络这一轮没允许的
+  逐个用 `-c mcp_servers.<名字>.enabled=false` 关掉。
+- 技能：随材料放进工作目录的 `skills/`，由网络在提示词里列出（`skills: prompt`）。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import threading
@@ -36,17 +40,39 @@ class CodexDriver:
         return RuntimeCapabilities(
             name="codex", placement="device",
             enforcement={"web.research": ADVISORY, "file.write": ENFORCED, "shell.exec": ENFORCED,
-                         "delegate": ENFORCED},
-            session_resume=True, steer=False, approval="none", sandbox="workspace-write")
+                         "delegate": ENFORCED, "connector.use": ENFORCED},
+            session_resume=True, steer=False, approval="none", sandbox="workspace-write", skills="prompt")
 
     def available(self) -> bool:
         return shutil.which(self.codex_bin) is not None
+
+    def services(self) -> list[str]:
+        """用户在 Codex 里配置、并且开着的 MCP 服务名。"""
+        try:
+            out = subprocess.run(argv([self.codex_bin, "mcp", "list", "--json"]), capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=30, creationflags=no_window()).stdout
+            return [str(x["name"]) for x in json.loads(out or "[]") if isinstance(x, dict) and x.get("name")
+                    and x.get("enabled", True)]
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+
+    def mcp_overrides(self, spec: RunSpec) -> list[str]:
+        """网络这一轮没允许的服务一律关掉。没发这个字段（旧服务端）时不干预。"""
+        if spec.connectors is None:
+            return []
+        out: list[str] = []
+        for name in self.services():
+            if name not in spec.connectors:
+                key = name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name)
+                out += ["-c", f"mcp_servers.{key}.enabled=false"]
+        return out
 
     def sandbox(self, authority: list[str]) -> str:
         return "workspace-write" if "file.write" in authority else "read-only"
 
     def command(self, spec: RunSpec) -> list[str]:
         model = ["--model", spec.model["model"]] if spec.model and spec.model.get("model") else []
+        model += self.mcp_overrides(spec)
         if spec.session_id:
             # 续接：`codex exec resume` 不认 --sandbox / --cd：沙箱用 -c 覆盖，工作目录就是进程的 cwd
             return [self.codex_bin, "exec", "resume", "--json", "--skip-git-repo-check",

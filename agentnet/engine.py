@@ -27,23 +27,27 @@ from pathlib import Path
 from typing import Any
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS, ATTACHMENTS_PER_MESSAGE,
-                     AUTHORITIES, BRIEF_LIMIT, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, MCP_PREFIX, PROJECT_FILES, PROJECT_KINDS, REQUEST_TOOLS, SESSION_TOOLS,
-                     TOOL_AUTHORITY, AgentNode, Approval, Conversation, Decision, Delegation, KnowledgeItem, Message,
-                     Project, Proposal, ResourceRef, Seat, Task, TaskStatus, UserRequest, attachment_rel, new_id,
-                     seat_id)
+from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
+                     ATTACHMENTS_PER_MESSAGE, AUTHORITIES, BRIEF_LIMIT, CONNECTOR_PREFIX, DESCRIPTION_LIMIT, FILE_LIMIT,
+                     HARNESSES, MCP_PREFIX, PROJECT_FILES, PROJECT_KINDS, REQUEST_TOOLS, SESSION_TOOLS, SKILLS,
+                     SKILLS_PER_AGENT, SKILLS_TOTAL, TOOL_AUTHORITY, AgentNode, Approval, Connection, ConnectorNeed,
+                     Conversation, Decision, Delegation, KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat,
+                     Task, TaskStatus, UserRequest, attachment_rel, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat,
-                       format_decision, format_delivery, format_request_detail, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
+                       format_abilities, format_decision, format_delivery, format_request_detail, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_proposal_notice, format_request_changes,
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
-from . import homedir, workdir
+from . import homedir, skills as skillfs, workdir
+from .connector_catalog import ConnectorCatalog, ConnectorSpec
+from .mcp_client import MCPError, RemoteMCP
+from .vault import Vault, VaultError
 from .auth import Pairings
 from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import ModelCatalog
-from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, RunRequest, RunResult, RuntimeCapabilities,
-                      ToolBridge)
+from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, RunRequest, RunResult,
+                      RuntimeCapabilities, ToolBridge)
 from .store import Store
 
 
@@ -74,6 +78,8 @@ class ExecContext:
     wake: list[str] = field(default_factory=list)     # 这一轮送达的交付（本轮结束仍未处理即视为接受）
     addressed: list[str] = field(default_factory=list)  # 席位：这一轮送达的、@ 它的人的消息（open_request 的来源）
     session: bool = False           # 项目会话里的助理：有读项目现状的工具
+    connections: list[str] = field(default_factory=list)  # 这一轮能用的“我的连接器”（网络按令牌代调用时只认这些）
+    suggested: set[str] = field(default_factory=set)       # 这一轮已经提醒过所有者的连接器（suggest_connector 去重）
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -101,7 +107,7 @@ class NetworkError(ValueError):
 class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
-                 models: ModelCatalog | None = None):
+                 models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -111,6 +117,13 @@ class Network:
         self.store = Store(data_dir, seed=seed)
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
+        # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
+        self.connectors = connectors or ConnectorCatalog(self.store.root / "connectors.json")
+        self.vault = Vault(self.store.root)
+        self.connector_url = tool_url.rsplit("/", 1)[0] + "/connectors"
+        self._remotes: dict[str, RemoteMCP] = {}            # connection id → 远程 MCP 客户端（带着解开的凭证，只在内存）
+        self._remote_tools: dict[str, tuple[float, list[dict[str, Any]]]] = {}  # connection id → (取的时间, 工具)
+        self._connector_skills_version: float | None = None
         self.bus = EventBus()
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
@@ -255,6 +268,10 @@ class Network:
             for k in LIMIT_FIELDS:  # 运行上限：显式传 None = 改回不限制
                 if k in fields:
                     setattr(a, k, _clean_limit(fields.pop(k)))
+            if fields.get("skills") is not None:  # 只能勾自己技能库里的
+                a.skills = self._clean_agent_skills(a, fields.pop("skills"))
+            if fields.get("connections") is not None:  # 只能勾自己的、能在它运行的地方用的
+                a.connections = self._clean_agent_connections(a, fields.pop("connections"))
             for k, v in fields.items():
                 if v is None:
                     continue
@@ -627,11 +644,20 @@ class Network:
             g = self.hosted_project(project_id, actor)
             sug = next((x for x in g.suggestions if x.id == suggestion_id and x.status == "pending"), None)
             self._check(sug is not None, f"suggestion {suggestion_id}")
-            sug.status = "accepted" if accept else "rejected"
-            if accept:
-                g.brief, g.brief_updated_at = sug.text, time.time()
-                self._archive_changed(g, "brief.set", by_user=actor, suggestion=sug.id, size=len(sug.text))
-        self._archive_saved(g, "主持人采纳了纲要修改建议" if accept else "主持人没有采纳纲要修改建议")
+            if sug.kind == "skill":
+                if accept:  # 先写，写不进去（超大、名字无效）就不改状态，让主持人知道
+                    self._write_project_skill(g, sug.skill_name, sug.skill_description, sug.text, actor,
+                                              by_agent=sug.by_agent, suggestion=sug.id)
+                sug.status = "accepted" if accept else "rejected"
+                event = (f"主持人采纳了 {self._name(sug.by_agent)} 提议的技能「{sug.skill_name}」，项目里的成员此后都能用"
+                         if accept else f"主持人没有采纳技能「{sug.skill_name}」的提议")
+            else:
+                sug.status = "accepted" if accept else "rejected"
+                if accept:
+                    g.brief, g.brief_updated_at = sug.text, time.time()
+                    self._archive_changed(g, "brief.set", by_user=actor, suggestion=sug.id, size=len(sug.text))
+                event = "主持人采纳了纲要修改建议" if accept else "主持人没有采纳纲要修改建议"
+        self._archive_saved(g, event)
         return g
 
     def record_decision(self, project_id: str, text: str, reason: str = "", supersedes: str | None = None,
@@ -749,8 +775,10 @@ class Network:
     def project_detail(self, project_id: str, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             g = self.visible_project(project_id, actor)
-            d = g.to_dict()
+            d = self._project_dict(g, actor)
             d["files"] = self.project_files(g)
+            d["skill_list"] = self.project_skills(g)
+            d["connector_readiness"] = self.connector_readiness(g)
             d["host"] = self._email(g.owner_id)
             d["participant_emails"] = {u: self._email(u) for u in g.people}
             d["invited_emails"] = {u: self._email(u) for u in g.invited} if actor in (None, g.owner_id) else {}
@@ -758,6 +786,605 @@ class Network:
                 d.pop("invited")
             d["is_host"] = actor is None or g.owner_id in (None, actor)
             return d
+
+    # ================= 连接器与技能 =================
+    # 两个并列的概念（docs/connectors-and-skills.md）：连接器接外部服务、要授权，背后是授权人的状态，默认隔离；
+    # 技能是可复用的做法、不要授权，是能力，可以随 Agent 和项目共享。个人层管“我有什么”，项目层管“这里需要什么、
+    # 这里怎么做”，项目层从不持有任何人的凭证（不变量 16、19）。
+    def _project_dict(self, g: Project, actor: str | None) -> dict[str, Any]:
+        """调用方持有锁。联合项目里各人为自己的 Agent 打开了哪些连接器，只给 Agent 的所有者看。"""
+        d = g.to_dict()
+        if actor is not None:
+            d["connections_enabled"] = {a: ids for a, ids in g.connections_enabled.items()
+                                        if (x := self.store.agents.get(a)) is not None and x.owner_id == actor}
+        return d
+
+    def _need_user(self, actor: str | None) -> str:
+        if not actor or actor not in self.store.users:
+            raise NetworkError("需要登录")
+        return actor
+
+    # ---- 我的技能 ----
+    def my_skills(self, actor: str | None) -> list[dict[str, Any]]:
+        uid = self._need_user(actor)
+        with self._lock:
+            mine = [a for a in self.store.agents.values() if a.owner_id == uid]
+            out = []
+            for i in skillfs.listing(self.store.user_skills_dir(uid)):
+                d = i.public()
+                d["agents"] = [a.id for a in mine if i.name in a.skills]
+                out.append(d)
+            return out
+
+    def my_skill(self, name: str, actor: str | None) -> dict[str, Any]:
+        uid = self._need_user(actor)
+        root = self.store.user_skills_dir(uid)
+        try:
+            _, description, body = skillfs.read(root, name)
+        except skillfs.SkillError as e:
+            raise NetworkError(f"unknown skill {name}") from e
+        info = skillfs.info(root / name)
+        return {"name": name, "description": description, "body": body, "files": info.files if info else []}
+
+    def save_my_skill(self, name: str, description: str, body: str, actor: str | None) -> dict[str, Any]:
+        uid = self._need_user(actor)
+        try:
+            skillfs.write(self.store.user_skills_dir(uid), name, description, body)
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("skills.updated", user_id=uid)
+        return self.my_skill(name, actor)
+
+    def add_my_skill_file(self, name: str, rel: str, data: bytes, actor: str | None) -> dict[str, Any]:
+        uid = self._need_user(actor)
+        try:
+            skillfs.add_file(self.store.user_skills_dir(uid), name, rel, data)
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("skills.updated", user_id=uid)
+        return self.my_skill(name, actor)
+
+    def delete_my_skill(self, name: str, actor: str | None) -> None:
+        uid = self._need_user(actor)
+        try:
+            gone = skillfs.remove(self.store.user_skills_dir(uid), name)
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        self._check(gone, f"skill {name}")
+        with self._lock:
+            for a in self.store.agents.values():
+                if a.owner_id == uid and name in a.skills:
+                    a.skills = [x for x in a.skills if x != name]
+            self.store.save()
+        self.bus.emit("skills.updated", user_id=uid)
+
+    def _clean_agent_skills(self, a: AgentNode, names: Any) -> list[str]:
+        """调用方持有锁。"""
+        names = _dedup([str(x).strip() for x in _as_list(names) if str(x).strip()])
+        if not names:
+            return []
+        if not a.owner_id:
+            raise NetworkError("这个 Agent 还没有所有者，不能勾选技能")
+        have = {i.name for i in skillfs.listing(self.store.user_skills_dir(a.owner_id))}
+        missing = [n for n in names if n not in have]
+        if missing:
+            raise NetworkError(f"你的技能库里没有：{'、'.join(missing)}")
+        if len(names) > SKILLS_PER_AGENT:
+            raise NetworkError(f"一个 Agent 最多勾 {SKILLS_PER_AGENT} 个技能")
+        return names
+
+    # ---- 项目技能（项目档案的一部分，不变量 17） ----
+    def project_skills(self, g: Project) -> list[dict[str, Any]]:
+        out = []
+        for i in skillfs.listing(self.store.project_skills_dir(g.id)):
+            meta = g.skills.get(i.name, {})
+            out.append({**i.public(), "by_user": meta.get("by_user"), "by_agent": meta.get("by_agent"),
+                        "approved_by": meta.get("approved_by"),
+                        "author": self._name(meta["by_agent"]) if meta.get("by_agent") else self._email(meta.get("by_user"))})
+        return out
+
+    def project_skill(self, project_id: str, name: str, actor: str | None = None) -> dict[str, Any]:
+        g = self.visible_project(project_id, actor)
+        root = self.store.project_skills_dir(g.id)
+        try:
+            _, description, body = skillfs.read(root, name)
+        except skillfs.SkillError as e:
+            raise NetworkError(f"unknown skill {name}") from e
+        info = skillfs.info(root / name)
+        return {"name": name, "description": description, "body": body, "files": info.files if info else [],
+                **{k: g.skills.get(name, {}).get(k) for k in ("by_user", "by_agent", "approved_by")}}
+
+    def _write_project_skill(self, g: Project, name: str, description: str, body: str, actor: str | None,
+                             by_agent: str | None = None, suggestion: str | None = None) -> bool:
+        """调用方持有锁。返回是不是新建的。"""
+        root = self.store.project_skills_dir(g.id)
+        created = not (root / name / skillfs.SKILL_FILE).is_file()
+        try:
+            skillfs.write(root, name, description, body)
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        g.skills[name] = {"by_user": None if by_agent else actor, "by_agent": by_agent,
+                          "approved_by": actor if by_agent else None, "updated_at": time.time()}
+        self._archive_changed(g, "skill.create" if created else "skill.update", by_user=actor, by_agent=by_agent,
+                              skill=name, suggestion=suggestion)
+        return created
+
+    def save_project_skill(self, project_id: str, name: str, description: str, body: str,
+                           actor: str | None = None) -> dict[str, Any]:
+        """主持人（内部项目是所有者）直接写。联合项目里正文对所有参与者公开：它影响每个人的 Agent。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            created = self._write_project_skill(g, name, description, body, actor)
+        self._archive_saved(g, f"主持人{'新增' if created else '更新'}了项目技能「{name}」：{_short(description, 80)}")
+        return self.project_skill(project_id, name, actor)
+
+    def add_project_skill_file(self, project_id: str, name: str, rel: str, data: bytes,
+                               actor: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            try:
+                skillfs.add_file(self.store.project_skills_dir(g.id), name, rel, data)
+            except skillfs.SkillError as e:
+                raise NetworkError(str(e)) from e
+            self._archive_changed(g, "skill.file", by_user=actor, skill=name, file=rel, size=len(data))
+        self._archive_saved(g, f"主持人给项目技能「{name}」加了文件 {rel}")
+        return self.project_skill(project_id, name, actor)
+
+    def delete_project_skill(self, project_id: str, name: str, actor: str | None = None) -> Project:
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            try:
+                gone = skillfs.remove(self.store.project_skills_dir(g.id), name)
+            except skillfs.SkillError as e:
+                raise NetworkError(str(e)) from e
+            self._check(gone, f"skill {name}")
+            g.skills.pop(name, None)
+            self._archive_changed(g, "skill.delete", by_user=actor, skill=name)
+        self._archive_saved(g, f"主持人删除了项目技能「{name}」")
+        return g
+
+    def suggest_skill(self, project_id: str, name: str, description: str, body: str, reason: str = "",
+                      agent_id: str | None = None, actor: str | None = None) -> Project:
+        """Agent 提议沉淀一个项目技能：主持人批准后才进档案（不变量 9、17）。"""
+        try:
+            skillfs.render(name, description, body)  # 先校验，坏的提议不进档案
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        if len(body.encode()) > 64_000:
+            raise NetworkError("技能正文最多 64 KB；模板与脚本由主持人批准后另外加")
+        from .models import BriefSuggestion
+        with self._lock:
+            g = self.visible_project(project_id, actor)
+            if any(x.kind == "skill" and x.skill_name == name and x.status == "pending" for x in g.suggestions):
+                raise NetworkError(f"技能「{name}」已经有一条提议在等主持人决定")
+            g.suggestions.append(BriefSuggestion(id=new_id("sugg"), text=body.strip(), reason=reason.strip()[:1000],
+                                                 by_user=actor, by_agent=agent_id, kind="skill", skill_name=name,
+                                                 skill_description=" ".join(description.split())[:500]))
+        who = self._name(agent_id) if agent_id else self._email(actor)
+        self._archive_saved(g, f"{who} 提议把「{name}」沉淀为项目技能，等主持人决定")
+        return g
+
+    def _tool_propose_skill(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_project(ctx, delegate=False)
+        name = str(args.get("name", "")).strip()
+        self.suggest_skill(g.id, name, str(args.get("description", "")), str(args.get("body", "")),
+                           str(args.get("reason", "")), agent_id=ctx.agent_id)
+        return f"已提交技能「{name}」的提议，主持人批准后项目里的成员才能用。", False
+
+    # ---- 一轮里的技能 ----
+    def _skill_layers(self, ctx: ExecContext, agent: AgentNode, conns: list[Connection]) -> list[skillfs.Layer]:
+        """项目技能 > 连接器自带的 > 我的技能。Agent 自己攒的不在这里：网络不读私有目录，
+        它作为运行时的第二个技能根挂上，排在这些后面（重名时运行时取前者）。"""
+        layers: list[skillfs.Layer] = []
+        g = self.store.projects.get(ctx.project_id or "")
+        if g is not None:
+            layers.append(("项目技能", self.store.project_skills_dir(g.id), None))
+        self._sync_connector_skills()
+        for c in conns:
+            spec = self.connectors.get(c.connector_id) if c.where == "cloud" else None
+            if spec is not None and spec.skills:
+                layers.append((f"连接器「{spec.name}」", self.store.connector_skills_dir(spec.id), None))
+        if agent.owner_id and agent.skills:
+            layers.append(("我的技能", self.store.user_skills_dir(agent.owner_id), list(agent.skills)))
+        return layers
+
+    def _sync_connector_skills(self) -> None:
+        """连接器目录里的技能展开成文件（目录变了才重写）。"""
+        version = self.connectors.version
+        if version == self._connector_skills_version:
+            return
+        self._connector_skills_version = version
+        shutil.rmtree(self.store.root / "cache" / "connector-skills", ignore_errors=True)
+        for spec in self.connectors.specs():
+            for sk in spec.skills:
+                try:
+                    skillfs.write(self.store.connector_skills_dir(spec.id), sk.name, sk.description, sk.body)
+                except skillfs.SkillError as e:
+                    print(f"[agentnet] 连接器 {spec.id} 的技能 {sk.name} 无效：{e}", flush=True)
+
+    def _resolve_skills(self, ctx: ExecContext, agent: AgentNode,
+                        conns: list[Connection]) -> dict[str, tuple[str, Path]]:
+        chosen, shadowed = skillfs.resolve(self._skill_layers(ctx, agent, conns))
+        if shadowed:  # 被盖住的只告诉 Agent 的所有者（运行过程按席位 / 任务过滤）
+            self.bus.emit("skills.shadowed", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
+                          skills=[{"name": n, "from": src, "by": chosen[n][0]} for n, src in shadowed])
+        return chosen
+
+    def _skill_materials(self, chosen: dict[str, tuple[str, Path]]) -> list[dict[str, Any]]:
+        """端侧：技能随材料下发（skills/<名字>/...），合计不超过 SKILLS_TOTAL，超了的整个跳过。"""
+        out, total = [], 0
+        for name, (_, src) in chosen.items():
+            files = [f for f in sorted(src.rglob("*")) if f.is_file() and not f.is_symlink()]
+            size = sum(f.stat().st_size for f in files)
+            if total + size > SKILLS_TOTAL:
+                continue
+            total += size
+            out += [{"path": f"{SKILLS}/{name}/{f.relative_to(src).as_posix()}",
+                     "data": base64.b64encode(f.read_bytes()).decode()} for f in files]
+        return out
+
+    # ---- 我的连接器 ----
+    def connector_catalog(self) -> list[dict[str, Any]]:
+        return [s.public() for s in self.connectors.specs()]
+
+    def _connection_view(self, c: Connection) -> dict[str, Any]:
+        """调用方持有锁。给授权人自己看的：没有凭证，只有名字、状态、给了谁。"""
+        d = c.public()
+        spec = self.connectors.get(c.connector_id) if c.where == "cloud" else None
+        d["kind"] = "cloud" if c.where == "cloud" else "device"
+        d["description"] = spec.description if spec else ""
+        d["skills"] = [s.name for s in spec.skills] if spec else []
+        d["agents"] = [a.id for a in self.store.agents.values() if c.id in a.connections]
+        if c.where != "cloud":
+            dev = self.store.devices.get(c.where)
+            d["device_name"] = dev.name if dev else c.where
+            d["online"] = c.where in self._runtimes
+            d["harness_name"] = HARNESSES.get(c.harness or "", c.harness)
+        elif spec is None:
+            d["status"], d["error"] = "error", "部署方已下架这个连接器"
+        return d
+
+    def my_connections(self, actor: str | None) -> list[dict[str, Any]]:
+        uid = self._need_user(actor)
+        with self._lock:
+            return [self._connection_view(c) for c in sorted(self.store.connections.values(), key=lambda c: c.created_at)
+                    if c.owner_id == uid]
+
+    def _own_connection(self, connection_id: str, actor: str | None) -> Connection:
+        c = self.store.connections.get(connection_id)
+        if c is None or (actor is not None and c.owner_id != actor):
+            raise NetworkError(f"unknown connection {connection_id}")  # 别人的连接器按不存在处理（不变量 13）
+        return c
+
+    def authorize_connector(self, connector_id: str, values: dict[str, Any], actor: str | None,
+                            agent_ids: list[str] | None = None) -> dict[str, Any]:
+        """授权一个云端连接器：凭证加密保管，试连一次，记下状态。同一个人同一个连接器只有一份，再授权就是替换凭证。"""
+        uid = self._need_user(actor)
+        spec = self.connectors.get(connector_id)
+        if spec is None:
+            raise NetworkError(f"没有这个连接器：{connector_id}")
+        clean = {f.key: str(values.get(f.key) or "").strip() for f in spec.fields}
+        missing = [f.label for f in spec.fields if not clean[f.key]]
+        if missing:
+            raise NetworkError(f"请填写：{'、'.join(missing)}")
+        with self._lock:
+            c = next((x for x in self.store.connections.values()
+                      if x.owner_id == uid and x.where == "cloud" and x.connector_id == spec.id), None)
+            created = c is None
+            if c is None:
+                c = Connection(id=new_id("conn"), owner_id=uid, connector_id=spec.id, name=spec.name)
+                self.store.connections[c.id] = c
+            self.vault.put(c.id, clean)
+            self._remotes.pop(c.id, None)
+            self._remote_tools.pop(c.id, None)
+        status, error = self._probe(c)
+        with self._lock:
+            c.status, c.error, c.updated_at = status, error, time.time()
+            if created:  # 新授权默认只勾自己的助理（云端的）；其余在 Agent 设置里勾
+                assistant = self.assistant_of(uid)
+                picks = agent_ids if agent_ids is not None else ([assistant.id] if assistant else [])
+                for aid in picks:
+                    a = self.store.agents.get(aid)
+                    if a is not None and a.owner_id == uid and not a.device_runtime and c.id not in a.connections:
+                        a.connections.append(c.id)
+            self.store.save()
+            view = self._connection_view(c)
+        self.bus.emit("connection.updated", user_id=uid, connection_id=c.id)
+        return view
+
+    def recheck_connection(self, connection_id: str, actor: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            c = self._own_connection(connection_id, actor)
+            self._remotes.pop(c.id, None)
+            self._remote_tools.pop(c.id, None)
+        if c.where == "cloud":
+            status, error = self._probe(c)
+            with self._lock:
+                c.status, c.error, c.updated_at = status, error, time.time()
+                self.store.save()
+        with self._lock:
+            return self._connection_view(c)
+
+    def revoke_connection(self, connection_id: str, actor: str | None = None) -> None:
+        """撤销授权：删凭证，从所有 Agent 与项目里摘掉。电脑上的只是网络这边忘掉，下次上线报告时再出现。"""
+        with self._lock:
+            c = self._own_connection(connection_id, actor)
+            self.store.connections.pop(c.id, None)
+            for a in self.store.agents.values():
+                if c.id in a.connections:
+                    a.connections = [x for x in a.connections if x != c.id]
+            for g in self.store.projects.values():
+                for aid, ids in list(g.connections_enabled.items()):
+                    g.connections_enabled[aid] = [x for x in ids if x != c.id]
+            self._remotes.pop(c.id, None)
+            self._remote_tools.pop(c.id, None)
+            self.store.save()
+        if c.where == "cloud":
+            self.vault.delete(c.id)
+        self.bus.emit("connection.updated", user_id=c.owner_id, connection_id=c.id)
+
+    def connection_calls(self, connection_id: str, actor: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        import json
+        with self._lock:
+            c = self._own_connection(connection_id, actor)
+        log = self.store.connection_dir(c.id) / "calls.jsonl"
+        if not log.is_file():
+            return []
+        out = []
+        for line in log.read_text(encoding="utf-8").splitlines()[-limit:]:
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out[::-1]
+
+    def _clean_agent_connections(self, a: AgentNode, ids: Any) -> list[str]:
+        """调用方持有锁。只能勾同一所有者的、能在这个 Agent 运行的地方用的连接器。"""
+        ids = _dedup([str(x).strip() for x in _as_list(ids) if str(x).strip()])
+        for cid in ids:
+            c = self.store.connections.get(cid)
+            if c is None or c.owner_id != a.owner_id or not a.owner_id:
+                raise NetworkError(f"没有这个连接器：{cid}")
+            if not self._placed_for(c, a):
+                where = "云端" if c.where == "cloud" else f"电脑「{self._connection_view(c).get('device_name')}」上的 " \
+                                                           f"{HARNESSES.get(c.harness or '', c.harness)}"
+                raise NetworkError(f"「{c.name}」只能给运行在{where}的 Agent 用")
+        return ids
+
+    def _default_harness(self, device_id: str) -> str | None:
+        rt = self._runtimes.get(device_id)
+        info = getattr(rt, "info", None)
+        if info is not None:
+            return info.runtime
+        d = self.store.devices.get(device_id)
+        return d.harnesses[0] if d is not None and d.harnesses else None
+
+    def _placed_for(self, c: Connection, a: AgentNode) -> bool:
+        """调用方持有锁。云端的连接器给云端的 Agent；电脑上的给同一台电脑、同一个 AI 工具上的 Agent。"""
+        if c.where == "cloud":
+            return not a.device_runtime
+        return a.device_runtime == c.where and (a.harness or self._default_harness(c.where)) == c.harness
+
+    def _connections_for(self, ctx: ExecContext, agent: AgentNode) -> list[Connection]:
+        """这一轮能用的连接器 = 所有者授权过的 ∩ 勾给这个 Agent 的 ∩（联合项目里）在这个项目打开的
+        ∩ 本轮权限含 connector.use ∩ 能在它运行的地方用的。调用方持有锁。"""
+        if "connector.use" not in ctx.authority:
+            return []
+        g = self.store.projects.get(ctx.project_id or "")
+        opened = set(g.connections_enabled.get(agent.id, [])) if g is not None and g.kind == "joint" else None
+        out = []
+        for cid in agent.connections:
+            c = self.store.connections.get(cid)
+            if c is None or c.owner_id != agent.owner_id or c.status != "ok" or not self._placed_for(c, agent):
+                continue
+            if c.where == "cloud" and self.connectors.get(c.connector_id) is None:
+                continue
+            if opened is not None and cid not in opened:
+                continue
+            out.append(c)
+        return out
+
+    def _probe(self, c: Connection) -> tuple[str, str]:
+        """试连一次：能列出工具就算可用。"""
+        try:
+            tools = self._remote(c).list_tools()
+            self._remote_tools[c.id] = (time.time(), tools)
+            return "ok", ""
+        except (MCPError, VaultError, NetworkError) as e:
+            return "error", str(e)[:300]
+
+    def _remote(self, c: Connection) -> RemoteMCP:
+        spec = self.connectors.get(c.connector_id)
+        if spec is None:
+            raise NetworkError(f"部署方已下架连接器 {c.connector_id}")
+        with self._lock:
+            r = self._remotes.get(c.id)
+            if r is None or r.url != spec.url:
+                r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
+                self._remotes[c.id] = r
+            return r
+
+    # ---- 网络代调用（运行时经 mcp_connectors.py 回调这里，只凭执行上下文令牌） ----
+    REMOTE_TOOLS_TTL = 300
+
+    def connector_tools(self, token: str) -> list[dict[str, Any]]:
+        ctx = self._contexts.get(token)
+        if ctx is None:
+            return []
+        out = []
+        for cid in ctx.connections:
+            with self._lock:
+                c = self.store.connections.get(cid)
+            spec = self.connectors.get(c.connector_id) if c is not None else None
+            if c is None or spec is None:
+                continue
+            cached = self._remote_tools.get(cid)
+            if cached is None or time.time() - cached[0] > self.REMOTE_TOOLS_TTL:
+                try:
+                    cached = (time.time(), self._remote(c).list_tools())
+                except (MCPError, VaultError, NetworkError):
+                    continue
+                self._remote_tools[cid] = cached
+            for t in cached[1]:
+                out.append({"name": f"{spec.id}__{t['name']}",
+                            "description": f"[{spec.name}] {t.get('description') or ''}".strip(),
+                            "inputSchema": t.get("inputSchema") or {"type": "object", "properties": {}}})
+        return out
+
+    def connector_call(self, token: str, name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        import json
+        ctx = self._contexts.get(token)
+        if ctx is None:
+            return "执行上下文无效或已结束", True
+        prefix, _, tool = str(name).partition("__")
+        with self._lock:
+            c = next((self.store.connections[x] for x in ctx.connections
+                      if x in self.store.connections and self.store.connections[x].connector_id == prefix), None)
+        if c is None or not tool:
+            # 不在这一轮的有效集合里：拒绝并留痕（不变量 11）
+            self.bus.emit("authority.violation", context=ctx.kind, context_id=ctx.id, agent_id=ctx.agent_id,
+                          detail=f"调用了这一轮没有的连接器工具 {name}")
+            if ctx.kind == "task" and ctx.id in self.store.tasks:
+                with self._lock:
+                    t = self.store.tasks[ctx.id]
+                    t.violations = _dedup(t.violations + [f"调用了这一轮没有的连接器工具 {name}"])
+            return f"这一轮不能用 {name}：没有对应的连接器", True
+        started = time.time()
+        try:
+            text, is_error = self._remote(c).call_tool(tool, args if isinstance(args, dict) else {})
+        except (MCPError, VaultError, NetworkError) as e:
+            text, is_error = f"连接器「{c.name}」出错：{e}", True
+        entry = {"ts": started, "ms": int((time.time() - started) * 1000), "tool": tool, "ok": not is_error,
+                 "agent_id": ctx.agent_id, "agent": self._name(ctx.agent_id), "context": ctx.kind,
+                 "context_id": ctx.id, "project_id": ctx.project_id}
+        with (self.store.connection_dir(c.id) / "calls.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return text, is_error
+
+    # ---- 电脑上的连接器：Matrix 客户端上线时报告那台电脑上各 AI 工具里配置的服务（只有名字） ----
+    def _device_connections(self, device_id: str, reported: dict[str, list[str]]) -> None:
+        """调用方持有锁。报告到的新建或恢复为可用，这次没报告的标为 missing。新出现的默认勾给同一台电脑、
+        同一个 AI 工具上的 Agent：有连接器之前它们一直能用这些服务（内部项目与私聊；联合项目仍要逐个打开）。"""
+        d = self.store.devices.get(device_id)
+        if d is None:
+            return
+        for harness, names in reported.items():
+            seen = set()
+            for name in names:
+                cid = "conn-" + hashlib.sha1(f"{device_id}|{harness}|{name}".encode()).hexdigest()[:10]
+                seen.add(cid)
+                c = self.store.connections.get(cid)
+                if c is None:
+                    c = Connection(id=cid, owner_id=d.user_id, connector_id=name, name=name, where=device_id,
+                                   harness=harness)
+                    self.store.connections[cid] = c
+                    for a in self.store.agents.values():
+                        if a.owner_id == d.user_id and self._placed_for(c, a) and cid not in a.connections:
+                            a.connections.append(cid)
+                c.status, c.error, c.updated_at = "ok", "", time.time()
+            for c in self.store.connections.values():
+                if c.where == device_id and c.harness == harness and c.id not in seen:
+                    c.status, c.error = "missing", "这次上线没有报告这个服务"
+
+    # ---- 项目需要的连接器（只是声明，不持有凭证） ----
+    def add_connector_need(self, project_id: str, connector_id: str, purpose: str = "", ref_id: str | None = None,
+                           actor: str | None = None) -> ConnectorNeed:
+        connector_id = connector_id.strip()
+        if not connector_id or len(connector_id) > 80:
+            raise NetworkError("要写明需要哪个连接器")
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            if ref_id and not any(r.id == ref_id for r in g.refs):
+                raise NetworkError(f"项目里没有资源引用 {ref_id}")
+            if any(n.connector_id == connector_id for n in g.connector_needs):
+                raise NetworkError(f"已经声明过需要 {connector_id}")
+            need = ConnectorNeed(id=new_id("need"), connector_id=connector_id, purpose=purpose.strip()[:300],
+                                 ref_id=ref_id or None)
+            g.connector_needs.append(need)
+            self._archive_changed(g, "need.add", by_user=actor, need=need.id, connector=connector_id)
+        self._archive_saved(g, f"主持人声明本项目需要连接器「{self._connector_label(connector_id)}」"
+                               + (f"：{need.purpose}" if need.purpose else "") + "。各成员用自己的授权")
+        return need
+
+    def remove_connector_need(self, project_id: str, need_id: str, actor: str | None = None) -> Project:
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            need = next((n for n in g.connector_needs if n.id == need_id), None)
+            self._check(need is not None, f"need {need_id}")
+            g.connector_needs.remove(need)
+            self._archive_changed(g, "need.remove", by_user=actor, need=need.id)
+        self._archive_saved(g, f"主持人去掉了对连接器「{self._connector_label(need.connector_id)}」的需要")
+        return g
+
+    def _connector_label(self, connector_id: str) -> str:
+        spec = self.connectors.get(connector_id)
+        return spec.name if spec else connector_id
+
+    def set_project_connections(self, project_id: str, agent_id: str, connection_ids: list[str],
+                                actor: str | None = None) -> Project:
+        """联合项目里，所有者给自己的 Agent 逐个打开连接器（默认都关，不变量 19）。内部项目不需要：
+        那里只有所有者自己，勾给 Agent 的就能用。"""
+        with self._lock:
+            g = self.visible_project(project_id, actor)
+            a = self.owned_agent(agent_id, actor)
+            if a.id not in g.member_ids:
+                raise NetworkError(f"{a.name} 不在项目里")
+            if g.kind != "joint":
+                raise NetworkError("内部项目里勾给 Agent 的连接器都能用，不用另外打开")
+            ids = _dedup([str(x) for x in _as_list(connection_ids)])
+            bad = [x for x in ids if x not in a.connections]
+            if bad:
+                raise NetworkError("只能打开已经勾给这个 Agent 的连接器")
+            if ids:
+                g.connections_enabled[a.id] = ids
+            else:
+                g.connections_enabled.pop(a.id, None)
+            self.store.save()
+        self.bus.emit("project.updated", project=g.to_dict())
+        return g
+
+    def connector_readiness(self, g: Project) -> list[dict[str, Any]]:
+        """调用方持有锁。每条需要 × 每个成员 Agent：ready | not_enabled | unauthorized。只给状态，不给是谁的账号。"""
+        out = []
+        for need in g.connector_needs:
+            members = []
+            for aid in g.member_ids:
+                a = self.store.agents.get(aid)
+                if a is None:
+                    continue
+                conns = [c for c in self.store.connections.values() if c.owner_id == a.owner_id and a.owner_id
+                         and c.connector_id == need.connector_id and c.status == "ok"]
+                ticked = [c for c in conns if c.id in a.connections and self._placed_for(c, a)]
+                if not conns:
+                    status = "unauthorized"
+                elif not ticked or ("connector.use" not in a.authority) or (
+                        g.kind == "joint" and not any(c.id in g.connections_enabled.get(a.id, []) for c in ticked)):
+                    status = "not_enabled"
+                else:
+                    status = "ready"
+                members.append({"agent_id": a.id, "agent": a.name, "owner": self._email(a.owner_id), "status": status})
+            out.append({**asdict(need), "name": self._connector_label(need.connector_id), "members": members})
+        return out
+
+    def _tool_suggest_connector(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        """缺一个连接器时提醒所有者：只在对话里给所有者看一张卡片，不授权、不安装、不开启。"""
+        name = " ".join(str(args.get("connector", "")).split())[:80]
+        reason = str(args.get("reason", "")).strip()[:500]
+        if not name:
+            return "要写明需要哪个连接器", True
+        if name in ctx.suggested:
+            return f"这一轮已经提醒过所有者「{name}」了", False
+        ctx.suggested.add(name)
+        agent = self._agent(ctx.agent_id)
+        owner = [agent.owner_id] if agent.owner_id else []
+        conv = self.store.conversations.get(ctx.conversation_id)
+        if conv is not None:
+            self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id,
+                                       text=f"{agent.name} 想用连接器「{name}」" + (f"：{reason}" if reason else "")
+                                       + "。可以在「连接器」页授权并勾给它；联合项目里还要在成员栏里打开。",
+                                       audience=owner, private_to=owner))
+        self.bus.emit("connector.suggested", agent_id=agent.id, context=ctx.kind, context_id=ctx.id, connector=name)
+        return f"已提醒你的所有者需要「{name}」。授权之前，这一轮用现有的能力继续。", False
 
     # ================= 助理与项目会话 =================
     # 每个人有一个助理（User.assistant_id：自己的一个 Agent，默认是第一个创建的，可以换）。人进项目时助理一定在里面；
@@ -1287,6 +1914,8 @@ class Network:
             device = self.store.devices.get(name)
             if device is not None and info is not None:
                 device.harnesses = list(info.harnesses)  # 离线时 UI 仍按它让人选 harness
+                if info.connectors is not None:  # 旧客户端不报告：网络这边什么也不动
+                    self._device_connections(name, info.connectors)
             for a in self.store.agents.values():
                 if a.device_runtime == name and self._serves(runtime, a):
                     # 记下最近一次声明，离线时沿用
@@ -1682,19 +2311,33 @@ class Network:
             prompt = f"{prompt}\n\n{format_ledger(others, hidden)}"
         home: str | None = None   # 端侧：私有目录交给连接器挂载（rw / ro），None 表示不挂载
         before = None
+        with self._lock:
+            conns = self._connections_for(ctx, agent)
+        chosen = self._resolve_skills(ctx, agent, conns)
+        caps = self.capabilities(agent)
+        note, abilities_key = format_abilities(
+            [(c.name, f"{c.connector_id}__") for c in conns if c.where == "cloud"],
+            [c.name for c in conns if c.where != "cloud"],
+            [(n, skillfs.info(src).description if skillfs.info(src) else "") for n, (_, src) in chosen.items()]
+            if caps.skills == "prompt" else [])
+        if abilities_key != holder.abilities_seen:  # 本轮可用的连接器 / 技能变了才说一次
+            prompt = f"{prompt}\n\n{note}" if note else prompt
+        skill_files: list[dict[str, Any]] = []
         if agent.device_runtime:  # 工作目录在用户电脑上：项目文件随 run.request 下发，服务器这边不挂载
             if mount_home:
                 home = "rw" if "file.write" in ctx.authority else "ro"
+            skill_files = self._skill_materials(chosen)
         else:
             self._mount_project_files(ctx, workdir)
             self._mount_attachments(ctx, workdir)
+            skillfs.mount(workdir / SKILLS, chosen)
             before = self._mount_home(agent, workdir) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
         stop = threading.Event()
         with self._lock:
             self._stops[ctx.id] = stop
         invoke = lambda p: self._invoke(ctx, agent, p, workdir, holder.dsh_session_id, timeout_s,  # noqa: E731
-                                        on_session, home=home, cancel=stop)
+                                        on_session, home=home, cancel=stop, conns=conns, skill_files=skill_files)
         try:
             res = invoke(prompt)
             holder.dsh_session_id = res.session_id or holder.dsh_session_id
@@ -1706,11 +2349,15 @@ class Network:
                 holder.dsh_session_id = res2.session_id or holder.dsh_session_id
                 res2.tool_calls = res.tool_calls + res2.tool_calls
                 res = res2
+            if res.ok:
+                holder.abilities_seen = abilities_key
         finally:
             with self._lock:
                 self._stops.pop(ctx.id, None)
             shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
             shutil.rmtree(workdir / ATTACHMENTS, ignore_errors=True)
+            if not agent.device_runtime:
+                shutil.rmtree(workdir / SKILLS, ignore_errors=True)
             if before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx.id)
                 if conflicts:
@@ -1729,7 +2376,8 @@ class Network:
     def _archive_text(self, g: Project) -> str:
         """调用方持有锁。"""
         return format_archive(g, self._active_decisions(g), [f["name"] for f in self.project_files(g)],
-                              self._name, self._email)
+                              self._name, self._email,
+                              [(i.name, i.description) for i in skillfs.listing(self.store.project_skills_dir(g.id))])
 
     @staticmethod
     def _active_decisions(g: Project) -> list[Decision]:
@@ -1804,8 +2452,16 @@ class Network:
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float | None, on_session: Any = None, home: str | None = None,
-                cancel: threading.Event | None = None) -> RunResult:
+                cancel: threading.Event | None = None, conns: list[Connection] | None = None,
+                skill_files: list[dict[str, Any]] | None = None) -> RunResult:
         token = secrets.token_urlsafe(18)
+        conns = conns or []
+        ctx.connections = [c.id for c in conns]
+        cloud = [c for c in conns if c.where == "cloud"]
+        connectors = ConnectorBridge(url=self.connector_url, token=token,
+                                     list_tools=lambda: self.connector_tools(token),
+                                     call=lambda name, args: self.connector_call(token, name, args)) \
+            if cloud and not agent.device_runtime else None
         tools = None
         if ctx.tools:  # 席位有用户任务工具；项目里有档案工具；协作工具（委托等）另外要求 delegate
             tools = ToolBridge(url=self.tool_url, token=token,
@@ -1859,12 +2515,13 @@ class Network:
                              error=f"TRANSPORT 端侧运行时 {self._where(agent)} 未连接")
         try:
             with self._lock:
-                materials = self._materials(ctx) if agent.device_runtime else []
+                materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime else []
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
                                               approvals=approvals, materials=materials, home=home,
-                                              harness=agent.harness, cancel=cancel))
+                                              harness=agent.harness, cancel=cancel, connectors=connectors,
+                                              local_connectors=[c.connector_id for c in conns if c.where != "cloud"]))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -1991,7 +2648,7 @@ class Network:
         holder = self._holder(ctx.kind, ctx.id)
         rel = str(args.get("path", "")).strip()
         top = Path(rel).parts[0] if Path(rel).parts else ""
-        if top in (PROJECT_FILES, HOME_DIR) or workdir.safe_rel(rel) is None:
+        if top in (PROJECT_FILES, HOME_DIR, SKILLS) or workdir.safe_rel(rel) is None:
             return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {PROJECT_FILES}/ 与 {HOME_DIR}/）", True
 
         def publish(fname: str, content: bytes) -> str:
@@ -2775,6 +3432,8 @@ class Network:
             if ev_type == "project.left":  # 退出的人据此从界面上移除项目
                 g = self.store.projects.get(data.get("project_id", ""))
                 return data if data.get("user_id") == actor or (g and self.can_see_project(g, actor)) else None
+            if ev_type in ("skills.updated", "connection.updated"):  # 我的技能、我的连接器：只给本人
+                return data if data.get("user_id") == actor else None
             if ev_type == "approval.updated":
                 return data if (data.get("approval") or {}).get("owner_id") in (None, actor) else None
             if ev_type in ("device.connected", "device.disconnected"):
@@ -2796,7 +3455,8 @@ class Network:
                 t = self.store.tasks[task_id]
                 if not self.can_see_task(t, actor):
                     return None
-                if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry", "run.stopping"):  # 执行过程：执行方所有者
+                if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry", "run.stopping",
+                               "skills.shadowed", "connector.suggested"):  # 执行过程：执行方所有者
                     a = self.store.agents.get(t.delegatee_id or "")
                     return data if a is None or self.can_use_agent(a, actor) else None
                 return data
@@ -2841,7 +3501,7 @@ class Network:
 
     def project_view(self, g: Project, actor: str | None) -> dict[str, Any]:
         """调用方持有锁。列表与事件里的项目：邀请名单只给主持人。"""
-        d = g.to_dict()
+        d = self._project_dict(g, actor)
         d["host_email"] = self._email(g.owner_id) if g.owner_id else None
         if actor is not None and g.owner_id not in (None, actor):
             d.pop("invited")
@@ -2863,11 +3523,13 @@ TOOL_HANDLERS = {
     "list_decisions": Network._tool_list_decisions,
     "publish_file": Network._tool_publish_file,
     "propose_brief": Network._tool_propose_brief,
+    "propose_skill": Network._tool_propose_skill,
     "read_chat": Network._tool_read_chat,
     "read_request": Network._tool_read_request,
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
     "accept_request": Network._tool_accept_request,
+    "suggest_connector": Network._tool_suggest_connector,
 }
 
 
@@ -2881,6 +3543,8 @@ def network_tools_for(kind: str, in_project: bool, can_delegate: bool, session: 
             return kind == "seat" and in_project and session
         if n in ARCHIVE_TOOLS:
             return in_project
+        if n in ABILITY_TOOLS:
+            return True
         return can_delegate
     return [n for n in TOOL_HANDLERS if ok(n)]
 
@@ -2932,8 +3596,10 @@ def _violations(tool_calls: list[dict[str, Any]], authority: list[str]) -> list[
     for c in tool_calls:
         tool = str(c.get("tool") or "")
         if tool.startswith(MCP_PREFIX) and "delegate" not in authority \
-                and tool.removeprefix(MCP_PREFIX) not in ARCHIVE_TOOLS + REQUEST_TOOLS:
+                and tool.removeprefix(MCP_PREFIX) not in ARCHIVE_TOOLS + REQUEST_TOOLS + ABILITY_TOOLS:
             out.append(f"无 delegate 权限却调用了 {tool}")
+        elif tool.startswith(CONNECTOR_PREFIX) and "connector.use" not in authority:
+            out.append(f"无 connector.use 权限却调用了连接器 {tool}")
         else:
             need = TOOL_AUTHORITY.get(tool)
             if need and need not in authority:

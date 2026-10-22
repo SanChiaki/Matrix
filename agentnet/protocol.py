@@ -6,10 +6,13 @@ Agent 不输出结构化协议：委托通过网络工具（MCP）完成，最�
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, DECISIONS_PUSHED, MCP_PREFIX, PROJECT_FILES,
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
+                     MCP_PREFIX, PROJECT_FILES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -90,6 +93,10 @@ TOOL_GUIDE: dict[str, str] = {
     "publish_file": ("把当前工作目录里的一个文件（或一个目录，打成 zip）发布进项目档案，所有成员此后在 `./project/` 读到"
                      "（只发布别人要用、已经定稿的交付物）。"),
     "propose_brief": "建议修改项目纲要（写完整的新纲要和理由），主持人决定。",
+    "propose_skill": ("把一个值得反复用的做法提议为项目技能（name：小写英文与连字符，description：什么时候用，"
+                      "body：怎么做，reason：为什么值得沉淀），主持人批准后项目里的成员才能用。"),
+    "suggest_connector": ("需要某个外部服务（如飞书、GitHub、某个数据库）却没有对应的连接器时，提醒你的所有者"
+                          "（connector：哪个服务，reason：拿来做什么）。只是提醒，不会授权或安装；提醒完用现有的能力继续。"),
     "read_chat": "读项目群聊的消息（query 按关键词找，limit 条数，默认最近 20 条）：了解群聊里交代过、讨论过、定下过什么。",
     "read_request": "读项目里一个用户任务的详情（request_id）：原始要求、状态、交付说明、为它发起的委托与结果。",
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
@@ -114,7 +121,7 @@ def _network_tools(project: Project, can_delegate: bool) -> list[str]:
     return archive + [
         "", f"## 协作：你所在的项目「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()
-          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS),
+          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -127,6 +134,37 @@ def _network_tools(project: Project, can_delegate: bool) -> list[str]:
         "- 与项目成员协作只能通过网络工具；你自己的 subagent 只是替你干活的帮手，"
         "不能代替委托，权限也不会超出你自己的权限。",
     ]
+
+
+def _abilities() -> list[str]:
+    return [
+        "", "## 连接器与技能",
+        f"- 连接器是你的所有者授权的外部服务。这一轮能用哪些会另外告诉你，它们的工具以 `{CONNECTOR_PREFIX}` 开头；"
+        "没告诉你的就是没有，不要自己安装、配置或找凭证。",
+        *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ABILITY_TOOLS),
+        "- 技能是可复用的做法说明，按需要使用。技能不授予任何权限：写着要用的工具或服务，你没有就是没有。",
+    ]
+
+
+def format_abilities(cloud: list[tuple[str, str]], device: list[str],
+                     skills: list[tuple[str, str]]) -> tuple[str, str]:
+    """本轮可用的连接器与（需要在提示词里列出的）技能。返回 (说明, 指纹)；都没有时指纹为空。
+    调用方只在指纹变化时把说明放进这一轮。"""
+    if not (cloud or device or skills):
+        return "## 本轮可用的连接器与技能\n- 之前可用的连接器与技能，这一轮都没有了。", ""
+    key = hashlib.sha1(json.dumps([cloud, device, skills], ensure_ascii=False).encode()).hexdigest()[:16]
+    parts = ["## 本轮可用的连接器与技能"]
+    if cloud:
+        parts.append("- 连接器（你的所有者授权，网络代为调用）：" +
+                     "、".join(f"{n}（工具以 `{CONNECTOR_PREFIX}{prefix}` 开头）" for n, prefix in cloud))
+    if device:
+        parts.append("- 连接器（你所在电脑上已经配好的服务）：" + "、".join(device))
+    if not (cloud or device):
+        parts.append("- 这一轮没有可用的连接器。")
+    if skills:
+        parts += [f"- 技能（正文在 `./{SKILLS}/<名字>/SKILL.md`，用之前先读）：",
+                  *(f"  - {n}：{d}" for n, d in skills)]
+    return "\n".join(parts), key
 
 
 def _requests() -> list[str]:
@@ -180,7 +218,7 @@ def format_decision(d: Decision, name: Callable[[str | None], str], email: Calla
 
 
 def format_archive(g: Project, active: list[Decision], files: list[str], name: Callable[[str | None], str],
-                   email: Callable[[str | None], str]) -> str:
+                   email: Callable[[str | None], str], skills: list[tuple[str, str]] | None = None) -> str:
     """项目档案的推送部分：纲要、最近的有效决定、文件与资源的指针。作为背景，不附带任何“先读档案”的指令。"""
     parts = [f"## 项目档案（「{g.name}」）"]
     if g.brief:
@@ -193,6 +231,9 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
     if files:
         parts += [f"### 文件（`./{PROJECT_FILES}/`，只读）", "、".join(files[:40])
                   + (f" 等 {len(files)} 个" if len(files) > 40 else "")]
+    if skills:
+        parts += ["### 项目技能（大家约定的做法，和你自己的技能重名时以这里为准）",
+                  *(f"- {n}：{d}" for n, d in skills[:40])]
     if g.refs:
         parts += ["### 相关资源（只是引用，不代表你能访问）",
                   *(f"- {r.name}：{r.location}" + (f" —— {r.note}" if r.note else "") for r in g.refs)]
@@ -242,6 +283,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
                   "- 每轮会带上项目现状的摘要（有变化时）；更早或更细的内容用上面的工具读，不要凭印象回答。"]
     parts += _requests()
+    parts += _abilities()
     parts += [*_attachments_note(), *_home(home_writable, home), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
@@ -356,6 +398,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *(["", f"## 附件（委托方转交，只读副本，改动不会保存）", *format_attachments(task.attachments)]
           if task.attachments else []),
         *_network_tools(project, can_delegate),
+        *_abilities(),
         *_knowledge(knowledge),
         *_home(home_writable, home),
         *_writing(),

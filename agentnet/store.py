@@ -15,7 +15,8 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
-from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Conversation, Decision, Delegation, Device,
+from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
+                     Decision, Delegation, Device,
                      KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus, User, UserRequest,
                      new_id, seat_id)
 
@@ -206,6 +207,7 @@ class Store:
         self.approvals: dict[str, Approval] = {}
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
+        self.connections: dict[str, Connection] = {}  # 我的连接器（凭证不在这里，见 vault.py）
         if self.path.exists():
             self._load()
         else:
@@ -225,6 +227,30 @@ class Store:
     def project_dir(self, project_id: str) -> Path:
         """项目档案的文件区：不属于任何代码仓库。只有网络写入（publish_file、人上传），运行时只读挂载。"""
         d = self.root / "projects" / project_id / "files"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def project_skills_dir(self, project_id: str) -> Path:
+        """项目技能：项目档案的一部分，和 files/ 平级。只有网络写入（人的操作、人批准的提议）。"""
+        d = self.root / "projects" / project_id / "skills"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def user_skills_dir(self, user_id: str) -> Path:
+        """我的技能：人维护的技能库，勾给自己的 Agent。和 Agent 的私有目录分开。"""
+        d = self.root / "users" / user_id / "skills"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def connector_skills_dir(self, connector_id: str) -> Path:
+        """连接器自带的技能：从连接器目录展开出来的缓存，目录变了就重写。"""
+        d = self.root / "cache" / "connector-skills" / connector_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def connection_dir(self, connection_id: str) -> Path:
+        """一个连接的调用记录（calls.jsonl）。只给授权人看；不含凭证与调用内容。"""
+        d = self.root / "connections" / connection_id
         d.mkdir(parents=True, exist_ok=True)
         return d
 
@@ -261,6 +287,7 @@ class Store:
                 "approvals": [a.to_dict() for a in self.approvals.values()],
                 "requests": [r.to_dict() for r in self.requests.values()],
                 "devices": [asdict(d) for d in self.devices.values()],
+                "connections": [asdict(c) for c in self.connections.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -277,11 +304,16 @@ class Store:
             raw, notes = _merge_groups(raw, self.root)
         for a in raw.get("agents", []):
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
+            if "connections" not in a and a.get("device_runtime"):
+                # 有连接器之前，电脑上的 Agent 一直能用那个 AI 工具里自己配的服务；现在要有 connector.use 并勾选，
+                # 保留这份能力（勾选在设备上线、报告服务时补上，见 Network.register_runtime）
+                a["authority"] = list(dict.fromkeys([*(a.get("authority") or []), "connector.use"]))
             self.agents[a["id"]] = AgentNode(**_known(AgentNode, a))
         for p in raw.get("projects", []):
             p["decisions"] = [Decision(**_known(Decision, d)) for d in p.get("decisions") or []]
             p["refs"] = [ResourceRef(**_known(ResourceRef, r)) for r in p.get("refs") or []]
             p["suggestions"] = [BriefSuggestion(**_known(BriefSuggestion, x)) for x in p.get("suggestions") or []]
+            p["connector_needs"] = [ConnectorNeed(**_known(ConnectorNeed, n)) for n in p.get("connector_needs") or []]
             self.projects[p["id"]] = Project(**_known(Project, p))
         for c in raw.get("conversations", []):
             conv = _load_conversation(c)
@@ -339,6 +371,8 @@ class Store:
             self.devices[d["id"]] = Device(**_known(Device, d))
         for r in raw.get("requests", []):
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
+        for c in raw.get("connections", []):
+            self.connections[c["id"]] = Connection(**_known(Connection, c))
         self._one_trust_domain()
         self.default_assistants()
         if migrated:
