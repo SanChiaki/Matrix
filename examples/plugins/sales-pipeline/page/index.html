@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>销售漏斗</title>
+<link rel="stylesheet" href="style.css">
+<script src="../_matrix/sdk.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="kpis" id="kpis"></div>
+  <div class="acts">
+    <input id="q" type="search" placeholder="搜索公司、联系人…" aria-label="搜索">
+    <button type="button" class="ghost" id="new">+ 新线索</button>
+    <button type="button" id="post">把漏斗概况发到群聊</button>
+  </div>
+</header>
+<p class="err" id="err" role="alert"></p>
+<main class="board" id="board" aria-label="线索看板"></main>
+<dialog id="edit"><form method="dialog" id="form"></form></dialog>
+<script src="board.js"></script>
+</body>
+</html>

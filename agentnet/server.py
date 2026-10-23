@@ -27,9 +27,10 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import auth
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
-from .engine import Network, NetworkError
+from .engine import HookRateLimited, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
 from .model_catalog import ModelCatalog
+from .plugins import PluginCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
@@ -54,6 +55,24 @@ def resume_seq(since: int, last_event_id: str | None, last_seq: int) -> int:
     if last_event_id and last_event_id.isdigit():
         seq = int(last_event_id)
     return 0 if seq > last_seq else max(0, seq)
+
+
+class PluginInstallIn(BaseModel):
+    name: str = Field(max_length=64)
+    confirm: bool = False
+
+
+class TriggerIn(BaseModel):
+    enabled: bool
+
+
+class FrameIn(BaseModel):
+    tab: str = Field(max_length=40)
+
+
+class BridgeIn(BaseModel):
+    op: str = Field(max_length=40)
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelIn(BaseModel):
@@ -322,6 +341,39 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
         return unzip(bytes(buf))
     except (SkillError, ValueError, KeyError, TypeError, AttributeError) as e:
         raise HTTPException(400, str(e) or "技能包格式不对") from e
+
+
+async def plugin_package(request: Request) -> list[tuple[str, bytes]]:
+    """插件包：请求体是 zip，或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
+    import base64
+    from .models import PLUGIN_FILES, PLUGIN_LIMIT
+    from .plugins import PluginError, unzip
+    cap = PLUGIN_LIMIT * 2  # base64 膨胀
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(413, f"插件包超过 {PLUGIN_LIMIT // 1_000_000} MB")
+    try:
+        if "json" in request.headers.get("content-type", ""):
+            files = json.loads(bytes(buf)).get("files") or []
+            return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:PLUGIN_FILES + 1]]
+        return unzip(bytes(buf))
+    except (PluginError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise HTTPException(400, str(e) or "插件包格式不对") from e
+
+
+# 插件页面的响应头（不变量 20）：直接打开也在沙箱里（不透明来源、没有登录 cookie），不能联网、不能被别的站点嵌入，
+# 不带 Referer（地址里有帧令牌）。
+PLUGIN_FRAME_HEADERS = {
+    "Content-Security-Policy": ("sandbox allow-scripts allow-forms; default-src 'none'; script-src 'self' 'unsafe-inline'; "
+                                "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; "
+                                "connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; "
+                                "frame-ancestors 'self'"),
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
 
 
 def create_app(network: Network) -> FastAPI:
@@ -637,6 +689,89 @@ def create_app(network: Network) -> FastAPI:
 
     # ---- 对话 ----
     # ---- 项目会话：人和自己的助理在项目里的私下对话，只有这个人看得到（不变量 18） ----
+    # ---- 项目插件（docs/project-plugins.md） ----
+    @app.get("/api/plugins")
+    def plugin_catalog(user: Me) -> list[dict]:
+        return network.plugin_catalog()
+
+    @app.post("/api/projects/{project_id}/plugins")
+    def install_plugin(project_id: str, body: PluginInstallIn, user: Me) -> dict:
+        return network.install_plugin(project_id, body.name, body.confirm, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/plugins/upload")
+    async def upload_plugin(project_id: str, request: Request, user: Me, confirm: bool = False) -> dict:
+        await run_in_threadpool(network.hosted_project, project_id, user.id)  # 先查权限，不收无权者的内容
+        entries = await plugin_package(request)
+        return await run_in_threadpool(network.upload_plugin, project_id, entries, confirm, user.id)
+
+    @app.delete("/api/projects/{project_id}/plugins/{name}")
+    def uninstall_plugin(project_id: str, name: str, user: Me) -> dict:
+        network.uninstall_plugin(project_id, name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/plugins/{name}")
+    def set_plugin_enabled(project_id: str, name: str, body: TriggerIn, user: Me) -> dict:
+        """启用 / 停用整个插件（只有主持人）；停用保留包、记录与触发设置。"""
+        return network.set_plugin_enabled(project_id, name, body.enabled, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/plugins/{name}/triggers/{key}")
+    def set_plugin_trigger(project_id: str, name: str, key: str, body: TriggerIn, user: Me) -> dict:
+        return network.set_plugin_trigger(project_id, name, key, body.enabled, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/plugins/{name}/triggers/{key}/hook")
+    def reset_plugin_hook(project_id: str, name: str, key: str, user: Me) -> dict:
+        """明文令牌只在这里出现一次；网络只存哈希。"""
+        return {"path": f"/hooks/{network.reset_plugin_hook(project_id, name, key, actor=user.id)}"}
+
+    @app.get("/api/projects/{project_id}/plugins/{name}/records/{table}")
+    def plugin_records(project_id: str, name: str, table: str, user: Me, q: str = "", limit: int = 200) -> list[dict]:
+        return network.plugin_records(project_id, name, table, q, None, limit, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/plugins/{name}/frame")
+    def plugin_frame(project_id: str, name: str, body: FrameIn, user: Me) -> dict:
+        return {"src": f"/plugin-frame/{network.plugin_frame(project_id, name, body.tab, actor=user.id)}"}
+
+    @app.post("/api/projects/{project_id}/plugins/{name}/bridge")
+    def plugin_bridge(project_id: str, name: str, body: BridgeIn, user: Me) -> dict:
+        """插件页面的唯一出口：父页面把 iframe 的 postMessage 原样转到这里，网络按插件申请的能力与看的人的可见性执行。"""
+        return {"result": network.plugin_bridge(project_id, name, body.op, body.args, actor=user.id)}
+
+    @app.post("/api/plugin-drafts/{draft_id}/send")
+    def send_plugin_draft(draft_id: str, user: Me) -> dict:
+        """确认卡上的“发送”：只有父页面能调（插件页面拿不到登录凭证，桥里也没有这个操作）。"""
+        msg = network.send_plugin_draft(draft_id, actor=user.id)
+        return {"id": msg.id}
+
+    @app.get("/plugin-frame/{token}/{path:path}")
+    def plugin_frame_file(token: str, path: str) -> FileResponse:
+        try:
+            if path == "_matrix/sdk.js":  # 给插件页面用的桥客户端，和插件文件同源（同一个令牌）
+                network.plugin_frame_check(token)
+                return FileResponse(STATIC / "plugin-sdk.js", headers=PLUGIN_FRAME_HEADERS,
+                                    media_type="text/javascript")
+            return FileResponse(network.plugin_frame_file(token, path), headers=PLUGIN_FRAME_HEADERS)
+        except NetworkError:
+            raise HTTPException(404, "not found") from None
+
+    @app.post("/hooks/{token}")
+    async def plugin_webhook(token: str, request: Request) -> dict:
+        """外部系统的回调：不需要登录，令牌就是授权（主持人在插件页里生成、可重置）。请求体是 JSON，最多 64 KB。"""
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > 64_000:
+                raise HTTPException(413, "请求体最多 64 KB")
+        try:
+            payload = json.loads(bytes(buf) or b"{}")
+        except ValueError:
+            raise HTTPException(400, "请求体要是 JSON") from None
+        try:
+            return await run_in_threadpool(network.plugin_webhook, token, payload)
+        except HookRateLimited as e:
+            raise HTTPException(429, str(e)) from None
+        except NetworkError as e:
+            raise HTTPException(404 if str(e).startswith("unknown ") else 409, str(e)) from None
+
     @app.get("/api/projects/{project_id}/sessions")
     def list_sessions(project_id: str, user: Me) -> list:
         return network.sessions(project_id, actor=user.id)
@@ -958,13 +1093,14 @@ class AgentNetServer(uvicorn.Server):
 
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
-                  models: str | None = None, connectors: str | None = None) -> Network:
+                  models: str | None = None, connectors: str | None = None, plugins: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
     return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
                    models=ModelCatalog(Path(models).resolve()) if models else None,
-                   connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None)
+                   connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None,
+                   plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None)
 
 
 def main() -> None:
@@ -977,18 +1113,23 @@ def main() -> None:
                    help="云侧预置模型目录（JSON，改了就生效）；默认 <data>/models.json，没有就不限制")
     p.add_argument("--connectors", default=os.environ.get("AGENTNET_CONNECTORS"),
                    help="云端连接器目录（JSON，改了就生效）；默认 <data>/connectors.json，没有就不提供云端连接器")
+    p.add_argument("--plugins", default=os.environ.get("AGENTNET_PLUGINS"),
+                   help="项目插件目录（JSON，改了就生效）；默认 <data>/plugins.json，没有就只能上传插件包")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=os.environ.get("AGENTNET_HOST", "127.0.0.1"))
     args = p.parse_args()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
-                            connectors=args.connectors)
+                            connectors=args.connectors, plugins=args.plugins)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     catalog = network.models
     if catalog.active:
         print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")
     if network.connectors.specs():
         print(f"云端连接器：{network.connectors.path}（{len(network.connectors.specs())} 个）")
+    if network.plugin_dir_catalog.items():
+        print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
+    network.start_scheduler()
     config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
     AgentNetServer(config, network).run()

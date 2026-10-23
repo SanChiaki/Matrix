@@ -1,0 +1,29 @@
+:root { color-scheme: dark; --bg: #121318; --card: #1f2229; --col: #181a20; --line: rgba(255,255,255,.08); --text: #e8e9ed; --muted: #7d8391;
+  --accent: #5cc8d6; --on-accent: #06181b; --bad: #ef6b65; font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+:root.light { color-scheme: light; --bg: #fff; --card: #f4f5f7; --col: #f8f9fb; --line: rgba(16,20,32,.09); --text: #16181d; --muted: #6a7080; --on-accent: #fff; --accent: #0f8796; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { border: 1px solid transparent; border-radius: 7px; padding: 6px 12px; background: var(--accent); color: var(--on-accent); font-weight: 600; cursor: pointer; }
+button.ghost { background: transparent; border-color: var(--line); color: var(--text); font-weight: 500; }
+input, select, textarea { background: var(--col); border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; width: 100%; }
+.top { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.kpis { display: flex; gap: 10px; }
+.kpi { background: var(--col); border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; }
+.kpi b { display: block; font-size: 18px; } .kpi span { font-size: 11px; color: var(--muted); }
+.acts { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.acts input { width: 200px; }
+.board { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; }
+.col { background: var(--col); border-radius: 8px; padding: 8px; min-height: 240px; }
+.col.over { outline: 2px dashed var(--accent); }
+.col h2 { display: flex; justify-content: space-between; font-size: 12px; margin: 2px 4px 8px; color: var(--muted); }
+.lead { background: var(--card); border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; cursor: grab; }
+.lead:hover { border-color: var(--accent); }
+.lead .meta { display: flex; justify-content: space-between; gap: 6px; color: var(--muted); font-size: 11px; margin-top: 4px; }
+.lead .who { color: var(--accent); }
+.err { color: var(--bad); margin: 0 0 8px; min-height: 0; }
+dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); padding: 18px; width: min(460px, 92vw); }
+dialog::backdrop { background: rgba(0,0,0,.5); }
+dialog label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+dialog .hist { font-size: 12px; color: var(--muted); margin-top: 10px; }

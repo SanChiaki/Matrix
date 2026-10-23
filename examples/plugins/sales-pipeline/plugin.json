@@ -1,0 +1,31 @@
+{
+  "name": "sales-pipeline",
+  "version": "1.0.0",
+  "title": "销售漏斗",
+  "description": "线索从获取到成交的推进：看板、外部表单接入、阶段变化时交给成员",
+  "tabs": [{"key": "funnel", "label": "销售漏斗", "entry": "page/index.html"}],
+  "tables": {
+    "leads": {
+      "title": "线索",
+      "fields": [
+        {"key": "company", "label": "公司", "type": "text", "required": true},
+        {"key": "contact", "label": "联系人", "type": "text"},
+        {"key": "source", "label": "来源", "type": "select", "options": ["官网表单", "展会", "转介绍", "老客户", "其他"]},
+        {"key": "stage", "label": "阶段", "type": "select", "options": ["线索", "沟通", "报价", "成交", "流失"]},
+        {"key": "amount", "label": "金额（元）", "type": "number"},
+        {"key": "owner_agent", "label": "负责成员", "type": "agent"},
+        {"key": "note", "label": "备注", "type": "longtext"}
+      ]
+    }
+  },
+  "page_permissions": ["records.read", "records.write", "members.read", "chat.post"],
+  "agent_tools": ["records.read", "records.write"],
+  "triggers": [
+    {"key": "new_lead", "type": "webhook", "table": "leads",
+     "notify": {"to": "销售助理", "text": "新线索：{company}（{source}），按 sales-intake 跟进"}},
+    {"key": "quote", "type": "record", "table": "leads", "when": {"field": "stage", "equals": "报价"},
+     "notify": {"to": "销售助理", "text": "{company} 进入报价阶段，请准备方案"}},
+    {"key": "weekly", "type": "schedule", "cron": "0 9 * * 1",
+     "notify": {"to": "销售助理", "text": "整理上周漏斗变化（新增、推进、成交、流失），发到群聊"}}
+  ]
+}

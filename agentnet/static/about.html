@@ -501,7 +501,8 @@ footer a { color: var(--text-2); }
         </button>
         <div class="node-detail" id="d-human"><div><div class="parts">
           <div class="part"><h4>单页前端</h4><p>看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（档案、文件预览）· 网络图 · 设备配对</p></div>
-          <div class="part"><h4>CLI</h4><p><code>agentnet.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP</p></div>
+          <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”</p></div>
+          <div class="part"><h4>CLI</h4><p><code>agentnet.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP；<code>matrix-plugin check</code> 在本地校验插件包</p></div>
           <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt）、HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
           <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准工作区外溢与沙箱升权 · 验收、退回、取消自己下发的用户任务</p></div>
         </div></div></div>
@@ -527,9 +528,10 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（纲要、决定、文件、资源引用）按版本推送给成员</p></div>
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经联合项目</p></div>
             <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，联合项目里逐个打开；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
+            <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、打法（技能）与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
             <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
           </div>
-          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code></div>
+          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code><code>/plugin-frame</code><code>/hooks</code></div>
         </div></div>
       </div>
 
@@ -545,11 +547,11 @@ footer a { color: var(--text-2); }
           <li><code>conversations/&lt;id&gt;/</code>每个席位独立的工作目录</li>
           <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
           <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
-          <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code></li>
+          <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code>；<code>plugins/</code> 装好的插件包，<code>plugin-data/</code> 插件记录</li>
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
           <li><code>vault/</code>连接器凭证，加密保存，只在代调用时解开</li>
           <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
-          <li><code>models.json</code> · <code>connectors.json</code>云侧预置模型与云端连接器目录，改文件即生效</li>
+          <li><code>models.json</code> · <code>connectors.json</code> · <code>plugins.json</code>云侧预置模型、云端连接器与插件目录，改文件即生效</li>
         </ul></div></div>
       </div>
 
@@ -602,7 +604,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>19 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>20 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -618,6 +620,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">17</span><b>项目档案只走网络</b><span>写入只经人的操作或档案工具，留变更日志</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；联合项目里默认关</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">20</span><b>插件只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>
