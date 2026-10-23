@@ -3,6 +3,7 @@
     matrix-connect setup http://127.0.0.1:8765   # 配对（浏览器里批准）+ 装成后台服务
     matrix-connect run                            # 前台运行（后台服务就是跑这个）
     matrix-connect status                         # 本机配置与检测到的 harness
+    matrix-connect install                        # 按已有配置重新装后台服务（升级后用，不重新配对）
     matrix-connect uninstall                      # 卸载后台服务（可加 --forget 删掉本机配置）
 
 一台电脑一个连接器：本机装了的 claude / codex / dsh 都会报告给网络，Agent 选“设备 + harness”。
@@ -134,6 +135,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"harness：{'、'.join(found) or '本机没有找到 claude / codex / dsh'}")
     print(f"工作目录：{conf.workroot}")
     print(f"后台服务：{'已安装 ' + str(unit) if unit and unit.exists() else '未安装'}")
+    if unit and unit.exists() and service.runs_from(_exe()) is False:
+        print("  后台服务跑的不是这份安装（升级前的旧版本？）：运行 matrix-connect install 重新装一次")
     print(f"配置：{path}")
 
 def _exe() -> str:
@@ -184,6 +187,14 @@ def cmd_setup(args: argparse.Namespace) -> None:
     if args.no_service:
         print("运行：matrix-connect run")
         return
+    _install_service(path)
+
+def cmd_install(args: argparse.Namespace) -> None:
+    """按本机已有的配置重新装后台服务，不重新配对（设备和绑在它上面的 Agent 不变）。
+    升级后用：服务定义指向的是装它时的那份安装，换了安装位置（如包改名后 uv tool 装进了新目录）要重新装一次。"""
+    path = Path(args.config).expanduser()
+    if cfg.load(path) is None:
+        _no_config(path)
     _install_service(path)
 
 def cmd_uninstall(args: argparse.Namespace) -> None:
@@ -237,6 +248,10 @@ def main(argv: list[str] | None = None) -> None:
     st.add_argument("--config", **conf_opt)
     st.set_defaults(func=cmd_status)
 
+    i = sub.add_parser("install", help="按已有配置重新装后台服务（不重新配对；升级后用）")
+    i.add_argument("--config", **conf_opt)
+    i.set_defaults(func=cmd_install)
+
     u = sub.add_parser("uninstall", help="卸载后台服务")
     u.add_argument("--forget", action="store_true", help="同时删掉本机配置（含令牌）")
     u.add_argument("--config", **conf_opt)
@@ -246,5 +261,5 @@ def main(argv: list[str] | None = None) -> None:
     args.func(args)
 
 
-if __name__ == "__main__":  # Windows 后台服务：pythonw -m agentnet.connector.main run …
+if __name__ == "__main__":  # Windows 后台服务：pythonw -m matrix.connector.main run …
     main()

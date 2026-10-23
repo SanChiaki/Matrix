@@ -1,8 +1,8 @@
 """设备码配对（docs/device-runtimes.md 第 2.5 节）：连接器不再需要人复制令牌，人在已登录的网页里批准。"""
 from fastapi.testclient import TestClient
 
-from agentnet import auth
-from agentnet.server import create_app
+from matrix import auth
+from matrix.server import create_app
 from tests.test_devices import build, hello
 from tests.test_users import client
 

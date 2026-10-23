@@ -1,7 +1,7 @@
 """连接器凭证的加密保管（docs/connectors-and-skills.md 4.2，候选不变量 19）。
 
 - 每个连接一份 `vault/<connection_id>.bin`，内容是 Fernet（AES-128-CBC + HMAC-SHA256）加密的 JSON。
-- 主密钥取自环境变量 `AGENTNET_VAULT_KEY`；没有就用 `<data>/vault.key`（第一次用时生成，权限 0600）。
+- 主密钥取自环境变量 `MATRIX_VAULT_KEY`；没有就用 `<data>/vault.key`（第一次用时生成，权限 0600）。
   密钥和数据放在同一台机器上只防“数据目录被拷走 / 误提交”，防不了能读这台机器的人。
 - 凭证只在网络代调用外部服务时解开，不进 state.json、提示词、事件、日志、API 返回与任何工作目录。
 """
@@ -14,6 +14,8 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from . import compat
+
 
 class VaultError(RuntimeError):
     pass
@@ -24,7 +26,7 @@ class Vault:
         self.dir = root / "vault"
         self._key_file = root / "vault.key"
         self._fernet: Fernet | None = None
-        self._key = key if key is not None else os.environ.get("AGENTNET_VAULT_KEY")
+        self._key = key if key is not None else compat.env("VAULT_KEY")
 
     def _f(self) -> Fernet:
         if self._fernet is None:

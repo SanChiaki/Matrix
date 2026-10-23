@@ -1,9 +1,9 @@
 """端侧连接器协议（docs/device-runtimes.md 第 2 节）：一轮的收发、工具回传、审批上行、能力握手。"""
 import threading
 
-from agentnet.device import (APPROVAL_REQUEST, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST, RUN_RESULT, TOOL_CALL,
+from matrix.device import (APPROVAL_REQUEST, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST, RUN_RESULT, TOOL_CALL,
                              DeviceError, DeviceRuntime, MemoryLink, capabilities_from_hello)
-from agentnet.runtime import ADVISORY, ENFORCED, RunRequest, RuntimeCapabilities, ToolBridge
+from matrix.runtime import ADVISORY, ENFORCED, RunRequest, RuntimeCapabilities, ToolBridge
 
 
 def hello(runtime="fake-harness", **caps):
@@ -208,8 +208,8 @@ def test_capabilities_default_to_nothing_enforced():
 # ================= 引擎接线 =================
 def test_network_routes_an_agent_to_its_device_runtime(tmp_path):
     """绑定 device_runtime 的 Agent 走连接器；未绑定的仍走默认运行时。"""
-    from agentnet.engine import Network
-    from agentnet.runtime import ScriptedRuntime
+    from matrix.engine import Network
+    from matrix.runtime import ScriptedRuntime
     from tests.test_users import users
 
     default = ScriptedRuntime(lambda call: "cloud")
@@ -232,8 +232,8 @@ def test_network_routes_an_agent_to_its_device_runtime(tmp_path):
 
 
 def test_offline_device_runtime_is_a_transport_error_not_a_task_failure(tmp_path):
-    from agentnet.engine import Network
-    from agentnet.runtime import ScriptedRuntime
+    from matrix.engine import Network
+    from matrix.runtime import ScriptedRuntime
     from tests.test_users import users
 
     net = Network(ScriptedRuntime(lambda call: "cloud"), tmp_path, seed=False)
@@ -250,8 +250,8 @@ def test_offline_device_runtime_is_a_transport_error_not_a_task_failure(tmp_path
 
 def test_capabilities_are_per_agent(tmp_path):
     """同一个网络里，端侧 Agent 的有效权限按它自己的运行时要收窄；云侧 Agent 不受影响。"""
-    from agentnet.engine import Network
-    from agentnet.runtime import ScriptedRuntime
+    from matrix.engine import Network
+    from matrix.runtime import ScriptedRuntime
     from tests.test_users import users
 
     net = Network(ScriptedRuntime(lambda call: "cloud"), tmp_path, seed=False)

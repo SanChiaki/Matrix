@@ -16,10 +16,15 @@
   人在已登录的网页（`#pair=<码>`）里批准，令牌经轮询只交付一次，存进本机 0600 配置文件；再装成 launchd / systemd 用户服务（Windows 是任务计划程序里的登录任务）。
   `/api/devices/pair` 与 `…/pair/poll` 不需要登录，所以同时等待的申请数、每个用户输错配对码的次数都有上限（`auth.PAIR_*`），
   不要去掉。手动签发令牌（`POST /api/devices`）留作没有浏览器时的备用。
+- **升级不重新配对**：后台服务定义指向装它时的那份安装（`service.runs_from` 看得出来，`matrix-connect status` 会提示）。
+  换了安装位置（代码包从 agentnet 改名为 matrix 后，`uv tool install --force git+…` 装进了新的工具目录）要运行
+  `matrix-connect install`：按本机已有配置重新装服务，设备和绑在它上面的 Agent 不变；不要重跑 `setup`（那会配对成一台新设备）。
+  服务名（`dev.matrix.connect` / `matrix-connect.service` / `MatrixConnect`）没变，重新装会原地替换。
+  还没升级的连接器照样能连：它报回的旧工具名（`mcp__agentnet__*`）由网络换成现在的（`compat.current_tool`）。
 - **有效权限要再交运行时强制执行能力**：只有该 harness 能强制的权限才进入有效权限，
   只能靠提示词约定的按 `advisory` 记账、自动收窄，并在委托详情里写明原因。
 - 私有目录在端侧就留在用户电脑上（`<root>/.homes/<agent>/`），网络不读、不注入；服务器只在 `run.request.home`
-  里说明挂载方式（`rw` / `ro` / 不挂载），连接器按与云侧相同的语义（`agentnet/homedir.py`）挂载与写回。项目文件按轮下发只读副本。
+  里说明挂载方式（`rw` / `ro` / 不挂载），连接器按与云侧相同的语义（`matrix/homedir.py`）挂载与写回。项目文件按轮下发只读副本。
 - **端侧不可达是等待，不是失败**：任务进入 `WAITING`，不消耗重试，无限等；对话状态仍是 `waiting`；
   端侧席位只给所有者写一条“已排队”说明。上线后（`register_runtime`）唤醒该设备上等待中的任务，消费积压。
   离线期间按最近一次握手声明的能力计算有效权限（`Agent.enforcement`），不把“未知”当成“全都不行”。
@@ -27,7 +32,7 @@
   外部请求进来的任务不获得本系统内的授权。
 - 当前状态：**运行时契约、能力报告、连接器协议与配对已实现**（`runtime.RuntimeCapabilities`、
   `engine.Network.capabilities`/`_effective`/`runtime_for`、`Task.narrowed`、`device.py`、设备令牌与
-  `/api/devices/connect`）。**连接器本体已实现**：`uv run matrix-connect`（`agentnet/connector/`），dsh、
+  `/api/devices/connect`）。**连接器本体已实现**：`uv run matrix-connect`（`matrix/connector/`），dsh、
   Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端，dsh 与 Codex 也在 Windows 与 WSL 上跑通
   （Windows 上 npm 装的 harness 是 `.cmd` 包装，`runtime.argv` 直接用 node 跑；Windows 的后台服务是任务计划程序里的登录任务，用 pythonw 跑、日志写文件）。**端侧其余部分也已实现**：
   设备管理页（配对 / 吊销、在线状态、harness 列表）、Agent 绑定“设备 + harness”与能力缺口展示、材料下发（`run.request.materials`）

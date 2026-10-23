@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from agentnet import plugins as pluginfs
-from agentnet.engine import Network, NetworkError
-from agentnet.models import MCP_PREFIX, Message, SKILLS
-from agentnet.runtime import ScriptCall, ScriptedRuntime
+from matrix import plugins as pluginfs
+from matrix.engine import Network, NetworkError
+from matrix.models import MCP_PREFIX, Message, SKILLS
+from matrix.runtime import ScriptCall, ScriptedRuntime
 from tests.test_users import client, joint, users
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "plugins.json"
@@ -177,7 +177,7 @@ def test_plugin_frame_is_sandboxed_and_token_bound(tmp_path: Path):
     """不变量 20：插件页面带 sandbox CSP（不透明来源、不能联网）、不需要也不带登录凭证；
     帧令牌只取这个插件 page/ 下的静态文件，过期、卸载、换版本、看的人看不到项目后一律 404。"""
     from fastapi.testclient import TestClient
-    from agentnet.server import create_app
+    from matrix.server import create_app
     net, _, host, sales, g = setup(tmp_path)
     users(net, "o@x.io")
     net.upload_plugin(g.id, package(), actor=host)
@@ -200,7 +200,7 @@ def test_plugin_frame_is_sandboxed_and_token_bound(tmp_path: Path):
     assert client(net, "o@x.io").post(f"/api/projects/{g.id}/plugins/deals/frame", json={"tab": "board"}).status_code == 404
     net.upload_plugin(g.id, package(manifest(version="1.0.1")), actor=host)  # 换了版本：旧令牌作废
     assert anon.get(src).status_code == 404
-    from agentnet import engine
+    from matrix import engine
     old, engine.FRAME_TTL = engine.FRAME_TTL, -1
     try:
         src2 = net.plugin_frame(g.id, "deals", "board", actor=host)
@@ -248,7 +248,7 @@ def test_chat_post_only_drafts_until_viewer_confirms(tmp_path: Path):
     assert d["mentions"] == ["Sales"] and d["joint"] is True and len(chat.messages) == n  # 什么都没发
     with pytest.raises(NetworkError):
         net.send_plugin_draft(d["id"], actor=guest)  # 别人确认不了
-    from agentnet.engine import BRIDGE_OPS
+    from matrix.engine import BRIDGE_OPS
     assert not any("send" in op for op in BRIDGE_OPS)  # 桥里没有“发送”：插件页面自己发不出去
     msg = net.send_plugin_draft(d["id"], actor=host)
     assert msg.user_id == host and msg.via == "商机" and msg.mentions == [sales.id]
@@ -332,7 +332,7 @@ def test_webhook_writes_record_and_speaks_for_the_enabler(tmp_path: Path):
     assert req.requester_id == host and req.message_id == m.id
     assert c.post("/hooks/h_nope", json={}).status_code == 404
     assert c.post(path, content=b"not json").status_code == 400
-    from agentnet import engine
+    from matrix import engine
     old, engine.HOOK_RATE = engine.HOOK_RATE, 1
     try:
         assert c.post(path, json={"company": "B"}).status_code == 429
@@ -423,7 +423,7 @@ def test_plugin_toggle_route_is_host_only(tmp_path: Path):
 
 # ================= 本地校验命令 matrix-plugin check =================
 def test_check_command_passes_example_and_reports_errors(tmp_path: Path, capsys):
-    from agentnet import plugin_check
+    from matrix import plugin_check
     assert plugin_check.main(["check", str(EXAMPLE.parent / "plugins" / "sales-pipeline"), "--strict"]) == 0
     out = capsys.readouterr().out
     assert "✓ sales-pipeline 1.0.0" in out and "提醒" not in out
@@ -435,7 +435,7 @@ def test_check_command_passes_example_and_reports_errors(tmp_path: Path, capsys)
 
 
 def test_check_command_warns_about_likely_mistakes(tmp_path: Path, capsys):
-    from agentnet import plugin_check
+    from matrix import plugin_check
     m = manifest(page_permissions=["records.read", "members.read"])
     m["triggers"][0]["notify"]["text"] = "新线索：{company} {boss}"
     m["triggers"][2]["notify"]["text"] = "周报 {company}"

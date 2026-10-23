@@ -44,11 +44,11 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 
 ### 云端
 
-- 目录：部署方维护的 `connectors.json`（默认 `<data>/connectors.json`，`--connectors` / `AGENTNET_CONNECTORS`），
+- 目录：部署方维护的 `connectors.json`（默认 `<data>/connectors.json`，`--connectors` / `MATRIX_CONNECTORS`），
   按修改时间热加载，写坏了沿用上一份（`connector_catalog.py`）。目前只支持远程 MCP（Streamable HTTP）；
   `auth.fields` 描述授权时填什么、怎么拼成请求头。API（`/api/connectors`）不返回地址。
 - 授权：`POST /api/me/connections`，网络用填的值试连一次（`tools/list`），结果写进 `status` / `error`；
-  凭证只进 `vault/<连接 id>.bin`（Fernet 加密，0600），主密钥取 `AGENTNET_VAULT_KEY` 或 `<data>/vault.key`（0600，首次生成）。
+  凭证只进 `vault/<连接 id>.bin`（Fernet 加密，0600），主密钥取 `MATRIX_VAULT_KEY` 或 `<data>/vault.key`（0600，首次生成）。
   新授权默认勾给助理。撤销删掉保管项与所有勾选。
 - 调用：运行时挂的是本地 stdio 桥 `mcp_connectors.py`（MCP 服务名 `connectors`，工具名 `<连接器>__<工具>`），
   只带回调地址与执行上下文令牌。网络按令牌查这一轮的有效连接器，带上凭证转发（`mcp_client.RemoteMCP`），

@@ -4,10 +4,10 @@ import re
 
 import pytest
 
-from agentnet.engine import Network, NetworkError
-from agentnet.models import Task, TaskStatus, Delegation
-from agentnet.runtime import ScriptedRuntime
-from agentnet.store import Store
+from matrix.engine import Network, NetworkError
+from matrix.models import Task, TaskStatus, Delegation
+from matrix.runtime import ScriptedRuntime
+from matrix.store import Store
 from tests.test_users import users, joint, client
 
 
@@ -130,7 +130,7 @@ def test_accept_request_prompt_requires_explicit_acceptance(tmp_path, text):
     """语义交给模型：确定性运行时模拟遵循提示词，对催促、返工和含糊消息不调用。"""
     net, chat, r, _, requester, out = setup_request(tmp_path)
     def cautious(call):
-        from agentnet.protocol import _requests
+        from matrix.protocol import _requests
         prompt = "\n".join(_requests())
         assert "只有明确说通过、可以了、就这样、验收才调用" in prompt
         assert "含糊、催促、继续改都不算" in prompt

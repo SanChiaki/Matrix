@@ -103,14 +103,14 @@ research: acp-vs-a2a#acp-methods）。dsh 的另一套 SDK JSON-RPC（`dsh --pro
 | `usage_update`（`used` / `size`） | `{"type": "status", "context": {...}}`；**没有累计 token**，`RunResult.usage` 会变空（目前引擎不用它） |
 | `session/prompt` 返回 | `{"type": "final", "text"}` |
 
-dsh 的 `tool_call.title` 就是工具名（`bash`、`mcp__agentnet__delegate`……），所以 `_violations` 按 `TOOL_AUTHORITY`
+dsh 的 `tool_call.title` 就是工具名（`bash`、`mcp__matrix_net__delegate`……），所以 `_violations` 按 `TOOL_AUTHORITY`
 检查越权（不变量 11）照旧成立。Claude / Codex 的适配器里 `title` 是给人看的标题，工具名要从各家字段取（第 5 节）。
 原始 ACP 帧照旧追加到工作目录的事件日志（`dsh-events.jsonl` 改名 `acp-events.jsonl`）。
 
 ### 3.3 网络工具
 
-保持现状：覆盖层 `insert` 一个 `dsh-mcp-client`，stdio 启动 `agentnet/mcp_server.py`，环境里带
-`AGENTNET_TOOL_URL`、`AGENTNET_TOKEN`（本轮的执行上下文令牌，不变量 10）、`AGENTNET_TOOLS`，
+保持现状：覆盖层 `insert` 一个 `dsh-mcp-client`，stdio 启动 `matrix/mcp_server.py`，环境里带
+`MATRIX_TOOL_URL`、`MATRIX_TOKEN`（本轮的执行上下文令牌，不变量 10）、`MATRIX_TOOLS`，
 `toolCallTimeoutMs = tool_timeout_s + 60s`。`session/new` 的 `mcpServers` 传空。
 
 不改用 ACP `mcpServers` 的原因：
@@ -274,7 +274,7 @@ dsh 的 `tool_call.title` 就是工具名（`bash`、`mcp__agentnet__delegate`�
 | 阶段 | 内容 | 测试 |
 | --- | --- | --- |
 | 0. 验证 | 跑第 8 节各项，结论写回本文档；任何一项不过就停在这里 | 手工 + 记录 |
-| 1. `AcpClient` | `agentnet/acp.py`：仅标准库的行分隔 JSON-RPC 客户端（同 `mcp_server.py` 的取舍，不引入依赖），握手检查、会话方法、更新翻译、超时与取消 | 假 Agent：事件映射、`final_text`、握手缺能力即失败、取消返回 `STOPPED`、超时返回 `TIMEOUT` 且会话 id 保留、错误文本分类、`request_permission` 只选一次性选项且无 handler 时拒绝 |
+| 1. `AcpClient` | `matrix/acp.py`：仅标准库的行分隔 JSON-RPC 客户端（同 `mcp_server.py` 的取舍，不引入依赖），握手检查、会话方法、更新翻译、超时与取消 | 假 Agent：事件映射、`final_text`、握手缺能力即失败、取消返回 `STOPPED`、超时返回 `TIMEOUT` 且会话 id 保留、错误文本分类、`request_permission` 只选一次性选项且无 handler 时拒绝 |
 | 2. 云侧 `AcpDshRuntime` | 与 `DshRuntime` 并存，`--runtime dsh-acp` 选择；覆盖层改写 `acp` 行；默认仍是 headless | `build_patch_yaml` 在 ACP 模式下仍禁用同样的插件（扩展 `test_dsh_patch_reflects_authority_and_mounts_mcp`）；审批恰好一条记录（不变量 14）；终止时待审批申请作废；重启后 `resume` 续接（不变量 12）；`test_authorities_registered_everywhere` 不变 |
 | 3. 图片 | `RunRequest.images`、`run.request.images`、降级提示 | 支持 / 不支持图片两种握手下的提示词内容；超限降级；端侧材料引用 |
 | 4. 端侧 ACP 驱动 | `drivers/acp.py` + 三份 `AcpProfile`；连接器检测适配器是否安装；原生驱动保留 | 每家档案的命令与会话参数（类似现有 `test_claude_command_maps_authority_to_tool_whitelist`）；Codex 不能落在 `agent` 模式；Claude 的 `tools` 清单与权限一致；`clean_env` 仍生效 |
@@ -294,7 +294,7 @@ dsh 的 `tool_call.title` 就是工具名（`bash`、`mcp__agentnet__delegate`�
 5. **取消的落定时间**：一个正在跑 `bash` 的轮次，`session/cancel` 后多久返回，子进程是否被清理。
 6. **图片**：配置了支持图片的模型时 `promptCapabilities.image` 为真，模型确实看到了图。
 7. **Claude 适配器**：`tools` 清单之外的工具确实不可调用；用户 `~/.claude/settings.json` 的 allow 规则在收紧 `settingSources` 后不再放行；
-   工作目录以外的写会变成 `request_permission`；网络工具（`mcp__agentnet__*`）不触发审批。
+   工作目录以外的写会变成 `request_permission`；网络工具（`mcp__matrix_net__*`）不触发审批。
 8. **Codex 适配器**：`INITIAL_AGENT_MODE=read-only` / `workspace-write` 生效、工作目录以外的命令变成 `request_permission`；
    `web_search` 是否受模式约束。
 

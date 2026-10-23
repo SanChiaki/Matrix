@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentnet.engine import NOTHING_NEW, TAINTED_CALL, Network, NetworkError
-from agentnet.models import MCP_PREFIX, Message, new_id
-from agentnet.runtime import ScriptCall, ScriptedRuntime
-from agentnet.server import create_app
+from matrix.engine import NOTHING_NEW, TAINTED_CALL, Network, NetworkError
+from matrix.models import MCP_PREFIX, Message, new_id
+from matrix.runtime import ScriptCall, ScriptedRuntime
+from matrix.server import create_app
 from tests.test_connections import SECRET, FakeMCP, catalog_file
 from tests.test_users import joint, users
 
@@ -57,7 +57,7 @@ class Home:
 def network(tmp_path: Path, handler, url: str = "https://example.invalid/mcp") -> Network:
     data = tmp_path / "data"
     data.mkdir()
-    from agentnet.connector_catalog import ConnectorCatalog
+    from matrix.connector_catalog import ConnectorCatalog
     return Network(ScriptedRuntime(handler), data, seed=False, connectors=ConnectorCatalog(catalog_file(tmp_path, url)))
 
 

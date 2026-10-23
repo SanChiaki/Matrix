@@ -1,6 +1,6 @@
 """云端连接器目录：部署方维护的一份 JSON 文件，增减连接器不用重启（同 model_catalog 的做法）。
 
-文件（默认 `<data>/connectors.json`，`--connectors` / `AGENTNET_CONNECTORS` 可改）::
+文件（默认 `<data>/connectors.json`，`--connectors` / `MATRIX_CONNECTORS` 可改）::
 
     {
       "connectors": [
@@ -141,7 +141,7 @@ class ConnectorCatalog:
             self.error = None
         except (OSError, ValueError) as e:
             self.error = str(e)
-            print(f"[agentnet] 连接器目录 {self.path} 无效，沿用上一份：{e}", file=sys.stderr)
+            print(f"[matrix] 连接器目录 {self.path} 无效，沿用上一份：{e}", file=sys.stderr)
 
     def specs(self) -> list[ConnectorSpec]:
         with self._lock:

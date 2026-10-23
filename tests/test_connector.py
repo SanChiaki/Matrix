@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from agentnet.connector.bridge import LocalBridge
-from agentnet.connector.client import Connector
-from agentnet.connector.drivers.base import RunSpec
-from agentnet.connector.drivers.claude import ClaudeDriver
-from agentnet.connector.drivers.codex import CodexDriver
-from agentnet.device import RUN_REQUEST as RUN_REQUEST_MSG
-from agentnet.device import DeviceRuntime, MemoryLink
-from agentnet.runtime import ADVISORY, ENFORCED, ToolBridge
+from matrix.connector.bridge import LocalBridge
+from matrix.connector.client import Connector
+from matrix.connector.drivers.base import RunSpec
+from matrix.connector.drivers.claude import ClaudeDriver
+from matrix.connector.drivers.codex import CodexDriver
+from matrix.device import RUN_REQUEST as RUN_REQUEST_MSG
+from matrix.device import DeviceRuntime, MemoryLink
+from matrix.runtime import ADVISORY, ENFORCED, ToolBridge
 
 
 def fake_bin(tmp_path: Path, name: str, body: str) -> str:
@@ -159,7 +159,7 @@ print(json.dumps({"type":"turn.completed","last_agent_message":"hello"}))
 # ================= 运行上下文 =================
 def test_run_ctx_relays_tools_and_approvals():
     c = Connector(ClaudeDriver(), Path("/tmp"))
-    from agentnet.connector.client import _Run
+    from matrix.connector.client import _Run
     run = _Run(c, "run-x")
 
     def deliver(msg):
@@ -174,7 +174,7 @@ def test_run_ctx_relays_tools_and_approvals():
 
 # ================= 材料下发与回传 =================
 def test_materials_are_written_and_group_is_refreshed(tmp_path):
-    from agentnet.connector.client import Connector
+    from matrix.connector.client import Connector
     import base64
     c = Connector(ClaudeDriver(), tmp_path)
     wd = c.workdir_of("a/c")
@@ -191,7 +191,7 @@ def test_materials_are_written_and_group_is_refreshed(tmp_path):
 
 
 def test_safe_path_rejects_escape_and_missing(tmp_path):
-    from agentnet.connector.client import Connector
+    from matrix.connector.client import Connector
     root = tmp_path / "root"
     (root / "sub").mkdir(parents=True)
     (root / "sub" / "ok.md").write_text("x", encoding="utf-8")
@@ -237,8 +237,8 @@ def test_fetch_file_round_trip():
 
 def test_run_request_carries_materials_to_the_connector(tmp_path):
     """服务器下发的材料随 run.request 到达连接器，并写进这一轮的工作目录。"""
-    from agentnet.device import RUN_REQUEST as RUN_REQ
-    from agentnet.device import DeviceRuntime, MemoryLink
+    from matrix.device import RUN_REQUEST as RUN_REQ
+    from matrix.device import DeviceRuntime, MemoryLink
     from tests.test_device import hello as device_hello
 
     rt = DeviceRuntime(MemoryLink(serve=lambda m: None), device_hello())
@@ -286,7 +286,7 @@ print(json.dumps({"type":"result","session_id":"s","is_error":True,"result":"Not
 
 def test_claude_env_drops_host_credentials():
     """宿主进程注入的凭据 / 网关变量不能带进用户的 claude，否则会变成 "Not logged in"。"""
-    from agentnet.connector.drivers.claude import clean_env
+    from matrix.connector.drivers.claude import clean_env
 
     env = clean_env({"PATH": "/bin", "CLAUDECODE": "1", "ANTHROPIC_BASE_URL": "http://host",
                      "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST": "1", "HOME": "/Users/x"})
@@ -302,7 +302,7 @@ NPM_SCRIPT = r"node_modules\@deepseek-ai\dsh\lib\bin.js"
 
 def test_npm_cmd_shim_runs_through_node_not_cmd_exe(tmp_path):
     """Windows 上 npm 装的 harness 是 .cmd 包装：直接用 node 跑它指向的脚本，参数（JSON、路径）不经 cmd.exe 改写。"""
-    from agentnet.runtime import argv
+    from matrix.runtime import argv
     shim = tmp_path / "dsh.cmd"
     shim.write_text(NPM_SHIM, encoding="utf-8")
     shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
@@ -316,7 +316,7 @@ def test_npm_cmd_shim_runs_through_node_not_cmd_exe(tmp_path):
 def test_codex_resume_trusts_windows_paths(tmp_path):
     r"""codex 的 -c 值是 TOML：Windows 路径里的反斜杠不能写进基本字符串（\U 是非法转义）。"""
     import tomllib
-    from agentnet.connector.drivers.codex import toml_key
+    from matrix.connector.drivers.codex import toml_key
     for p in (r"C:\Users\me\.matrix\a\c", "/home/me/a", "it's"):
         assert tomllib.loads(f'projects.{toml_key(p)}.trust_level="trusted"')["projects"][p]["trust_level"] == "trusted"
 
@@ -337,7 +337,7 @@ def test_driver_guard_enforces_timeout_and_cancel():
     import subprocess
     import time
 
-    from agentnet.runtime import watch_process as guard
+    from matrix.runtime import watch_process as guard
 
     sleep = [sys.executable, "-c", "import time; time.sleep(30)"]
     p = subprocess.Popen(sleep)
@@ -359,7 +359,7 @@ def test_dsh_runtime_stops_on_cancel(tmp_path):
     """云侧 dsh：人终止时结束进程，这一轮以 STOPPED 结束，拿到的会话 id 保留。"""
     import time
 
-    from agentnet.runtime import DshRuntime, RunRequest
+    from matrix.runtime import DshRuntime, RunRequest
 
     fake = tmp_path / "fake-dsh"
     fake.write_text("#!" + sys.executable + "\nimport json, sys, time\nsys.stdin.read()\n"

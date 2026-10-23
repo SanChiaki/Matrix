@@ -3,9 +3,9 @@
 有效权限 = 自身权限 ∩ 委托授予 ∩ 运行时能强制的部分。只能靠提示词约定的权限按 advisory 记账，
 不进入有效权限，并记录收窄原因。
 """
-from agentnet.engine import Network
-from agentnet.protocol import format_task_result
-from agentnet.runtime import ADVISORY, ENFORCED, UNAVAILABLE, RuntimeCapabilities, ScriptedRuntime
+from matrix.engine import Network
+from matrix.protocol import format_task_result
+from matrix.runtime import ADVISORY, ENFORCED, UNAVAILABLE, RuntimeCapabilities, ScriptedRuntime
 from tests.test_users import joint, users
 
 
@@ -125,14 +125,14 @@ def test_task_narrowing_is_shown_and_persisted(tmp_path):
     assert "运行时限制" in text and "file.write" in text and "advisory" in text
 
     net.store.save()
-    from agentnet.store import Store
+    from matrix.store import Store
     again = Store(tmp_path, seed=False)
     assert again.tasks[task.id].narrowed == task.narrowed
 
 
 def test_offline_device_uses_last_declared_capabilities(tmp_path):
     """端侧离线：沿用最近一次握手声明的能力，不把"未知"当成"全都不行"（docs/device-runtimes.md §5）。"""
-    from agentnet.device import HELLO_OK, PROTOCOL, DeviceRuntime, MemoryLink, capabilities_from_hello
+    from matrix.device import HELLO_OK, PROTOCOL, DeviceRuntime, MemoryLink, capabilities_from_hello
     from tests.test_users import users
 
     net = build(tmp_path)

@@ -15,6 +15,7 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
+from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft,
                      KnowledgeItem, Message, Project, Proposal, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
@@ -348,6 +349,7 @@ class Store:
             t.pop("summary", None)
             t["delegation"] = Delegation(**t["delegation"])
             t["status"] = TaskStatus(t["status"])
+            t["evidence"] = [current_call(e) for e in t.get("evidence") or []]  # 改名前的网络工具名
             task = Task(**_known(Task, t))
             self.tasks[task.id] = task
         for task in self.tasks.values():

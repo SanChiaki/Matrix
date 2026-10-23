@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from agentnet.store import Store
+from matrix.store import Store
 
 
 def _agent(aid: str, owner: str = "u1", created: float = 1.0) -> dict:

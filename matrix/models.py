@@ -44,7 +44,7 @@ HARNESSES: dict[str, str] = {
     "dsh": "dsh",
 }
 
-MCP_SERVER = "agentnet"
+MCP_SERVER = "matrix_net"  # 网络工具的 MCP 服务名；不叫 matrix，免得和用户自己配的同名服务（如 matrix.org）撞上
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 # 云端连接器：网络代调用的那一组工具挂在另一个 MCP 服务下，工具名是 <连接器 id>__<工具名>（docs/connectors-and-skills.md）
 CONNECTOR_SERVER = "connectors"

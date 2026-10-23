@@ -152,7 +152,7 @@ class Network:
         self._approval_waits: dict[str, threading.Event] = {}
         self._home_locks: dict[str, threading.Lock] = {}
         self._lock = self.store.lock
-        self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="agentnet-round")
+        self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="matrix-round")
 
     # ================= 归属与可见性 =================
     # actor 是发起操作的用户 id；None 表示系统内部或测试，不做归属检查。
@@ -1060,7 +1060,7 @@ class Network:
                 try:
                     skillfs.write(self.store.connector_skills_dir(spec.id), sk.name, sk.description, sk.body)
                 except skillfs.SkillError as e:
-                    print(f"[agentnet] 连接器 {spec.id} 的技能 {sk.name} 无效：{e}", flush=True)
+                    print(f"[matrix] 连接器 {spec.id} 的技能 {sk.name} 无效：{e}", flush=True)
 
     def _resolve_skills(self, ctx: ExecContext, agent: AgentNode,
                         conns: list[Connection]) -> dict[str, tuple[str, Path]]:
@@ -1885,8 +1885,8 @@ class Network:
                 try:
                     self.run_schedules()
                 except Exception as e:  # noqa: BLE001 —— 定时触发出错不能拖垮服务
-                    print(f"[agentnet] 定时触发出错：{e}", flush=True)
-        threading.Thread(target=loop, name="agentnet-schedules", daemon=True).start()
+                    print(f"[matrix] 定时触发出错：{e}", flush=True)
+        threading.Thread(target=loop, name="matrix-schedules", daemon=True).start()
 
     # ---- 插件页面：沙箱 iframe + 桥。页面拿不到登录凭证，读写只经这里，以看页面的人的身份 ----
     def plugin_frame(self, project_id: str, name: str, tab: str, actor: str | None = None) -> str:

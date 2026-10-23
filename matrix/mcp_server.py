@@ -1,7 +1,7 @@
-"""agentnet 的 stdio MCP 服务：由 DSH 的 dsh-mcp-client 拉起，把网络工具调用转发给网络。
+"""matrix 的 stdio MCP 服务：由 DSH 的 dsh-mcp-client 拉起，把网络工具调用转发给网络。
 
 只依赖标准库，任何支持 MCP 的 Agent 运行时都能用它接入网络。
-调用方身份不由模型提供：网络在启动运行时时把执行上下文令牌写入 AGENTNET_TOKEN。
+调用方身份不由模型提供：网络在启动运行时时把执行上下文令牌写入 MATRIX_TOKEN。
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import sys
 import urllib.error
 import urllib.request
 
-URL = os.environ.get("AGENTNET_TOOL_URL", "")
-TOKEN = os.environ.get("AGENTNET_TOKEN", "")
-TIMEOUT = float(os.environ.get("AGENTNET_TOOL_TIMEOUT", "1800"))
-ALLOWED = [n for n in os.environ.get("AGENTNET_TOOLS", "").split(",") if n]  # 这次执行能用的工具；空 = 全部
+URL = os.environ.get("MATRIX_TOOL_URL", "")
+TOKEN = os.environ.get("MATRIX_TOKEN", "")
+TIMEOUT = float(os.environ.get("MATRIX_TOOL_TIMEOUT", "1800"))
+ALLOWED = [n for n in os.environ.get("MATRIX_TOOLS", "").split(",") if n]  # 这次执行能用的工具；空 = 全部
 PROTO = "2025-06-18"
 # 回调的是本机网络（云侧服务或端侧连接器的本机桥）：不走系统 / 环境里配置的代理
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -384,7 +384,7 @@ def main() -> None:
                 # 只实现 2025-06-18 语义；更新的客户端会回落到这个版本，更旧的则按其请求回应。
                 "protocolVersion": min((msg.get("params") or {}).get("protocolVersion") or PROTO, PROTO),
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "agentnet", "version": "0.2.0"},
+                "serverInfo": {"name": "matrix", "version": "0.2.0"},
             }})
         elif method == "tools/list":
             # 只列出这次执行能用的工具；网络端仍会按执行上下文再检查一次

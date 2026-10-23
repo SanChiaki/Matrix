@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,7 +24,7 @@ from starlette.concurrency import run_in_threadpool
 import uvicorn
 from pydantic import BaseModel, Field, model_validator
 
-from . import auth
+from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
@@ -1116,7 +1115,7 @@ def create_app(network: Network) -> FastAPI:
         return {"outcome": outcome}
 
     return app
-class AgentNetServer(uvicorn.Server):
+class MatrixServer(uvicorn.Server):
     """收到退出信号就唤醒事件流。uvicorn 要等所有连接结束才执行 lifespan 关闭，
     只靠 lifespan 的话事件流会一直拖到优雅关闭超时才被强行切断。"""
 
@@ -1144,17 +1143,18 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Matrix：Agent 协作网络")
     p.add_argument("--runtime", choices=["dsh", "scripted"], default="dsh")
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--data", default=os.environ.get("AGENTNET_DATA", ".agentnet"))
+    p.add_argument("--data", default=None, help="数据目录；默认 MATRIX_DATA，没有就用 .matrix（只有改名前的 .agentnet 时沿用它）")
     p.add_argument("--dsh-bin", default="dsh")
-    p.add_argument("--models", default=os.environ.get("AGENTNET_MODELS"),
+    p.add_argument("--models", default=compat.env("MODELS"),
                    help="云侧预置模型目录（JSON，改了就生效）；默认 <data>/models.json，没有就不限制")
-    p.add_argument("--connectors", default=os.environ.get("AGENTNET_CONNECTORS"),
+    p.add_argument("--connectors", default=compat.env("CONNECTORS"),
                    help="云端连接器目录（JSON，改了就生效）；默认 <data>/connectors.json，没有就不提供云端连接器")
-    p.add_argument("--plugins", default=os.environ.get("AGENTNET_PLUGINS"),
+    p.add_argument("--plugins", default=compat.env("PLUGINS"),
                    help="项目插件目录（JSON，改了就生效）；默认 <data>/plugins.json，没有就只能上传插件包")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
-    p.add_argument("--host", default=os.environ.get("AGENTNET_HOST", "127.0.0.1"))
+    p.add_argument("--host", default=compat.env("HOST", "127.0.0.1"))
     args = p.parse_args()
+    args.data = args.data or compat.data_dir()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins)
@@ -1169,7 +1169,7 @@ def main() -> None:
     network.start_scheduler()
     config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
-    AgentNetServer(config, network).run()
+    MatrixServer(config, network).run()
 
 
 if __name__ == "__main__":

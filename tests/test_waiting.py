@@ -1,11 +1,11 @@
 """端侧可达性（docs/device-runtimes.md §5）：不在线是等待，不是失败；上线即消费积压。"""
 from pathlib import Path
 
-from agentnet.device import HELLO_OK, PROTOCOL, DeviceRuntime, MemoryLink, capabilities_from_hello
-from agentnet.engine import Network
-from agentnet.models import TaskStatus
-from agentnet.runtime import ENFORCED, ScriptedRuntime
-from agentnet.store import Store
+from matrix.device import HELLO_OK, PROTOCOL, DeviceRuntime, MemoryLink, capabilities_from_hello
+from matrix.engine import Network
+from matrix.models import TaskStatus
+from matrix.runtime import ENFORCED, ScriptedRuntime
+from matrix.store import Store
 from tests.test_users import users
 
 
@@ -101,7 +101,7 @@ def test_device_approval_does_not_expire_with_time(tmp_path):
     import threading
     import time
 
-    from agentnet.engine import ExecContext
+    from matrix.engine import ExecContext
 
     net, lead, worker, chat, rt, alice = setup(tmp_path, online=True)
     net.limits.approval_timeout_s = 0.2  # 云侧会立刻超时
@@ -125,7 +125,7 @@ def test_device_approval_does_not_expire_with_time(tmp_path):
 def test_device_publish_file_fetches_from_the_connector(tmp_path):
     """端侧 publish_file：服务器向连接器要文件后发布进项目档案（工作目录在用户电脑上）。"""
     import base64
-    from agentnet.engine import ExecContext
+    from matrix.engine import ExecContext
 
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice = users(net, "alice@x.io")[0]

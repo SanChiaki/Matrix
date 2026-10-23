@@ -1,4 +1,4 @@
-# Matrix（agentnet）：Python 3.14 + uv，加上 DSH 运行时（Node 24 + @deepseek-ai/dsh）。
+# Matrix：Python 3.14 + uv，加上 DSH 运行时（Node 24 + @deepseek-ai/dsh）。
 # 只在 compose 网络里对 Caddy 开放 8765，不对宿主机发布端口；对外访问一律经 Caddy（HTTPS + basic auth）。
 FROM python:3.14-slim-bookworm
 
@@ -20,12 +20,12 @@ RUN useradd --create-home --uid 1000 matrix \
  && mkdir -p /app /data /home/matrix/.dsh && chown matrix:matrix /app /data /home/matrix/.dsh
 WORKDIR /app
 COPY --chown=matrix:matrix pyproject.toml uv.lock ./
-COPY --chown=matrix:matrix agentnet ./agentnet
+COPY --chown=matrix:matrix matrix ./matrix
 USER matrix
 RUN uv sync --frozen --no-dev
 
-ENV AGENTNET_HOST=0.0.0.0 \
-    AGENTNET_DATA=/data \
+ENV MATRIX_HOST=0.0.0.0 \
+    MATRIX_DATA=/data \
     PATH=/app/.venv/bin:$PATH
 EXPOSE 8765
-CMD ["agentnet", "--runtime", "dsh", "--port", "8765"]
+CMD ["matrix", "--runtime", "dsh", "--port", "8765"]

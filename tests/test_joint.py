@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from agentnet import auth
-from agentnet.engine import Network, NetworkError
-from agentnet.models import TaskStatus
-from agentnet.runtime import ScriptCall, ScriptedRuntime
+from matrix import auth
+from matrix.engine import Network, NetworkError
+from matrix.models import TaskStatus
+from matrix.runtime import ScriptCall, ScriptedRuntime
 from tests.test_users import client, joint, users
 
 

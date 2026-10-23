@@ -1,6 +1,6 @@
 """命令行：在群聊里 @ 某个 Agent 发一条消息（无 UI），打印事件流与回复，直到所有委托都有结果。
 
-    uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" [--agent "Product Strategy Agent"] [--runtime scripted]
+    uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" [--agent "Product Strategy Agent"] [--runtime scripted]
 
 DSH 运行时下网络工具经 MCP 回调 HTTP 端点，所以 CLI 会在后台起一个仅本机的服务。
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import threading
 
+from . import compat
 from .server import build_network, create_app
 
 SHOW = {"runtime.invoke", "tool.call", "task.created", "task.updated", "knowledge.shared", "authority.violation",
@@ -22,9 +23,10 @@ def main() -> None:
     p.add_argument("--agent", default="Product Strategy Agent")
     p.add_argument("--project", default=None, help="项目名称；默认取该 Agent 所在的第一个项目")
     p.add_argument("--runtime", choices=["dsh", "scripted"], default="dsh")
-    p.add_argument("--data", default=".agentnet")
+    p.add_argument("--data", default=None, help="数据目录；默认同服务（.matrix，只有改名前的 .agentnet 时沿用它）")
     p.add_argument("--port", type=int, default=8766)
     args = p.parse_args()
+    args.data = args.data or compat.data_dir()
 
     net = build_network(args.runtime, args.data, args.port, seed=True)
     if args.runtime == "dsh":

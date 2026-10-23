@@ -1,6 +1,6 @@
 # 领域模型
 
-> 入口见 [AGENTS.md](../../AGENTS.md)。代码在 `agentnet/models.py`。
+> 入口见 [AGENTS.md](../../AGENTS.md)。代码在 `matrix/models.py`。
 
 | 概念 | 含义 |
 | --- | --- |

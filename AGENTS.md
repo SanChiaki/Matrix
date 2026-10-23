@@ -12,11 +12,11 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 ## 项目描述
 
-**Matrix**（代码包名 `agentnet`）：一个本地运行的 Agent Network（Agent 协作网络）Demo。人在项目群聊里 @ Agent 交代任务（或在项目会话里和自己的助理单独聊、和单个 Agent 私聊）；被 @ 的 Agent 自己做，或通过网络工具（MCP）把子任务委托给同一项目的成员，网络负责授权、隔离、追踪与知识沉淀。
+**Matrix**（代码包名 `matrix`）：一个本地运行的 Agent Network（Agent 协作网络）Demo。人在项目群聊里 @ Agent 交代任务（或在项目会话里和自己的助理单独聊、和单个 Agent 私聊）；被 @ 的 Agent 自己做，或通过网络工具（MCP）把子任务委托给同一项目的成员，网络负责授权、隔离、追踪与知识沉淀。
 
 - 语言 / 依赖：Python ≥ 3.14，FastAPI + uvicorn，包管理用 `uv`，测试用 pytest。
 - 运行时：默认以 DeepSeek Harness（DSH）headless 为 Agent 运行时；`scripted` 运行时是确定性脚本，用于测试与离线演练。
-- 状态：全部持久化在 `--data` 目录（默认 `.agentnet/`，已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个项目有档案目录 `projects/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何代码仓库。
+- 状态：全部持久化在 `--data` 目录（默认 `.matrix/`，只有改名前的 `.agentnet/` 时沿用它；都已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个项目有档案目录 `projects/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何代码仓库。
 
 核心概念（定义见 [domain.md](docs/reference/domain.md)）：
 
@@ -50,32 +50,33 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 | 文件 | 职责 |
 | --- | --- |
-| `agentnet/engine.py` | `Network` 核心：Agent/项目/对话管理、联合项目的参与者与可见性、项目档案、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
-| `agentnet/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
-| `agentnet/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
-| `agentnet/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
-| `agentnet/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
-| `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
-| `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
-| `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
-| `agentnet/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
-| `agentnet/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `AGENTNET_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
-| `agentnet/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
-| `agentnet/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
-| `agentnet/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `AGENTNET_CONNECTORS`），热加载；地址只来自这里 |
-| `agentnet/vault.py` | 连接器凭证的加密保管（Fernet，`AGENTNET_VAULT_KEY` 或 `<data>/vault.key`） |
-| `agentnet/mcp_client.py` | 网络这一侧的远程 MCP 客户端（Streamable HTTP，JSON / SSE），代调用云端连接器 |
-| `agentnet/mcp_connectors.py` | 运行时这一侧的 stdio 桥：把连接器工具转发到 `/internal/connectors/*`，只带执行上下文令牌 |
-| `agentnet/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `AGENTNET_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
-| `agentnet/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
-| `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
-| `agentnet/store.py` | 持久化、旧数据迁移（`_merge_groups`：群组 + 项目两层合成一层，`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 一个研究项目；服务默认不预置，CLI 与测试预置） |
-| `agentnet/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
-| `agentnet/scripted.py` | 脚本运行时的场景处理器 |
-| `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
+| `matrix/engine.py` | `Network` 核心：Agent/项目/对话管理、联合项目的参与者与可见性、项目档案、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
+| `matrix/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
+| `matrix/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
+| `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
+| `matrix/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
+| `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
+| `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
+| `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
+| `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
+| `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
+| `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
+| `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
+| `matrix/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `MATRIX_CONNECTORS`），热加载；地址只来自这里 |
+| `matrix/vault.py` | 连接器凭证的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |
+| `matrix/mcp_client.py` | 网络这一侧的远程 MCP 客户端（Streamable HTTP，JSON / SSE），代调用云端连接器 |
+| `matrix/mcp_connectors.py` | 运行时这一侧的 stdio 桥：把连接器工具转发到 `/internal/connectors/*`，只带执行上下文令牌 |
+| `matrix/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
+| `matrix/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
+| `matrix/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
+| `matrix/store.py` | 持久化、旧数据迁移（`_merge_groups`：群组 + 项目两层合成一层，`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 一个研究项目；服务默认不预置，CLI 与测试预置） |
+| `matrix/compat.py` | 改名兼容（代码原名 agentnet）：部署方环境变量 `MATRIX_*` 没设时读 `AGENTNET_*`（`env`）、默认数据目录沿用旧的 `.agentnet`（`data_dir`）、旧网络工具名换成 `mcp__matrix_net__*`（`current_tool`，用于旧 state.json 与没升级的连接器）。改名相关的兼容都放这里 |
+| `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
+| `matrix/scripted.py` | 脚本运行时的场景处理器 |
+| `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、打法、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
-| `agentnet/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件） |
+| `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -86,13 +87,13 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 ```bash
 uv sync                                         # 安装依赖
 uv run pytest -q                                # 全部测试（离线，不需要 dsh）
-uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
-uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
-uv run agentnet --models models.json            # 云侧只允许 models.json 里的预置模型（改文件即生效）
-uv run agentnet --connectors connectors.json    # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
-uv run agentnet --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
+uv run matrix --runtime scripted                # 启动服务 http://127.0.0.1:8765（离线）
+uv run matrix                                   # 使用 DSH 运行时（需 PATH 中有 dsh）
+uv run matrix --models models.json              # 云侧只允许 models.json 里的预置模型（改文件即生效）
+uv run matrix --connectors connectors.json      # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
+uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
-uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
+uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect run                                        # 前台运行已配对的连接器
 uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 手动令牌（备用）
@@ -142,12 +143,12 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
    或 [invariants.md](docs/reference/invariants.md) 与下方索引不一致时变红。
 8. 规则反复靠记忆失效时，把它挪进代码或测试（参照 Raft 的 structural enforcement，research: raft#structural-enforcement）：一条规则如果违反了也没有任何信号，
    就要么加一个能变红的检查，要么写明为什么接受这个风险。
-9. 不要提交 `.agentnet/` 下的运行数据；那里可能包含真实研究结果与会话记录。
+9. 不要提交 `.matrix/`（或改名前的 `.agentnet/`）下的运行数据；那里可能包含真实研究结果与会话记录。
 10. 依赖使用精确或下限版本，经 `uv add` 写入 `pyproject.toml` 与 `uv.lock`。
 11. 设计借鉴了别的产品时写“参照 X”并带 `research: <笔记>#<锚点>`（见文首），调研笔记里没有的先补笔记。
     `test_research_refs_resolve` 在调研仓库就位时检查每个引用都能找到对应的笔记与锚点，不在时跳过。
 12. 系统架构或设计有变化（新增或拆分模块、运行时、接口、状态目录、不变量，改变协作方式）时，同一个改动里刷新
-    [about.html](agentnet/static/about.html) 的架构图与相关段落。架构图是唯一的对外架构说明，不另放静态架构图。
+    [about.html](matrix/static/about.html) 的架构图与相关段落。架构图是唯一的对外架构说明，不另放静态架构图。
     `test_about_page_matches_invariants` 只能核对不变量条数，其余靠改动者对照这一条自查（内容是给人看的介绍，逐项机器核对得不偿失）。
 
 ### 三、安全红线

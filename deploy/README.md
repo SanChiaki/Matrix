@@ -48,6 +48,11 @@ docker compose up -d --build
 cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 ```
 
+从改名前（代码包 `agentnet`）的版本升级：镜像里的环境变量已改为 `MATRIX_DATA`、`MATRIX_HOST`，数据卷不变。
+`.env` 里自己加过的 `AGENTNET_*`（`DATA`、`HOST`、`MODELS`、`CONNECTORS`、`PLUGINS`、`VAULT_KEY`）在新名字没设时照样生效
+（`matrix/compat.py`），方便时改成 `MATRIX_*`。已配对的电脑升级连接器后运行一次 `matrix-connect install`（不重新配对），
+见 [docs/reference/device-runtimes.md](../docs/reference/device-runtimes.md)。
+
 ## 证书
 
 由 `deploy/.env` 里的 `MATRIX_TLS_ISSUER` 决定：

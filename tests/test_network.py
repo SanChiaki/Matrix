@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from agentnet.engine import Limits, Network, NetworkError
-from agentnet.models import MCP_PREFIX, TaskStatus
-from agentnet.runtime import (ScriptCall, ScriptedRuntime, ToolBridge, build_patch_yaml, classify_error,
+from matrix.engine import Limits, Network, NetworkError
+from matrix.models import MCP_PREFIX, TaskStatus
+from matrix.runtime import (ScriptCall, ScriptedRuntime, ToolBridge, build_patch_yaml, classify_error,
                               permission_mode)
-from agentnet.scripted import scenario_handler
+from matrix.scripted import scenario_handler
 
 GOAL = "我要研究一个新的 AI 产品机会。"
 
@@ -260,7 +260,7 @@ def test_delegate_constraints_as_text(tmp_path: Path):
 
 def test_delegate_schema_keeps_free_text_in_strings():
     """自由文本只放 string 参数：数组参数的值要由模型直接写成 JSON，长中文容易被写成裸文本。"""
-    from agentnet.mcp_server import TOOLS
+    from matrix.mcp_server import TOOLS
     for tool in TOOLS:
         for key, spec in tool["inputSchema"]["properties"].items():
             if key in ("mission", "expected_outcome", "constraints", "feedback", "note", "reason", "description"):
@@ -376,7 +376,7 @@ def test_dm_has_no_network_tools(tmp_path: Path):
     lead = net.store.agent_by_name("Product Strategy Agent")
     conv = talk(net, lead, None, GOAL)
     assert conv.kind == "dm" and not rt.calls[0].can_delegate
-    assert sorted(t.removeprefix("mcp__agentnet__") for t in rt.calls[0].tool_names) == ["accept_request", "deliver_request", "open_request",
+    assert sorted(t.removeprefix("mcp__matrix_net__") for t in rt.calls[0].tool_names) == ["accept_request", "deliver_request", "open_request",
                                                                                                 "suggest_connector"]
     assert "不能委托" in conv.messages[-1].text and not tasks(net)
     assert conv.messages[0].mentions == [lead.id]
@@ -577,7 +577,7 @@ def test_knowledge_shared_only_explicitly(scenario):
 def test_share_requires_visibility(scenario):
     """不变量 9。"""
     net, _, conv = scenario
-    from agentnet.engine import ExecContext
+    from matrix.engine import ExecContext
     tech = net.store.agent_by_name("Technical Analysis Agent")
     tech_task = by_target(net, "Technical Analysis Agent")[0]
     ci_key = next(k for k in net.store.knowledge if "Competitive" in net.store.knowledge[k].title)
@@ -819,7 +819,7 @@ def test_propose_agent_approved_joins_group(tmp_path: Path):
 
 def test_propose_agent_description_limit(tmp_path: Path):
     """描述超过上限的提议直接退回给 Agent 压缩，不生成一个人原样批准不了的提议。"""
-    from agentnet.models import DESCRIPTION_LIMIT
+    from matrix.models import DESCRIPTION_LIMIT
     out: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
@@ -932,7 +932,7 @@ def test_restart_fails_running_tasks_and_notifies(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda c: "x"), tmp_path)
     a, b, g = pair(net)
     conv = talk(net, a, g, "go")
-    from agentnet.models import Delegation, Task
+    from matrix.models import Delegation, Task
     t = Task(id="task-0000beef", conversation_id=conv.id, project_id=g.id, delegator_id=a.id, delegatee_id=b.id,
              parent_task_id=None, depth=1, delegation=Delegation("m", [], [], "o"), dsh_session_id="s1")
     net.store.tasks[t.id] = t
@@ -1012,14 +1012,14 @@ def test_legacy_multiple_chats_collapse_to_one(tmp_path: Path):
 # ================= 结构性约束：一处定义，处处一致 =================
 def test_network_tools_defined_consistently():
     """新增网络工具要同步 schema、实现、提示词三处：由这条测试保证，而不是靠记住。"""
-    from agentnet.engine import TOOL_HANDLERS
-    from agentnet.mcp_server import TOOLS
-    from agentnet.protocol import TOOL_GUIDE
-    from agentnet.models import ARCHIVE_TOOLS
+    from matrix.engine import TOOL_HANDLERS
+    from matrix.mcp_server import TOOLS
+    from matrix.protocol import TOOL_GUIDE
+    from matrix.models import ARCHIVE_TOOLS
     names = [t["name"] for t in TOOLS]
     assert len(names) == len(set(names))
     assert set(names) == set(TOOL_HANDLERS) == set(TOOL_GUIDE)
-    from agentnet.models import REQUEST_TOOLS
+    from matrix.models import REQUEST_TOOLS
     assert set(ARCHIVE_TOOLS + REQUEST_TOOLS) <= set(names)  # 档案、用户任务工具（不需要 delegate）也必须是已定义的网络工具
 
 
@@ -1028,14 +1028,14 @@ def test_archive_tools_mounted_without_delegate_and_checked_by_network():
     import os
     import subprocess
     import sys
-    from agentnet.engine import network_tools_for
-    from agentnet.models import ARCHIVE_TOOLS
-    from agentnet.runtime import MCP_SERVER_SCRIPT
-    from agentnet.models import ABILITY_TOOLS, REQUEST_TOOLS
+    from matrix.engine import network_tools_for
+    from matrix.models import ARCHIVE_TOOLS
+    from matrix.runtime import MCP_SERVER_SCRIPT
+    from matrix.models import ABILITY_TOOLS, REQUEST_TOOLS
     assert network_tools_for("task", True, False) == list(ARCHIVE_TOOLS + ABILITY_TOOLS)  # 委托任务：没有用户任务工具
     assert network_tools_for("seat", False, False) == list(REQUEST_TOOLS + ABILITY_TOOLS)  # 私聊
     assert set(network_tools_for("seat", True, False)) == set(ARCHIVE_TOOLS + REQUEST_TOOLS + ABILITY_TOOLS)
-    env = {**os.environ, "AGENTNET_TOOLS": ",".join(network_tools_for("task", True, False))}
+    env = {**os.environ, "MATRIX_TOOLS": ",".join(network_tools_for("task", True, False))}
     out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n',
                          capture_output=True, text=True, env=env, timeout=10, encoding="utf-8").stdout
     import json
@@ -1061,7 +1061,7 @@ def test_about_page_matches_invariants():
     import re
     root = Path(__file__).parent.parent
     declared = re.findall(r"^\d+\. \*\*", (root / "docs" / "reference" / "invariants.md").read_text(encoding="utf-8"), re.M)
-    about = (root / "agentnet" / "static" / "about.html").read_text(encoding="utf-8")
+    about = (root / "matrix" / "static" / "about.html").read_text(encoding="utf-8")
     assert re.findall(r"(\d+) 条不变量", about) == [str(len(declared))], "about.html 的不变量条数过期了"
 
 
@@ -1072,7 +1072,7 @@ def test_research_refs_resolve():
     if not (research / "products").is_dir():
         pytest.skip(f"调研仓库不在 {research}")
     files = [root / n for n in ("AGENTS.md", "CHARTER.md", "REQUIREMENTS.md")]
-    files += [*(root / "docs").glob("**/*.md"), *(root / "agentnet").glob("**/*.py")]
+    files += [*(root / "docs").glob("**/*.md"), *(root / "matrix").glob("**/*.py")]
     refs = {(f.name, note, anchor) for f in files if f.is_file()
             for note, anchor in re.findall(r"research: ([\w-]+)#([\w-]+)", f.read_text(encoding="utf-8"))}
     assert refs, "没有找到任何 research 引用"
@@ -1087,8 +1087,8 @@ def test_research_refs_resolve():
 
 def test_authorities_registered_everywhere():
     """新增权限要同步词表、工具映射、运行时插件：每个权限都必须能落到某种强制手段上。"""
-    from agentnet.models import AUTHORITIES, TOOL_AUTHORITY
-    from agentnet.runtime import AUTHORITY_PLUGINS
+    from matrix.models import AUTHORITIES, TOOL_AUTHORITY
+    from matrix.runtime import AUTHORITY_PLUGINS
     assert set(TOOL_AUTHORITY.values()) <= set(AUTHORITIES)
     assert set(AUTHORITY_PLUGINS) <= set(AUTHORITIES)
     # file.write → 沙箱模式；delegate → 是否挂载网络工具；connector.use → 是否挂载 / 开启连接器
@@ -1105,31 +1105,31 @@ def test_dsh_patch_reflects_authority_and_mounts_mcp():
     y2 = build_patch_yaml(["web.research", "shell.exec", "delegate"],
                           ToolBridge(url="http://127.0.0.1:1/internal/tools", token="t", handler=lambda n, a: ("", False)))
     assert "id: tool-bash" not in y2 and "id: tool-pwsh" not in y2
-    assert y2.startswith("#") and "- insert:" in y2 and "dsh-mcp-client" in y2 and "AGENTNET_TOKEN" in y2
+    assert y2.startswith("#") and "- insert:" in y2 and "dsh-mcp-client" in y2 and "MATRIX_TOKEN" in y2
     assert permission_mode(["web.research"]) == "read-only"
     assert permission_mode(["file.write"]) == "workspace-write"
 
 
 def test_mcp_server_stdio(tmp_path: Path):
     """MCP 服务握手 + tools/list；tools/call 在网络不可达时返回 isError。"""
-    from agentnet.mcp_server import TOOLS
+    from matrix.mcp_server import TOOLS
     msgs = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}},
         {"jsonrpc": "2.0", "method": "notifications/initialized"},
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_members", "arguments": {}}},
     ]
-    from agentnet.runtime import MCP_SERVER_SCRIPT
+    from matrix.runtime import MCP_SERVER_SCRIPT
     out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input="\n".join(json.dumps(m) for m in msgs),
                          capture_output=True, text=True, timeout=20,
-                         env={**os.environ, "AGENTNET_TOOL_URL": "http://127.0.0.1:9/x", "AGENTNET_TOKEN": "t",
-                              "AGENTNET_TOOL_TIMEOUT": "3"}, encoding="utf-8").stdout  # 有的环境里连关闭的端口是超时而不是被拒
+                         env={**os.environ, "MATRIX_TOOL_URL": "http://127.0.0.1:9/x", "MATRIX_TOKEN": "t",
+                              "MATRIX_TOOL_TIMEOUT": "3"}, encoding="utf-8").stdout  # 有的环境里连关闭的端口是超时而不是被拒
     res = [json.loads(line) for line in out.splitlines()]
     assert [r["id"] for r in res] == [1, 2, 3]
     assert res[0]["result"]["protocolVersion"] == "2025-06-18"
     assert {t["name"] for t in res[1]["result"]["tools"]} == {t["name"] for t in TOOLS}
     assert res[2]["result"]["isError"] is True
-    assert MCP_PREFIX == "mcp__agentnet__"
+    assert MCP_PREFIX == "mcp__matrix_net__"
 
 
 # ================= 人主动终止一轮 =================

@@ -10,7 +10,7 @@
 - 没 @ 任何人的消息留在群聊里，不唤醒任何人；只能 @ 项目成员。
 - 席位被唤醒时收到**上次运行之后群聊里的新公开消息**（人的消息、其他成员的回复），其中 @ 它的那条标为“@ 你”。委托的过程、结果、知识不在公开消息里，只送给委托方（不变量 9）。
 - 委托回报回到委托方的席位（或上一级任务），由它验收。执行者工作目录里的**产物**（除去运行时文件、只读副本、`tmp/`、缓存）
-  在交付时快照进委托方工作目录的 `deliveries/<task_id>/`（`agentnet/workdir.py`），重新交付时整体替换。
+  在交付时快照进委托方工作目录的 `deliveries/<task_id>/`（`matrix/workdir.py`），重新交付时整体替换。
   Agent 的所有者可以在 UI 里浏览、下载自己 Agent 的席位与任务工作目录（只读）。
 - **附件**（参照 dsh，research: deepseek-harness#attachments）：人先把文件上传到对话（`POST /api/conversations/<id>/attachments`，
   请求体就是文件内容，单个 ≤20 MB），再随消息发出（`Message.attachments`：sha、name、size、mime）。文件按 sha256 只读存在

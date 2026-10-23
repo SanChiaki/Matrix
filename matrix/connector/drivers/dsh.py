@@ -1,6 +1,6 @@
 """dsh 驱动：在本机跑 DSH headless（与云侧同一个运行时，但工作目录在本机）。
 
-复用 `agentnet.runtime.DshRuntime`：权限仍然由 `--patch` 覆盖层 + 沙箱强制执行；
+复用 `matrix.runtime.DshRuntime`：权限仍然由 `--patch` 覆盖层 + 沙箱强制执行；
 区别只在于 MCP 工具端点与审批端点指向连接器本地的小桥（见 connector/bridge.py），
 由桥经出站连接把 `tool.call` / `approval.request` 送回网络。
 """
@@ -13,6 +13,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+from ...models import CONNECTOR_SERVER, MCP_SERVER
 from ...runtime import DshRuntime, RunRequest, RuntimeCapabilities, ToolBridge, ApprovalBridge, argv, no_window
 from .base import RunOutcome, RunSpec
 
@@ -48,7 +49,7 @@ class DshDriver:
             pid = re.search(r"^-\s+id:\s*['\"]?([^'\"\n]+)", block.strip(), re.M) or \
                 re.search(r"^\s+- id:\s*['\"]?([^'\"\n]+)", block, re.M)
             server = re.search(r"^\s+serverName:\s*['\"]?([^'\"\n]+)", block, re.M)
-            if pid and server and server.group(1).strip() not in ("agentnet", "connectors"):
+            if pid and server and server.group(1).strip() not in (MCP_SERVER, CONNECTOR_SERVER):
                 found[server.group(1).strip()] = pid.group(1).strip()
         return found
 
