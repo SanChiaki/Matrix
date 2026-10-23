@@ -163,6 +163,7 @@ async function start() {
     if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
   }).catch((e) => alert(e.message));
   $("#skill-new").addEventListener("click", () => upMine(false));
+  $("#conn-custom").addEventListener("click", () => { S.connPanel = "__custom"; S.connSel = null; renderConnectorsView(); $("#cu-name")?.focus(); });
   $("#skill-new-dir").addEventListener("click", () => upMine(true));
   // 设备详情里的服务标签：跳到连接器页并选中它
   document.addEventListener("click", (e) => {
@@ -2449,13 +2450,7 @@ function renderConnectorsView() {
       </button>
       <div class="card-foot"><span class="muted">云端</span><span class="button sm" aria-hidden="true">${have ? "更新授权" : "授权"}</span></div>
     </div></li>`;
-  }).join("") + `<li class="${S.connPanel === "__custom" ? "selected" : ""}"><div class="card">
-      <button type="button" class="card-main" data-add="__custom" aria-label="添加自定义连接器">
-        <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">自定义</span></div>
-        <p class="card-desc">填一个服务地址接入（远程 MCP，需 https 公网地址）。电脑上的服务在那台电脑的 AI 工具里配好就会出现。</p>
-      </button>
-      <div class="card-foot"><span class="muted">云端</span><span class="button sm" aria-hidden="true">添加</span></div>
-    </div></li>`;
+  }).join("") || '<li class="empty">部署方还没有提供云端连接器。可以点右上角“自定义连接器”自己接入。</li>';
   $("#conn-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
     S.connSel = b.dataset.id; S.connPanel = null; renderConnectorsView();
   }));
