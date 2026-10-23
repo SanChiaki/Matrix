@@ -236,13 +236,14 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
-    # ---- 项目会话：助理读项目现状（按会话主人的可见性过滤）----
+    # ---- 项目会话与助理对话：助理读项目现状（按主人的可见性过滤）----
     {
         "name": "read_chat",
         "description": "读项目群聊的消息：按关键词找，或看最近的若干条。只读，看到的范围和你的所有者一样。",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "project": {"type": "string", "description": "助理对话里必填：项目名；项目会话里不用写"},
                 "query": {"type": "string", "description": "可选：关键词，只返回含它的消息"},
                 "limit": {"type": "string", "description": "可选：最多几条（1–50，默认 20），取最近的"},
             },
@@ -254,8 +255,55 @@ TOOLS = [
         "description": "读项目里一个用户任务的详情：原始要求、状态、交付说明、为它发起的委托与结果。只读。",
         "inputSchema": {
             "type": "object",
-            "properties": {"request_id": {"type": "string", "description": "任务 id（req-…）"}},
+            "properties": {
+                "request_id": {"type": "string", "description": "任务 id（req-…）"},
+                "project": {"type": "string", "description": "可选：项目名（不写就按任务所在的项目）"},
+            },
             "required": ["request_id"],
+            "additionalProperties": False,
+        },
+    },
+    # ---- 助理对话：起草（主人确认后以主人的名义发出）与主人的定时 ----
+    {
+        "name": "draft_message",
+        "description": "替所有者起草一条发进某个项目群聊的消息。不会直接发出：所有者确认（可以改）后以所有者的名义发出。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string", "description": "项目名：所有者参与的项目"},
+                "text": {"type": "string", "description": "消息全文；要唤醒某个成员就写 @成员名"},
+            },
+            "required": ["project", "text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "schedule",
+        "description": "按所有者的话建一个定时：到点时网络在你们的私聊里唤醒你。cron 与 after_minutes 二选一。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "定时叫什么（如：早报）"},
+                "instruction": {"type": "string", "description": "到点时要你做什么，写成交给你自己的话"},
+                "cron": {"type": "string", "description": "重复的：五段 cron（分 时 日 月 周，本地时间），如 0 9 * * 1-5"},
+                "after_minutes": {"type": "string", "description": "一次性的：过多少分钟（至少 10）"},
+            },
+            "required": ["title", "instruction"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_schedules",
+        "description": "列出所有者的定时。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "cancel_schedule",
+        "description": "按所有者的话取消一个定时。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"schedule_id": {"type": "string", "description": "定时 id（sched-…）"}},
+            "required": ["schedule_id"],
             "additionalProperties": False,
         },
     },

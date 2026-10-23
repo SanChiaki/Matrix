@@ -73,6 +73,16 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .tab:hover { background: var(--surface-3); color: var(--text); }
 .tab[aria-pressed="true"] { background: var(--accent-soft); color: var(--text); }
 .tab[aria-pressed="true"] svg { opacity: 1; color: var(--accent); }
+/* 侧栏：“助理”在最上面，少用的视图收进“更多”（点开是浮在旁边的一列） */
+#nav-home[hidden] { display: none; }
+#home-dot { margin-left: auto; display: inline-flex; }
+#home-dot:empty { display: none; }
+.more-wrap { display: flex; flex-direction: column; }
+.tab .more-cur { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--muted); }
+.more-menu { position: fixed; z-index: 70; min-width: 172px; display: flex; flex-direction: column; gap: 2px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+.more-menu[hidden] { display: none; }
+.more-menu .tab { width: 100%; }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 12px 8px 0; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); }
 .status-line { display: flex; align-items: center; gap: 8px; }
 .status-line::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--completed); box-shadow: 0 0 0 3px color-mix(in srgb, var(--completed) 15%, transparent); }
@@ -297,6 +307,9 @@ button.icon.sm { width: 22px; height: 22px; padding: 3px; }
   border: 1px solid color-mix(in srgb, var(--human) 30%, transparent); background: color-mix(in srgb, var(--human) 5%, transparent); }
 .proposal-card .who { display: flex; align-items: center; gap: 8px; }
 .proposal-card p { margin: 0; }
+.draft-card .draft-text { width: 100%; resize: vertical; }
+.draft-card .body { white-space: pre-wrap; }
+.sched-list .s { white-space: normal; }
 .tag.model { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 11px; }
 fieldset.model { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
 fieldset.model legend { padding: 0; margin-bottom: 6px; font-size: 12.5px; font-weight: 500; color: var(--text-2); }
@@ -340,7 +353,7 @@ button.link:hover { background: none; text-decoration: underline; }
 .todo-list, .busy-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .todo-item { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 14px; border-radius: var(--radius);
   border: 1px solid color-mix(in srgb, var(--human) 30%, transparent); background: color-mix(in srgb, var(--human) 5%, transparent); }
-.todo-item > span { flex: 1; min-width: 0; }
+.todo-item > span:not(.avatar) { flex: 1; min-width: 0; }
 .todo-item.approval { flex-direction: column; align-items: stretch; }
 .todo-item .who, .approval-card .who { display: flex; align-items: center; gap: 8px; }
 .reason { margin: 0; font-size: 13px; color: var(--text-2); white-space: pre-wrap; word-break: break-word; }

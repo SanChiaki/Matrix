@@ -16,8 +16,8 @@ from typing import Any
 from dataclasses import asdict, fields
 
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
-                     Decision, Delegation, Device,
-                     KnowledgeItem, Message, Project, Proposal, ResourceRef, Seat, Task, TaskStatus, User, UserRequest,
+                     Decision, Delegation, Device, Draft,
+                     KnowledgeItem, Message, Project, Proposal, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
                      new_id, seat_id)
 
 
@@ -208,6 +208,8 @@ class Store:
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
         self.connections: dict[str, Connection] = {}  # 我的连接器（凭证不在这里，见 vault.py）
+        self.drafts: dict[str, Draft] = {}     # 助理在助理对话里起草、等主人确认的消息
+        self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
         if self.path.exists():
             self._load()
         else:
@@ -300,6 +302,8 @@ class Store:
                 "requests": [r.to_dict() for r in self.requests.values()],
                 "devices": [asdict(d) for d in self.devices.values()],
                 "connections": [asdict(c) for c in self.connections.values()],
+                "drafts": [d.to_dict() for d in self.drafts.values()],
+                "schedules": [x.to_dict() for x in self.schedules.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -385,6 +389,10 @@ class Store:
             self.requests[r["id"]] = UserRequest(**_known(UserRequest, r))
         for c in raw.get("connections", []):
             self.connections[c["id"]] = Connection(**_known(Connection, c))
+        for d in raw.get("drafts", []):  # 旧数据没有这两项：缺省为空
+            self.drafts[d["id"]] = Draft(**_known(Draft, d))
+        for x in raw.get("schedules", []):
+            self.schedules[x["id"]] = Schedule(**_known(Schedule, x))
         self._one_trust_domain()
         self.default_assistants()
         if migrated:

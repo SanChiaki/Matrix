@@ -82,7 +82,7 @@ uv run matrix-plugin check todo-board
 uv run agentnet --runtime scripted --data /tmp/plugin-dev
 ```
 
-打开 http://127.0.0.1:8765 ，注册，按提示建好第一个 Agent（你的助理），再建一个项目。
+打开 http://127.0.0.1:8765 ，注册（网络会给你一个助理），再建一个项目。
 进项目页 →「插件」→「上传文件夹」选 `todo-board`，然后点新出现的「待办」标签页。
 
 ## 2. 包的结构

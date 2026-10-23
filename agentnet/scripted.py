@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 
+from .models import MCP_PREFIX
 from .runtime import ScriptCall
 
 TARGETS = ("Market Research Agent", "Technical Analysis Agent", "Competitive Intelligence Agent")
@@ -34,7 +35,31 @@ def _name(prompt: str) -> str:
 _SESSION: dict[str, dict] = {}  # 会话 id → 这个会话的 Agent 名与对话进度
 
 
+def _home(call: ScriptCall) -> str:
+    """助理对话：问“有什么要我处理的”就按总览回答；“在 X 项目里 …”起草；“每天 N 点 …”“N 分钟后 …”建定时；定时到点就汇报。"""
+    asked = re.findall(r"\*\*用户[^*]*\*\*（@ 你）：(.+)", call.prompt)
+    todo = re.search(r"### 等你的所有者处理\n((?:- .+\n?)+)", call.prompt)
+    if not asked:
+        if "到点了" in call.prompt:
+            return f"早报：\n{todo.group(1).strip()}" if todo else "没有新情况"
+        return "（没有新消息）"
+    text = asked[-1].strip()
+    if m := re.search(r"在「?([^」\s]+?)」?(?:项目)?里(?:说|发)?[：:，,]?\s*(.+)", text):
+        return call.tool("draft_message", project=m.group(1), text=m.group(2))
+    if m := re.search(r"每天\s*(\d{1,2})\s*点", text):
+        return call.tool("schedule", title="每日提醒", instruction=text, cron=f"0 {int(m.group(1))} * * *")
+    if m := re.search(r"(\d+)\s*分钟后", text):
+        return call.tool("schedule", title="提醒", instruction=text, after_minutes=m.group(1))
+    if "定时" in text:
+        return call.tool("list_schedules")
+    if todo:
+        return f"等你处理的事：\n{todo.group(1).strip()}"
+    return "目前没有等你处理的事。"
+
+
 def scenario_handler(call: ScriptCall) -> str:
+    if MCP_PREFIX + "draft_message" in call.tool_names:
+        return _home(call)
     if call.turn == 1 or call.session_id not in _SESSION:
         _SESSION[call.session_id] = {"name": _name(call.prompt), "results": {}, "pending": set()}
     st = _SESSION[call.session_id]
