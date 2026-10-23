@@ -747,3 +747,33 @@ dialog.preview::backdrop { background: rgba(10, 12, 18, .45); }
 table.csv { border-collapse: collapse; font-size: 12.5px; }
 table.csv th, table.csv td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; white-space: nowrap; }
 table.csv th { background: var(--surface-2); font-weight: 600; }
+
+/* ---------- 技能与连接器 ---------- */
+.sec-title { margin: 28px 0 12px; font-size: 13px; color: var(--text-2); }
+.sec-title:first-of-type { margin-top: 8px; }
+.ability-ico { flex: none; width: 24px; height: 24px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-soft); color: var(--accent); }
+.ability-ico svg { width: 14px; height: 14px; }
+.calls { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.calls li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.calls .ok { color: var(--completed); } .calls .bad { color: var(--rejected); }
+.calls .muted { margin-left: auto; }
+.needs { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 10px; max-width: 760px; }
+.needs > li { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 12px 14px; }
+.needs > li.empty { border-style: dashed; color: var(--muted); }
+.need-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.need-head .grow { flex: 1; }
+.ready { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ready li { display: flex; align-items: center; gap: 8px; }
+.ready a { font-size: 12px; }
+.r-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.r-dot.ok { background: var(--completed); } .r-dot.bad { background: var(--rejected); }
+.pending-skills { max-width: 760px; margin-bottom: 16px; }
+.pending-skills h3 { margin-top: 0; }
+#ps-detail { margin-top: 16px; max-width: 760px; }
+#ps-detail .md { margin-top: 8px; }
+.assets tr.selected td { background: var(--accent-soft); }
+.member-list .joint-conns { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.member-list .joint-conns summary { cursor: pointer; }
+.member-list .joint-conns .switch { display: flex; font-size: 11px; gap: 4px; margin-top: 4px; }
+.member-list li:has(.joint-conns[open]) { flex-wrap: wrap; }

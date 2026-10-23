@@ -376,7 +376,8 @@ def test_dm_has_no_network_tools(tmp_path: Path):
     lead = net.store.agent_by_name("Product Strategy Agent")
     conv = talk(net, lead, None, GOAL)
     assert conv.kind == "dm" and not rt.calls[0].can_delegate
-    assert sorted(t.removeprefix("mcp__agentnet__") for t in rt.calls[0].tool_names) == ["accept_request", "deliver_request", "open_request"]
+    assert sorted(t.removeprefix("mcp__agentnet__") for t in rt.calls[0].tool_names) == ["accept_request", "deliver_request", "open_request",
+                                                                                                "suggest_connector"]
     assert "不能委托" in conv.messages[-1].text and not tasks(net)
     assert conv.messages[0].mentions == [lead.id]
 
@@ -1030,15 +1031,15 @@ def test_archive_tools_mounted_without_delegate_and_checked_by_network():
     from agentnet.engine import network_tools_for
     from agentnet.models import ARCHIVE_TOOLS
     from agentnet.runtime import MCP_SERVER_SCRIPT
-    from agentnet.models import REQUEST_TOOLS
-    assert network_tools_for("task", True, False) == list(ARCHIVE_TOOLS)          # 委托任务：没有用户任务工具
-    assert network_tools_for("seat", False, False) == list(REQUEST_TOOLS)          # 私聊
-    assert set(network_tools_for("seat", True, False)) == set(ARCHIVE_TOOLS + REQUEST_TOOLS)
+    from agentnet.models import ABILITY_TOOLS, REQUEST_TOOLS
+    assert network_tools_for("task", True, False) == list(ARCHIVE_TOOLS + ABILITY_TOOLS)  # 委托任务：没有用户任务工具
+    assert network_tools_for("seat", False, False) == list(REQUEST_TOOLS + ABILITY_TOOLS)  # 私聊
+    assert set(network_tools_for("seat", True, False)) == set(ARCHIVE_TOOLS + REQUEST_TOOLS + ABILITY_TOOLS)
     env = {**os.environ, "AGENTNET_TOOLS": ",".join(network_tools_for("task", True, False))}
     out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input='{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n',
                          capture_output=True, text=True, env=env, timeout=10, encoding="utf-8").stdout
     import json
-    assert [t["name"] for t in json.loads(out)["result"]["tools"]] == list(ARCHIVE_TOOLS)
+    assert [t["name"] for t in json.loads(out)["result"]["tools"]] == list(ARCHIVE_TOOLS + ABILITY_TOOLS)
 
 
 def test_invariants_have_tests():
@@ -1090,7 +1091,8 @@ def test_authorities_registered_everywhere():
     from agentnet.runtime import AUTHORITY_PLUGINS
     assert set(TOOL_AUTHORITY.values()) <= set(AUTHORITIES)
     assert set(AUTHORITY_PLUGINS) <= set(AUTHORITIES)
-    enforced = set(AUTHORITY_PLUGINS) | {"file.write", "delegate"}  # file.write → 沙箱模式；delegate → 是否挂载网络工具
+    # file.write → 沙箱模式；delegate → 是否挂载网络工具；connector.use → 是否挂载 / 开启连接器
+    enforced = set(AUTHORITY_PLUGINS) | {"file.write", "delegate", "connector.use"}
     assert set(AUTHORITIES) <= enforced
 
 

@@ -9,13 +9,13 @@ import shutil
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from .models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES
+from .models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES, SKILLS
 
 DELIVERIES = "deliveries"  # 委托产物在委托方工作目录里的位置：deliveries/<task_id>/
 # 网络、运行时写进工作目录的文件：不是执行者的产物
 RUNTIME_FILES = {".dsh-authority.yml", "dsh-events.jsonl", "DELEGATION.json"}
 # 顶层：只读副本、私有目录、共享知识、别人交来的产物、临时文件
-TOP_SKIP = {PROJECT_FILES, ATTACHMENTS, AGENT_HOME, "shared", DELIVERIES, "tmp"}
+TOP_SKIP = {PROJECT_FILES, ATTACHMENTS, AGENT_HOME, SKILLS, "shared", DELIVERIES, "tmp"}
 # 任何一层：缓存与依赖目录
 ANY_SKIP = {"__pycache__", ".venv", "venv", "node_modules", ".git", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 MAX_FILES = 500

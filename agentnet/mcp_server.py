@@ -173,6 +173,37 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "propose_skill",
+        "description": ("把一个值得反复用的做法提议为项目技能。主持人批准后进项目档案，项目里的成员此后都能用；"
+                        "批准前不生效。技能只是做法说明，不授予任何权限。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "技能名：小写英文、数字与连字符，如 weekly-report"},
+                "description": {"type": "string", "description": "一句话：什么时候用它"},
+                "body": {"type": "string", "description": "正文：怎么做（步骤、标准、注意事项）"},
+                "reason": {"type": "string", "description": "为什么值得沉淀"},
+            },
+            "required": ["name", "description", "body", "reason"],
+            "additionalProperties": False,
+        },
+    },
+    # ---- 能力：缺连接器时提醒所有者（不授权、不安装）----
+    {
+        "name": "suggest_connector",
+        "description": ("需要某个外部服务却没有对应的连接器时，提醒你的所有者去授权。只是提醒：不会授权、安装或开启任何东西，"
+                        "这一轮继续用现有的能力。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "connector": {"type": "string", "description": "需要哪个服务，如 飞书文档、GitHub"},
+                "reason": {"type": "string", "description": "拿它来做什么"},
+            },
+            "required": ["connector", "reason"],
+            "additionalProperties": False,
+        },
+    },
     # ---- 项目会话：助理读项目现状（按会话主人的可见性过滤）----
     {
         "name": "read_chat",

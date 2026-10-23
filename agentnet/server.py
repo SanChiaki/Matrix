@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import auth
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import Network, NetworkError
+from .connector_catalog import ConnectorCatalog
 from .model_catalog import ModelCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
@@ -75,6 +76,47 @@ class AgentIn(BaseModel):
     max_delegations: int | None = Field(None, ge=1)  # 每次被 @ / 每个任务最多委托几次；None = 不限制
 
 
+class SkillIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=500)
+    body: str = Field("", max_length=64_000)
+
+
+class SkillFileIn(BaseModel):
+    path: str = Field(min_length=1, max_length=200)
+    content: str = Field(max_length=200_000)
+
+
+class CustomConnectorIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    url: str = Field(min_length=8, max_length=2000)       # 只接受 https 公网地址
+    header: str = Field("", max_length=64)
+    value: str = Field("", max_length=4000)               # 只进加密保管，不回显
+    agent_ids: list[str] | None = None
+
+
+class AuthorizeIn(BaseModel):
+    connector_id: str = Field(min_length=1, max_length=40)
+    values: dict[str, str] = Field(default_factory=dict)  # 授权字段；secret 的只进加密保管，任何接口都不回显
+    agent_ids: list[str] | None = None                    # 新授权时勾给哪些 Agent；省略 = 只勾自己的助理
+
+
+class NeedIn(BaseModel):
+    connector_id: str = Field(min_length=1, max_length=80)
+    purpose: str = Field("", max_length=300)
+    ref_id: str | None = None
+
+
+class ProjectConnectionsIn(BaseModel):
+    connection_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class ConnectorCallIn(BaseModel):
+    token: str
+    tool: str = ""
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentPatch(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=80)
     description: str | None = Field(None, min_length=2, max_length=DESCRIPTION_LIMIT)
@@ -87,6 +129,8 @@ class AgentPatch(BaseModel):
     harness: str | None = Field(None, max_length=40)
     timeout_s: int | None = Field(None, ge=1)        # 显式传 null 表示改回不限制
     max_delegations: int | None = Field(None, ge=1)
+    skills: list[str] | None = Field(None, max_length=50)       # 勾上的“我的技能”
+    connections: list[str] | None = Field(None, max_length=50)  # 勾上的“我的连接器”
 
 
 class ProposalApprove(BaseModel):
@@ -258,6 +302,26 @@ def current_user(request: Request) -> User:
 
 # 模块级定义：文件开头的 `from __future__ import annotations` 让注解变成字符串，FastAPI 要在模块作用域解析它
 Me = Annotated[User, Depends(current_user)]
+
+
+async def skill_package(request: Request) -> list[tuple[str, bytes]]:
+    """技能包：请求体是 zip（application/zip），或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
+    import base64
+    from .models import SKILL_LIMIT
+    cap = SKILL_LIMIT * 2  # base64 膨胀
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(413, f"技能包超过 {SKILL_LIMIT // 1000} KB")
+    from .skills import SkillError, unzip
+    try:
+        if "json" in request.headers.get("content-type", ""):
+            files = json.loads(bytes(buf)).get("files") or []
+            return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:500]]
+        return unzip(bytes(buf))
+    except (SkillError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise HTTPException(400, str(e) or "技能包格式不对") from e
 
 
 def create_app(network: Network) -> FastAPI:
@@ -469,6 +533,107 @@ def create_app(network: Network) -> FastAPI:
     def delete_file(project_id: str, name: str, user: Me) -> dict:
         network.delete_file(project_id, name, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
+
+    # ---- 项目技能（项目档案的一部分）与项目需要的连接器（只是声明） ----
+    @app.get("/api/projects/{project_id}/skills/{name}")
+    def project_skill(project_id: str, name: str, user: Me) -> dict:
+        return network.project_skill(project_id, name, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/skills")
+    def save_project_skill(project_id: str, body: SkillIn, user: Me) -> dict:
+        network.save_project_skill(project_id, body.name, body.description, body.body, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/skills/upload")
+    async def upload_project_skill(project_id: str, request: Request, user: Me) -> dict:
+        await run_in_threadpool(network.hosted_project, project_id, user.id)  # 先查权限，不收无权者的内容
+        entries = await skill_package(request)
+        return await run_in_threadpool(network.upload_project_skill, project_id, entries, user.id)
+
+    @app.post("/api/projects/{project_id}/skills/{name}/files")
+    def add_project_skill_file(project_id: str, name: str, body: SkillFileIn, user: Me) -> dict:
+        return network.add_project_skill_file(project_id, name, body.path, body.content.encode(), actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/skills/{name}")
+    def delete_project_skill(project_id: str, name: str, user: Me) -> dict:
+        network.delete_project_skill(project_id, name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/needs")
+    def add_need(project_id: str, body: NeedIn, user: Me) -> dict:
+        network.add_connector_need(project_id, body.connector_id, body.purpose, body.ref_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/needs/{need_id}")
+    def remove_need(project_id: str, need_id: str, user: Me) -> dict:
+        network.remove_connector_need(project_id, need_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/members/{agent_id}/connections")
+    def project_connections(project_id: str, agent_id: str, body: ProjectConnectionsIn, user: Me) -> dict:
+        """联合项目里给自己的 Agent 逐个打开连接器（默认都关）。"""
+        network.set_project_connections(project_id, agent_id, body.connection_ids, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    # ---- 我的技能、我的连接器（只有自己看得到） ----
+    @app.get("/api/me/skills")
+    def my_skills(user: Me) -> list[dict]:
+        return network.my_skills(user.id)
+
+    @app.get("/api/me/skills/{name}")
+    def my_skill(name: str, user: Me) -> dict:
+        return network.my_skill(name, user.id)
+
+    @app.put("/api/me/skills")
+    def save_my_skill(body: SkillIn, user: Me) -> dict:
+        return network.save_my_skill(body.name, body.description, body.body, user.id)
+
+    @app.post("/api/me/skills/upload")
+    async def upload_my_skill(request: Request, user: Me) -> dict:
+        entries = await skill_package(request)
+        return await run_in_threadpool(network.upload_my_skill, entries, user.id)
+
+    @app.post("/api/me/skills/{name}/files")
+    def add_my_skill_file(name: str, body: SkillFileIn, user: Me) -> dict:
+        return network.add_my_skill_file(name, body.path, body.content.encode(), user.id)
+
+    @app.delete("/api/me/skills/{name}")
+    def delete_my_skill(name: str, user: Me) -> dict:
+        network.delete_my_skill(name, user.id)
+        return {"ok": True}
+
+    @app.get("/api/connectors")
+    def connector_catalog(user: Me) -> list[dict]:
+        """部署方提供的云端连接器（名字、描述、要填什么）。地址与接入方式不对外。"""
+        return network.connector_catalog()
+
+    @app.get("/api/me/connections")
+    def my_connections(user: Me) -> list[dict]:
+        return network.my_connections(user.id)
+
+    @app.post("/api/me/connections")
+    async def authorize(body: AuthorizeIn, user: Me) -> dict:
+        # 会试连外部服务：放到线程里
+        return await asyncio.to_thread(network.authorize_connector, body.connector_id, body.values, user.id,
+                                       body.agent_ids)
+
+    @app.post("/api/me/connections/custom")
+    async def add_custom(body: CustomConnectorIn, user: Me) -> dict:
+        return await asyncio.to_thread(network.add_custom_connector, body.name, body.url, body.header, body.value,
+                                       user.id, body.agent_ids)
+
+    @app.post("/api/me/connections/{connection_id}/check")
+    async def recheck(connection_id: str, user: Me) -> dict:
+        return await asyncio.to_thread(network.recheck_connection, connection_id, user.id)
+
+    @app.delete("/api/me/connections/{connection_id}")
+    def revoke(connection_id: str, user: Me) -> dict:
+        network.revoke_connection(connection_id, user.id)
+        return {"ok": True}
+
+    @app.get("/api/me/connections/{connection_id}/calls")
+    def connection_calls(connection_id: str, user: Me) -> list[dict]:
+        return network.connection_calls(connection_id, user.id)
 
     # ---- 对话 ----
     # ---- 项目会话：人和自己的助理在项目里的私下对话，只有这个人看得到（不变量 18） ----
@@ -762,6 +927,16 @@ def create_app(network: Network) -> FastAPI:
         text, is_error = await asyncio.to_thread(network.handle_tool, body.token, body.tool, body.args)
         return {"text": text, "is_error": is_error}
 
+    # 云端连接器：运行时经 mcp_connectors.py 回调。网络按令牌认定这一轮能用哪些，带上凭证代为调用
+    @app.post("/internal/connectors/list")
+    async def connector_list(body: ConnectorCallIn) -> dict:
+        return {"tools": await asyncio.to_thread(network.connector_tools, body.token)}
+
+    @app.post("/internal/connectors/call")
+    async def connector_call(body: ConnectorCallIn) -> dict:
+        text, is_error = await asyncio.to_thread(network.connector_call, body.token, body.tool, body.args)
+        return {"text": text, "is_error": is_error}
+
     @app.post("/internal/approval")
     async def approval(body: ApprovalIn) -> dict:
         # 阻塞到 Agent 所有者决定或超时；dsh 那头的应答插件一直等着
@@ -783,12 +958,13 @@ class AgentNetServer(uvicorn.Server):
 
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
-                  models: str | None = None) -> Network:
+                  models: str | None = None, connectors: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
     return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
-                   models=ModelCatalog(Path(models).resolve()) if models else None)
+                   models=ModelCatalog(Path(models).resolve()) if models else None,
+                   connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None)
 
 
 def main() -> None:
@@ -799,15 +975,20 @@ def main() -> None:
     p.add_argument("--dsh-bin", default="dsh")
     p.add_argument("--models", default=os.environ.get("AGENTNET_MODELS"),
                    help="云侧预置模型目录（JSON，改了就生效）；默认 <data>/models.json，没有就不限制")
+    p.add_argument("--connectors", default=os.environ.get("AGENTNET_CONNECTORS"),
+                   help="云端连接器目录（JSON，改了就生效）；默认 <data>/connectors.json，没有就不提供云端连接器")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=os.environ.get("AGENTNET_HOST", "127.0.0.1"))
     args = p.parse_args()
 
-    network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models)
+    network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
+                            connectors=args.connectors)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     catalog = network.models
     if catalog.active:
         print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")
+    if network.connectors.specs():
+        print(f"云端连接器：{network.connectors.path}（{len(network.connectors.specs())} 个）")
     config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
     AgentNetServer(config, network).run()

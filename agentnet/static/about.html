@@ -464,13 +464,15 @@ footer a { color: var(--text-2); }
           <li>按权限生成插件覆盖层，沙箱只能写自己的工作目录</li>
           <li>私有目录每轮挂载，写回时三方合并，冲突另存副本</li>
           <li>工作目录以外的写，由 Agent 所有者逐次批准</li>
+          <li>外部服务由网络带上凭证代为调用，运行时拿不到凭证</li>
         </ul></article>
       <div class="mid" aria-hidden="true">同一张网</div>
       <article class="card reveal"><h3>用户端侧<small>device · Claude Code / Codex / dsh</small></h3>
         <ul>
-          <li>出站连接器，不开任何入站端口；设备令牌可单独吊销</li>
+          <li>Matrix 客户端只出站，不开任何入站端口；设备授权可单独吊销</li>
           <li>私有目录留在你的电脑上，网络不读、不注入</li>
           <li>离线是等待，不是失败：上线后消费积压的任务</li>
+          <li>你本机 AI 工具里配好的服务，每一轮只开网络允许的那几个</li>
         </ul></article>
     </div>
     <p class="note reveal"><b>能力报告</b>：每个运行时声明它能强制哪些权限。做不到的不会假装授予，自动收窄并写明原因。权限是网络算出来的，也是运行时真正兑现的。</p>
@@ -524,9 +526,10 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>治理与审批</h4><p>网络不自动建 Agent，只接受提议、由人批准；工作区外溢由所有者逐次批准；每次越权都留痕</p></div>
             <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（纲要、决定、文件、资源引用）按版本推送给成员</p></div>
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经联合项目</p></div>
+            <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，联合项目里逐个打开；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
             <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
           </div>
-          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/internal/tools</code><code>/internal/approval</code><code>/api/devices/connect</code></div>
+          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code></div>
         </div></div>
       </div>
 
@@ -542,9 +545,11 @@ footer a { color: var(--text-2); }
           <li><code>conversations/&lt;id&gt;/</code>每个席位独立的工作目录</li>
           <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
           <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
-          <li><code>projects/&lt;id&gt;/</code>档案文件与变更日志 <code>log.jsonl</code></li>
+          <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code></li>
+          <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
+          <li><code>vault/</code>连接器凭证，加密保存，只在代调用时解开</li>
           <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
-          <li><code>models.json</code>云侧预置模型目录，改文件即生效</li>
+          <li><code>models.json</code> · <code>connectors.json</code>云侧预置模型与云端连接器目录，改文件即生效</li>
         </ul></div></div>
       </div>
 
@@ -559,8 +564,9 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-cloud"><div><div class="parts">
-          <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型</p></div>
+          <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型；只读网络给的技能，不读服务机上的</p></div>
           <div class="part"><h4>网络工具</h4><p>stdio MCP 服务回调 <code>/internal/tools</code>，凭这一轮的执行上下文令牌</p></div>
+          <div class="part"><h4>连接器桥</h4><p>外部服务的工具也回调网络（<code>/internal/connectors</code>），网络查这一轮能用哪些，带上凭证代为调用并记录</p></div>
           <div class="part"><h4>审批应答</h4><p>沙箱升权申请转给 Agent 所有者决定，从不自动批准</p></div>
           <div class="part"><h4>私有目录</h4><p>每轮挂载进工作目录，写回时按文件三方合并，冲突另存副本</p></div>
         </div></div></div>
@@ -570,13 +576,14 @@ footer a { color: var(--text-2); }
         <button type="button" class="node-head" aria-expanded="false" aria-controls="d-device">
           <span><span class="node-kind">Device · 端侧</span>
             <b>你电脑上的 Agent</b>
-            <span class="node-sum">用你自己的 Claude Code、Codex 或 dsh，经连接器接进网络。</span></span>
+            <span class="node-sum">用你自己的 Claude Code、Codex 或 dsh，经 Matrix 客户端接进网络。</span></span>
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-device"><div><div class="parts">
-          <div class="part"><h4>matrix-connect 连接器</h4><p>只出站，不开入站端口；一个连接器同时提供多个 harness</p></div>
-          <div class="part"><h4>本机桥</h4><p>harness 的网络工具调本机 <code>127.0.0.1</code> 的桥，再经 WebSocket 转给网络</p></div>
+          <div class="part"><h4>Matrix 客户端</h4><p><code>matrix-connect</code> 只出站，不开入站端口；一个客户端同时提供本机的多个 AI 工具</p></div>
+          <div class="part"><h4>本机桥</h4><p>AI 工具的网络工具调本机 <code>127.0.0.1</code> 的桥，再经 WebSocket 转给网络</p></div>
           <div class="part"><h4>设备码配对</h4><p>在浏览器里批准；令牌只存哈希，可单独吊销；可装成后台服务</p></div>
+          <div class="part"><h4>只开允许的服务</h4><p>上线时只报本机 AI 工具里配了哪些服务（名字）；每一轮只开网络允许的，技能随任务下发</p></div>
           <div class="part"><h4>私有目录留在本机</h4><p>网络不读、不注入；离线时任务排队，上线后接着消费</p></div>
         </div></div></div>
       </div>
@@ -595,7 +602,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>18 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>19 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -606,7 +613,11 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">09</span><b>知识只显式共享</b><span>结果只对产生者与直接委托方可见</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">10</span><b>身份由网络认定</b><span>运行期令牌识别调用方，不信任模型自报</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">11</span><b>越权必留痕</b><span>每次不符都写进记录、发出事件</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">13</span><b>无权限即不存在</b><span>看不到的东西一律 404，事件推送前按人过滤</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">14</span><b>外溢由所有者批准</b><span>工作目录以外的写，逐次批准、只对那一次有效</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">17</span><b>项目档案只走网络</b><span>写入只经人的操作或档案工具，留变更日志</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；联合项目里默认关</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>
@@ -628,7 +639,7 @@ footer a { color: var(--text-2); }
     <div class="dreams">
       <article class="card dream reveal"><span class="ix" aria-hidden="true">01</span>
         <h3>能力像域名一样被发现</h3>
-        <p>说出你需要什么，网络找到能做的节点：不在乎它在哪台机器、哪个 harness、属于哪个组织，只在乎它被授权做什么。</p>
+        <p>说出你需要什么，网络找到能做的节点：不在乎它在哪台机器、哪个 AI 工具、属于哪个组织，只在乎它被授权做什么。</p>
         <div class="base">能力描述 · 项目成员 · 运行位置是节点属性</div></article>
       <article class="card dream reveal"><span class="ix" aria-hidden="true">02</span>
         <h3>网络在缺口处长出新节点</h3>
@@ -688,8 +699,8 @@ uv run agentnet</code></pre></article>
         <pre><code>@Product Strategy
 研究一个新的 AI 产品机会</code></pre></article>
       <article class="card reveal"><span class="tag">03 · 接入电脑</span>
-        <h3>让本机 harness 成为节点</h3>
-        <p>连接器检测本机的 Claude Code、Codex、dsh，在浏览器里批准配对后，它们就能作为 Agent 加入项目。</p>
+        <h3>让本机 AI 工具成为节点</h3>
+        <p>Matrix 客户端检测本机的 Claude Code、Codex、dsh，在浏览器里批准配对后，它们就能作为 Agent 加入项目。</p>
         <pre><code>uv run matrix-connect setup \
   http://127.0.0.1:8765</code></pre></article>
     </div>

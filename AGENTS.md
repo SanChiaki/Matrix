@@ -36,7 +36,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 委托、收件箱、失败与续接、看板与用户任务 | [docs/reference/execution.md](docs/reference/execution.md) |
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
-| 端侧运行时、连接器、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
+| 连接器（外部服务）与技能，个人与项目两层 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
+| 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
 | 需求与实现状态 | [REQUIREMENTS.md](REQUIREMENTS.md) |
@@ -53,6 +54,11 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `agentnet/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `agentnet/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
+| `agentnet/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
+| `agentnet/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `AGENTNET_CONNECTORS`），热加载；地址只来自这里 |
+| `agentnet/vault.py` | 连接器凭证的加密保管（Fernet，`AGENTNET_VAULT_KEY` 或 `<data>/vault.key`） |
+| `agentnet/mcp_client.py` | 网络这一侧的远程 MCP 客户端（Streamable HTTP，JSON / SSE），代调用云端连接器 |
+| `agentnet/mcp_connectors.py` | 运行时这一侧的 stdio 桥：把连接器工具转发到 `/internal/connectors/*`，只带执行上下文令牌 |
 | `agentnet/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `AGENTNET_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
 | `agentnet/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `agentnet/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
@@ -61,7 +67,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `agentnet/scripted.py` | 脚本运行时的场景处理器 |
 | `agentnet/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `agentnet/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_migration.py`（旧数据迁移）、`test_attachments.py`（对话附件） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_migration.py`（旧数据迁移）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -75,6 +81,7 @@ uv run pytest -q                                # 全部测试（离线，不需
 uv run agentnet --runtime scripted              # 启动服务 http://127.0.0.1:8765（离线）
 uv run agentnet                                 # 使用 DSH 运行时（需 PATH 中有 dsh）
 uv run agentnet --models models.json            # 云侧只允许 models.json 里的预置模型（改文件即生效）
+uv run agentnet --connectors connectors.json    # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
 uv run python -m agentnet.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect run                                        # 前台运行已配对的连接器
@@ -106,6 +113,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 16. **Agent 不跨信任域**：跨用户协作只能通过联合项目。
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
+19. **连接器凭证只属于授权的人**：网络代调用，联合项目里默认不开。
 
 ### 二、工作方式
 
@@ -136,6 +144,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
-- `/internal/tools`、`/internal/approval` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
-- 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准。
+- `/internal/tools`、`/internal/approval`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
+- 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准；覆盖层要一直关掉 dsh 的默认技能根。
+- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录，用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽。
 - 已知风险：沙箱只管写、不管读。接入第二个运行时或任何多机部署之前，必须先做读隔离。

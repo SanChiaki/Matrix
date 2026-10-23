@@ -30,6 +30,9 @@ class RunSpec:
     model: dict[str, str] | None = None
     harness: str | None = None        # 用哪个驱动；None = 连接器的默认驱动
     timeout_s: float | None = None    # 这一轮最长跑多久（Agent 设置）；None = 不限制
+    # 这一轮允许用的、本机 AI 工具里配置的服务名（电脑上的连接器）。驱动只开这些、其余关掉；
+    # None = 旧服务端没发这个字段，保持旧行为（不干预）
+    connectors: list[str] | None = None
 
 
 @dataclass
@@ -55,6 +58,7 @@ class Driver(Protocol):
 
     def capabilities(self) -> RuntimeCapabilities: ...
     def available(self) -> bool: ...                              # harness 是否装在本机
+    def services(self) -> list[str]: ...                          # 这个 AI 工具里用户配置的服务名（不含配置与凭证）
     def run(self, spec: RunSpec, ctx: RunCtx, cancel: threading.Event) -> RunOutcome: ...
 
 

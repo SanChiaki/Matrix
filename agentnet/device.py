@@ -34,13 +34,16 @@ RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation
                                    #  harness: 用设备上的哪个 harness；null = 默认（握手里的第一个）
                                    #  materials: [{path, data(base64)}] —— 项目文件与委托材料的只读副本
                                    #  home: "rw" | "ro" | null —— 私有目录怎么挂载；目录本身在连接器本机，不经过网络
+                                   #  connectors: [服务名] —— 这一轮允许用的、那个 AI 工具里配置的服务；驱动只开这些，
+                                   #  其余一律关掉（空 = 全关）。旧服务端不发这个字段
 CANCEL = "cancel"                  # {run_id}
 SHUTDOWN = "shutdown"
 
 # ---- 消息（连接器 → 服务器）----
 HELLO_OK = "hello.ok"              # {runtime, capabilities, runtimes?}
-                                   #  runtimes: [{runtime, capabilities}] —— 一台设备上的多个 harness，
+                                   #  runtimes: [{runtime, capabilities, connectors?}] —— 一台设备上的多个 harness，
                                    #  第一个是默认；旧连接器不带，等于只有 runtime 这一个
+                                   #  connectors: [服务名] —— 这个 AI 工具里用户自己配置的服务（只有名字，不带配置与凭证）
 RUN_EVENT = "run.event"            # {run_id, event}  —— 与 RunRequest.on_event 的事件同形
 RUN_RESULT = "run.result"          # {run_id, session_id, final_text, tool_calls, usage, ok, error}
 TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
@@ -77,6 +80,8 @@ class DeviceInfo:
     capabilities: RuntimeCapabilities
     protocol: int = PROTOCOL
     runtimes: dict[str, RuntimeCapabilities] = field(default_factory=dict)
+    # 各 harness 里配置的服务名（电脑上的连接器）；None = 旧客户端，没有报告
+    connectors: dict[str, list[str]] | None = None
 
     def __post_init__(self) -> None:
         if not self.runtimes:
@@ -132,6 +137,7 @@ class DeviceRuntime:
             "model": req.model, "materials": list(getattr(req, "materials", None) or []),
             "home": getattr(req, "home", None), "harness": req.harness,
             "timeout_s": req.timeout_s,
+            "connectors": list(getattr(req, "local_connectors", None) or []),
         }
         try:
             self.link.send(payload)
@@ -313,16 +319,31 @@ def capabilities_from_hello(msg: dict[str, Any]) -> DeviceInfo:
     raw = msg.get("capabilities") or {}
     default = _caps(str(msg.get("runtime") or raw.get("name") or "device"), raw)
     runtimes: dict[str, RuntimeCapabilities] = {}
+    connectors: dict[str, list[str]] | None = None
     for item in msg.get("runtimes") or []:
         name = str((item or {}).get("runtime") or "")[:40] if isinstance(item, dict) else ""
         if name and name not in runtimes and len(runtimes) < 16:
             runtimes[name] = _caps(name, item.get("capabilities") or {})
+            if isinstance(item.get("connectors"), list):
+                connectors = connectors or {}
+                connectors[name] = _service_names(item["connectors"])
     if default.name in runtimes:   # 默认 harness 以 runtimes 里的那份为准，并排在第一个
         default = runtimes.pop(default.name)
         runtimes = {default.name: default, **runtimes}
     elif runtimes:
         default = next(iter(runtimes.values()))
-    return DeviceInfo(runtime=default.name, capabilities=default, protocol=proto, runtimes=runtimes)
+    return DeviceInfo(runtime=default.name, capabilities=default, protocol=proto, runtimes=runtimes,
+                      connectors=connectors)
+
+
+def _service_names(raw: list[Any]) -> list[str]:
+    """客户端报告的服务名：只收字符串，去重，限长限量（只用于展示与匹配，不进任何命令行）。"""
+    out: list[str] = []
+    for x in raw:
+        name = str(x).strip()[:80] if isinstance(x, str) else ""
+        if name and name not in out and len(out) < 100:
+            out.append(name)
+    return out
 
 
 def _caps(name: str, raw: dict[str, Any]) -> RuntimeCapabilities:
@@ -333,7 +354,9 @@ def _caps(name: str, raw: dict[str, Any]) -> RuntimeCapabilities:
                                session_resume=bool(raw.get("session_resume", False)),
                                steer=bool(raw.get("steer", False)),
                                approval=str(raw.get("approval") or "none"),
-                               sandbox=str(raw.get("sandbox") or "none"))
+                               sandbox=str(raw.get("sandbox") or "none"),
+                               # 旧客户端不报告：技能当文件下发，在提示词里列出（它的 harness 不一定会去找）
+                               skills="native" if raw.get("skills") == "native" else "prompt")
 
 
 @dataclass

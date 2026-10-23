@@ -22,7 +22,7 @@ from .. import homedir
 from ..workdir import safe_rel
 from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
-from ..models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES
+from ..models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES, SKILLS
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
 
@@ -99,10 +99,19 @@ class Connector:
             c = d.capabilities()
             return {"name": c.name, "placement": c.placement, "enforcement": c.enforcement,
                     "session_resume": c.session_resume, "steer": c.steer,
-                    "approval": c.approval, "sandbox": c.sandbox}
+                    "approval": c.approval, "sandbox": c.sandbox, "skills": c.skills}
+
+        def services_of(d: Driver) -> list[str]:
+            """这个 AI 工具里用户配置的服务：只报名字（电脑上的连接器），配置与凭证留在本机。"""
+            get = getattr(d, "services", None)
+            try:
+                return list(get()) if callable(get) else []
+            except Exception:  # noqa: BLE001 —— 读不出来就当没有，不影响上线
+                return []
         return {"type": HELLO_OK, "protocol": PROTOCOL, "runtime": self.driver.name,
                 "capabilities": caps_of(self.driver),
-                "runtimes": [{"runtime": name, "capabilities": caps_of(d)} for name, d in self.drivers.items()]}
+                "runtimes": [{"runtime": name, "capabilities": caps_of(d), "connectors": services_of(d)}
+                             for name, d in self.drivers.items()]}
 
     def serve_forever(self) -> None:
         """收到消息就处理；连接断开时抛 DeviceError（由外层按退避重连）。"""
@@ -162,7 +171,7 @@ class Connector:
         try:
             root = self._root_for_fetch(msg)
             path = self._safe_path(root, str(msg.get("path", "")))
-            for top in (AGENT_HOME, PROJECT_FILES):  # 私有目录不经过网络；project/ 是下发的副本，不能当成产物回传
+            for top in (AGENT_HOME, PROJECT_FILES, SKILLS, ".claude"):  # 私有目录不经过网络；下发的副本不能当成产物回传
                 if (root / top).resolve() in (path, *path.parents):
                     raise DeviceError(f"不能发布 {top}/ 里的文件")
             reply["data"] = base64.b64encode(path.read_bytes()).decode()
@@ -209,7 +218,9 @@ class Connector:
             authority=list(msg.get("authority") or []), tool_names=list(msg.get("tool_names") or []),
             session_id=msg.get("session_id"), model=msg.get("model"),
             harness=str(msg["harness"]) if msg.get("harness") else None,
-            timeout_s=_limit(msg.get("timeout_s")))
+            timeout_s=_limit(msg.get("timeout_s")),
+            connectors=[str(x) for x in msg["connectors"] if isinstance(x, str)]
+            if isinstance(msg.get("connectors"), list) else None)
         run.workdir = workdir
         run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
@@ -217,7 +228,7 @@ class Connector:
     @staticmethod
     def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
         """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        for top in ("group", PROJECT_FILES, ATTACHMENTS, "materials"):  # group/：旧版下发的
+        for top in ("group", PROJECT_FILES, ATTACHMENTS, SKILLS, "materials"):  # group/：旧版下发的
             shutil.rmtree(workdir / top, ignore_errors=True)
         for item in materials:
             rel = str(item.get("path", ""))

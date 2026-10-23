@@ -56,7 +56,7 @@ function showGate(mode) {
   $("#auth-form").hidden = mode === "onboard";
   $("#onboard-form").hidden = mode !== "onboard";
   if (mode === "onboard") {
-    $("#ob-auth").innerHTML = "<legend>权限</legend>" + authorityBoxes(["web.research", "file.write"]);
+    $("#ob-auth").innerHTML = "<legend>权限</legend>" + authorityBoxes(["web.research", "file.write", "connector.use"]);
     $("#ob-name").focus();
     return;
   }
@@ -159,8 +159,21 @@ async function start() {
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
+  const upMine = (folder) => pickSkillPackage("/api/me/skills", folder).then(async (x) => {
+    if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
+  }).catch((e) => alert(e.message));
+  $("#skill-new").addEventListener("click", () => upMine(false));
+  $("#conn-custom").addEventListener("click", () => { S.connPanel = "__custom"; S.connSel = null; renderConnectorsView(); $("#cu-name")?.focus(); });
+  $("#skill-new-dir").addEventListener("click", () => upMine(true));
+  // 设备详情里的服务标签：跳到连接器页并选中它
+  document.addEventListener("click", (e) => {
+    const t = e.target.closest("[data-conn]");
+    if (t) { S.connSel = t.dataset.conn; S.connPanel = null; }
+    const tab = e.target.closest("[data-pagetab]");  // 从别处跳到项目页的某个标签
+    if (tab) S.pendingTab = tab.dataset.pagetab;
+  });
   $("#device-new").addEventListener("click", () => {
-    if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
+    if (S.devicePanel?.token && !confirm("设备授权码还没确认复制，离开后就再也看不到了。确定离开？")) return;
     S.devicePanel = "new"; renderDeviceDetail();
   });
   $("#project-new").addEventListener("click", () => { S.projectSel = null; renderProjectsView(); renderProjectEditor(true); });
@@ -192,7 +205,7 @@ async function loadModels() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "projects", "board", "agents", "devices"];
+  const PLAIN = ["network", "projects", "board", "agents", "skills", "connectors", "devices"];
   // 参照 Raft：#g-<项目> 打开项目的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   // #pair=<配对码>：连接器 setup 打开的批准页（docs/device-runtimes.md 第 2.5 节）
   const pair = hash.match(/^pair=([A-Za-z0-9-]{4,16})$/);
@@ -234,6 +247,7 @@ function show(view) {
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
   if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}` : `#${view}`);
   if (view === "agents") loadModels();
+  if (["agents", "skills", "connectors", "projects", "chats", "devices"].includes(view)) loadMine();
   render();
 }
 
@@ -257,7 +271,7 @@ function render() {
   $("#todo-count").textContent = todo;
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
   ({ network: renderGraph, projects: renderProjectsView, board: loadBoard, agents: renderAgentsView,
-     chats: renderChats, devices: renderDevicesView })[S.view]();
+     chats: renderChats, devices: renderDevicesView, skills: renderSkillsView, connectors: renderConnectorsView })[S.view]();
 }
 
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
@@ -312,8 +326,8 @@ function renderBoard() {
       <span class="actions"><button type="button" class="sm" data-inv="${esc(iv.project_id)}" data-ok="1">接受</button>
         <button type="button" class="ghost sm" data-inv="${esc(iv.project_id)}" data-ok="0">拒绝</button></span></li>`),
     ...(b.suggestions || []).map((x) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
-      <span><b>${esc(x.by_agent ? aname(x.by_agent) : "参与者")}</b> 建议修改「${esc(x.project_name)}」的纲要</span>
-      <a class="button sm" href="#p-${esc(x.project_id)}">去看看</a></li>`),
+      <span><b>${esc(x.by_agent ? aname(x.by_agent) : "参与者")}</b> ${x.kind === "skill" ? `提议给「${esc(x.project_name)}」新增技能 <code>${esc(x.skill_name)}</code>` : `建议修改「${esc(x.project_name)}」的纲要`}</span>
+      <a class="button sm" href="#${x.kind === "skill" ? `project-${esc(x.project_id)}` : `p-${esc(x.project_id)}`}" ${x.kind === "skill" ? 'data-pagetab="skills"' : ""}>去看看</a></li>`),
   ];
   $("#todo").hidden = !todo.length;
   const editing = $("#todo-list").contains(document.activeElement) && document.activeElement.matches("textarea");
@@ -453,6 +467,7 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "tool.call" || ev.type === "runtime.invoke") return;  // 已由 run.progress 覆盖
+  if (ev.type === "skills.updated" || ev.type === "connection.updated") { loadMine(true).then(schedule); return; }
   if (ev.type === "project.invited" && S.view === "board") loadBoard();
   if (ev.type === "project.left" && d.user_id === S.me?.id && S.conv?.project_id === d.project_id) {
     S.convId = null; S.conv = null; location.hash = "projects";  // 自己退出 / 被移出：离开这个项目
@@ -652,7 +667,7 @@ function renderAgents() {
         <div class="card-head">${avatar(a.name)}<span class="name">${esc(a.name)}</span>${pill(a.status)}</div>
         <p class="card-desc">${esc(a.description)}</p>
         <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}${a.device_runtime
-          ? `<span class="tag model" title="端侧运行时">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "本机") : "设备离线"}</span>` : ""}</div>
+          ? `<span class="tag model" title="在我的电脑上">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "我的电脑") : "设备离线"}</span>` : ""}</div>
       </button>
       <div class="card-foot"><span>${a.mine ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
         ${!a.mine ? '<span class="muted">联合项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
@@ -674,7 +689,7 @@ function readModel(f) {
 
 // 实际用的模型由服务器算（model_info）：预置 / 自己填的 / 目录默认 / 运行时默认，以及选的是否已下架
 const effectiveModel = (a) => a.model_info?.model || (a.device_runtime ? null : S.defaultModel);
-const modelSourceCN = { preset: "预置模型", custom: "单独配置", default: "默认模型", runtime: "运行时默认" };
+const modelSourceCN = { preset: "预置模型", custom: "单独配置", default: "默认模型", runtime: "默认" };
 const modelTag = (a) => {
   const i = a.model_info, m = effectiveModel(a);
   if (!m) return "";
@@ -684,7 +699,7 @@ const modelTag = (a) => {
 };
 function modelDd(a) {
   const i = a.model_info, m = effectiveModel(a);
-  if (!m) return a.device_runtime ? 'harness 默认 <span class="muted">（端侧）</span>' : "运行时默认";
+  if (!m) return a.device_runtime ? 'AI 工具里的默认模型 <span class="muted">（我的电脑上）</span>' : "默认";
   const text = i?.label ? `${i.label} · ${modelLabel(m)}` : modelLabel(m);
   const note = i?.unavailable ? '<span class="hint warn">选的模型已下架，现在用默认模型</span>'
     : i?.source === "default" || i?.source === "runtime" || !i ? ' <span class="muted">（默认）</span>' : "";
@@ -694,7 +709,7 @@ const catalogOn = () => !!S.models?.active;
 // 预置模型下拉框的选项；sel 是当前选中的 id（"" = 默认）
 function presetOptions(sel) {
   const d = S.models.models.find((m) => m.id === S.models.default);
-  const dflt = d ? `默认（${d.label}）` : S.defaultModel ? `默认（${modelLabel(S.defaultModel)}）` : "运行时默认";
+  const dflt = d ? `默认（${d.label}）` : S.defaultModel ? `默认（${modelLabel(S.defaultModel)}）` : "默认";
   return `<option value="">${esc(dflt)}</option>` + S.models.models.map((m) =>
     `<option value="${esc(m.id)}" ${m.id === sel ? "selected" : ""}>${esc(m.label)} · ${esc(m.model)}${m.reasoning_effort ? ` · ${esc(m.reasoning_effort)}` : ""}</option>`).join("");
 }
@@ -716,7 +731,7 @@ function renderAgentEditor(isNew = false) {
   const box = $("#agent-editor"), a = agent(S.agentSel);
   if (!a && !isNew) { box.innerHTML = placeholder("选择一个 Agent 编辑，或新建。"); return; }
   if (a && !a.mine) { renderAgentReadonly(box, a); return; }
-  const x = a || { name: "", description: "", capabilities: [], authority: ["web.research"], chat_enabled: true };
+  const x = a || { name: "", description: "", capabilities: [], authority: ["web.research", "connector.use"], chat_enabled: true };
   box.innerHTML = `<h2 class="panel-title">${a ? esc(a.name) : "新建 Agent"}</h2>
     <p class="muted">${a ? "修改后点击保存生效。" : "定义它能做什么，以及最多能被授予哪些权限。"}</p>
     <form class="editor" id="agent-form">
@@ -727,29 +742,30 @@ function renderAgentEditor(isNew = false) {
       <div class="field"><label for="af-caps">能力</label><input id="af-caps" name="capabilities" value="${esc(x.capabilities.join(", "))}">
         <p class="hint">逗号分隔。</p></div>
       <fieldset class="checks"><legend>自身权限 · 委托只能在此之内再收窄</legend>${authorityBoxes(x.authority)}</fieldset>
-      ${a && a.runtime_capabilities ? `<div class="field"><label>这个运行时的实际能力</label>
+      ${a && a.runtime_capabilities ? `<div class="field"><label>它跑的地方实际能做到的</label>
         <div class="card-meta">${Object.entries(a.runtime_capabilities.enforcement).map(([k, v]) =>
           `<span class="tag ${v === "enforced" ? "ok" : ""}" title="${esc(v)}">${esc(k)}${v === "enforced" ? "" : ` · ${esc(v === "advisory" ? "仅约定" : "不可用")}`}</span>`).join("")}</div>
         <p class="hint">只有“可强制”的权限会进入有效权限；其余会在委托时自动收窄，并写明原因。</p></div>` : ""}
+      ${a ? abilityBoxes(a) : ""}
       <fieldset class="model"><legend>运行位置</legend>
         <div class="field"><label for="af-device">运行在</label>
           <select id="af-device" name="device_runtime">
-            <option value="">平台云侧（内置 dsh）</option>
+            <option value="">云端</option>
             ${placementOptions(x)}
           </select>
-          <p class="hint">${S.devices?.length ? "端侧 Agent 在你这台电脑上用选定的 harness 跑，用你本机的登录与文件；它读不到服务器上的数据。" : "还没有设备。先到「设备」页连接一台，才可以选择端侧运行。"}</p>
+          <p class="hint">${S.devices?.length ? "选了你的电脑，它就在那台电脑上用选定的 AI 工具跑，用你本机的登录与文件；它读不到服务器上的数据。" : "还没有设备。先到「设备」页连接一台，才可以让它在你的电脑上跑。"}</p>
         </div>
       </fieldset>
       <fieldset class="model"><legend>模型</legend>
         ${catalogOn() ? `<div class="field" id="af-preset-box"><label for="af-preset">预置模型</label>
           <select id="af-preset" name="model_preset">${presetOptions(x.model_info?.source === "preset" ? x.model_info.preset : "")}</select>
-          <p class="hint">${x.model_info?.unavailable ? '<span class="warn">原来选的模型已下架，现在用默认模型；重新选一个后保存。</span> ' : ""}平台云侧的 Agent 只能用部署方预置的模型。</p></div>` : ""}
+          <p class="hint">${x.model_info?.unavailable ? '<span class="warn">原来选的模型已下架，现在用默认模型；重新选一个后保存。</span> ' : ""}云端的 Agent 只能用部署方预置的模型。</p></div>` : ""}
         <div class="model-fields" id="af-free">
-          <div class="field"><label for="af-provider">Provider</label><input id="af-provider" name="provider" value="${esc(x.model?.provider || "")}" placeholder="${esc(S.defaultModel?.provider || "")}"></div>
-          <div class="field"><label for="af-model">Model</label><input id="af-model" name="model" value="${esc(x.model?.model || "")}" placeholder="${esc(S.defaultModel?.model || "")}"></div>
+          <div class="field"><label for="af-provider">模型服务</label><input id="af-provider" name="provider" value="${esc(x.model?.provider || "")}" placeholder="${esc(S.defaultModel?.provider || "")}"></div>
+          <div class="field"><label for="af-model">模型</label><input id="af-model" name="model" value="${esc(x.model?.model || "")}" placeholder="${esc(S.defaultModel?.model || "")}"></div>
           <div class="field"><label for="af-effort">推理强度</label><input id="af-effort" name="effort" value="${esc(x.model?.reasoning_effort || "")}" placeholder="默认"></div>
         </div>
-        <p class="hint" id="af-free-hint">留空则使用${catalogOn() ? " harness 自己的默认模型。端侧用的是你本机 harness 里的模型" : `运行时默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。provider 必须是运行时里已配置的`}。</p>
+        <p class="hint" id="af-free-hint">留空则使用${catalogOn() ? " AI 工具自己的默认模型。在你电脑上跑时用的是你本机 AI 工具里的模型" : `默认模型${S.defaultModel ? `（${esc(modelLabel(S.defaultModel))}）` : ""}。模型服务必须是已经配置好的`}。</p>
       </fieldset>
       <fieldset class="model"><legend>运行上限</legend>
         <div class="model-fields">
@@ -788,12 +804,14 @@ function renderAgentEditor(isNew = false) {
       max_delegations: f.max_delegations.value ? Number(f.max_delegations.value) : null,
       ...placementOf(f.device_runtime.value),
     };
+    if (a && f.querySelector("#af-skills")) body.skills = [...f.querySelectorAll('[name="skill"]:checked')].map((c) => c.value);
+    if (a && f.querySelector("#af-conns")) body.connections = [...f.querySelectorAll('[name="conn"]:checked')].map((c) => c.value);
     if (usePreset()) {
       Object.assign(body, { model: null, model_preset: f.model_preset.value || null });
     } else if (f.device_runtime.value || S.models) {
       // 端侧总是自由填写；云侧要等目录取回来才知道该怎么填（没取到时不改模型，免得把选好的预置模型冲掉）
       if ((f.provider.value.trim() !== "") !== (f.model.value.trim() !== "")) {
-        $(".error", f).textContent = "Provider 与 Model 要么都填，要么都留空。"; return;
+        $(".error", f).textContent = "模型服务与模型要么都填，要么都留空。"; return;
       }
       Object.assign(body, { model: readModel(f), model_preset: null });
     }
@@ -912,6 +930,8 @@ const ICON = {
   link: svgIcon('<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>'),
   copy: svgIcon('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>'),
   upload: svgIcon('<path d="M12 20V9"/><path d="m7 13 5-5 5 5"/><path d="M5 4h14"/>'),
+  skill: svgIcon('<path d="M5 3h10l4 4v14H5z"/><path d="M8.5 10h7M8.5 13.5h7M8.5 17h4"/>'),
+  plug: svgIcon('<path d="M9 2.5v4M15 2.5v4"/><path d="M6 6.5h12v4a6 6 0 0 1-12 0z"/><path d="M12 16.5v5"/>'),
 };
 const fileIcon = (ext) => `<span class="file-ico ${FILE_KIND[ext] || "other"}">${ICON.file}</span>`;
 const fileUrl = (pid, name) => `/api/projects/${encodeURIComponent(pid)}/files/${encodeURIComponent(name)}`;
@@ -931,8 +951,9 @@ async function renderProjectPage(force = false) {
   if (!d || S.projectSel !== g.id) return;
   const st = S.assets = S.assets?.pid === g.id ? S.assets
     : { pid: g.id, tab: "files", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
+  if (S.pendingTab) { st.tab = S.pendingTab; S.pendingTab = null; }
   // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
-  const sig = JSON.stringify([d, g.name, g.description, st.tab, st.by, st.asc, st.note]);
+  const sig = JSON.stringify([d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog]);
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
@@ -941,12 +962,12 @@ async function renderProjectPage(force = false) {
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
       <a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}</div>
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("needs", "需要的连接器", (d.connector_readiness || []).length)}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
     st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => $(`#pt-${st.tab}`)?.focus());
   }));
-  (st.tab === "refs" ? renderRefsTab : renderFilesTab)($("#pp-panel", page), d, st);
+  ({ refs: renderRefsTab, skills: renderSkillsTab, needs: renderNeedsTab }[st.tab] || renderFilesTab)($("#pp-panel", page), d, st);
 }
 
 const assetNote = (st) => st.note ? `<p class="asset-note ${st.bad ? "bad" : ""}" role="status">${esc(st.note)}</p>` : "";
@@ -1078,6 +1099,100 @@ function renderRefsTab(box, d, st) {
   box.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); b.title = "已复制"; b.classList.add("ok"); setTimeout(() => { b.title = "复制位置"; b.classList.remove("ok"); }, 1200); }
     catch { prompt("复制这个位置：", b.dataset.copy); }
+  }));
+}
+
+// 项目技能：档案的一部分（不变量 17）。主持人写或批准提议，所有参与者能读全文；Agent 每轮在工作目录的 skills/ 里拿到只读副本
+function renderSkillsTab(box, d, st) {
+  const host = d.is_host, list = d.skill_list || [];
+  const pend = d.suggestions.filter((x) => x.kind === "skill" && x.status === "pending");
+  box.innerHTML = `<p class="muted tab-intro">这个项目里大家约定的做法。成员 Agent 每一轮都会拿到，和它们自己技能库里的重名时用项目的。${host ? "" : "由主持人维护；Agent 可以提议，主持人批准后才生效。"}</p>
+    ${assetNote(st)}
+    ${pend.length ? `<section class="pending-skills" aria-label="等主持人决定的技能提议"><h3>提议 · ${pend.length}</h3><ul class="suggestions">${pend.map((x) => `<li>
+      <div class="who"><b>${esc(x.by_agent ? aname(x.by_agent) : d.participant_emails?.[x.by_user] || "")}</b> 提议新增技能 <code>${esc(x.skill_name)}</code></div>
+      <p>${esc(x.skill_description)}</p>${x.reason ? `<p class="muted">${esc(x.reason)}</p>` : ""}
+      <details><summary>做法</summary><div class="md">${renderMarkdown(x.text)}</div></details>
+      ${host ? `<div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">批准</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不批准</button></div>` : ""}
+      </li>`).join("")}</ul></section>` : ""}
+    <div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>什么时候用</th><th>作者</th><th>更新</th></tr></thead><tbody>
+      ${list.map((k) => `<tr class="${st.skill === k.name ? "selected" : ""}"><td class="name"><div class="cell"><span class="file-ico ref">${ICON.skill}</span>
+        <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button></div></td>
+        <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td></tr>`).join("")
+      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能包" : ""}。</td></tr>`}
+    </tbody></table></div>
+    ${host ? '<div class="actions"><button type="button" class="ghost" id="ps-new">上传技能（zip）</button><button type="button" class="ghost" id="ps-new-dir">上传文件夹</button></div>' : ""}
+    <div id="ps-detail"></div>`;
+  const base = `/api/projects/${d.id}/skills`;
+  const done = async (what, name) => {
+    st.note = what === "deleted" ? `已删除 ${name}` : what === "file" ? `已添加文件` : `已保存 ${name}`; st.bad = false;
+    st.skillNew = false; st.skill = what === "deleted" ? null : name;
+    await reload(); renderProjectPage(true);
+  };
+  box.querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => {
+    st.skill = st.skill === b.dataset.skill ? null : b.dataset.skill; st.skillNew = false; st.note = ""; renderProjectPage(true);
+  }));
+  const up = (folder) => pickSkillPackage(base, folder).then((x) => x && done("saved", x.name))
+    .catch((e) => { st.note = e.message; st.bad = true; renderProjectPage(true); });
+  $("#ps-new", box)?.addEventListener("click", () => up(false));
+  $("#ps-new-dir", box)?.addEventListener("click", () => up(true));
+  box.querySelectorAll("[data-sug]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api(`/api/projects/${d.id}/suggestions/${b.dataset.sug}`, { method: "POST", body: { accept: b.dataset.ok === "1" } }); st.note = ""; }
+    catch (e) { st.note = e.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
+  }));
+  const detail = $("#ps-detail", box);
+  const x = st.skill && list.find((k) => k.name === st.skill);
+  if (x) {
+    const by = x.by_agent ? `${aname(x.by_agent)} 提议，${d.participant_emails?.[x.approved_by] || "主持人"} 批准` : x.author || "";
+    detail.innerHTML = skillCardHtml(x, esc(by), host);
+    $("#sk-del", detail)?.addEventListener("click", async () => {
+      if (!confirm(`删除项目技能「${x.name}」？`)) return;
+      try { await api(`${base}/${encodeURIComponent(x.name)}`, { method: "DELETE" }); } catch (e) { $(".error", detail).textContent = e.message; return; }
+      await done("deleted", x.name);
+    });
+  }
+}
+
+// 需要的连接器：项目只声明需要什么，不持有任何人的授权；就绪状态按成员给，不给是谁的账号
+const READY_CN = { ready: ["ok", "就绪"], not_enabled: ["", "授权了，没在这里打开"], unauthorized: ["bad", "没授权"] };
+function renderNeedsTab(box, d, st) {
+  const host = d.is_host, needs = d.connector_readiness || [];
+  const refName = (id) => d.refs.find((r) => r.id === id)?.name;
+  box.innerHTML = `<p class="muted tab-intro">这个项目要用到的外部服务。项目不持有任何人的授权：每个成员的 Agent 用的是它所有者自己授权的${d.kind === "joint" ? "，而且要所有者在这个项目里打开" : ""}。要用别人的服务，就委托他的 Agent。</p>
+    ${assetNote(st)}
+    <ul class="needs">${needs.map((n) => `<li><div class="need-head"><span class="ability-ico">${ICON.plug}</span><b>${esc(n.name)}</b>
+        ${n.purpose ? `<span class="muted">${esc(n.purpose)}</span>` : ""}${n.ref_id && refName(n.ref_id) ? `<span class="tag">${esc(refName(n.ref_id))}</span>` : ""}
+        <span class="grow"></span>${host ? `<button type="button" class="icon-btn bad" data-rmneed="${esc(n.id)}" title="移除" aria-label="移除 ${esc(n.name)}">${ICON.trash}</button>` : ""}</div>
+      <ul class="ready">${n.members.map((m) => {
+        const [cls, t] = READY_CN[m.status] || ["", m.status], mine = agent(m.agent_id)?.mine;
+        const text = m.status === "not_enabled" && d.kind !== "joint" ? "授权了，没勾给它" : t;
+        return `<li><span class="r-dot ${cls}" aria-hidden="true"></span>${esc(m.agent)}<span class="muted">${mine ? "你的" : `${esc(m.owner || "")} 的`} · ${text}</span>
+          ${mine && m.status === "unauthorized" ? '<a href="#connectors">去授权</a>' : ""}${mine && m.status === "not_enabled" ? (d.kind === "joint" ? `<a href="#p-${esc(d.id)}">在成员栏里打开</a>` : '<a href="#connectors">勾给它</a>') : ""}</li>`;
+      }).join("") || '<li class="muted">项目里还没有成员</li>'}</ul></li>`).join("")
+      || `<li class="empty">还没有声明${host ? "，在下面添加" : "，由主持人添加"}。</li>`}</ul>
+    ${host ? `<form class="ref-add" id="pp-need-form" aria-label="添加需要的连接器">
+      <label class="sr-only" for="pn-conn">连接器</label>
+      <select id="pn-conn" required>${(S.catalog || []).map((k) => `<option value="${esc(k.id)}">${esc(k.name)}</option>`).join("")}
+        <option value="">其他（电脑上配好的服务）…</option></select>
+      <label class="sr-only" for="pn-other">服务名</label><input id="pn-other" maxlength="80" placeholder="服务名，如 notion" hidden>
+      <label class="sr-only" for="pn-purpose">用来做什么</label><input id="pn-purpose" maxlength="300" placeholder="用来做什么（可选）">
+      <label class="sr-only" for="pn-ref">关联的资源</label><select id="pn-ref"><option value="">不关联资源</option>${d.refs.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("")}</select>
+      <button type="submit">添加</button></form>` : ""}`;
+  const done = async (path, opts, msg) => {
+    try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    document.activeElement?.blur();
+    await reload(); renderProjectPage(true);
+  };
+  const sel = $("#pn-conn", box), other = $("#pn-other", box);
+  const sync = () => { if (other) { other.hidden = !!sel.value; other.required = !sel.value; } };
+  sel?.addEventListener("change", sync); sync();
+  $("#pp-need-form", box)?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const id = sel.value || other.value.trim();
+    done(`/api/projects/${d.id}/needs`, { method: "POST", body: { connector_id: id, purpose: $("#pn-purpose").value, ref_id: $("#pn-ref").value || null } }, "已添加");
+  });
+  box.querySelectorAll("[data-rmneed]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("不再声明需要这个连接器？")) done(`/api/projects/${d.id}/needs/${b.dataset.rmneed}`, { method: "DELETE" }, "已移除");
   }));
 }
 
@@ -1406,7 +1521,8 @@ async function renderArchive() {
   const stale = d.brief && d.brief_updated_at && (Date.now() / 1000 - d.brief_updated_at) > BRIEF_STALE_DAYS * 86400;
   const active = d.decisions.filter((x) => x.status === "active").reverse();
   const inactive = d.decisions.filter((x) => x.status !== "active").reverse();
-  const pend = d.suggestions.filter((x) => x.status === "pending");
+  const pend = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill");
+  const pendSkills = d.suggestions.filter((x) => x.status === "pending" && x.kind === "skill");
   const decision = (x) => `<li class="${x.status}"><div>${esc(x.text)}${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}</div>
     <div class="meta"><code>${esc(x.id)}</code> · ${esc(who(x))} · ${time(x.created_at)}${x.supersedes ? ` · 取代 <code>${esc(x.supersedes)}</code>` : ""}
       ${x.status === "active" ? `<button type="button" class="link" data-revoke="${esc(x.id)}">撤销</button>` : ` · ${x.status === "revoked" ? "已撤销" : "已被取代"}`}</div></li>`;
@@ -1425,6 +1541,12 @@ async function renderArchive() {
         ${x.reason ? `<p class="muted">${esc(x.reason)}</p>` : ""}<div class="md">${renderMarkdown(x.text)}</div>
         <div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">采纳</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不采纳</button></div></li>`).join("")}</ul>`
         : pend.length ? `<p class="hint">${pend.length} 条修改建议等主持人决定。</p>` : ""}
+    </section>
+    <section class="archive-sec" aria-labelledby="ar-skills"><h3 id="ar-skills">技能 · ${(d.skill_list || []).length}
+      <a class="h3-link" href="#project-${esc(d.id)}" data-pagetab="skills">在项目页查看</a></h3>
+      <ul class="files">${(d.skill_list || []).map((k) => `<li><code>${esc(k.name)}</code><span class="muted">${esc(k.description)}</span></li>`).join("")
+        || '<li class="empty">还没有项目技能。Agent 可以用 propose_skill 提议，主持人批准后生效。</li>'}</ul>
+      ${pendSkills.length ? `<p class="hint">${pendSkills.length} 条技能提议等${host ? "你" : "主持人"}决定，<a href="#project-${esc(d.id)}" data-pagetab="skills">去看看</a>。</p>` : ""}
     </section>
     <section class="archive-sec" aria-labelledby="ar-dec"><h3 id="ar-dec">决定 · ${active.length}</h3>
       <ul class="decisions">${active.map(decision).join("") || '<li class="empty">还没有决定</li>'}</ul>
@@ -1535,7 +1657,7 @@ function renderMembers() {
       aria-label="把 ${esc(a.name)} 移出项目" title="移出项目"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h8"/></svg></button>` : "";
   // 联合项目：标出属于谁；自己的 Agent 可以打开私有目录挂载（默认不挂载）
   const extra = (a) => joint && a.mine ? `${`<label class="switch home-mount" title="挂载后它在这个项目里能用自己的私有目录；其他参与方的消息可能诱导它带出里面的内容">
-        <input type="checkbox" data-home="${esc(a.id)}" ${g.home_enabled.includes(a.id) ? "checked" : ""}> 私有目录</label>`}` : "";
+        <input type="checkbox" data-home="${esc(a.id)}" ${g.home_enabled.includes(a.id) ? "checked" : ""}> 私有目录</label>`}${jointConns(g, a)}` : "";
   box.innerHTML = `<h3>成员 · ${members.length}</h3>
     <ul class="member-list">${members.map((a) => row(a, extra(a) + rm(a), joint ? (a.mine ? "你的" : `${a.owner_email || ""} 的`) : "")).join("")
       || '<li class="empty">还没有成员</li>'}</ul>
@@ -1550,6 +1672,12 @@ function renderMembers() {
     ${workdirsHtml(c)}`;
   bindWorkdirs(box, c);
   const err = (e) => { $(".error", box).textContent = e.message; };
+  box.querySelectorAll("[data-jconn]").forEach((cb) => cb.addEventListener("change", async () => {
+    const aid = cb.dataset.jconn, ids = [...box.querySelectorAll(`[data-jconn="${CSS.escape(aid)}"]:checked`)].map((x) => x.value);
+    if (cb.checked && !confirm("在这个联合项目里打开：别的参与者 @ 它时，它会用你授权的这个服务、动你账号里的数据。确定打开？")) { cb.checked = false; return; }
+    try { await api(`/api/projects/${g.id}/members/${aid}/connections`, { method: "PUT", body: { connection_ids: ids } }); await reload(); }
+    catch (e) { err(e); }
+  }));
   box.querySelectorAll("[data-home]").forEach((cb) => cb.addEventListener("change", async () => {
     if (cb.checked && !confirm("在联合项目里挂载私有目录：它能读到你积累的笔记，其他参与方的消息可能诱导它带出来。确定打开？")) { cb.checked = false; return; }
     try { await api(`/api/projects/${g.id}/members/${cb.dataset.home}/home`, { method: "PUT", body: { enabled: cb.checked } }); await reload(); }
@@ -1570,6 +1698,15 @@ function renderMembers() {
     try { await api(`/api/projects/${g.id}/members`, { method: "POST", body: { agent_id: $("#add-member-sel").value } }); await reload(); }
     catch (e2) { err(e2); }
   });
+}
+
+// 联合项目里我的 Agent 能用我的哪些连接器：默认都关，逐个打开；只有我看得到（connections_enabled 只给所有者）
+function jointConns(g, a) {
+  const conns = (S.myConns || []).filter((c) => (a.connections || []).includes(c.id));
+  if (!conns.length) return "";
+  const on = g.connections_enabled?.[a.id] || [];
+  return `<details class="joint-conns"><summary title="在这个项目里用你授权的服务">连接器 · ${conns.filter((c) => on.includes(c.id)).length}/${conns.length}</summary>
+    ${conns.map((c) => `<label class="switch"><input type="checkbox" data-jconn="${esc(a.id)}" value="${esc(c.id)}" ${on.includes(c.id) ? "checked" : ""}> ${esc(c.name)}</label>`).join("")}</details>`;
 }
 
 function renderThread() {
@@ -1977,7 +2114,7 @@ init().catch((e) => { document.body.insertAdjacentHTML("afterbegin", `<p class="
 // 接入走设备码配对：电脑上跑 setup，浏览器里批准（#pair=<码>）；手动签发令牌留作没有浏览器时的备用。
 const harnessLabel = (h) => S.info?.harnesses?.[h] || h;
 const harnessTags = (d) => (d.harnesses || []).map((h, i) =>
-  `<span class="tag model" title="${i === 0 ? "默认 harness" : "harness"}">${esc(harnessLabel(h))}</span>`).join("");
+  `<span class="tag model" title="${i === 0 ? "默认的 AI 工具" : "AI 工具"}">${esc(harnessLabel(h))}</span>`).join("");
 
 async function renderDevicesView() {
   let devices = [];
@@ -1998,11 +2135,11 @@ async function renderDevicesView() {
     </div></li>`;
   }).join("") || '<li class="empty">还没有设备。点“连接一台设备”，在要运行 Agent 的电脑上执行一条命令。</li>';
   $("#device-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
-    if (S.devicePanel?.token && !confirm("令牌还没确认复制，离开后就再也看不到了。确定离开？")) return;
+    if (S.devicePanel?.token && !confirm("设备授权码还没确认复制，离开后就再也看不到了。确定离开？")) return;
     S.devicePanel = null; S.deviceSel = b.dataset.id; renderDevicesView();
   }));
   $("#device-list").querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("吊销后这台设备上的连接器会立即断开，绑在它上面的 Agent 进入等待。")) return;
+    if (!confirm("吊销后这台设备上的 Matrix 客户端会立即断开，绑在它上面的 Agent 进入等待。")) return;
     try { await api(`/api/devices/${b.dataset.revoke}`, { method: "DELETE" }); await reload(); }
     catch (e) { alert(e.message); }
   }));
@@ -2063,18 +2200,18 @@ function renderDeviceDetail() {
       <pre class="cmd" id="device-setup" tabindex="0">${esc(cmd)}</pre>
       <div class="actions"><button type="button" id="dv-copy-setup">复制命令</button></div>
       <p class="hint" id="dv-copied-setup" role="status"></p>
-      <p class="hint">它会检测本机装了的 Claude Code、Codex、dsh，打开浏览器让你批准这台电脑，再装成后台服务（登录后自动运行）。命令里没有密钥；令牌只保存在那台电脑上。</p>
+      <p class="hint">它会装好 Matrix 客户端，检测本机装了的 Claude Code、Codex、dsh，打开浏览器让你批准这台电脑，再设成开机后自动运行。命令里没有密钥；授权只保存在那台电脑上。</p>
       <form class="editor" id="pair-form">
         <div class="field"><label for="pair-code">浏览器没有自动打开？输入终端里显示的配对码</label>
           <input id="pair-code" name="code" placeholder="ABCD-EFGH" maxlength="16" autocomplete="off" spellcheck="false"></div>
         <p class="error" role="alert"></p>
         <div class="actions"><button type="submit">下一步</button><button type="button" class="ghost" id="dv-cancel">取消</button></div>
       </form>
-      <details class="manual"><summary>没有浏览器的机器：手动签发令牌</summary>
+      <details class="manual"><summary>高级：没有浏览器的机器，手动添加</summary>
         <form class="editor" id="device-form">
           <div class="field"><label for="dv-name">设备名称</label><input id="dv-name" name="name" placeholder="我的服务器" maxlength="80"></div>
           <p class="error" role="alert"></p>
-          <div class="actions"><button type="submit" class="ghost">签发令牌</button></div>
+          <div class="actions"><button type="submit" class="ghost">生成设备授权码</button></div>
         </form>
       </details>`;
     copyButton("#dv-copy-setup", "#device-setup", "#dv-copied-setup", cmd);
@@ -2103,16 +2240,16 @@ function renderDeviceDetail() {
   if (panel && panel.token) {
     if (box.querySelector("#device-cmd")) return;  // 已经显示：不重绘（保住选中状态与“已复制”提示）
     box.innerHTML = `<h2 class="panel-title">${esc(panel.name)}</h2>
-      <div class="warn-box">令牌只显示这一次。关掉这个面板之后就再也看不到了，请现在复制。</div>
+      <div class="warn-box">设备授权码只显示这一次。关掉这个面板之后就再也看不到了，请现在复制。</div>
       <p class="muted" style="margin-top:12px">在要运行 Agent 的电脑上执行：</p>
       <pre class="cmd" id="device-cmd" tabindex="0">${esc(panel.cmd)}</pre>
       <div class="actions"><button type="button" id="dv-copy">复制命令</button>
         <button type="button" class="ghost" id="dv-done">已复制，完成</button></div>
       <p class="hint" id="dv-copied" role="status"></p>
-      <p class="hint">手动令牌一次只接一个 harness：把 --driver 换成 dsh 或 codex 即可换。能开浏览器的电脑建议改用“连接一台设备”里的一条命令，自动检测全部 harness。</p>`;
+      <p class="hint">手动添加的设备一次只接一个 AI 工具：把 --driver 换成 dsh 或 codex 即可换。能开浏览器的电脑建议改用“连接一台设备”里的一条命令，自动检测全部 AI 工具。</p>`;
     copyButton("#dv-copy", "#device-cmd", "#dv-copied", panel.cmd);
     $("#dv-done").addEventListener("click", () => {
-      if (!confirm("关掉后令牌不会再显示。确认已经复制好了？")) return;
+      if (!confirm("关掉后授权码不会再显示。确认已经复制好了？")) return;
       S.devicePanel = null; renderDeviceDetail();
     });
     return;
@@ -2122,9 +2259,10 @@ function renderDeviceDetail() {
   const agents = S.snap.agents.filter((a) => a.device_runtime === d.id);
   box.innerHTML = `<h2 class="panel-title">${esc(d.name)}</h2>
     <p class="muted">${d.revoked ? "已吊销" : d.online ? "在线" : "离线"}${d.hostname ? ` · ${esc(d.hostname)}` : ""} · ${d.last_seen_at ? `最近连接 ${time(d.last_seen_at)}` : "还没连接过"}</p>
-    <dl><dt>harness</dt><dd>${(d.harnesses || []).length ? harnessTags(d) : '<span class="muted">还没报告（连接器连上后显示）</span>'}</dd>
+    <dl><dt>AI 工具</dt><dd>${(d.harnesses || []).length ? harnessTags(d) : '<span class="muted">还没报告（Matrix 客户端连上后显示）</span>'}</dd>
       <dt>运行在这台设备上的 Agent</dt><dd>${agents.length ? tags(agents.map((a) => a.harness ? `${a.name} · ${harnessLabel(a.harness)}` : a.name)) : '<span class="muted">无</span>'}</dd></dl>
-    <p class="hint">在那台电脑上装了新的 harness 后，重启连接器（或后台服务）就会出现在这里。连接器只发出站请求；设备离线时绑在它上面的 Agent 进入等待，不消耗重试。</p>`;
+    ${devConnsHtml(d)}
+    <p class="hint">在那台电脑上装了新的 AI 工具、或在工具里配了新的服务后，重启 Matrix 客户端就会出现在这里。它只发出站请求；设备离线时绑在它上面的 Agent 进入等待，不消耗重试。</p>`;
 }
 
 // 批准一台设备：看清主机名与 harness，确认是自己刚刚在那台电脑上看到的码，再批准。
@@ -2155,7 +2293,7 @@ function renderPairing(box, panel) {
     <div class="warn-box">只批准你刚刚在自己电脑上看到的配对码。批准后，这台电脑可以替你运行绑定到它的 Agent。</div>
     <dl style="margin-top:12px"><dt>配对码</dt><dd><code>${esc(p.user_code)}</code></dd>
       <dt>主机名</dt><dd>${esc(p.hostname || "未报告")}</dd>
-      <dt>检测到的 harness</dt><dd>${(p.harnesses || []).length ? harnessTags(p) : '<span class="muted">没有（装好后重启连接器即可）</span>'}</dd></dl>
+      <dt>检测到的 AI 工具</dt><dd>${(p.harnesses || []).length ? harnessTags(p) : '<span class="muted">没有（装好后重启 Matrix 客户端即可）</span>'}</dd></dl>
     <form class="editor" id="pair-approve">
       <div class="field"><label for="pa-name">设备名称</label><input id="pa-name" name="name" value="${esc(p.name || "")}" maxlength="80"></div>
       <p class="error" role="alert"></p>
@@ -2176,4 +2314,285 @@ function renderPairing(box, panel) {
     try { await api(`/api/devices/pair/${code}/deny`, { method: "POST", body: {} }); } catch { /* 已过期也一样 */ }
     done(); renderDeviceDetail();
   });
+}
+
+// ================= 技能与连接器（docs/reference/connectors-skills.md） =================
+// 个人层在这里：“技能”页是我的技能库，“连接器”页是我授权的外部服务与我电脑上配好的服务。勾给哪些 Agent
+// 在 Agent 编辑页或连接器详情里改。项目层（项目技能、需要的连接器）在项目页。界面不出现 MCP、命令行之类的实现名词。
+async function loadMine(force = false) {
+  if (S.mineLoading) return S.mineLoading;
+  if (!force && S.mySkills && S.myConns && S.catalog) return;
+  S.mineLoading = Promise.all([api("/api/me/skills"), api("/api/me/connections"), api("/api/connectors")])
+    .then(([sk, cs, cat]) => {
+      const changed = JSON.stringify([sk, cs, cat]) !== JSON.stringify([S.mySkills, S.myConns, S.catalog]);
+      S.mySkills = sk; S.myConns = cs; S.catalog = cat; S.skillCache = null;
+      if (changed && ["agents", "skills", "connectors", "devices"].includes(S.view)) render();
+    })
+    .catch(() => { S.mySkills ||= []; S.myConns ||= []; S.catalog ||= []; })
+    .finally(() => { S.mineLoading = null; });
+  return S.mineLoading;
+}
+
+const CONN_STATUS = { ok: ["idle", "可用"], error: ["failed", "出错"], missing: ["rejected", "电脑上没有了"] };
+const connPill = (c) => { const [cls, text] = CONN_STATUS[c.status] || ["", c.status]; return `<span class="pill status ${cls}">${text}</span>`; };
+const connWhere = (c) => c.kind === "cloud" ? "云端" : `${esc(c.device_name)} · ${esc(c.harness_name || "")}${c.online ? "" : "（离线）"}`;
+// 这个连接能给哪些 Agent：云端的给云端的 Agent；电脑上的给同一台电脑、同一个 AI 工具上的（服务端会再校验）
+const devDefault = (id) => (S.devices || []).find((d) => d.id === id)?.harnesses?.[0];
+const placedFor = (c, a) => c.kind === "cloud" ? !a.device_runtime
+  : a.device_runtime === c.where && (a.harness || devDefault(c.where) || c.harness) === c.harness;
+const mineAgents = () => S.snap.agents.filter((a) => a.mine);
+
+// Agent 编辑页里的两组勾选：只列我自己的，联合项目里别人看不到
+function abilityBoxes(a) {
+  if (!S.mySkills || !S.myConns) return '<p class="hint">正在读取你的技能与连接器…</p>';
+  const skills = S.mySkills, conns = S.myConns.filter((c) => placedFor(c, a) || (a.connections || []).includes(c.id));
+  const noUse = !a.authority.includes("connector.use");
+  return `<fieldset class="checks" id="af-skills"><legend>技能 · 在「技能」页管理</legend>
+      ${skills.map((k) => `<label><input type="checkbox" name="skill" value="${esc(k.name)}" ${(a.skills || []).includes(k.name) ? "checked" : ""}>
+        <span class="opt">${esc(k.name)}<small>${esc(k.description)}</small></span></label>`).join("")
+        || '<p class="hint">技能库里还没有技能。<a href="#skills">去写一个</a>。</p>'}
+      <p class="hint">项目里约定的做法（项目技能）会自动给到，重名时项目的优先。它自己在私有目录里攒的技能也会用上。</p>
+    </fieldset>
+    <fieldset class="checks" id="af-conns"><legend>连接器 · 在「连接器」页授权</legend>
+      ${conns.map((c) => `<label><input type="checkbox" name="conn" value="${esc(c.id)}" ${(a.connections || []).includes(c.id) ? "checked" : ""}>
+        <span class="opt">${esc(c.name)} ${c.status === "ok" ? "" : connPill(c)}<small>${connWhere(c)}</small></span></label>`).join("")
+        || `<p class="hint">${a.device_runtime ? "这台电脑上的这个 AI 工具里还没有配好的服务。" : "你还没有授权云端的连接器。"}<a href="#connectors">去看看</a>。</p>`}
+      <p class="hint">${noUse ? '<span class="warn">它没有“使用连接器”的权限，勾了也用不上。</span> ' : ""}委托给别的 Agent 时不会转授；联合项目里默认不开，要在项目的成员栏里打开。</p>
+    </fieldset>`;
+}
+
+// ---- 我的技能 ----
+function renderSkillsView() {
+  const list = S.mySkills;
+  const users = (name) => mineAgents().filter((a) => (a.skills || []).includes(name));
+  $("#skill-list").innerHTML = !list ? '<li class="empty">正在读取…</li>' : list.map((k) => `
+    <li class="${S.skillSel === k.name ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-name="${esc(k.name)}" aria-label="查看技能 ${esc(k.name)}">
+        <div class="card-head"><span class="ability-ico">${ICON.skill}</span><span class="name">${esc(k.name)}</span></div>
+        <p class="card-desc">${esc(k.description)}</p>
+        <div class="card-meta">${users(k.name).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没有 Agent 用它</span>'}
+          ${k.files.length ? `<span class="muted">${k.files.length} 个附带文件</span>` : ""}</div>
+      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准技能包（含 SKILL.md 的 zip 或文件夹）。</li>';
+  $("#skill-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
+    S.skillSel = b.dataset.name; renderSkillsView();
+  }));
+  renderSkillEditor();
+}
+
+async function renderSkillEditor() {
+  const box = $("#skill-editor");
+  if (!S.skillSel) { box.innerHTML = placeholder("选择一个技能看详情，或点“上传技能”。"); return; }
+  const x = (S.mySkills || []).find((k) => k.name === S.skillSel);
+  if (!x) { S.skillSel = null; box.innerHTML = placeholder("这个技能已删除。"); return; }
+  const users = mineAgents().filter((a) => (a.skills || []).includes(x.name));
+  box.innerHTML = skillCardHtml(x, users.length ? `${users.map((a) => esc(a.name)).join("、")} 在用。` : "还没有 Agent 用它，在 Agent 编辑页里勾上。", true);
+  $("#sk-del", box).addEventListener("click", async () => {
+    if (!confirm(`删除技能「${x.name}」？用到它的 Agent 之后就没有这个做法了。`)) return;
+    try { await api(`/api/me/skills/${encodeURIComponent(x.name)}`, { method: "DELETE" }); } catch (e) { $(".error", box).textContent = e.message; return; }
+    S.skillSel = null; await loadMine(true); await reload(); renderSkillsView();
+  });
+}
+
+// 技能只展示名字与描述；内容按 Agent Skills 标准（SKILL.md + 可选目录）在别处维护，打包上传
+function skillCardHtml(x, note, canDelete) {
+  return `<h2 class="panel-title">${esc(x.name)}</h2><p>${esc(x.description)}</p>
+    ${note ? `<p class="muted">${note}</p>` : ""}
+    ${x.files?.length ? `<p class="hint">${x.files.length} 个附带文件</p>` : ""}
+    <p class="hint">更新：重新上传同名的技能包。</p><p class="error" role="alert"></p>
+    ${canDelete ? '<div class="actions"><button type="button" class="danger" id="sk-del">删除</button></div>' : ""}`;
+}
+
+// 选 zip 或文件夹，上传到 base（/api/me/skills 或 /api/projects/<id>/skills）
+function pickSkillPackage(base, folder) {
+  return new Promise((resolve, reject) => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    if (folder) inp.webkitdirectory = true; else inp.accept = ".zip,.skill,application/zip";
+    inp.addEventListener("change", async () => {
+      const files = [...inp.files];
+      if (!files.length) return resolve(null);
+      try {
+        let res;
+        if (folder) {
+          const enc = async (f) => { const b = new Uint8Array(await f.arrayBuffer()); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(t); };
+          const body = { files: await Promise.all(files.map(async (f) => ({ path: f.webkitRelativePath || f.name, data: await enc(f) }))) };
+          res = await api(`${base}/upload`, { method: "POST", body });
+        } else {
+          res = await api(`${base}/upload`, { method: "POST", body: files[0], headers: { "Content-Type": "application/zip" } });
+        }
+        resolve(res);
+      } catch (e) { reject(e); }
+    });
+    inp.click();
+  });
+}
+
+// ---- 我的连接器 ----
+function renderConnectorsView() {
+  if (S.devices === undefined) api("/api/devices").then((d) => { S.devices = d; }).catch(() => { S.devices = []; });
+  const conns = S.myConns, cat = S.catalog;
+  const users = (c) => mineAgents().filter((a) => (a.connections || []).includes(c.id));
+  $("#conn-list").innerHTML = !conns ? '<li class="empty">正在读取…</li>' : conns.map((c) => `
+    <li class="${S.connSel === c.id ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-id="${esc(c.id)}" aria-label="查看连接器 ${esc(c.name)}">
+        <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">${esc(c.name)}</span>${connPill(c)}</div>
+        <p class="card-desc">${c.kind === "cloud" ? esc(c.custom ? "自定义 · 云端" : c.description || "云端") : `${connWhere(c)} 里配好的服务`}</p>
+        <div class="card-meta">${users(c).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没给任何 Agent</span>'}</div>
+      </button></div></li>`).join("")
+    || '<li class="empty">还没有连接器。在下面授权一个云端服务；你电脑上 Claude Code、Codex、dsh 里配好的服务，连上设备后会自动出现在这里。</li>';
+  $("#catalog-list").innerHTML = !cat ? "" : cat.map((k) => {
+    const have = (conns || []).filter((c) => c.connector_id === k.id && c.kind === "cloud").length;
+    return `<li class="${S.connPanel === k.id ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-add="${esc(k.id)}" aria-label="授权 ${esc(k.name)}">
+        <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">${esc(k.name)}</span>${have ? '<span class="pill">已授权</span>' : ""}</div>
+        <p class="card-desc">${esc(k.description || "")}</p>
+        <div class="card-meta">${k.skills.length ? `<span class="muted">自带技能</span>${k.skills.map((x) => `<span class="tag" title="${esc(x.description)}">${esc(x.name)}</span>`).join("")}` : ""}</div>
+      </button>
+      <div class="card-foot"><span class="muted">云端</span><span class="button sm" aria-hidden="true">${have ? "更新授权" : "授权"}</span></div>
+    </div></li>`;
+  }).join("") || '<li class="empty">部署方还没有提供云端连接器。可以点右上角“自定义连接器”自己接入。</li>';
+  $("#conn-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
+    S.connSel = b.dataset.id; S.connPanel = null; renderConnectorsView();
+  }));
+  $("#catalog-list").querySelectorAll("[data-add]").forEach((b) => b.addEventListener("click", () => {
+    S.connPanel = b.dataset.add; S.connSel = null; renderConnectorsView();
+  }));
+  renderConnDetail();
+}
+
+function renderConnDetail() {
+  const box = $("#conn-detail");
+  if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
+  if (S.connPanel === "__custom") {
+    if (box.querySelector("#custom-form")) return;
+    const cloud = mineAgents().filter((a) => !a.device_runtime);
+    box.innerHTML = `<h2 class="panel-title">自定义连接器</h2>
+      <form class="editor" id="custom-form">
+        <div class="field"><label for="cu-name">名字</label><input id="cu-name" name="name" required maxlength="60" placeholder="团队知识库"></div>
+        <div class="field"><label for="cu-url">服务地址</label><input id="cu-url" name="url" required type="url" placeholder="https://example.com/mcp" spellcheck="false">
+          <p class="hint">只能是 https 的公网地址，不能是内网。</p></div>
+        <div class="field"><label for="cu-header">认证请求头（可选）</label><input id="cu-header" name="header" maxlength="64" placeholder="Authorization" spellcheck="false"></div>
+        <div class="field"><label for="cu-value">认证值（可选）</label><input id="cu-value" name="value" type="password" autocomplete="off" placeholder="Bearer …"></div>
+        <fieldset class="checks"><legend>给哪些 Agent 用</legend>
+          ${cloud.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${a.id === S.me?.assistant_id ? "checked" : ""}><span class="opt">${esc(a.name)}</span></label>`).join("") || '<p class="hint">你还没有在云端跑的 Agent。</p>'}
+        </fieldset>
+        <p class="hint">认证值加密保存，Agent 拿不到，页面也不再显示。</p>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit">添加</button><button type="button" class="ghost" id="cu-cancel">取消</button></div>
+      </form>`;
+    const f = $("#custom-form", box);
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "正在试连…";
+      try {
+        const c = await api("/api/me/connections/custom", { method: "POST", body: { name: f.name.value.trim(), url: f.url.value.trim(),
+          header: f.header.value.trim(), value: f.value.value, agent_ids: [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value) } });
+        S.connPanel = null; S.connSel = c.id; document.activeElement?.blur();
+        await loadMine(true); await reload();
+      } catch (err) { $(".error", f).textContent = err.message; btn.disabled = false; btn.textContent = "添加"; }
+    });
+    $("#cu-cancel").addEventListener("click", () => { S.connPanel = null; renderConnectorsView(); });
+    return;
+  }
+  const spec = (S.catalog || []).find((k) => k.id === S.connPanel);
+  if (spec) {
+    if (box.querySelector(`#auth-form-${CSS.escape(spec.id)}`)) return;
+    const cloud = mineAgents().filter((a) => !a.device_runtime);
+    box.innerHTML = `<h2 class="panel-title">授权 ${esc(spec.name)}</h2>
+      <p class="muted">${esc(spec.description || "")}</p>
+      <form class="editor" id="auth-form-${esc(spec.id)}">
+        ${spec.fields.map((x) => `<div class="field"><label for="au-${esc(x.key)}">${esc(x.label)}</label>
+          <input id="au-${esc(x.key)}" name="${esc(x.key)}" ${x.secret ? 'type="password" autocomplete="off"' : ""} required spellcheck="false"></div>`).join("")
+          || '<p class="hint">这个服务不需要填写任何东西。</p>'}
+        <fieldset class="checks"><legend>给哪些 Agent 用</legend>
+          ${cloud.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${a.id === S.me?.assistant_id ? "checked" : ""}>
+            <span class="opt">${esc(a.name)}<small>${a.authority.includes("connector.use") ? "" : "没有“使用连接器”的权限，勾了也用不上"}</small></span></label>`).join("")
+            || '<p class="hint">你还没有在云端跑的 Agent。电脑上的 Agent 用的是那台电脑上配好的服务。</p>'}
+        </fieldset>
+        <p class="hint">填的内容加密保存，只在 Agent 调用这个服务时由网络带上，Agent 自己拿不到，任何页面也不会再显示。之后可以随时撤销。</p>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit">授权</button><button type="button" class="ghost" id="au-cancel">取消</button></div>
+      </form>`;
+    const f = box.querySelector("form");
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "正在试连…";
+      const values = Object.fromEntries(spec.fields.map((x) => [x.key, f.elements[x.key].value]));
+      try {
+        const c = await api("/api/me/connections", { method: "POST", body: { connector_id: spec.id, values,
+          agent_ids: [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value) } });
+        S.connPanel = null; S.connSel = c.id;
+        document.activeElement?.blur();
+        await loadMine(true); await reload();
+      } catch (err) { $(".error", f).textContent = err.message; btn.disabled = false; btn.textContent = "授权"; }
+    });
+    $("#au-cancel").addEventListener("click", () => { S.connPanel = null; renderConnectorsView(); });
+    return;
+  }
+  const c = (S.myConns || []).find((x) => x.id === S.connSel);
+  if (!c) { box.innerHTML = placeholder("选择一个连接器查看，或在“可以添加”里授权一个。"); return; }
+  const fit = mineAgents().filter((a) => placedFor(c, a) || (a.connections || []).includes(c.id));
+  const sig = JSON.stringify([c, fit.map((a) => [a.id, a.connections, a.authority])]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  box.innerHTML = `<h2 class="panel-title">${esc(c.name)} ${connPill(c)}</h2>
+    <p class="muted">${c.kind === "cloud" ? `云端 · ${esc(c.description || "")}` : `${connWhere(c)} 里配好的服务`}</p>
+    ${c.error ? `<p class="hint warn">${esc(c.error)}</p>` : ""}
+    <form class="editor" id="conn-agents">
+      <fieldset class="checks"><legend>给哪些 Agent 用</legend>
+        ${fit.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${(a.connections || []).includes(c.id) ? "checked" : ""}>
+          <span class="opt">${esc(a.name)}<small>${a.authority.includes("connector.use") ? "" : "没有“使用连接器”的权限，勾了也用不上"}</small></span></label>`).join("")
+          || `<p class="hint">${c.kind === "cloud" ? "你还没有在云端跑的 Agent。" : "还没有 Agent 跑在这台电脑的这个 AI 工具上。"}</p>`}
+      </fieldset>
+      ${c.skills?.length ? `<p class="hint">自带技能：${c.skills.map((x) => `<span class="tag">${esc(x)}</span>`).join("")}，有这个连接器的那一轮会一起给到。</p>` : ""}
+      <p class="hint">${c.kind === "cloud" ? "Agent 调用时由网络带上你的授权，Agent 拿不到授权本身。" : "这一轮允许的服务才会在那台电脑上打开，其余的关着。"}
+        联合项目里默认不开，要在那个项目的成员栏里逐个打开。</p>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">保存</button>
+        ${c.kind === "cloud" ? '<button type="button" class="ghost" id="conn-check">重新检查</button><button type="button" class="danger" id="conn-del">撤销授权</button>'
+          : c.status === "missing" ? '<button type="button" class="danger" id="conn-del">移除</button>' : ""}</div>
+    </form>
+    ${c.kind === "cloud" ? '<h3>最近的调用</h3><div id="conn-calls"><p class="muted">正在读取…</p></div>' : ""}`;
+  const f = $("#conn-agents"), err = (e) => { $(".error", f).textContent = e.message; };
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const want = new Set([...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value));
+    try {
+      for (const a of fit) {
+        const has = (a.connections || []).includes(c.id);
+        if (has === want.has(a.id)) continue;
+        const next = has ? a.connections.filter((x) => x !== c.id) : [...(a.connections || []), c.id];
+        await api(`/api/agents/${a.id}`, { method: "PATCH", body: { connections: next } });
+      }
+      box.dataset.sig = ""; await reload(); await loadMine(true);
+    } catch (e2) { err(e2); }
+  });
+  $("#conn-check")?.addEventListener("click", async (e) => {
+    e.target.disabled = true; e.target.textContent = "正在检查…";
+    try { await api(`/api/me/connections/${c.id}/check`, { method: "POST", body: {} }); box.dataset.sig = ""; await loadMine(true); }
+    catch (e2) { err(e2); e.target.disabled = false; e.target.textContent = "重新检查"; }
+  });
+  $("#conn-del")?.addEventListener("click", async () => {
+    if (!confirm(c.kind === "cloud" ? `撤销 ${c.name} 的授权？保存的授权会删除，所有 Agent 和项目里都不再能用。` : `移除 ${c.name}？那台电脑再报告它时会重新出现。`)) return;
+    try { await api(`/api/me/connections/${c.id}`, { method: "DELETE" }); S.connSel = null; box.dataset.sig = ""; await loadMine(true); await reload(); }
+    catch (e2) { err(e2); }
+  });
+  if (c.kind === "cloud") {
+    api(`/api/me/connections/${c.id}/calls`).then((calls) => {
+      const el = $("#conn-calls");
+      if (!el) return;
+      el.innerHTML = calls.length ? `<ul class="calls">${calls.slice(-20).reverse().map((x) => `<li><span class="${x.ok ? "ok" : "bad"}">${x.ok ? "✓" : "✗"}</span>
+        <b>${esc(x.agent)}</b> <code>${esc(x.tool)}</code><span class="muted">${time(x.ts)} · ${x.ms} ms</span></li>`).join("")}</ul>
+        <p class="hint">只记下谁、什么时候、调了哪个工具，不记内容。</p>` : '<p class="muted">还没有调用。</p>';
+    }).catch(() => {});
+  }
+}
+
+// 设备详情里：这台电脑上各 AI 工具里配好的服务
+function devConnsHtml(d) {
+  const list = (S.myConns || []).filter((c) => c.where === d.id);
+  if (!list.length) return "";
+  return `<dl><dt>配好的服务</dt><dd>${list.map((c) => `<a class="tag" href="#connectors" data-conn="${esc(c.id)}">${esc(c.name)} · ${esc(c.harness_name || "")}</a>`).join("")}</dd></dl>`;
 }
