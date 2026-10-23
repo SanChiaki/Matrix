@@ -4,7 +4,8 @@
 
 - `Project`：成员集合与委托边界，没有主 Agent；带一个项目群聊（`Conversation.kind = project`）和一份项目档案（[archive.md](archive.md)）。
   `internal` 只有所有者，`joint` 由主持人邀请参与者（[conversations.md](conversations.md)）。
-- **助理**（`User.assistant_id`，`Network.assistant_of`）：默认是用户第一个创建的 Agent（`Store.default_assistants`，删掉后取下一个），
+- **助理**（`User.assistant_id`，`Network.assistant_of`）：注册时网络给没有 Agent 的人建一个（`ensure_assistant`，见 [assistant.md](assistant.md)）；
+  没指定时是用户第一个创建的 Agent（`Store.default_assistants`，删掉后取下一个），
   `PUT /api/me/assistant` 换。人进项目（创建、接受邀请）时 `_bring_assistant` 把助理加进成员并在群聊记一条事件；
   人在项目里时助理不能移出（`_check_removable`）。换助理不动已有项目，新助理在下次进项目或开会话时加入。
 - **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是开会话时的助理）：

@@ -258,6 +258,14 @@ class AssistantIn(BaseModel):
     agent_id: str
 
 
+class DraftSendIn(BaseModel):
+    text: str | None = Field(None, max_length=4000)  # 主人在确认卡上改过的文本；不写就照草稿发
+
+
+class SchedulePatch(BaseModel):
+    enabled: bool
+
+
 class ConversationIn(BaseModel):
     """打开对话：project_id → 这个项目的群聊；agent_id → 和它的私聊（第一次打开时创建）。"""
     project_id: str | None = None
@@ -423,7 +431,9 @@ def create_app(network: Network) -> FastAPI:
     def register(body: CredentialsIn, response: Response) -> dict:
         user, token, first = auth.register(store, body.email, body.password)
         set_cookie(response, token)
-        return {**user.public(), "claimed_existing": first and bool(store.agents)}
+        claimed = first and bool(store.agents)
+        network.ensure_assistant(user.id)  # 注册即有助理（认领了旧数据、已有 Agent 的不补建）
+        return {**store.users[user.id].public(), "claimed_existing": claimed}
 
     @app.post("/api/auth/login")
     def login(body: CredentialsIn, response: Response) -> dict:
@@ -439,8 +449,10 @@ def create_app(network: Network) -> FastAPI:
 
     @app.get("/api/me")
     def whoami(user: Me) -> dict:
+        network.ensure_assistant(user.id)  # 有了这个功能之前注册、还没有 Agent 的人：补一个助理
         own = [a for a in store.agents.values() if a.owner_id == user.id]
-        return {**user.public(), "agent_count": len(own)}
+        home = network.home_of(user.id)
+        return {**store.users[user.id].public(), "agent_count": len(own), "home_id": home.id if home else None}
 
     @app.get("/api/network")
     def snapshot(user: Me) -> dict:
@@ -783,6 +795,31 @@ def create_app(network: Network) -> FastAPI:
     @app.patch("/api/sessions/{conv_id}")
     def update_session(conv_id: str, body: SessionPatch, user: Me) -> dict:
         return network.update_session(conv_id, body.title, body.archived, actor=user.id).to_dict(full=False)
+
+    # ---- 助理对话：起草的消息（只有主人能发、能丢）与主人的定时 ----
+    @app.post("/api/drafts/{draft_id}/send")
+    def send_draft(draft_id: str, body: DraftSendIn, user: Me) -> dict:
+        msg = network.send_draft(draft_id, body.text, actor=user.id)
+        return {"id": msg.id}
+
+    @app.post("/api/drafts/{draft_id}/discard")
+    def discard_draft(draft_id: str, user: Me) -> dict:
+        network.discard_draft(draft_id, actor=user.id)
+        return {"ok": True}
+
+    @app.get("/api/schedules")
+    def list_schedules(user: Me) -> list:
+        return network.schedules(user.id)
+
+    @app.patch("/api/schedules/{schedule_id}")
+    def update_schedule(schedule_id: str, body: SchedulePatch, user: Me) -> dict:
+        network.set_schedule_enabled(schedule_id, body.enabled, actor=user.id)
+        return {"ok": True}
+
+    @app.delete("/api/schedules/{schedule_id}")
+    def delete_schedule(schedule_id: str, user: Me) -> dict:
+        network.delete_schedule(schedule_id, actor=user.id)
+        return {"ok": True}
 
     @app.put("/api/me/assistant")
     def set_assistant(body: AssistantIn, user: Me) -> dict:

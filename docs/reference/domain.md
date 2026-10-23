@@ -4,7 +4,7 @@
 
 | 概念 | 含义 |
 | --- | --- |
-| User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent，默认最早创建的），进项目时自动加入、项目会话里陪这个人聊 |
+| User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent；注册时还没有 Agent 就由网络建一个，否则默认最早创建的），进项目时自动加入、项目会话里陪这个人聊；和它的私聊就是侧栏最上面的“助理”（[assistant.md](assistant.md)） |
 | Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（云侧启用模型目录时是预置模型 id `model_preset`，否则是 provider / model / reasoning_effort；空则用默认）；
 运行上限 `timeout_s`（每轮运行超时秒数）与 `max_delegations`（每次被 @ / 每个任务的委托次数），默认都不限制；`skills`（勾上的我的技能名）、`connections`（勾上的我的连接）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
 | Project（项目） | 成员集合与委托边界，**没有主 Agent**。`internal`（内部项目）：只有所有者，成员只能是所有者自己的 Agent。`joint`（联合项目，参照 Raft 的 joint channel，research: raft#joint-channel）：主持人（`owner_id`）邀请用户，接受后成为参与者（`participants`），每人只能加入自己的 Agent。创建后不能转换类型。人（`people`）进项目时助理自动加入，人在项目里时助理不能移出。委托只能发给项目成员；网络**不会**自己创建 Agent，只接受 Agent 的提议、由人批准。每个项目带一份**项目档案**（见下）。设计见 [docs/projects.md](../projects.md) |
@@ -18,6 +18,8 @@
 | 项目档案 | 归项目所有：`brief`（**纲要**：目标、范围、成功标准、当前阶段，≤4000 字，**每轮推送**）、`decisions`（有效 / 被取代 / 撤销，推送最近的有效决定）、文件（`projects/<id>/files/`，每轮只读拷进工作目录的 `project/`，运行后丢弃改动）、`refs`（资源引用：仓库 / 路径 / 文档，只是指针，不授予访问权限；旧版叫 `projects`）、`suggestions`（纲要修改建议与技能提议，`kind` 区分）、`skills`（**项目技能**的元数据，正文在 `projects/<id>/skills/`）、`connector_needs`（**需要的连接器**：只是声明）、`connections_enabled`（联合项目里各 Agent 的所有者打开了哪些自己的连接，只给所有者看）。`archive_rev` 每变一次 +1，席位 / 任务只在版本变化时重新推送 |
 | Connection（连接） | 一个人对一个连接器的一次授权（云端，凭证在 `vault/`），或他电脑上某个 AI 工具里已经配好的一个服务（只有名字）。`where` 是 `cloud` 或设备 id，`status` 是 ok / error / missing。不含凭证，只给本人看。见 [connectors-skills.md](connectors-skills.md) |
 | 技能 | 一种做法：`SKILL.md`（名字、描述、正文）+ 可选文件。分项目技能、连接器自带的、我的技能、Agent 自己攒的（私有目录里），见 [connectors-skills.md](connectors-skills.md) |
+| Draft（草稿） | 助理在助理对话里替主人起草、要发进某个项目群聊的一条消息（`pending → sent / discarded`）。只有主人看得到、能发；发出时以主人的身份、`Message.via = "<助理名> 起草"`，`message_id` 指向发出的那条。助理对话里对应的事件消息带 `draft_id` |
+| Schedule（定时） | 一个人的定时：`cron` 或一次性的 `at`，到点往 `agent_id`（他自己的 Agent，通常是助理）的私聊收件箱投一条，带 `title` 与 `instruction`。`created_by` 记是谁建的（人、注册时默认、助理），`failures` / `error` 记送不到的原因。只给主人看 |
 | 插件 | 项目装上的一个业务扩展：清单声明的表（记录在 `projects/<id>/plugin-data/`，是项目档案的一部分）、沙箱里的页面、打法（技能）、触发。元数据在 `Project.plugins[name]`（版本、来源、安装人、`disabled`、`data_rev`、各触发的启用人与状态），只有主持人装。触发发的群聊消息、插件页面确认后发的消息带 `Message.via`（插件名）。见 [plugins.md](plugins.md)、不变量 20 |
 
 权限词表：`web.research`、`file.write`、`shell.exec`、`delegate`、`connector.use`（这一轮能用勾给它的连接器）。新增权限的同步点见 AGENTS.md「工作方式」。

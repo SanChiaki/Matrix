@@ -45,7 +45,7 @@ def test_register_login_logout(tmp_path: Path):
     assert c.post("/api/auth/register", json={"email": "a@x.io", "password": "short"}).status_code == 400
     r = c.post("/api/auth/register", json={"email": " A@X.io ", "password": "password-123"})
     assert r.status_code == 200 and r.json()["email"] == "a@x.io"
-    assert c.get("/api/me").json()["agent_count"] == 0  # 引导去创建首个 Agent
+    assert c.get("/api/me").json()["agent_count"] == 1  # 注册即有助理（不变量 21 的测试在 test_assistant.py）
     assert c.post("/api/auth/register", json={"email": "a@x.io", "password": "password-123"}).status_code == 400
     c.post("/api/auth/logout")
     assert c.get("/api/me").status_code == 401

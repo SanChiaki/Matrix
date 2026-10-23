@@ -98,8 +98,10 @@ def attachment_rel(a: dict[str, Any]) -> str:
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief", "propose_skill")
 # 用户任务工具：席位（项目群聊、项目会话、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
-# 项目会话工具：只有项目会话里的助理有，读项目的现状（按会话主人的可见性过滤）。
+# 读项目现状的工具：项目会话里的助理（读这个项目）与助理对话（读主人参与的任一项目）有，按主人的可见性过滤。
 SESSION_TOOLS = ("read_chat", "read_request")
+# 助理对话工具：只有助理对话（人和自己助理的私聊）里有：起草要以主人名义发进项目群聊的消息、主人的定时（不变量 21）。
+HOME_TOOLS = ("draft_message", "schedule", "list_schedules", "cancel_schedule")
 # 插件记录工具：项目里装了把它们开给 Agent 的插件时才有（档案类工具，不需要 delegate）
 PLUGIN_TOOLS = ("plugin_records", "plugin_write")
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
@@ -144,7 +146,7 @@ class AgentNode:
     # 所有者勾给它的“我的连接器”（Connection id）与“我的技能”（技能名）。只能是同一所有者的
     connections: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
-    created_by: str = "seed"             # seed | human | proposal:<id>
+    created_by: str = "seed"             # seed | human | signup（注册时网络给的助理）| proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
     active: int = 0                      # 运行中的会话/任务数（不持久化）
@@ -279,7 +281,8 @@ class Message:
     audience: list[str] = field(default_factory=list)  # 只给这些用户看（空 = 对话里的所有人），如席位的失败说明
     private_to: list[str] = field(default_factory=list)  # steps / wake 只给这些用户看（Agent 的所有者）
     attachments: list[dict[str, Any]] = field(default_factory=list)  # user：附件 {sha, name, size, mime}，文件在对话的附件区
-    via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）
+    via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）、哪个助理起草的
+    draft_id: str | None = None          # event：助理对话里起草的一条消息（前端渲染成确认卡）
     ts: float = field(default_factory=time.time)
 
 
@@ -301,7 +304,8 @@ class Seat:
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
     archive_seen: int = -1               # 已经送达过的项目档案版本（Project.archive_rev）
     abilities_seen: str = ""             # 已经送达过的“本轮可用的连接器 / 技能”说明的指纹，没变就不再送
-    state_seen: str = ""                 # 项目会话：已经送达过的项目现状（摘要的指纹），没变就不再送
+    state_seen: str = ""                 # 项目会话 / 助理对话：已经送达过的项目现状（摘要的指纹），没变就不再送
+    joint_seen: str = ""                 # 助理对话：已经送达过的联合项目总览的指纹（送了新的，这一轮就不能用连接器）
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, Any]:
@@ -519,6 +523,52 @@ class User:
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "email": self.email, "assistant_id": self.assistant_id}
+
+
+@dataclass
+class Draft:
+    """助理在助理对话里起草、要以主人的名义发进某个项目群聊的消息（不变量 21）。主人确认（可以改）后才发出，
+    目标群聊与 @ 在发出时按项目现状重新认定。"""
+
+    id: str
+    owner_id: str                        # 主人：只有他能看、能发、能丢弃
+    agent_id: str                        # 起草的助理
+    project_id: str
+    text: str
+    home_id: str                         # 起草所在的助理对话对话
+    status: str = "pending"              # pending | sent | discarded
+    message_id: str | None = None        # 发出后群聊里的那条消息
+    created_at: float = field(default_factory=time.time)
+    decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Schedule:
+    """主人的一个定时：到点往那个 Agent 的私聊（助理对话）收件箱投一条，唤醒它跑一轮（不变量 21）。
+    定时轮次没有人的新消息，不能登记用户任务。cron 与 at 二选一：cron 是五段（本地时间），at 是一次性的到点时间。"""
+
+    id: str
+    owner_id: str
+    agent_id: str
+    title: str
+    instruction: str                     # 到点时交给 Agent 的话
+    cron: str = ""
+    at: float | None = None
+    enabled: bool = True
+    created_by: str = "user"             # user（主人说的，或注册时的默认早报）
+    last_minute: int | None = None       # 同一分钟不重复触发
+    last_fired: float | None = None
+    day: str = ""                        # fires_today 计数的日期（本地 YYYY-MM-DD）
+    fires_today: int = 0
+    failures: int = 0                    # 连续没送达（席位停着）的次数，到 3 次自动停用
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass
