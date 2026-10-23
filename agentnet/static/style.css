@@ -80,12 +80,22 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 @keyframes pulse { 50% { opacity: .35; } }
 /* ---------- layout ---------- */
 main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.view { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 380px; }
+.view { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .view[hidden], .pane[hidden] { display: none; }
 .pane { display: flex; flex-direction: column; gap: 20px; min-height: 0; padding: 28px 32px; overflow: auto; }
 .view-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; }
 .view-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; max-width: 620px; }
-.side { border-left: 1px solid var(--border); background: var(--surface); overflow: auto; padding: 28px 24px; min-height: 0; }
+/* 次级信息用弹出框，不占常驻侧栏 */
+.side { display: none; position: fixed; z-index: 60; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(640px, calc(100vw - 32px)); max-height: min(82vh, 860px); overflow: auto; padding: 28px 28px 24px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 24px 64px rgba(0,0,0,.22), 0 2px 8px rgba(0,0,0,.08); outline: none; }
+.side.open { display: block; animation: modal-in .16s ease-out; }
+.view[hidden] .side.open { display: none; }
+@keyframes modal-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.98); } }
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: rgba(15, 18, 30, .32); backdrop-filter: blur(3px); }
+.modal-backdrop[hidden] { display: none; }
+.modal-x { position: sticky; top: -14px; float: right; margin: -14px -14px 0 8px; width: 32px; height: 32px; font-size: 20px; line-height: 1; z-index: 1; }
 .side > h2, .panel-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 16px; margin-bottom: 6px; }
 .side > p { margin: 0 0 16px; }
 .muted { color: var(--muted); font-size: 13px; }
@@ -235,8 +245,10 @@ button.icon svg { width: 14px; height: 14px; }
 .dot-live { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--running); box-shadow: 0 0 0 3px var(--accent-soft); animation: pulse 1.4s ease-in-out infinite; }
 .status-line.offline::before { background: var(--rejected); box-shadow: 0 0 0 3px color-mix(in srgb, var(--rejected) 15%, transparent); animation: none; }
 
-.view.chats { grid-template-columns: minmax(0, 1fr) 380px; }
-.chat-side { padding: 0; display: flex; flex-direction: column; }
+.view.chats { grid-template-columns: minmax(0, 1fr); }
+.chat-side { padding: 0; height: min(82vh, 860px); }
+.chat-side.open { display: flex; flex-direction: column; }
+.chat-side > .modal-x { position: absolute; top: 10px; right: 12px; margin: 0; }
 .side-tabs { display: flex; gap: 4px; padding: 14px 20px 0; border-bottom: 1px solid var(--border); }
 .side-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 10px; color: var(--muted); font-size: 13px; }
 .side-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
@@ -481,8 +493,6 @@ button.link:hover { background: none; text-decoration: underline; }
 kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-radius: 4px; border: 1px solid var(--border-strong); color: var(--text-2); }
 
 @media (max-width: 1280px) {
-  .view { grid-template-columns: minmax(0, 1fr) 340px; }
-  .view.chats { grid-template-columns: minmax(0, 1fr) 320px; }
 }
 
 /* 中等宽度：固定列加起来会吃掉整个视口，收窄导航与侧栏，保证中列（对话正文）仍可用。
@@ -492,10 +502,7 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
   .rail { padding: 16px 8px; }
   .brand { font-size: 13.5px; padding: 2px 6px 16px; }
   .tab { font-size: 13px; padding: 8px; }
-  .view { grid-template-columns: minmax(0, 1fr) 300px; }
-  .view.chats { grid-template-columns: minmax(0, 1fr) 280px; }
   .pane { padding: 24px; }
-  .side { padding: 24px 20px; }
 }
 
 /* 窄屏：单列堆叠。侧栏与委托详情移到主内容下方，导航变成顶部横条，
@@ -521,9 +528,8 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
   .view, .view.chats { grid-template-columns: minmax(0, 1fr); grid-auto-rows: min-content; align-content: start; overflow-y: auto; }
   /* 堆叠后各列按内容高度排布：基础样式里的 min-height:0 是给“列内滚动”用的，
      在单列布局下会让 auto 行缩到比内容还矮，导致两列互相压盖。 */
-  .thread-col, .side { min-height: auto; }
+  .thread-col { min-height: auto; }
   .pane { overflow: visible; padding: 20px; }
-  .side { border-left: 0; border-top: 1px solid var(--border); padding: 20px; overflow: visible; }
   .graph-wrap { min-height: 340px; }
   .thread-col { min-height: 440px; }
   #thread-head { padding: 14px 20px; }
@@ -550,7 +556,7 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
   .delegs { padding-left: 8px; }
   .deleg.child { margin-left: 10px; }
   .pane { padding: 16px; }
-  .side { padding: 16px; }
+  .side { padding: 20px 16px; }
   .view-head { flex-direction: column; align-items: stretch; gap: 10px; }
   .view-head button { width: 100%; }
   .msg.user .content { max-width: 92%; }
@@ -777,3 +783,5 @@ table.csv th { background: var(--surface-2); font-weight: 600; }
 .member-list .joint-conns summary { cursor: pointer; }
 .member-list .joint-conns .switch { display: flex; font-size: 11px; gap: 4px; margin-top: 4px; }
 .member-list li:has(.joint-conns[open]) { flex-wrap: wrap; }
+.net-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; font-size: 13px; color: var(--text-2); }
+.net-stats b { color: var(--text); }
