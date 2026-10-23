@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
+from .compat import current_call
 from .models import AUTHORITIES
 from .runtime import (ENFORCED, STOPPED_ERROR, RunRequest, RunResult, RuntimeCapabilities)
 
@@ -163,7 +164,7 @@ class DeviceRuntime:
         return RunResult(
             session_id=data.get("session_id") or req.session_id or "",
             final_text=data.get("final_text", ""),
-            tool_calls=list(data.get("tool_calls") or []),
+            tool_calls=[current_call(c) for c in data.get("tool_calls") or []],
             usage=dict(data.get("usage") or {}),
             ok=bool(data.get("ok", True)),
             error=data.get("error"),

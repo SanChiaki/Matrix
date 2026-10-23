@@ -1,4 +1,4 @@
-"""云侧预置模型目录（agentnet/model_catalog.py）：部署方维护文件、改了即生效；云侧 Agent 只能选目录里的模型，
+"""云侧预置模型目录（matrix/model_catalog.py）：部署方维护文件、改了即生效；云侧 Agent 只能选目录里的模型，
 下架的改用默认；端侧不受约束；没有文件时保持自由填写。"""
 
 from __future__ import annotations
@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentnet.engine import Network, NetworkError
-from agentnet.model_catalog import ModelCatalog, parse_catalog
-from agentnet.runtime import ScriptCall, ScriptedRuntime
-from agentnet.server import create_app
+from matrix.engine import Network, NetworkError
+from matrix.model_catalog import ModelCatalog, parse_catalog
+from matrix.runtime import ScriptCall, ScriptedRuntime
+from matrix.server import create_app
 from tests.test_api import login
 from tests.test_network import talk
 
@@ -162,7 +162,7 @@ def test_models_api_and_agent_preset(tmp_path: Path):
 
 
 def test_moving_between_cloud_and_device_keeps_a_valid_model(tmp_path: Path):
-    from agentnet import auth
+    from matrix import auth
     write_catalog(tmp_path / "models.json", [FLASH, OPUS], default="flash")
     net = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False)
     user, _, _ = auth.register(net.store, "owner@example.com", "password-123")

@@ -36,7 +36,7 @@ Matrix 的目标不是"平台托管一批 Agent"，而是**让 Agent 按我们�
 
 ## 2. 运行时契约
 
-现状（`agentnet/runtime.py`）：
+现状（`matrix/runtime.py`）：
 
 ```python
 class AgentRuntime(Protocol):
@@ -152,7 +152,7 @@ matrix-connect setup <服务器>
 
 - `setup` 把服务器、令牌、设备名写进 `~/.config/matrix-connect/config.json`（0600，可用 `MATRIX_CONNECT_CONFIG` 改位置）；
   令牌不出现在命令行参数、服务定义和 `status` 输出里。
-- 然后装成用户级后台服务（`agentnet/connector/service.py`）：macOS 是 `~/Library/LaunchAgents/dev.matrix.connect.plist`
+- 然后装成用户级后台服务（`matrix/connector/service.py`）：macOS 是 `~/Library/LaunchAgents/dev.matrix.connect.plist`
   （`launchctl bootstrap gui/<uid>`），Linux 是 `systemd --user` 单元；`KeepAlive` / `Restart=always`，PATH 取 setup 时的值，
   让服务找得到 claude / codex / dsh。Windows 是任务计划程序里当前用户的“登录时”任务（`schtasks /Create /XML`，
   不需要管理员；不做成 Windows 服务，那会以 SYSTEM 运行、拿不到用户的 harness 凭据），用 pythonw 跑（没有控制台窗口），
@@ -240,7 +240,7 @@ matrix-connect setup <服务器>
 
 - **私有目录不经过网络**。端侧 Agent 的私有目录在所有者机器上的 `<root>/.homes/<agent>/`，网络不读、不注入。
   服务器只在 `run.request.home` 里说明这一轮怎么挂载：`rw`（有效权限含 `file.write`）、`ro`（没有则只读，
-  运行里的改动丢弃）、`null`（联合项目里所有者没打开）。连接器按和云侧相同的语义（`agentnet/homedir.py`）
+  运行里的改动丢弃）、`null`（联合项目里所有者没打开）。连接器按和云侧相同的语义（`matrix/homedir.py`）
   拷进工作目录的 `agent-home/`、运行后按文件三方合并写回，冲突另存 `*.conflict-*`。
   工作目录引用不能以 `.` 开头，碰不到 `.homes/`；`file.fetch` 不回传 `agent-home/` 与 `group/` 里的文件（含指向它们的符号链接）。
   Agent 从云侧改绑到端侧时，服务器上原来的 `agents/<id>/` 不会迁移过去。

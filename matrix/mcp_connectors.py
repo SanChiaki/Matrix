@@ -1,6 +1,6 @@
 """云端连接器的 stdio MCP 桥：由 DSH 的 dsh-mcp-client 拉起，把连接器工具的列出与调用转给网络。
 
-只依赖标准库。运行时拿到的只有执行上下文令牌（AGENTNET_TOKEN）：这一轮能用哪些连接器、带什么凭证，
+只依赖标准库。运行时拿到的只有执行上下文令牌（MATRIX_TOKEN）：这一轮能用哪些连接器、带什么凭证，
 都由网络按令牌认定并代为调用（docs/connectors-and-skills.md 4.2），凭证不经过这个进程。
 """
 
@@ -12,9 +12,9 @@ import sys
 import urllib.error
 import urllib.request
 
-URL = os.environ.get("AGENTNET_CONNECTOR_URL", "").rstrip("/")
-TOKEN = os.environ.get("AGENTNET_TOKEN", "")
-TIMEOUT = float(os.environ.get("AGENTNET_TOOL_TIMEOUT", "600"))
+URL = os.environ.get("MATRIX_CONNECTOR_URL", "").rstrip("/")
+TOKEN = os.environ.get("MATRIX_TOKEN", "")
+TIMEOUT = float(os.environ.get("MATRIX_TOOL_TIMEOUT", "600"))
 PROTO = "2025-06-18"
 # 回调的是本机网络：不走系统 / 环境里配置的代理
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))

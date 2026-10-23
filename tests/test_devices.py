@@ -3,11 +3,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from agentnet import auth
-from agentnet.device import HELLO, HELLO_OK, PROTOCOL
-from agentnet.engine import Network
-from agentnet.runtime import ENFORCED, ScriptedRuntime
-from agentnet.server import create_app
+from matrix import auth
+from matrix.device import HELLO, HELLO_OK, PROTOCOL
+from matrix.engine import Network
+from matrix.runtime import ENFORCED, ScriptedRuntime
+from matrix.server import create_app
 from tests.test_users import client, users
 
 

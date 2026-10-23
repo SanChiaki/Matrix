@@ -1,11 +1,11 @@
 """一台设备多个 harness（docs/device-runtimes.md 第 2.4 节）：握手报告多个运行时，Agent 绑定到“设备 + harness”。"""
 import pytest
 
-from agentnet import auth
-from agentnet.device import (HELLO_OK, PROTOCOL, RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink,
+from matrix import auth
+from matrix.device import (HELLO_OK, PROTOCOL, RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink,
                              capabilities_from_hello)
-from agentnet.engine import Network, NetworkError
-from agentnet.runtime import ADVISORY, ENFORCED, ScriptedRuntime
+from matrix.engine import Network, NetworkError
+from matrix.runtime import ADVISORY, ENFORCED, ScriptedRuntime
 from tests.test_users import users
 
 

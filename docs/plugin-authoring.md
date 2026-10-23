@@ -79,7 +79,7 @@ uv run matrix-plugin check todo-board
 ```
 
 ```bash
-uv run agentnet --runtime scripted --data /tmp/plugin-dev
+uv run matrix --runtime scripted --data /tmp/plugin-dev
 ```
 
 打开 http://127.0.0.1:8765 ，注册（网络会给你一个助理），再建一个项目。
@@ -373,7 +373,7 @@ uv run matrix-plugin check path/to/my-plugin
 ### 在本地跑起来
 
 ```bash
-uv run agentnet --runtime scripted --data /tmp/plugin-dev
+uv run matrix --runtime scripted --data /tmp/plugin-dev
 ```
 
 `scripted` 运行时不需要模型，Agent 的回复是固定的演示内容，适合调页面、记录和触发。要看真实 Agent 怎么用你的打法和记录工具，

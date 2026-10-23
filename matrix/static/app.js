@@ -1705,12 +1705,12 @@ function retryConv(id) {
   }, wait);
 }
 
-const TOOL_CN = { [`mcp__agentnet__delegate`]: "委托", [`mcp__agentnet__list_members`]: "查看成员",
-  [`mcp__agentnet__share_knowledge`]: "共享知识", [`mcp__agentnet__list_tasks`]: "查看委托",
-  [`mcp__agentnet__accept_task`]: "验收", [`mcp__agentnet__request_changes`]: "退回修改",
-  [`mcp__agentnet__retry_task`]: "续接委托", [`mcp__agentnet__propose_agent`]: "提议新 Agent", web_search: "搜索", web_fetch: "抓取网页", read: "读取",
+const TOOL_CN = { [`mcp__matrix_net__delegate`]: "委托", [`mcp__matrix_net__list_members`]: "查看成员",
+  [`mcp__matrix_net__share_knowledge`]: "共享知识", [`mcp__matrix_net__list_tasks`]: "查看委托",
+  [`mcp__matrix_net__accept_task`]: "验收", [`mcp__matrix_net__request_changes`]: "退回修改",
+  [`mcp__matrix_net__retry_task`]: "续接委托", [`mcp__matrix_net__propose_agent`]: "提议新 Agent", web_search: "搜索", web_fetch: "抓取网页", read: "读取",
   write: "写入", edit: "编辑", bash: "执行命令", glob: "查找文件", grep: "搜索文件", todo_write: "更新计划" };
-const toolName = (t) => TOOL_CN[t] || t.replace(/^mcp__agentnet__/, "");
+const toolName = (t) => TOOL_CN[t] || t.replace(/^mcp__matrix_net__/, "");
 const time = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 // 过程：中间文本与工具调用。运行中实时展开；结束后折叠在回复上方。

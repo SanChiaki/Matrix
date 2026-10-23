@@ -13,13 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from agentnet import auth
-from agentnet.connector_catalog import ConnectorCatalog, parse_catalog
-from agentnet.engine import Network, NetworkError
-from agentnet.mcp_client import MCPError, RemoteMCP
-from agentnet.models import CONNECTOR_PREFIX
-from agentnet.runtime import ConnectorBridge, ScriptCall, ScriptedRuntime, build_patch_yaml
-from agentnet.vault import Vault, VaultError
+from matrix import auth
+from matrix.connector_catalog import ConnectorCatalog, parse_catalog
+from matrix.engine import Network, NetworkError
+from matrix.mcp_client import MCPError, RemoteMCP
+from matrix.models import CONNECTOR_PREFIX
+from matrix.runtime import ConnectorBridge, ScriptCall, ScriptedRuntime, build_patch_yaml
+from matrix.vault import Vault, VaultError
 from tests.test_users import client, joint, users
 
 SECRET = "ghp_super-secret-token-123"
@@ -204,7 +204,7 @@ def test_network_calls_the_service_on_the_agents_behalf(tmp_path: Path, sse: boo
         assert calls[0]["tool"] == "search_docs" and calls[0]["ok"] and "季度目标" not in json.dumps(calls[0])
         # 覆盖层里挂的是本地桥，只带地址与令牌
         y = build_patch_yaml(["connector.use"], connectors=req.connectors)
-        assert "AGENTNET_CONNECTOR_URL" in y and SECRET not in y and "mcp-connectors" in y
+        assert "MATRIX_CONNECTOR_URL" in y and SECRET not in y and "mcp-connectors" in y
     finally:
         f.close()
 
@@ -255,7 +255,7 @@ def test_calls_outside_the_effective_set_are_refused_and_recorded(tmp_path: Path
     net.send_message(dm.id, "试试", actor=alice, background=False)
     assert "这一轮不能用 other__steal" in dm.messages[-1].text
     assert any(e.type == "authority.violation" and "other__steal" in e.data["detail"] for e in net.bus.since(0))
-    from agentnet.engine import _violations
+    from matrix.engine import _violations
     assert _violations([{"tool": f"{CONNECTOR_PREFIX}docs__search_docs"}], []) == \
         [f"无 connector.use 权限却调用了连接器 {CONNECTOR_PREFIX}docs__search_docs"]
 
@@ -280,14 +280,14 @@ def test_remote_client_reports_auth_errors(fake: FakeMCP):
 
 def test_connector_bridge_script_speaks_mcp_and_fails_soft():
     """mcp_connectors.py：网络不可达时 tools/list 为空（不让整轮起不来），tools/call 回 isError。"""
-    from agentnet.runtime import CONNECTOR_SCRIPT
+    from matrix.runtime import CONNECTOR_SCRIPT
     msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
             {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "docs__x", "arguments": {}}}]
     out = subprocess.run([sys.executable, str(CONNECTOR_SCRIPT)], input="\n".join(json.dumps(m) for m in msgs),
                          capture_output=True, text=True, timeout=20, encoding="utf-8",
-                         env={**os.environ, "AGENTNET_CONNECTOR_URL": "http://127.0.0.1:9/x", "AGENTNET_TOKEN": "t",
-                              "AGENTNET_TOOL_TIMEOUT": "3"}).stdout
+                         env={**os.environ, "MATRIX_CONNECTOR_URL": "http://127.0.0.1:9/x", "MATRIX_TOKEN": "t",
+                              "MATRIX_TOOL_TIMEOUT": "3"}).stdout
     res = [json.loads(x) for x in out.splitlines()]
     assert res[1]["result"]["tools"] == [] and res[2]["result"]["isError"] is True
 
@@ -352,7 +352,7 @@ def test_suggest_connector_only_pings_the_owner(tmp_path: Path, fake: FakeMCP):
 
 # ================= 电脑上的连接器 =================
 def device_hello(services: dict[str, list[str]] | None, enforce: bool = True):
-    from agentnet.device import HELLO_OK, PROTOCOL, capabilities_from_hello
+    from matrix.device import HELLO_OK, PROTOCOL, capabilities_from_hello
     runtimes = []
     for name, names in (services or {"claude-code": []}).items():
         item = {"runtime": name, "capabilities": {"enforcement": {"connector.use": "enforced"} if enforce else {},
@@ -365,7 +365,7 @@ def device_hello(services: dict[str, list[str]] | None, enforce: bool = True):
 
 
 def device_net(tmp_path: Path, services: dict[str, list[str]] | None, enforce: bool = True):
-    from agentnet.device import RUN_RESULT, DeviceRuntime, MemoryLink
+    from matrix.device import RUN_RESULT, DeviceRuntime, MemoryLink
     from tests.test_device import connector
     net = Network(ScriptedRuntime(lambda c: "cloud"), tmp_path, seed=False)
     alice, guest = users(net, "alice@x.io", "guest@x.io")
@@ -378,7 +378,7 @@ def device_net(tmp_path: Path, services: dict[str, list[str]] | None, enforce: b
 
 
 def last_request(rt):
-    from agentnet.device import RUN_REQUEST
+    from matrix.device import RUN_REQUEST
     return [m for m in rt.link.sent if m["type"] == RUN_REQUEST][-1]
 
 
@@ -411,7 +411,7 @@ def test_device_services_become_connections_and_only_allowed_ones_are_sent(tmp_p
 
 
 def test_device_services_that_disappear_are_marked_missing(tmp_path: Path):
-    from agentnet.device import DeviceRuntime, MemoryLink
+    from matrix.device import DeviceRuntime, MemoryLink
     net, alice, guest, dev, a, rt = device_net(tmp_path, {"claude-code": ["notion"]})
     net.register_runtime(dev.id, DeviceRuntime(MemoryLink(serve=lambda m: None), device_hello({"claude-code": []})))
     c = net.my_connections(alice)[0]
@@ -429,7 +429,7 @@ def test_old_clients_report_nothing_and_unenforced_harnesses_get_no_connectors(t
 
 def test_old_device_agents_keep_their_local_services(tmp_path: Path):
     """旧数据：有连接器之前电脑上的 Agent 一直能用本机工具里配的服务，加载时补上 connector.use。"""
-    from agentnet.store import Store
+    from matrix.store import Store
     state = {"agents": [{"id": "a1", "name": "L", "description": "d", "capabilities": [], "authority": ["file.write"],
                          "device_runtime": "dev-1"},
                         {"id": "a2", "name": "C", "description": "d", "capabilities": [], "authority": []}]}
@@ -444,8 +444,8 @@ def test_old_device_agents_keep_their_local_services(tmp_path: Path):
 
 # ================= 驱动：只开允许的服务 =================
 def test_claude_driver_loads_only_allowed_services(tmp_path: Path):
-    from agentnet.connector.drivers.base import RunSpec
-    from agentnet.connector.drivers.claude import ClaudeDriver
+    from matrix.connector.drivers.base import RunSpec
+    from matrix.connector.drivers.claude import ClaudeDriver
     cfg = tmp_path / ".claude.json"
     cfg.write_text(json.dumps({"mcpServers": {"notion": {"type": "http", "url": "https://n", "headers": {"k": "v"}},
                                               "linear": {"type": "stdio", "command": "linear-mcp"}}}))
@@ -454,7 +454,7 @@ def test_claude_driver_loads_only_allowed_services(tmp_path: Path):
     spec = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path / "w", authority=[],
                    tool_names=["open_request"], connectors=["notion"])
     servers = d.mcp_servers(spec)
-    assert set(servers) == {"agentnet", "notion"}
+    assert set(servers) == {"matrix_net", "notion"}
     cmd = d.command(spec, tmp_path / "cfg.json")
     assert "--strict-mcp-config" in cmd and str(tmp_path / "cfg.json") in cmd
     old = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path / "w", authority=[],
@@ -470,9 +470,23 @@ def test_claude_driver_loads_only_allowed_services(tmp_path: Path):
     assert (dest / "a" / "SKILL.md").read_text() == "net" and (dest / "b" / "SKILL.md").read_text() == "home"
 
 
+def test_claude_driver_keeps_users_own_matrix_service(tmp_path: Path):
+    """用户自己配了一个叫 matrix 的服务（如 matrix.org 聊天）：不和网络工具撞名，勾给它就照常能用。"""
+    from matrix.connector.drivers.base import RunSpec
+    from matrix.connector.drivers.claude import ClaudeDriver
+    from matrix.models import MCP_SERVER
+    cfg = tmp_path / ".claude.json"
+    cfg.write_text(json.dumps({"mcpServers": {"matrix": {"type": "stdio", "command": "matrix-chat-mcp"}}}))
+    d = ClaudeDriver(bridge_url="http://127.0.0.1:1", config_path=cfg)
+    spec = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path / "w", authority=[],
+                   tool_names=["open_request"], connectors=["matrix"])
+    servers = d.mcp_servers(spec)
+    assert MCP_SERVER != "matrix" and servers["matrix"]["command"] == "matrix-chat-mcp" and MCP_SERVER in servers
+
+
 def test_codex_driver_disables_services_that_are_not_allowed(monkeypatch, tmp_path: Path):
-    from agentnet.connector.drivers.base import RunSpec
-    from agentnet.connector.drivers import codex as codex_mod
+    from matrix.connector.drivers.base import RunSpec
+    from matrix.connector.drivers import codex as codex_mod
     d = codex_mod.CodexDriver()
     monkeypatch.setattr(d, "services", lambda: ["notion", "my.server"])
     spec = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path, authority=[],
@@ -483,7 +497,7 @@ def test_codex_driver_disables_services_that_are_not_allowed(monkeypatch, tmp_pa
 
 
 def test_dsh_driver_disables_unallowed_mcp_plugins(monkeypatch, tmp_path: Path):
-    from agentnet.connector.drivers.dsh import DshDriver
+    from matrix.connector.drivers.dsh import DshDriver
     dump = ("- id: tool-web\n  name: '@deepseek-ai/dsh-tool-web'\n"
             "- id: my-notion\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    serverName: notion\n"
             "- id: my-linear\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    serverName: linear\n")
@@ -496,7 +510,7 @@ def test_dsh_driver_disables_unallowed_mcp_plugins(monkeypatch, tmp_path: Path):
 
 def test_custom_connector_public_only(tmp_path):
     """不变量 19 / 安全：自定义的云端 MCP 地址只能是 https 公网地址，内网、回环、http 一律拒绝；凭证只进保管库。"""
-    from agentnet.mcp_client import MCPError, check_public_url
+    from matrix.mcp_client import MCPError, check_public_url
     for bad in ["http://example.com/mcp", "https://127.0.0.1/mcp", "https://localhost/mcp", "https://10.0.0.5/x",
                 "https://169.254.169.254/latest", "https://[::1]/x", "https://user:pw@example.com/", "ftp://x"]:
         with pytest.raises(MCPError):

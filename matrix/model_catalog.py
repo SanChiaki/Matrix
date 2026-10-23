@@ -1,6 +1,6 @@
 """云侧 Agent 的预置模型目录：由部署方维护的一份 JSON 文件，增减模型不用重启。
 
-文件（默认 `<data>/models.json`，`--models` / `AGENTNET_MODELS` 可改）::
+文件（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS` 可改）::
 
     {
       "default": "flash",
@@ -104,7 +104,7 @@ class ModelCatalog:
             self.error = None
         except (OSError, ValueError) as e:  # json.JSONDecodeError 是 ValueError
             self.error = str(e)
-            print(f"[agentnet] 模型目录 {self.path} 无效，{'沿用上一份' if self._active else '只允许运行时默认'}：{e}",
+            print(f"[matrix] 模型目录 {self.path} 无效，{'沿用上一份' if self._active else '只允许运行时默认'}：{e}",
                   file=sys.stderr)
         self._active = True
 

@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from agentnet.connector.client import HOMES, Connector, _Run
-from agentnet.connector.drivers.base import RunOutcome, RunSpec
-from agentnet.device import FILE_FETCH, RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink
-from agentnet.engine import Network
-from agentnet.runtime import ADVISORY, ENFORCED, ScriptedRuntime
+from matrix.connector.client import HOMES, Connector, _Run
+from matrix.connector.drivers.base import RunOutcome, RunSpec
+from matrix.device import FILE_FETCH, RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink
+from matrix.engine import Network
+from matrix.runtime import ADVISORY, ENFORCED, ScriptedRuntime
 from tests.test_device import connector, hello
 from tests.test_users import joint, users
 

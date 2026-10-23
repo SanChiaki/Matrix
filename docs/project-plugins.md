@@ -76,7 +76,7 @@ sales-pipeline/
 
 ## 3. 安装与版本
 
-- 部署方目录：`plugins.json`（默认 `<data>/plugins.json`，`--plugins` / `AGENTNET_PLUGINS`），列出插件包所在目录，按修改时间热加载，写坏了沿用上一份。
+- 部署方目录：`plugins.json`（默认 `<data>/plugins.json`，`--plugins` / `MATRIX_PLUGINS`），列出插件包所在目录，按修改时间热加载，写坏了沿用上一份。
 - 主持人在项目页“插件”标签里从目录安装，或上传插件包。安装时把包**拷进** `projects/<id>/plugins/<名字>/`，固定版本；
   目录里的新版本只提示、由主持人点升级，不自动换（人看过的代码才在大家的浏览器里跑）。
 - 升级时清单里的表结构变化：新增字段 / 选项直接生效；删字段、改类型要主持人确认，旧数据保留在 `log.jsonl` 里可以找回。
@@ -169,7 +169,7 @@ sales-pipeline/
 3. **触发**：webhook、schedule、record，触发消息的身份与验收，暂停与恢复。
 4. **以人名义的动作**：`chat.post`、`chat.read`、`requests.read`，父页面确认卡。
 
-每一期都同步更新 [about.html](../agentnet/static/about.html) 的架构图（新增插件、桥、触发入口）与 `docs/reference/` 里的说明。
+每一期都同步更新 [about.html](../matrix/static/about.html) 的架构图（新增插件、桥、触发入口）与 `docs/reference/` 里的说明。
 
 ## 10. 不做
 

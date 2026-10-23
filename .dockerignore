@@ -1,4 +1,5 @@
 .venv/
+.matrix/
 .agentnet/
 .git/
 __pycache__/

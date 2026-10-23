@@ -4,8 +4,8 @@ import re
 import zipfile
 from pathlib import Path
 
-from agentnet.engine import Network
-from agentnet.runtime import ScriptCall, ScriptedRuntime
+from matrix.engine import Network
+from matrix.runtime import ScriptCall, ScriptedRuntime
 from tests.test_users import client, users
 
 

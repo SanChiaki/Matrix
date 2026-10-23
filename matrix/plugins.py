@@ -598,7 +598,7 @@ class PluginCatalog:
             self._items, self.error = items, None
         except (OSError, ValueError) as e:
             self.error = str(e)
-            print(f"[agentnet] 插件目录 {self.path} 无效，沿用上一份：{e}", file=sys.stderr)
+            print(f"[matrix] 插件目录 {self.path} 无效，沿用上一份：{e}", file=sys.stderr)
 
     def items(self) -> list[CatalogPlugin]:
         with self._lock:

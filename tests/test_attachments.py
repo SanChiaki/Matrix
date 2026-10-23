@@ -12,11 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from agentnet.device import RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink
-from agentnet.engine import Network, NetworkError
-from agentnet.models import ATTACHMENT_LIMIT, ATTACHMENTS, attachment_rel
-from agentnet.runtime import ScriptCall, ScriptedRuntime
-from agentnet.store import Store
+from matrix.device import RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink
+from matrix.engine import Network, NetworkError
+from matrix.models import ATTACHMENT_LIMIT, ATTACHMENTS, attachment_rel
+from matrix.runtime import ScriptCall, ScriptedRuntime
+from matrix.store import Store
 from tests.test_device import connector, hello
 from tests.test_joint import is_task, joint
 from tests.test_users import client, users

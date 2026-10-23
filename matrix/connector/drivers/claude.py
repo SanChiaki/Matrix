@@ -25,7 +25,8 @@ from pathlib import Path
 
 import sys
 
-from ...models import AGENT_HOME, SKILLS
+from ... import compat
+from ...models import AGENT_HOME, MCP_SERVER, SKILLS
 from ...runtime import MCP_SERVER_SCRIPT, ENFORCED, UNAVAILABLE, RuntimeCapabilities, argv, no_window
 from .base import RunOutcome, RunSpec, guard
 
@@ -87,15 +88,15 @@ class ClaudeDriver:
         """这一轮要加载的 MCP 服务：网络工具 + 网络允许的、用户自己配置的服务。"""
         servers: dict[str, dict] = {}
         if spec.tool_names and self.bridge_url:
-            servers["agentnet"] = {
-                "type": "stdio", "command": os.environ.get("AGENTNET_MCP_CMD", sys.executable),
+            servers[MCP_SERVER] = {
+                "type": "stdio", "command": compat.env("MCP_CMD", sys.executable),
                 "args": [str(MCP_SERVER_SCRIPT)],
-                "env": {"AGENTNET_TOOL_URL": f"{self.bridge_url}/internal/tools",
-                        "AGENTNET_TOKEN": spec.run_id,
-                        "AGENTNET_TOOLS": ",".join(spec.tool_names)}}
+                "env": {"MATRIX_TOOL_URL": f"{self.bridge_url}/internal/tools",
+                        "MATRIX_TOKEN": spec.run_id,
+                        "MATRIX_TOOLS": ",".join(spec.tool_names)}}
         if spec.connectors:
             mine = self.user_servers()
-            servers.update({n: mine[n] for n in spec.connectors if n in mine and n != "agentnet"})
+            servers.update({n: mine[n] for n in spec.connectors if n in mine and n != MCP_SERVER})
         return servers
 
     def allowed_tools(self, authority: list[str]) -> list[str]:

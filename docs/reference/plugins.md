@@ -37,7 +37,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
 
 ## 安装、升级、卸载
 
-- 来源：部署方目录 `plugins.json`（`--plugins` / `AGENTNET_PLUGINS`，默认 `<data>/plugins.json`，`{"plugins": ["相对目录", ...]}`，
+- 来源：部署方目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，默认 `<data>/plugins.json`，`{"plugins": ["相对目录", ...]}`，
   按文件与清单的修改时间热加载），或主持人上传。**只有主持人**装、升级、卸载、启停触发（`hosted_project`）；
   联合项目的参与者看得到装了什么、申请了哪些能力（`project_detail.plugin_list`）。
 - 装好的包在 `projects/<id>/plugins/<name>/`，元数据在 `Project.plugins[name]`

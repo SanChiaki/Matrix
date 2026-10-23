@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from agentnet import skills as skillfs
-from agentnet.engine import Network, NetworkError
-from agentnet.models import SKILLS
-from agentnet.runtime import ScriptCall, ScriptedRuntime, RuntimeCapabilities, build_patch_yaml
+from matrix import skills as skillfs
+from matrix.engine import Network, NetworkError
+from matrix.models import SKILLS
+from matrix.runtime import ScriptCall, ScriptedRuntime, RuntimeCapabilities, build_patch_yaml
 from tests.test_users import client, joint, users
 
 
@@ -35,7 +35,7 @@ def test_dsh_overlay_never_reads_default_skill_roots(tmp_path: Path):
     y = build_patch_yaml([], skill_dirs=["/w/skills", "/w/agent-home/skills"])
     assert 'customSkillDirs: ["/w/skills", "/w/agent-home/skills"]' in y
 
-    from agentnet.runtime import DshRuntime, RunRequest
+    from matrix.runtime import DshRuntime, RunRequest
     import json, os, stat, sys
     fake = tmp_path / "fake-dsh"   # 只记录覆盖层，不真的跑模型
     fake.write_text(f"#!{sys.executable}\nimport sys,json,pathlib\n"
@@ -226,8 +226,8 @@ def test_bad_skill_proposals_never_reach_the_archive(tmp_path: Path):
 
 # ================= 端侧：技能随材料下发 =================
 def test_device_runs_receive_skills_as_materials(tmp_path: Path):
-    from agentnet import auth
-    from agentnet.device import RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink, capabilities_from_hello, HELLO_OK, PROTOCOL
+    from matrix import auth
+    from matrix.device import RUN_REQUEST, RUN_RESULT, DeviceRuntime, MemoryLink, capabilities_from_hello, HELLO_OK, PROTOCOL
     from tests.test_device import connector
     net = Network(ScriptedRuntime(lambda c: "cloud"), tmp_path, seed=False)
     alice, = users(net, "alice@x.io")

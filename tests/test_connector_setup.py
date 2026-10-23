@@ -10,13 +10,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentnet.connector import config as cfg
-from agentnet.connector import pairing, service
-from agentnet.connector.client import Connector
-from agentnet.connector.drivers.base import RunOutcome
-from agentnet.connector.main import detect_drivers, main
-from agentnet.models import HARNESSES
-from agentnet.server import create_app
+from matrix.connector import config as cfg
+from matrix.connector import pairing, service
+from matrix.connector.client import Connector
+from matrix.connector.drivers.base import RunOutcome
+from matrix.connector.main import detect_drivers, main
+from matrix.models import HARNESSES
+from matrix.server import create_app
 from tests.test_devices import build
 from tests.test_users import client
 
@@ -28,7 +28,7 @@ class FakeDriver:
         self.ran = []
 
     def capabilities(self):
-        from agentnet.runtime import RuntimeCapabilities
+        from matrix.runtime import RuntimeCapabilities
         return RuntimeCapabilities(name=self.name, placement="device", enforcement={"web.research": "enforced"})
 
     def available(self):
@@ -73,13 +73,13 @@ def test_hello_lists_every_driver():
     c = Connector([FakeDriver("claude-code"), FakeDriver("codex")], Path("/tmp"))
     msg = c.hello_message()
     assert msg["runtime"] == "claude-code" and [r["runtime"] for r in msg["runtimes"]] == ["claude-code", "codex"]
-    from agentnet.device import capabilities_from_hello
+    from matrix.device import capabilities_from_hello
     assert capabilities_from_hello(msg).harnesses == ["claude-code", "codex"]
     c.close()
 
 
 def test_detect_drivers_keeps_only_installed(monkeypatch):
-    import agentnet.connector.main as m
+    import matrix.connector.main as m
     monkeypatch.setattr(m, "build_driver", lambda name, **kw: FakeDriver(name, installed=name != "dsh"))
     assert [d.name for d in detect_drivers()] == ["claude-code", "codex"]
     assert [d.name for d in detect_drivers(["codex", "dsh"])] == ["codex"]
@@ -87,7 +87,7 @@ def test_detect_drivers_keeps_only_installed(monkeypatch):
 
 def test_connector_drivers_are_known_harnesses():
     """连接器的驱动名必须是网络认得的 harness，否则 Agent 绑不上去。"""
-    from agentnet.connector.main import DRIVERS
+    from matrix.connector.main import DRIVERS
     assert set(DRIVERS) <= set(HARNESSES)
 
 
@@ -129,7 +129,7 @@ def test_pair_against_the_server(tmp_path):
                         sleep=lambda s: time.sleep(0.02))
     assert shown and conf.device_name == "笔记本" and conf.email == "alice@x.io"
     assert net.store.devices[conf.device_id].harnesses == ["codex"]
-    from agentnet import auth
+    from matrix import auth
     assert auth.device_of(net.store, conf.token).id == conf.device_id
 
 
@@ -196,7 +196,7 @@ def test_windows_install_registers_a_logon_task(tmp_path):
     assert xml.startswith('<?xml version="1.0" encoding="UTF-16"?>')
     assert "<LogonTrigger>" in xml and "<MultipleInstancesPolicy>IgnoreNew" in xml
     assert f"<Command>{scripts / 'pythonw.exe'}</Command>" in xml
-    assert f'-m agentnet.connector.main run --config "{config}"' in xml
+    assert f'-m matrix.connector.main run --config "{config}"' in xml
     assert f'--log "{home / "AppData/Local/matrix-connect/matrix-connect.log"}"' in xml
     assert "s3cret-token" not in xml
     assert ["schtasks", "/Create", "/TN", service.TASK, "/XML", str(path), "/F"] in ran
@@ -213,6 +213,31 @@ def test_windows_install_registers_a_logon_task(tmp_path):
         service.install(str(exe), config, system="Windows", home=home, run=ran.append,
                         started=lambda log, since: False)
     assert not path.exists() and ran[-1] == ["schtasks", "/Delete", "/TN", service.TASK, "/F"]
+
+
+def test_service_knows_which_install_it_runs(tmp_path):
+    """升级换了安装位置（包改名后 uv tool 装进新目录）：能看出装着的服务还在跑旧的那份。"""
+    home = tmp_path / "home"
+    for system in ("Darwin", "Linux"):
+        assert service.runs_from("/new/bin/matrix-connect", system=system, home=home) is None
+        service.install("/old/bin/matrix-connect", tmp_path / "config.json", system=system, home=home,
+                        run=lambda cmd: None, env_path="/usr/bin")
+        assert service.runs_from("/old/bin/matrix-connect", system=system, home=home) is True
+        assert service.runs_from("/new/bin/matrix-connect", system=system, home=home) is False
+
+
+def test_install_reuses_the_existing_pairing(tmp_path, monkeypatch, capsys):
+    """`matrix-connect install` 按已有配置重新装后台服务，不重新配对（设备与绑在它上面的 Agent 不变）。"""
+    installed = []
+    monkeypatch.setattr("matrix.connector.main._install_service", installed.append)
+    monkeypatch.setattr(pairing, "pair", lambda *a, **k: pytest.fail("不应重新配对"))
+    with pytest.raises(SystemExit) as e:
+        main(["install", "--config", str(tmp_path / "none.json")])
+    assert e.value.code == 2 and "setup" in capsys.readouterr().err and installed == []
+    path = tmp_path / "config.json"
+    cfg.save(cfg.Config(server="http://127.0.0.1:8765", token="t", device_id="dev-1"), path)
+    main(["install", "--config", str(path)])
+    assert installed == [path]
 
 
 def test_install_waits_for_the_log(tmp_path):
@@ -253,7 +278,7 @@ def test_run_log_captures_output(tmp_path, monkeypatch):
     log = tmp_path / "logs" / "matrix-connect.log"
     log.parent.mkdir()
     log.write_text("旧" * 10)
-    monkeypatch.setattr("agentnet.connector.main.LOG_MAX_BYTES", 10)
+    monkeypatch.setattr("matrix.connector.main.LOG_MAX_BYTES", 10)
     with pytest.raises(SystemExit):
         main(["run", "--config", str(tmp_path / "none.json"), "--log", str(log)])
     sys.stderr.close()

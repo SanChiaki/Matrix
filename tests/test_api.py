@@ -15,15 +15,15 @@ from pathlib import Path
 import uvicorn
 from fastapi.testclient import TestClient
 
-from agentnet.engine import ExecContext, Network
-from agentnet.runtime import MCP_SERVER_SCRIPT, ScriptedRuntime
-from agentnet.scripted import scenario_handler
-from agentnet.server import AgentNetServer, create_app
+from matrix.engine import ExecContext, Network
+from matrix.runtime import MCP_SERVER_SCRIPT, ScriptedRuntime
+from matrix.scripted import scenario_handler
+from matrix.server import MatrixServer, create_app
 
 
 def test_event_stream_resume_after_restart():
     """事件序号不持久化：服务重启后旧页面带着更大的 since 重连，必须从头补发，而不是一直沉默。"""
-    from agentnet.server import resume_seq
+    from matrix.server import resume_seq
     assert resume_seq(since=4, last_event_id=None, last_seq=10) == 4
     assert resume_seq(since=4, last_event_id="7", last_seq=10) == 7   # 浏览器自动重连带 Last-Event-ID
     assert resume_seq(since=300, last_event_id=None, last_seq=2) == 0  # 服务已重启
@@ -41,7 +41,7 @@ def test_event_stream_closes_on_shutdown(tmp_path: Path):
         port = s.getsockname()[1]
     # 优雅关闭超时设得很长：事件流必须因退出信号立即断开，而不是等超时强切
     # 优雅关闭超时设得很长：事件流必须因退出信号立即断开，而不是等超时强切
-    server = AgentNetServer(uvicorn.Config(create_app(net), host="127.0.0.1", port=port, log_level="warning",
+    server = MatrixServer(uvicorn.Config(create_app(net), host="127.0.0.1", port=port, log_level="warning",
                                            timeout_graceful_shutdown=30), net)
     th = threading.Thread(target=server.run, daemon=True)
     th.start()
@@ -50,7 +50,7 @@ def test_event_stream_closes_on_shutdown(tmp_path: Path):
 
     ended: dict[str, float] = {}
 
-    from agentnet import auth
+    from matrix import auth
     _, token, _ = auth.register(net.store, "owner@example.com", "password-123")
     opened = threading.Event()
 
@@ -180,7 +180,7 @@ def test_api_flow(tmp_path: Path):
 
 def test_api_proposal_review(tmp_path: Path):
     """人在 API 上审核 Agent 的提议：批准时可改字段，权限不能超出提议者。"""
-    from agentnet.runtime import ScriptCall
+    from matrix.runtime import ScriptCall
 
     def handler(call: ScriptCall) -> str:
         if call.can_delegate and call.turn == 1:
@@ -236,7 +236,7 @@ def test_mcp_server_calls_back_into_network(tmp_path: Path):
         ]
         out = subprocess.run([sys.executable, str(MCP_SERVER_SCRIPT)], input="\n".join(json.dumps(m) for m in msgs),
                              capture_output=True, text=True, timeout=30,
-                             env={**os.environ, "AGENTNET_TOOL_URL": net.tool_url, "AGENTNET_TOKEN": "tok"}, encoding="utf-8").stdout
+                             env={**os.environ, "MATRIX_TOOL_URL": net.tool_url, "MATRIX_TOKEN": "tok"}, encoding="utf-8").stdout
         res = {r["id"]: r["result"] for r in map(json.loads, out.splitlines())}
         assert "Market Research Agent" in res[2]["content"][0]["text"] and not res[2]["isError"]
         assert "已受理" in res[3]["content"][0]["text"] and not res[3]["isError"]  # 异步：立即返回

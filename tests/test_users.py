@@ -10,11 +10,11 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agentnet import auth
-from agentnet.engine import Limits, Network, NetworkError
-from agentnet.models import TaskStatus
-from agentnet.runtime import ApprovalBridge, ScriptCall, ScriptedRuntime, build_patch_yaml
-from agentnet.server import create_app
+from matrix import auth
+from matrix.engine import Limits, Network, NetworkError
+from matrix.models import TaskStatus
+from matrix.runtime import ApprovalBridge, ScriptCall, ScriptedRuntime, build_patch_yaml
+from matrix.server import create_app
 
 
 def users(net: Network, *emails: str) -> list[str]:
@@ -66,7 +66,7 @@ def test_first_user_claims_existing_data(tmp_path: Path):
 
 
 def test_server_does_not_seed(tmp_path: Path):
-    from agentnet.server import build_network
+    from matrix.server import build_network
     net = build_network("scripted", str(tmp_path), 1)
     assert not net.store.agents and not net.store.projects
 
@@ -220,11 +220,11 @@ def test_approval_rules(tmp_path: Path):
 
 
 def test_patch_mounts_approval_plugin():
-    from agentnet.runtime import APPROVAL_PLUGIN
+    from matrix.runtime import APPROVAL_PLUGIN
     y = build_patch_yaml(["file.write"], approvals=ApprovalBridge(url="http://127.0.0.1:1/internal/approval",
                                                                    token="t", handler=lambda t, r: "rejected"))
     import json
-    assert "id: agentnet-approval" in y and json.dumps(str(APPROVAL_PLUGIN)) in y and '"t"' in y
+    assert "id: matrix-approval" in y and json.dumps(str(APPROVAL_PLUGIN)) in y and '"t"' in y
     assert APPROVAL_PLUGIN.exists() and "approval/request" in APPROVAL_PLUGIN.read_text(encoding="utf-8")
 
 

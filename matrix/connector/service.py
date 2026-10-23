@@ -112,7 +112,7 @@ def windows_launcher(exe: str) -> Path:
 
 def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path) -> str:
     q = lambda s: escape(f'"{s}"')  # noqa: E731 —— 路径可能带空格
-    args = f"-m agentnet.connector.main run --config {q(config)} --log {q(log)}"
+    args = f"-m matrix.connector.main run --config {q(config)} --log {q(log)}"
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Matrix connector (matrix-connect)</Description></RegistrationInfo>
@@ -228,6 +228,18 @@ def uninstall(*, system: str | None = None, home: Path | None = None, run: Run =
         except ServiceError:
             pass
     return path
+
+
+def runs_from(exe: str, *, system: str | None = None, home: Path | None = None) -> bool | None:
+    """装着的服务是不是跑这份安装（exe 所在目录）。没装返回 None。升级换了安装位置后（如包改名后
+    uv tool 装进了新目录）旧服务还在跑旧的那份，`matrix-connect install` 重新装一次即可。"""
+    system = system or platform.system()
+    path = unit_path(system, home)
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-16" if system == "Windows" else "utf-8", errors="replace")
+    where = str(Path(exe).parent)
+    return where in text or escape(where) in text
 
 
 def log_hint(system: str | None = None) -> str:
