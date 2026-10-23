@@ -235,7 +235,7 @@ function route() {
     // #project-<项目> 打开项目页（可收藏、刷新、前进后退）；#projects 是项目列表
     const page = hash.match(/^project-(.+)$/);
     S.convId = null; S.conv = null;
-    S.projectSel = page ? page[1] : null;
+    S.projectSel = page ? page[1] : null; S.projectEdit = false;
     show(page ? "projects" : PLAIN.includes(hash) ? hash : "network");
   }
 }
@@ -641,13 +641,13 @@ function renderNetDetail() {
       <dl><dt>项目</dt><dd>${tags(r.projects.map((g) => proj(g)?.name || "（已删除）"))}</dd>
       <dt>最近</dt><dd>${new Date(r.last_at * 1000).toLocaleString()}</dd></dl>`;
   } else {
-    box.innerHTML = `<h2 class="panel-title">概览</h2><p class="muted">点击节点或连线查看详情。</p>
-      <div class="stats"><div class="stat"><b>${S.snap.agents.length}</b><span>Agent</span></div><div class="stat"><b>${S.snap.projects.length}</b><span>项目</span></div>
-      <div class="stat"><b>${S.snap.conversations.length}</b><span>对话</span></div><div class="stat"><b>${S.snap.relations.length}</b><span>委托关系</span></div>
-      <div class="stat"><b>${S.snap.active_tasks.length}</b><span>进行中委托</span></div>
-      <div class="stat"><b>${(S.snap.proposals || []).filter((p) => p.status === "pending").length}</b><span>待审核提议</span></div></div>
-      <p class="muted">连线粗细代表历史委托次数，流动的虚线是正在进行的委托，节点外圈颜色对应所属项目。</p>`;
+    box.innerHTML = "";
   }
+  // 概览常驻在图下方的一行，不占弹出框
+  $("#net-stats").innerHTML = [[S.snap.agents.length, "Agent"], [S.snap.projects.length, "项目"], [S.snap.conversations.length, "对话"],
+    [S.snap.relations.length, "委托关系"], [S.snap.active_tasks.length, "进行中委托"],
+    [(S.snap.proposals || []).filter((p) => p.status === "pending").length, "待审核提议"]]
+    .map(([n, l]) => `<span><b>${n}</b> ${l}</span>`).join("") + '<span class="muted">点击节点或连线查看详情</span>';
 }
 
 // ================= Agent 管理 =================
@@ -861,7 +861,7 @@ function renderProjects() {
 
 function renderProjectEditor(isNew = false) {
   const box = $("#project-editor"), g = proj(S.projectSel);
-  if (!g && !isNew) { box.innerHTML = placeholder("选择一个项目编辑成员，或新建。"); return; }
+  if (!isNew && !(g && S.projectEdit)) { box.innerHTML = placeholder("选择一个项目编辑成员，或新建。"); return; }
   if (g && !isHost(g)) { renderProjectGuest(box, g); return; }
   const x = g || { name: "", description: "", member_ids: [], kind: "internal" };
   // 只能加入自己的 Agent；联合项目里别人的成员由他们自己加减（主持人可以移出）
@@ -960,10 +960,11 @@ async function renderProjectPage(force = false) {
     aria-controls="pp-panel">${label}<span class="count">${n}</span></button>`;
   page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#projects">项目</a><span aria-hidden="true">/</span>
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
-      <a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
+      <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
     <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("needs", "需要的连接器", (d.connector_readiness || []).length)}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
+  $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
     st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => $(`#pt-${st.tab}`)?.focus());
   }));
@@ -1372,6 +1373,7 @@ function renderChats() {
 
 async function openConv(id) {
   if (S.convId !== id) S.taskSel = null;
+  if (S.conv?.id !== id) $(".chat-side").classList.remove("open");  // 换对话就收起上一个对话的成员与档案
   S.convId = id;
   history.replaceState(null, "", `#${id}`);
   // 新对话的数据到之前先显示“加载中”：否则慢网下屏幕上还是上一个对话，@ 列表也是它的成员
@@ -1490,8 +1492,9 @@ function bindProposals(root) {
 }
 
 // ---------- 侧栏：成员 / 委托详情 ----------
-function sideTab(which) {
+function sideTab(which, open = true) {
   S.sideTab = which;
+  if (open) $(".chat-side").classList.add("open");
   $("#tab-members").setAttribute("aria-selected", String(which === "members"));
   $("#tab-archive").setAttribute("aria-selected", String(which === "archive"));
   $("#tab-task").setAttribute("aria-selected", String(which === "task"));
@@ -1510,7 +1513,7 @@ async function renderArchive() {
   const box = $("#archive-panel"), c = S.conv;
   const has = !!c && (c.kind === "project" || c.kind === "session") && !!c.project_id && !c.archived && !!proj(c.project_id);
   $("#tab-archive").hidden = !has;
-  if (!has && S.sideTab === "archive") { sideTab("members"); return; }
+  if (!has && S.sideTab === "archive") { sideTab("members", false); return; }
   if (!has || box.hidden) return;
   // 正在填表时不重绘（事件驱动的刷新会清掉输入）
   if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
@@ -1741,7 +1744,9 @@ function renderThread() {
   const stale = S.convError ? `<span class="net-warn" role="status" title="${esc(S.convError)}">网络不稳定，显示的可能不是最新内容，正在重试…</span>` : "";
   const pageBtn = g && !c.archived && (c.kind === "project" || sess)
     ? `<a class="button ghost" href="#project-${esc(g.id)}" title="资产、资源引用与项目配置">项目页</a>` : "";
-  $("#thread-head").innerHTML = head + stale + pageBtn + actions;
+  const sideBtn = c.missing ? "" : `<button type="button" class="ghost" id="side-open" title="成员、项目档案与委托详情">成员与档案</button>`;
+  $("#thread-head").innerHTML = head + stale + pageBtn + sideBtn + actions;
+  $("#side-open")?.addEventListener("click", () => sideTab(S.sideTab === "task" || !S.sideTab ? "members" : S.sideTab));
   $("#conv-del")?.addEventListener("click", async () => {
     if (!confirm("删除这个已归档的对话？")) return;
     try { await api(`/api/conversations/${c.id}`, { method: "DELETE" }); S.convId = null; S.conv = null; location.hash = "network"; await reload(); }
@@ -2596,3 +2601,67 @@ function devConnsHtml(d) {
   if (!list.length) return "";
   return `<dl><dt>配好的服务</dt><dd>${list.map((c) => `<a class="tag" href="#connectors" data-conn="${esc(c.id)}">${esc(c.name)} · ${esc(c.harness_name || "")}</a>`).join("")}</dd></dl>`;
 }
+
+// ---------- 弹出框：次级信息（详情、编辑器、成员与档案）不占常驻侧栏 ----------
+// 各详情区照旧由各自的 render 函数填充；有实际内容（不是占位提示）就弹出，关闭时清掉对应的选中状态。
+const MODAL_CLOSE = {
+  "net-detail": () => { S.sel = null; renderGraph(); },
+  "board-detail": () => { S.reqSel = null; S.taskSel = null; renderBoard(); },
+  "agent-editor": () => { S.agentSel = null; renderAgents(); renderAgentEditor(); },
+  "skill-editor": () => { S.skillSel = null; renderSkillsView(); },
+  "conn-detail": () => { S.connSel = null; S.connPanel = null; $("#conn-detail").dataset.sig = ""; renderConnectorsView(); },
+  "project-editor": () => { S.projectEdit = false; renderProjectEditor(); },
+  "device-detail": () => {
+    S.devicePanel = null; S.deviceSel = null;
+    if (location.hash.startsWith("#pair=")) history.replaceState(null, "", "#devices");
+    renderDevicesView();
+  },
+};
+function closeModal(box) {
+  if (box.classList.contains("chat-side")) { box.classList.remove("open"); syncBackdrop(); return; }
+  MODAL_CLOSE[box.id]?.();
+}
+function syncBackdrop() {
+  const open = [...document.querySelectorAll(".side.open")].some((b) => !b.closest(".view[hidden]"));
+  $("#modal-backdrop").hidden = !open;
+}
+function setupModals() {
+  const bd = document.createElement("div");
+  bd.id = "modal-backdrop"; bd.className = "modal-backdrop"; bd.hidden = true;
+  bd.addEventListener("click", () => { const b = topModal(); if (b) closeModal(b); });
+  document.body.append(bd);
+  document.querySelectorAll(".side").forEach((box) => {
+    box.setAttribute("role", "dialog"); box.setAttribute("aria-modal", "true"); box.tabIndex = -1;
+    const ensureX = () => {
+      if (box.querySelector(":scope > .modal-x")) return;
+      const x = document.createElement("button");
+      x.type = "button"; x.className = "ghost icon modal-x"; x.setAttribute("aria-label", "关闭"); x.textContent = "×";
+      x.addEventListener("click", () => closeModal(box));
+      box.prepend(x);
+    };
+    ensureX();
+    if (box.classList.contains("chat-side")) {
+      new MutationObserver(syncBackdrop).observe(box, { attributes: true, attributeFilter: ["class"] });
+      return;
+    }
+    new MutationObserver(() => {
+      ensureX();
+      const kids = [...box.children].filter((k) => !k.classList.contains("modal-x"));
+      const has = kids.length > 0 && !(kids.length === 1 && kids[0].classList.contains("placeholder"));
+      const was = box.classList.contains("open");
+      box.classList.toggle("open", has);
+      if (has && !was) box.focus({ preventScroll: true });
+      syncBackdrop();
+    }).observe(box, { childList: true });
+  });
+  // 切换视图时只显示当前视图里的弹出框
+  document.querySelectorAll(".view").forEach((v) =>
+    new MutationObserver(syncBackdrop).observe(v, { attributes: true, attributeFilter: ["hidden"] }));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (e.target.closest?.(".mention-pop") || !$("#mention-pop").hidden) return;
+    const b = topModal(); if (b) { e.preventDefault(); closeModal(b); }
+  });
+}
+const topModal = () => [...document.querySelectorAll(".side.open")].find((b) => !b.closest(".view[hidden]"));
+setupModals();
