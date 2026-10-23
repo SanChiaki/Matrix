@@ -467,6 +467,14 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "tool.call" || ev.type === "runtime.invoke") return;  // 已由 run.progress 覆盖
+  if (ev.type === "plugin.records") {  // 插件记录变了：通知正在看的插件页面自己刷新；插件管理页更新条数
+    const f = S.pluginFrame;
+    if (f?.el.isConnected && f.pid === d.project_id && f.name === d.plugin)
+      f.el.contentWindow?.postMessage({ matrix: 1, event: "records.changed", data: { table: d.table } }, "*");
+    if (S.view === "projects" && S.projectSel === d.project_id && S.assets?.tab === "plugins") renderProjectPage();
+    return;
+  }
+  if (ev.type === "plugin.violation") return;
   if (ev.type === "skills.updated" || ev.type === "connection.updated") { loadMine(true).then(schedule); return; }
   if (ev.type === "project.invited" && S.view === "board") loadBoard();
   if (ev.type === "project.left" && d.user_id === S.me?.id && S.conv?.project_id === d.project_id) {
@@ -953,7 +961,13 @@ async function renderProjectPage(force = false) {
     : { pid: g.id, tab: "files", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
   if (S.pendingTab) { st.tab = S.pendingTab; S.pendingTab = null; }
   // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
-  const sig = JSON.stringify([d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog]);
+  const plugins = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken);  // 停用的插件不出标签页
+  const ptab = st.tab.startsWith("plugin:") ? st.tab.split(":") : null;  // plugin:<插件>:<标签>
+  if (ptab && !plugins.some((p) => p.name === ptab[1] && (p.tabs || []).some((t) => t.key === ptab[2]))) st.tab = "plugins";
+  // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
+  const sig = JSON.stringify(st.tab.startsWith("plugin:")
+    ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions])]
+    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook]);
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
@@ -962,13 +976,18 @@ async function renderProjectPage(force = false) {
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
       <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("needs", "需要的连接器", (d.connector_readiness || []).length)}</div>
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("needs", "需要的连接器", (d.connector_readiness || []).length)}${tab("plugins", "插件", plugins.length)}${
+      plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
+        data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
+        title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
   $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
-    st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => $(`#pt-${st.tab}`)?.focus());
+    st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => page.querySelector(`[data-tab="${CSS.escape(st.tab)}"]`)?.focus());
   }));
-  ({ refs: renderRefsTab, skills: renderSkillsTab, needs: renderNeedsTab }[st.tab] || renderFilesTab)($("#pp-panel", page), d, st);
+  if (st.tab.startsWith("plugin:")) { renderPluginFrame($("#pp-panel", page), d, st); return; }
+  S.pluginFrame = null;
+  ({ refs: renderRefsTab, skills: renderSkillsTab, needs: renderNeedsTab, plugins: renderPluginsTab }[st.tab] || renderFilesTab)($("#pp-panel", page), d, st);
 }
 
 const assetNote = (st) => st.note ? `<p class="asset-note ${st.bad ? "bad" : ""}" role="status">${esc(st.note)}</p>` : "";
@@ -1156,6 +1175,20 @@ function renderSkillsTab(box, d, st) {
 
 // 需要的连接器：项目只声明需要什么，不持有任何人的授权；就绪状态按成员给，不给是谁的账号
 const READY_CN = { ready: ["ok", "就绪"], not_enabled: ["", "授权了，没在这里打开"], unauthorized: ["bad", "没授权"] };
+// 定时触发给人看的说法：常见写法换成“每天 / 每周几 / 每月几号 几点”，其余原样显示
+function cronText(expr) {
+  const [mi, h, dom, mon, dow] = String(expr || "").trim().split(/\s+/);
+  const at = /^\d+$/.test(mi) && /^\d+$/.test(h) ? `${h.padStart(2, "0")}:${mi.padStart(2, "0")}` : null;
+  const week = "日一二三四五六日";
+  if (at && mon === "*") {
+    if (dom === "*" && dow === "*") return `每天 ${at}`;
+    if (dom === "*" && /^[0-7](,[0-7])*$/.test(dow)) return `每周${dow.split(",").map((d) => week[+d]).join("、")} ${at}`;
+    if (dom === "*" && dow === "1-5") return `工作日 ${at}`;
+    if (/^\d+$/.test(dom) && dow === "*") return `每月 ${dom} 号 ${at}`;
+  }
+  return `定时「${expr}」`;
+}
+
 function renderNeedsTab(box, d, st) {
   const host = d.is_host, needs = d.connector_readiness || [];
   const refName = (id) => d.refs.find((r) => r.id === id)?.name;
@@ -1195,6 +1228,217 @@ function renderNeedsTab(box, d, st) {
   box.querySelectorAll("[data-rmneed]").forEach((b) => b.addEventListener("click", () => {
     if (confirm("不再声明需要这个连接器？")) done(`/api/projects/${d.id}/needs/${b.dataset.rmneed}`, { method: "DELETE" }, "已移除");
   }));
+}
+
+// ---- 项目插件（docs/project-plugins.md）：插件页面跑在沙箱 iframe 里（不透明来源、没有登录 cookie、不能联网），
+// 读写只经这里的桥转给 /bridge，由网络按插件申请的能力与看的人的可见性执行；以人名义发群聊要在确认卡上点“发送”（不变量 20）。
+const TRIGGER_CN = { webhook: "外部回调", schedule: "定时", record: "记录变化" };
+const triggerWhen = (t, p) => {
+  const tb = (p.tables || []).find((x) => x.key === t.table);
+  const table = tb?.title || t.table, field = tb?.fields.find((f) => f.key === t.when?.field)?.label || t.when?.field;
+  return t.type === "webhook" ? `外部系统调用回调地址${t.table ? `，新增一条「${table}」` : ""}`
+    : t.type === "schedule" ? cronText(t.cron)
+    : t.when?.event === "create" ? `「${table}」新增记录` : `「${table}」的${field}变成「${t.when?.equals}」`;
+};
+
+function renderPluginsTab(box, d, st) {
+  const host = d.is_host, list = d.plugin_list || [];
+  if (S.pluginCatalog === undefined) {
+    S.pluginCatalog = null;
+    api("/api/plugins").then((c) => { S.pluginCatalog = c; renderProjectPage(true); }).catch(() => { S.pluginCatalog = []; });
+  }
+  const installed = new Set(list.map((p) => p.name));
+  const catalog = (S.pluginCatalog || []).filter((p) => !installed.has(p.name));
+  const caps = (p) => (p.page_permissions || []).map((c) => `<span class="pill plugin" title="${esc(c.key)}">${esc(c.label)}</span>`).join("")
+    || '<span class="muted">不读写任何数据</span>';
+  const trig = (p, t) => {
+    const s = p.trigger_state?.[t.key] || {};
+    const state = s.paused ? `<span class="pill bad" title="${esc(s.error || "")}">已暂停：连续失败</span>`
+      : s.enabled ? `<span class="pill ok">${esc(s.by || "")} 启用</span>` : '<span class="pill">未启用</span>';
+    const hook = t.type === "webhook" ? (st.hook?.key === `${p.name}:${t.key}`
+      ? `<div class="hook-url"><code>${esc(location.origin + st.hook.path)}</code><button type="button" class="icon-btn" data-copy-hook="${esc(location.origin + st.hook.path)}" title="复制">${ICON.copy}</button>
+         <span class="muted">只显示这一次：现在复制，配到外部系统里。</span></div>`
+      : `<div class="muted">${s.has_hook ? "回调地址已生成（不再显示）" : "还没有回调地址"}${host ? ` · <button type="button" class="link" data-hook="${esc(p.name)}:${esc(t.key)}">${s.has_hook ? "重置地址" : "生成地址"}</button>` : ""}</div>`) : "";
+    return `<li class="trig"><span class="pill">${TRIGGER_CN[t.type]}</span>
+      <div class="trig-main">${esc(triggerWhen(t, p))} → <b>@${esc(t.to)}</b>“${esc(t.text)}”${hook}
+        ${s.error && !s.paused ? `<div class="error">上次失败：${esc(s.error)}</div>` : ""}</div>
+      ${state}${host ? `<button type="button" class="ghost sm" data-trig="${esc(p.name)}:${esc(t.key)}" data-on="${s.enabled && !s.paused ? 0 : 1}">${s.enabled && !s.paused ? "停用" : s.paused ? "重新启用" : "启用"}</button>` : ""}</li>`;
+  };
+  box.innerHTML = `<p class="muted tab-intro">插件给项目加上一个业务场景：自己的页面、记录、打法和触发。页面代码只在每个人的浏览器沙箱里跑，读写都经网络、按看的人的权限；
+      触发只往群聊发一条 @ 成员的消息，代表启用它的人，之后照常由 Agent 自己做或委托。${d.kind === "joint" ? "联合项目里插件的记录对所有参与方可见。" : ""}${host ? "" : "插件由主持人安装。"}</p>
+    ${assetNote(st)}
+    <ul class="plugins">${list.map((p) => p.broken ? `<li class="plugin-card${p.enabled === false ? " off" : ""}"><b>${esc(p.title)}</b><p class="error">${esc(p.broken)}</p></li>` : `<li class="plugin-card${p.enabled ? "" : " off"}">
+      <div class="plugin-head"><span class="plugin-ico" aria-hidden="true">${esc((p.title || p.name).slice(0, 1))}</span>
+        <div><b>${esc(p.title)}</b> <span class="muted">${esc(p.version)} · <code>${esc(p.name)}</code></span>${p.enabled ? "" : ' <span class="pill warn">已停用</span>'}
+          <div class="muted">${esc(p.description)}</div>
+          <div class="muted small">${p.source === "catalog" ? "来自部署方目录" : "上传的插件包"} · ${esc(p.installed_by || "")} 安装${p.installed_at ? ` · ${dateTime(p.installed_at)}` : ""}</div></div>
+        <span class="grow"></span>
+        ${p.update && host ? `<button type="button" class="sm" data-upgrade="${esc(p.name)}">升级到 ${esc(p.update)}</button>` : p.update ? `<span class="pill warn">有新版本 ${esc(p.update)}</span>` : ""}
+        ${p.enabled ? (p.tabs || []).map((t) => `<button type="button" class="ghost sm" data-goto-tab="plugin:${esc(p.name)}:${esc(t.key)}">打开「${esc(t.label)}」</button>`).join("") : ""}
+        ${host ? `<label class="switch plugin-switch" title="${p.enabled ? "停用后页面、记录工具、打法和触发都暂停；记录与设置保留" : "重新启用，恢复页面、记录工具、打法和触发"}">
+          <input type="checkbox" role="switch" data-enable="${esc(p.name)}" ${p.enabled ? "checked" : ""} aria-label="启用插件「${esc(p.title)}」">${p.enabled ? "已启用" : "已停用"}</label>` : ""}
+        ${host ? `<button type="button" class="icon-btn bad" data-uninstall="${esc(p.name)}" title="卸载" aria-label="卸载 ${esc(p.title)}">${ICON.trash}</button>` : ""}</div>
+      <dl class="plugin-facts">
+        <dt>页面能做什么</dt><dd>${caps(p)}</dd>
+        <dt>Agent 能做什么</dt><dd>${(p.agent_tools || []).length ? [p.agent_tools.includes("records.read") && "查记录", p.agent_tools.includes("records.write") && "建 / 改记录（Agent 改的不引发“记录变化”触发）"].filter(Boolean).join("、") : '<span class="muted">不开放记录工具</span>'}</dd>
+        ${(p.tables || []).length ? `<dt>记录</dt><dd>${p.tables.map((t) => `${esc(t.title)} <span class="muted">${p.counts?.[t.key] ?? 0} 条</span>`).join(" · ")}</dd>` : ""}
+      </dl>
+      ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、打法与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
+      ${(p.triggers || []).length ? `<h3>触发</h3><ul class="trigs">${p.triggers.map((t) => trig(p, t)).join("")}</ul>` : ""}
+    </li>`).join("") || `<li class="empty">还没有装插件${host ? "：从下面的目录安装，或上传插件包" : ""}。</li>`}</ul>
+    ${host ? `<h3>部署方目录</h3><ul class="plugins catalog">${S.pluginCatalog === null ? '<li class="muted">正在读取…</li>' : catalog.map((p) => `<li class="plugin-card">
+        <div class="plugin-head"><span class="plugin-ico" aria-hidden="true">${esc((p.title || p.name).slice(0, 1))}</span>
+          <div><b>${esc(p.title)}</b> <span class="muted">${esc(p.version)}</span><div class="muted">${esc(p.description)}</div>
+          <div class="small">${caps(p)}</div></div><span class="grow"></span>
+          <button type="button" class="sm" data-install="${esc(p.name)}">安装</button></div></li>`).join("")
+        || '<li class="muted">目录里没有别的插件了。</li>'}</ul>
+      <div class="actions"><button type="button" class="ghost" id="pl-up">上传插件包（zip）</button><button type="button" class="ghost" id="pl-up-dir">上传文件夹</button>
+        <span class="muted small">装进项目的是这一版的拷贝；代码会在项目里每个人的浏览器沙箱里跑。</span></div>` : ""}`;
+  const base = `/api/projects/${d.id}/plugins`;
+  const done = async (fn, msg) => {
+    try { await fn(); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
+  };
+  const withConfirm = async (fn) => {  // 升级会删字段 / 改类型：先问，再带 confirm 重发
+    try { return await fn(false); } catch (e) {
+      if (e.status === 409 && e.message.startsWith("升级会改变") && confirm(e.message)) return fn(true);
+      throw e;
+    }
+  };
+  box.querySelectorAll("[data-install], [data-upgrade]").forEach((b) => b.addEventListener("click", () => {
+    const name = b.dataset.install || b.dataset.upgrade;
+    done(() => withConfirm((c) => api(base, { method: "POST", body: { name, confirm: c } })), b.dataset.install ? "已安装：触发默认不开，看过后逐个启用" : "已升级");
+  }));
+  box.querySelectorAll("[data-enable]").forEach((b) => b.addEventListener("change", () => {
+    if (!b.checked && !confirm("停用这个插件？页面、Agent 的记录工具、打法和触发都会暂停，记录与设置保留。")) { b.checked = true; return; }
+    done(() => api(`${base}/${encodeURIComponent(b.dataset.enable)}`, { method: "PUT", body: { enabled: b.checked } }),
+      b.checked ? "已启用" : "已停用：记录与设置保留");
+  }));
+  box.querySelectorAll("[data-uninstall]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("卸载这个插件？记录会保留，重新安装后恢复。")) done(() => api(`${base}/${encodeURIComponent(b.dataset.uninstall)}`, { method: "DELETE" }), "已卸载");
+  }));
+  box.querySelectorAll("[data-trig]").forEach((b) => b.addEventListener("click", () => {
+    const [name, key] = b.dataset.trig.split(":");
+    done(() => api(`${base}/${encodeURIComponent(name)}/triggers/${encodeURIComponent(key)}`, { method: "PUT", body: { enabled: b.dataset.on === "1" } }),
+      b.dataset.on === "1" ? "已启用：之后它代表你发消息" : "已停用");
+  }));
+  box.querySelectorAll("[data-hook]").forEach((b) => b.addEventListener("click", async () => {
+    const [name, key] = b.dataset.hook.split(":");
+    if (b.textContent === "重置地址" && !confirm("重置后旧地址立即失效，确定？")) return;
+    try { const r = await api(`${base}/${encodeURIComponent(name)}/triggers/${encodeURIComponent(key)}/hook`, { method: "POST" }); st.hook = { key: b.dataset.hook, path: r.path }; st.note = ""; }
+    catch (e) { st.note = e.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
+  }));
+  box.querySelectorAll("[data-copy-hook]").forEach((b) => b.addEventListener("click", () => navigator.clipboard.writeText(b.dataset.copyHook).catch(() => prompt("复制回调地址：", b.dataset.copyHook))));
+  box.querySelectorAll("[data-goto-tab]").forEach((b) => b.addEventListener("click", () => { st.tab = b.dataset.gotoTab; renderProjectPage(true); }));
+  const up = (folder) => pickPluginPackage(base, folder).then((x) => x && done(async () => {}, `已安装「${x.title}」${x.version}：触发默认不开，看过后逐个启用`))
+    .catch((e) => { st.note = e.message; st.bad = true; renderProjectPage(true); });
+  $("#pl-up", box)?.addEventListener("click", () => up(false));
+  $("#pl-up-dir", box)?.addEventListener("click", () => up(true));
+}
+
+function pickPluginPackage(base, folder) {
+  return new Promise((resolve, reject) => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    if (folder) inp.webkitdirectory = true; else inp.accept = ".zip,application/zip";
+    inp.addEventListener("change", async () => {
+      const files = [...inp.files];
+      if (!files.length) return resolve(null);
+      try {
+        let body, headers;
+        if (folder) {
+          const enc = async (f) => { const b = new Uint8Array(await f.arrayBuffer()); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(t); };
+          body = { files: await Promise.all(files.map(async (f) => ({ path: f.webkitRelativePath || f.name, data: await enc(f) }))) };
+        } else { body = files[0]; headers = { "Content-Type": "application/zip" }; }
+        const send = (c) => api(`${base}/upload${c ? "?confirm=true" : ""}`, { method: "POST", body, headers });
+        try { resolve(await send(false)); } catch (e) {
+          if (e.status === 409 && e.message.startsWith("升级会改变") && confirm(e.message)) resolve(await send(true)); else throw e;
+        }
+      } catch (e) { reject(e); }
+    });
+    inp.click();
+  });
+}
+
+// 插件标签：框上写明这是谁装的、哪一版、申请了什么，框里是插件自己的代码
+async function renderPluginFrame(box, d, st) {
+  const [, name, key] = st.tab.split(":");
+  const p = (d.plugin_list || []).find((x) => x.name === name), t = p?.tabs.find((x) => x.key === key);
+  if (!p || !t) return;
+  box.innerHTML = `<div class="sandbox"><div class="sandbox-bar"><span class="lock">插件页面</span>
+      <span>${esc(p.title)} <code>${esc(p.name)} ${esc(p.version)}</code> · ${esc(p.installed_by || "")} 安装 · 代码在沙箱里运行，读写按你的权限</span>
+      <span class="grow"></span>${(p.page_permissions || []).map((c) => `<span class="pill plugin">${esc(c.label)}</span>`).join("")}</div>
+    <p class="muted plugin-loading">正在加载…</p></div>`;
+  let src;
+  try { src = (await api(`/api/projects/${d.id}/plugins/${encodeURIComponent(name)}/frame`, { method: "POST", body: { tab: key } })).src; }
+  catch (e) { $(".plugin-loading", box).textContent = e.message; return; }
+  if (S.assets?.tab !== st.tab || !box.isConnected) return;
+  const frame = Object.assign(document.createElement("iframe"), { title: `插件「${p.title}」：${t.label}`, src, className: "plugin-frame" });
+  frame.setAttribute("sandbox", "allow-scripts allow-forms");   // 不给 allow-same-origin：不透明来源，读不到父页面与登录 cookie；
+  // allow-forms 只为让表单的 submit 事件照常触发，真正的提交被 CSP 的 form-action 'none' 挡下
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  $(".plugin-loading", box).replaceWith(frame);
+  S.pluginFrame = { el: frame, pid: d.id, name, key, title: p.title };
+}
+
+const pluginReply = (f, id, ok, value) => f.el.contentWindow?.postMessage({ matrix: 1, id, ok, ...(ok ? { result: value } : { error: value }) }, "*");
+
+window.addEventListener("message", async (e) => {
+  const f = S.pluginFrame;
+  if (!f || !f.el.isConnected || e.source !== f.el.contentWindow) return;  // 只认当前这个插件 iframe 发来的
+  const m = e.data || {};
+  if (m.matrix !== 1 || typeof m.op !== "string" || typeof m.id !== "string") return;
+  const args = m.args && typeof m.args === "object" ? m.args : {};
+  try {
+    if (m.op === "ui.badge") {  // 只影响这个插件自己的标签
+      const text = String(args.text ?? "").slice(0, 12);
+      (S.pluginBadges ||= {})[`${f.pid}:${f.name}:${f.key}`] = text;
+      const el = document.querySelector(`[data-badge="${CSS.escape(`${f.name}:${f.key}`)}"]`);
+      if (el) el.textContent = text;
+      return pluginReply(f, m.id, true, { ok: true });
+    }
+    if (m.op === "ui.file") {
+      const d = await api(`/api/projects/${f.pid}`);
+      previewAsset(d, d.files.find((x) => x.name === String(args.name || "")));
+      return pluginReply(f, m.id, true, { ok: true });
+    }
+    const bridge = (op, a) => api(`/api/projects/${f.pid}/plugins/${encodeURIComponent(f.name)}/bridge`, { method: "POST", body: { op, args: a } }).then((r) => r.result);
+    if (m.op === "chat.post") {
+      const draft = await bridge("chat.post", args);
+      const sent = await confirmPluginPost(f, draft);
+      return pluginReply(f, m.id, true, { sent });
+    }
+    const result = await bridge(m.op, args);
+    if (m.op === "context") result.theme = document.documentElement.dataset.theme;
+    pluginReply(f, m.id, true, result);
+  } catch (err) { pluginReply(f, m.id, false, err.message || String(err)); }
+});
+
+// 确认卡由宿主页面画，插件改不了它的内容；只对这一条生效
+function confirmPluginPost(f, draft) {
+  return new Promise((resolve) => {
+    let dlg = $("#plugin-confirm");
+    if (!dlg) { dlg = Object.assign(document.createElement("dialog"), { id: "plugin-confirm", className: "preview confirm-card" }); document.body.append(dlg); }
+    dlg.innerHTML = `<form method="dialog" class="preview-card" aria-labelledby="pc-title">
+      <p class="muted"><span class="pill plugin">${esc(draft.title)}</span> 想以<b>你</b>的名义在群聊里发一条消息</p>
+      <h2 id="pc-title">发到项目群聊</h2>
+      <blockquote class="draft">${esc(draft.text)}</blockquote>
+      <p class="muted small">${draft.mentions.length ? `会 @ ${draft.mentions.map(esc).join("、")}，被 @ 的 Agent 会被唤醒处理。` : "不 @ 任何成员，不会唤醒 Agent。"}
+        ${draft.joint ? "联合项目里所有参与方都看得到。" : ""}只对这一条生效。</p>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="button" class="ghost" value="cancel" data-no>取消</button><button type="button" data-yes>发送</button></div></form>`;
+    let settled = false;
+    const finish = (v) => { if (!settled) { settled = true; resolve(v); } if (dlg.open) dlg.close(); };
+    $("[data-no]", dlg).addEventListener("click", () => finish(false));
+    $("[data-yes]", dlg).addEventListener("click", async () => {
+      try { await api(`/api/plugin-drafts/${draft.id}/send`, { method: "POST" }); finish(true); }
+      catch (err) { $(".error", dlg).textContent = err.message; }
+    });
+    dlg.addEventListener("close", () => finish(false), { once: true });
+    dlg.showModal();
+    $("[data-yes]", dlg).focus();
+  });
 }
 
 // 资产预览：弹层里转义后渲染；图片用 blob URL；其他二进制只给下载
@@ -1807,7 +2051,7 @@ function renderThread() {
       const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
         `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPillOf(r)}</a>`).join("");
       const body = m.text ? `<div class="body">${mentionHtml(m.text)}</div>` : "";
-      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
+      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? `<span class="pill plugin" title="经插件「${esc(m.via)}」发出：触发或插件页面里确认后发送">经 ${esc(m.via)}</span>` : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
       <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`;

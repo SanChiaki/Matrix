@@ -12,6 +12,7 @@ dependencies = [
 [project.scripts]
 agentnet = "agentnet.server:main"
 matrix-connect = "agentnet.connector.main:main"
+matrix-plugin = "agentnet.plugin_check:main"
 
 [build-system]
 requires = ["hatchling"]

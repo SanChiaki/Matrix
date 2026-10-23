@@ -24,5 +24,14 @@
 - **连接器地址**：目录里的来自部署方的 `connectors.json`，由部署方负责；用户自定义的只能是 https 公网地址，解析出的每个地址都要是公网、直连校验过的 IP（防 DNS 重绑定）、不跟重定向、不走代理（`mcp_client.check_public_url` / `public_only`），避免把网络当跳板访问内网（SSRF）。
 - **电脑上的连接器**是用户自己机器上已经配好的服务，网络只拿名字。驱动按这一轮允许的名字只开那些（Claude Code 的临时配置文件 0600、
   在工作目录以外，跑完删掉）；能力报告里不能强制的 AI 工具，Agent 拿不到 `connector.use`。
+- **项目插件**（不变量 20，[plugins.md](plugins.md)）：插件代码只在浏览器里跑，网络不在服务器和运行时里执行它。页面是
+  `sandbox="allow-scripts allow-forms"`（没有 `allow-same-origin`）的 iframe，响应头再带 CSP `sandbox allow-scripts allow-forms; connect-src 'none'; form-action 'none'; frame-ancestors 'self'`
+  （`allow-forms` 只为让表单的 submit 事件触发；`form-action 'none'` 让表单哪里都提交不出去，不多开一条外带通道），
+  直接打开地址也在沙箱里：不透明来源，拿不到登录 cookie，`fetch` / XHR / WebSocket 被挡；帧令牌是 HMAC、10 分钟、绑定看的人与版本，
+  只取 `page/` 下的文件。桥只做清单申请的 ∩ 看的人本身有的事，以人名义发言必须在父页面确认卡上点发送。
+  回调地址的令牌只存 sha256、每分钟限 60 次、请求体 ≤64 KB；触发代表启用它的人，不派委托。
+  **已知风险（接受）**：沙箱禁了弹窗与顶层跳转，CSP 禁了主动联网，但挡不住 iframe **自己跳转**到外部地址（把读到的数据编进 URL）——
+  浏览器没有可用的 `navigate-to`。所以装了插件，等于把桥允许读的数据交给插件作者。接受理由：只有主持人能装，安装时群聊里公开写明申请的能力；
+  复查时机：开放插件市场或允许非主持人安装之前。
 - **技能**：覆盖层总是关掉 dsh 的默认技能根，部署机器上的技能不会进到用户的 Agent；技能文件的路径经 `skills.safe_rel` 校验，
   不能跳出技能目录、不能以点开头。

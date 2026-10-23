@@ -18,5 +18,6 @@
 | 项目档案 | 归项目所有：`brief`（**纲要**：目标、范围、成功标准、当前阶段，≤4000 字，**每轮推送**）、`decisions`（有效 / 被取代 / 撤销，推送最近的有效决定）、文件（`projects/<id>/files/`，每轮只读拷进工作目录的 `project/`，运行后丢弃改动）、`refs`（资源引用：仓库 / 路径 / 文档，只是指针，不授予访问权限；旧版叫 `projects`）、`suggestions`（纲要修改建议与技能提议，`kind` 区分）、`skills`（**项目技能**的元数据，正文在 `projects/<id>/skills/`）、`connector_needs`（**需要的连接器**：只是声明）、`connections_enabled`（联合项目里各 Agent 的所有者打开了哪些自己的连接，只给所有者看）。`archive_rev` 每变一次 +1，席位 / 任务只在版本变化时重新推送 |
 | Connection（连接） | 一个人对一个连接器的一次授权（云端，凭证在 `vault/`），或他电脑上某个 AI 工具里已经配好的一个服务（只有名字）。`where` 是 `cloud` 或设备 id，`status` 是 ok / error / missing。不含凭证，只给本人看。见 [connectors-skills.md](connectors-skills.md) |
 | 技能 | 一种做法：`SKILL.md`（名字、描述、正文）+ 可选文件。分项目技能、连接器自带的、我的技能、Agent 自己攒的（私有目录里），见 [connectors-skills.md](connectors-skills.md) |
+| 插件 | 项目装上的一个业务扩展：清单声明的表（记录在 `projects/<id>/plugin-data/`，是项目档案的一部分）、沙箱里的页面、打法（技能）、触发。元数据在 `Project.plugins[name]`（版本、来源、安装人、`disabled`、`data_rev`、各触发的启用人与状态），只有主持人装。触发发的群聊消息、插件页面确认后发的消息带 `Message.via`（插件名）。见 [plugins.md](plugins.md)、不变量 20 |
 
 权限词表：`web.research`、`file.write`、`shell.exec`、`delegate`、`connector.use`（这一轮能用勾给它的连接器）。新增权限的同步点见 AGENTS.md「工作方式」。

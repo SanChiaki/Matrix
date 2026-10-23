@@ -173,6 +173,38 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    # ---- 插件记录：项目里装了把记录工具开给 Agent 的插件时才有（档案类，不需要 delegate） ----
+    {
+        "name": "plugin_records",
+        "description": "查项目插件里的记录。插件名、表名与字段见推送的项目档案。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "插件名，如 sales-pipeline"},
+                "table": {"type": "string", "description": "表名，如 leads"},
+                "query": {"type": "string", "description": "可选：关键词"},
+                "where": {"type": "string", "description": "可选：JSON 对象字符串，按字段精确匹配，如 {\"stage\": \"沟通\"}"},
+                "limit": {"type": "integer", "description": "可选：最多几条，默认 20，最多 100"},
+            },
+            "required": ["plugin", "table"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "plugin_write",
+        "description": "新增或修改项目插件里的一条记录。只能写清单里的字段，网络按清单校验。写进去项目里所有人都看得到。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "插件名"},
+                "table": {"type": "string", "description": "表名"},
+                "record_id": {"type": "string", "description": "修改时填记录 id；不填就是新增"},
+                "fields": {"type": "string", "description": "JSON 对象字符串：要写的字段，如 {\"stage\": \"报价\"}"},
+            },
+            "required": ["plugin", "table", "fields"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "propose_skill",
         "description": ("把一个值得反复用的做法提议为项目技能。主持人批准后进项目档案，项目里的成员此后都能用；"

@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>原型 · 项目插件</title>
+<!-- 设计见 docs/project-plugins.md。纯静态原型，数据是写死的，不连服务。 -->
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0b0c0f; --surface: #121318; --surface-2: #181a20; --surface-3: #1f2229;
+  --border: rgba(255,255,255,.07); --border-strong: rgba(255,255,255,.13);
+  --text: #e8e9ed; --text-2: #b4b8c2; --muted: #7d8391;
+  --accent: #8b93ff; --accent-soft: rgba(139,147,255,.14); --accent-line: rgba(139,147,255,.45); --accent-hover: #a1a8ff; --on-accent: #0d0f1a;
+  --human: #e9b26b; --completed: #4cc38a; --rejected: #ef6b65; --plugin: #5cc8d6; --plugin-soft: rgba(92,200,214,.12); --plugin-line: rgba(92,200,214,.5);
+  --radius: 10px; --radius-sm: 7px;
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+  font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); display: grid; grid-template-rows: auto 1fr; }
+h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 20px; } h2 { font-size: 15px; }
+h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 18px 0 8px; }
+code { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; color: var(--text-2); }
+button { font: inherit; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; padding: 7px 14px; border-radius: var(--radius-sm);
+  border: 1px solid transparent; background: var(--accent); color: var(--on-accent); font-weight: 600; font-size: 13px; }
+button:hover { background: var(--accent-hover); }
+button.ghost { background: transparent; border-color: var(--border-strong); color: var(--text-2); font-weight: 500; }
+button.ghost:hover { background: var(--surface-3); color: var(--text); }
+button.sm { padding: 4px 10px; font-size: 12px; }
+.muted { color: var(--muted); }
+.pill { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 99px; font-size: 11px; font-weight: 600; background: var(--surface-3); color: var(--text-2); }
+.pill.plugin { background: var(--plugin-soft); color: var(--plugin); }
+.pill.ok { background: color-mix(in srgb, var(--completed) 15%, transparent); color: var(--completed); }
+.pill.warn { background: color-mix(in srgb, var(--human) 15%, transparent); color: var(--human); }
+
+/* 原型顶栏：切换场景 */
+.proto-bar { display: flex; align-items: center; gap: 14px; padding: 10px 18px; background: #06070a; border-bottom: 1px solid var(--border-strong); font-size: 13px; }
+.proto-bar strong { color: var(--plugin); }
+.proto-bar nav { display: flex; gap: 4px; margin-left: 8px; }
+.proto-bar nav button { background: transparent; color: var(--text-2); font-weight: 500; padding: 5px 12px; }
+.proto-bar nav button[aria-pressed="true"] { background: var(--plugin-soft); color: var(--plugin); }
+.proto-bar .note { margin-left: auto; color: var(--muted); }
+
+/* 应用外壳 */
+.app { display: grid; grid-template-columns: 224px 1fr; min-height: 0; }
+.rail { display: flex; flex-direction: column; gap: 2px; padding: 18px 12px; border-right: 1px solid var(--border); background: var(--surface); }
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 8px 18px; font-weight: 600; font-size: 15px; }
+.brand i { width: 24px; height: 24px; border-radius: 7px; background: linear-gradient(135deg, var(--accent), var(--plugin)); }
+.rail .item { padding: 8px 10px; border-radius: var(--radius-sm); color: var(--text-2); }
+.rail .item.on { background: var(--accent-soft); color: var(--text); }
+.rail .sub { margin: 14px 0 4px; padding: 0 10px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
+.rail .chat { padding: 6px 10px; border-radius: var(--radius-sm); color: var(--text-2); font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.rail .chat.on { background: var(--surface-3); color: var(--text); }
+.rail .chat b { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+main { min-width: 0; min-height: 0; overflow: auto; padding: 22px 28px 40px; }
+.scene { display: none; } .scene.on { display: block; }
+
+/* 项目页 */
+.crumb { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.crumb strong { color: var(--text); font-size: 20px; }
+.page-head { display: flex; align-items: flex-end; gap: 12px; margin-bottom: 14px; }
+.page-head .right { margin-left: auto; display: flex; gap: 8px; }
+.page-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.page-tabs button { background: transparent; color: var(--text-2); font-weight: 500; border-radius: 0; padding: 9px 14px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.page-tabs button:hover { background: transparent; color: var(--text); }
+.page-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.page-tabs button.plugin-tab[aria-selected="true"] { border-bottom-color: var(--plugin); }
+.page-tabs .sep { width: 1px; background: var(--border-strong); margin: 8px 6px; }
+.page-tabs .count { color: var(--muted); font-size: 12px; }
+.page-tabs .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--plugin); }
+
+/* 沙箱框：画出边界，让人看得到“这里是插件的代码” */
+.sandbox { position: relative; border: 1px dashed var(--plugin-line); border-radius: var(--radius); padding: 0; background: var(--surface); }
+.sandbox-bar { display: flex; align-items: center; gap: 10px; padding: 7px 12px; border-bottom: 1px dashed var(--plugin-line); font-size: 12px; color: var(--muted); background: var(--plugin-soft); border-radius: var(--radius) var(--radius) 0 0; }
+.sandbox-bar .lock { color: var(--plugin); font-weight: 600; }
+.sandbox-bar .caps { margin-left: auto; display: flex; gap: 6px; }
+.sandbox-body { padding: 16px; }
+.callout { position: absolute; right: -8px; top: 46px; transform: translateX(100%); width: 230px; font-size: 12px; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--plugin-line); border-radius: var(--radius-sm); padding: 10px 12px; }
+.callout::before { content: ""; position: absolute; left: -6px; top: 14px; width: 10px; height: 10px; background: var(--surface-2); border-left: 1px solid var(--plugin-line); border-bottom: 1px solid var(--plugin-line); transform: rotate(45deg); }
+.with-callout { margin-right: 250px; }
+.annot { font-size: 12px; color: var(--plugin); display: flex; gap: 6px; align-items: baseline; margin: 6px 0; }
+.annot::before { content: "◆"; font-size: 9px; }
+
+/* 插件内部：销售漏斗（这一块是“插件自己画的”，故意用和宿主略不同的风格） */
+.funnel-top { display: flex; gap: 12px; align-items: center; margin-bottom: 14px; }
+.kpi { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; }
+.kpi b { display: block; font-size: 18px; } .kpi span { font-size: 11px; color: var(--muted); }
+.funnel-top .acts { margin-left: auto; display: flex; gap: 8px; }
+.board { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 10px; }
+.col { background: var(--surface-2); border-radius: 8px; padding: 8px; min-height: 260px; }
+.col header { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--text-2); padding: 2px 4px 8px; }
+.lead { background: var(--surface-3); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; margin-bottom: 8px; cursor: pointer; font-size: 13px; }
+.lead:hover { border-color: var(--plugin-line); }
+.lead .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
+.lead .who { color: var(--accent); }
+.lead.new { border-color: var(--plugin); box-shadow: 0 0 0 3px var(--plugin-soft); }
+
+/* 记录抽屉 */
+.drawer { margin-top: 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: none; }
+.drawer.on { display: block; }
+.drawer dl { display: grid; grid-template-columns: 90px 1fr; gap: 6px 12px; margin: 10px 0 0; font-size: 13px; }
+.drawer dt { color: var(--muted); }
+.hist { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; font-size: 12px; color: var(--muted); }
+.hist div { padding: 2px 0; }
+
+/* 确认卡（由宿主页面画，不是插件） */
+.overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; align-items: center; justify-content: center; z-index: 10; }
+.overlay.on { display: flex; }
+.card { width: 460px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; padding: 18px 20px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.card .from { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+.card blockquote { margin: 12px 0; padding: 10px 12px; background: var(--bg); border-radius: 8px; border-left: 3px solid var(--plugin); white-space: pre-wrap; font-size: 13px; }
+.card .acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.card .fine { font-size: 12px; color: var(--muted); }
+
+/* 插件管理 */
+.grid2 { display: grid; grid-template-columns: 340px 1fr; gap: 18px; }
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.plist .p { display: flex; gap: 10px; padding: 10px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+.plist .p.on { background: var(--surface-2); border-color: var(--border-strong); }
+.plist .icon { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; background: var(--plugin-soft); color: var(--plugin); font-weight: 700; flex: none; }
+.plist .p small { display: block; color: var(--muted); font-size: 12px; }
+.plist .p .r { margin-left: auto; text-align: right; }
+.caps-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.caps-table td { padding: 8px 6px; border-top: 1px solid var(--border); vertical-align: top; }
+.caps-table td:first-child { width: 150px; }
+.trig { display: grid; grid-template-columns: 90px 1fr auto; gap: 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--border); font-size: 13px; }
+.url { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; background: var(--bg); padding: 4px 8px; border-radius: 6px; color: var(--text-2); }
+.drop { border: 1px dashed var(--border-strong); border-radius: 8px; padding: 14px; text-align: center; color: var(--muted); font-size: 13px; margin-top: 10px; }
+.tree { font-family: "SF Mono", ui-monospace, monospace; font-size: 12px; color: var(--text-2); background: var(--bg); border-radius: 8px; padding: 10px 12px; white-space: pre; margin: 0; }
+
+/* 群聊 */
+.chat-wrap { max-width: 820px; }
+.msg { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.av { width: 32px; height: 32px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: 12px; font-weight: 700; }
+.av.h { background: color-mix(in srgb, var(--human) 25%, transparent); color: var(--human); }
+.av.a { background: var(--accent-soft); color: var(--accent); }
+.av.p { background: var(--plugin-soft); color: var(--plugin); border-radius: 8px; }
+.msg .head { font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.msg .head .t { color: var(--muted); font-size: 12px; }
+.msg .body { font-size: 14px; margin-top: 2px; }
+.mention { color: var(--accent); font-weight: 600; }
+.event { text-align: center; font-size: 12px; color: var(--muted); padding: 10px 0; }
+.tool { display: inline-flex; gap: 6px; margin-top: 6px; font-size: 12px; padding: 4px 8px; border-radius: 6px; background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); }
+.tool code { color: var(--plugin); }
+.req { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 13px; display: flex; gap: 10px; align-items: center; }
+
+/* 结构图 */
+.flow { width: 100%; max-width: 1100px; }
+.flow text { fill: var(--text-2); font-size: 12px; font-family: inherit; }
+.flow .t { fill: var(--text); font-size: 13px; font-weight: 600; }
+.flow .m { fill: var(--muted); font-size: 11px; }
+.legend { display: flex; gap: 18px; font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+.legend span::before { content: ""; display: inline-block; width: 18px; height: 0; border-top: 2px solid var(--accent); vertical-align: middle; margin-right: 6px; }
+.legend .p::before { border-top-color: var(--plugin); }
+.legend .x::before { border-top: 2px dashed var(--rejected); }
+</style>
+</head>
+<body>
+
+<div class="proto-bar">
+  <span>原型 · <strong>项目插件</strong></span>
+  <nav aria-label="场景">
+    <button data-scene="page" aria-pressed="true">① 插件页面</button>
+    <button data-scene="manage" aria-pressed="false">② 安装与管理</button>
+    <button data-scene="chat" aria-pressed="false">③ 触发进群聊</button>
+    <button data-scene="arch" aria-pressed="false">④ 数据怎么走</button>
+  </nav>
+  <span class="note">静态原型 · 设计见 docs/project-plugins.md</span>
+</div>
+
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><i></i>Matrix</div>
+    <div class="item">网络</div><div class="item">Agent</div><div class="item">技能</div><div class="item">连接器</div>
+    <div class="item on">项目</div><div class="item">看板</div><div class="item">设备</div>
+    <div class="sub">项目群聊</div>
+    <div class="chat" data-goto="chat"><b></b>华东渠道拓展</div>
+    <div class="chat">新品调研</div>
+    <div class="sub">私聊</div>
+    <div class="chat">销售助理</div>
+    <div class="chat">报价专员</div>
+  </aside>
+
+  <main>
+    <!-- ================= ① 插件页面 ================= -->
+    <section class="scene on" id="scene-page">
+      <div class="page-head">
+        <div>
+          <div class="crumb">项目 / <span class="pill">联合项目</span></div>
+          <div class="crumb"><strong>华东渠道拓展</strong></div>
+        </div>
+        <div class="right"><button class="ghost">项目配置</button><button class="ghost" data-goto="chat">群聊</button></div>
+      </div>
+      <div class="page-tabs" role="tablist">
+        <button>资产 <span class="count">12</span></button>
+        <button>资源引用 <span class="count">3</span></button>
+        <button>技能 <span class="count">4</span></button>
+        <button>需要的连接器 <span class="count">2</span></button>
+        <button data-goto="manage">插件 <span class="count">2</span></button>
+        <span class="sep"></span>
+        <button class="plugin-tab" aria-selected="true"><span class="dot"></span>销售漏斗 <span class="count">1 新</span></button>
+        <button class="plugin-tab"><span class="dot"></span>周计划</button>
+      </div>
+
+      <div class="with-callout">
+        <div class="sandbox">
+          <div class="sandbox-bar">
+            <span class="lock">⬚ 插件页面</span>
+            <span>销售漏斗 <code>sales-pipeline 1.2.0</code> · 小林（主持人）安装 · 代码在沙箱里运行</span>
+            <span class="caps"><span class="pill plugin">读写记录</span><span class="pill plugin">读档案</span><span class="pill plugin">发群聊（需确认）</span></span>
+          </div>
+          <div class="sandbox-body" id="plugin-body">
+            <div class="funnel-top">
+              <div class="kpi"><b>14</b><span>进行中线索</span></div>
+              <div class="kpi"><b>¥ 186 万</b><span>报价中金额</span></div>
+              <div class="kpi"><b>32%</b><span>本月转化</span></div>
+              <div class="acts">
+                <button class="ghost sm">+ 新线索</button>
+                <button class="sm" id="post-summary">把本周漏斗发到群聊</button>
+              </div>
+            </div>
+            <div class="board" id="board"></div>
+            <div class="drawer" id="drawer"></div>
+          </div>
+          <div class="callout">
+            <b style="color:var(--plugin)">虚线框里是插件自己的代码</b><br>
+            跑在没有登录凭证、不能联网的沙箱 iframe 里。看板、指标、按钮都是插件画的；
+            数据只能经宿主页面的“桥”读写，按<b>正在看的人</b>的权限执行。<br><br>
+            点一张卡片看记录，点“发到群聊”看确认卡。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ② 安装与管理 ================= -->
+    <section class="scene" id="scene-manage">
+      <div class="page-head">
+        <div>
+          <div class="crumb">项目 / 华东渠道拓展</div>
+          <div class="crumb"><strong>插件</strong></div>
+        </div>
+        <div class="right"><button class="ghost">从目录安装</button><button>上传插件包</button></div>
+      </div>
+      <div class="grid2">
+        <div>
+          <div class="panel plist">
+            <h3 style="margin-top:0">这个项目装了的</h3>
+            <div class="p on"><div class="icon">漏</div><div><b>销售漏斗</b><small>线索从获取到成交的推进</small></div>
+              <div class="r"><span class="pill ok">已启用</span><small>1.2.0</small></div></div>
+            <div class="p"><div class="icon">周</div><div><b>周计划</b><small>按周排目标、回顾完成情况</small></div>
+              <div class="r"><span class="pill warn">有新版本 1.1</span><small>1.0.3</small></div></div>
+            <h3>部署方目录</h3>
+            <div class="p"><div class="icon">招</div><div><b>招聘看板</b><small>候选人筛选、面试、Offer</small></div><div class="r"><button class="ghost sm">安装</button></div></div>
+            <div class="p"><div class="icon">单</div><div><b>工单分派</b><small>外部工单进来，按类别交给成员</small></div><div class="r"><button class="ghost sm">安装</button></div></div>
+            <div class="p"><div class="icon">阶</div><div><b>阶段推进</b><small>需求 → 方案 → 实现 → 验收</small></div><div class="r"><button class="ghost sm">安装</button></div></div>
+            <div class="drop">把插件包（zip 或文件夹）拖到这里<br><small>只有主持人能上传；装进项目的是这一版的拷贝</small></div>
+          </div>
+          <div class="panel" style="margin-top:14px">
+            <h3 style="margin-top:0">一个插件包里有什么</h3>
+<pre class="tree">sales-pipeline/
+  plugin.json      清单
+  page/            页面代码（沙箱）
+    index.html
+    board.js
+  skills/
+    sales-intake/  打法
+      SKILL.md</pre>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">清单写标签、表结构、申请的能力和触发；打法装上后成为项目技能。</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div style="display:flex;gap:12px;align-items:center">
+            <div class="plist"><div class="icon">漏</div></div>
+            <div><h2>销售漏斗 <span class="muted" style="font-weight:400">1.2.0</span></h2>
+              <div class="muted" style="font-size:13px">来源：部署方目录 · 小林 10-21 安装 · 联合项目里所有参与者看得到这些信息</div></div>
+            <div style="margin-left:auto;display:flex;gap:8px"><button class="ghost sm">停用</button><button class="ghost sm" style="color:var(--rejected)">卸载</button></div>
+          </div>
+
+          <h3>页面能做什么（插件申请的 ∩ 看的人本身有的）</h3>
+          <table class="caps-table">
+            <tr><td><span class="pill plugin">读写记录</span></td><td>只能读写自己的表 <code>leads</code>（线索）、<code>visits</code>（拜访）；写入按清单校验字段</td></tr>
+            <tr><td><span class="pill plugin">读档案</span></td><td>纲要、有效决定、项目文件、资源引用——本来就对所有参与者可见</td></tr>
+            <tr><td><span class="pill plugin">发群聊</span></td><td>以<b>正在看的人</b>的名义发消息，<b>每次</b>弹确认卡，点“发送”才发</td></tr>
+            <tr><td><span class="pill">拿不到</span></td><td class="muted">私聊、项目会话、委托详情、别人的连接器、审批、Agent 设置、登录凭证；不能直接访问外部网络</td></tr>
+          </table>
+
+          <h3>Agent 能做什么</h3>
+          <table class="caps-table">
+            <tr><td><code>plugin_records</code></td><td>成员 Agent 按表、筛选、关键词查记录（档案类工具，不需要 <code>delegate</code>）</td></tr>
+            <tr><td><code>plugin_write</code></td><td>新增或修改一条记录，留痕“谁 · 经什么”；<b>Agent 改记录不会引发记录触发</b></td></tr>
+            <tr><td><span class="pill plugin">打法</span></td><td><code>sales-intake</code> 已并入项目技能：新线索怎么判断、什么时候报价、交给谁</td></tr>
+          </table>
+
+          <h3>触发（只往群聊发消息、@ 一个成员；代表启用它的人）</h3>
+          <div class="trig"><span class="pill">外部回调</span>
+            <div>官网表单提交 → 新增一条线索 → <span class="mention">@销售助理</span>“新线索：{company}，按 sales-intake 跟进”<br>
+              <span class="url">https://matrix…/hooks/h_7Kq…9xT</span> <span class="muted" style="font-size:12px">可重置 · 已校验签名</span></div>
+            <span class="pill ok">小林 启用</span></div>
+          <div class="trig"><span class="pill">定时</span>
+            <div>每周一 09:00 → <span class="mention">@销售助理</span>“整理本周漏斗变化，发到群聊”</div><span class="pill ok">小林 启用</span></div>
+          <div class="trig"><span class="pill">记录变化</span>
+            <div>线索阶段变成“报价” → <span class="mention">@报价专员</span>“{company} 进入报价，请出方案”<br>
+              <span class="muted" style="font-size:12px">只认人的修改和外部回调写入</span></div><span class="pill warn">已暂停：连续 3 次失败</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= ③ 触发进群聊 ================= -->
+    <section class="scene" id="scene-chat">
+      <div class="page-head">
+        <div><div class="crumb">群聊 · 联合项目</div><div class="crumb"><strong>华东渠道拓展</strong></div></div>
+        <div class="right"><button class="ghost" data-goto="page">项目页</button></div>
+      </div>
+      <div class="chat-wrap">
+        <div class="event">小林 安装了插件“销售漏斗 1.2.0”，申请：读写记录、读档案、发群聊（需确认） · 10-21</div>
+        <div class="msg"><div class="av p">漏</div><div>
+          <div class="head"><b>插件 · 销售漏斗</b><span class="pill">代表 小林</span><span class="t">今天 10:02 · 外部回调</span></div>
+          <div class="body"><span class="mention">@销售助理</span> 新线索：<b>苏州启明科技</b>，按 sales-intake 跟进</div>
+          <div class="tool">已新增记录 <code>leads / L-0147</code> · 来自官网表单</div>
+        </div></div>
+        <div class="msg"><div class="av a">销</div><div>
+          <div class="head"><b>销售助理</b><span class="pill">小林的 Agent</span><span class="t">10:04</span></div>
+          <div class="body">看了表单和官网：制造业、200 人左右，想做渠道培训。按打法属于 A 类线索，我把阶段改成“沟通”，约了周四电话。需要报价时再交给报价专员。</div>
+          <div class="tool"><code>plugin_write</code> leads / L-0147 · stage: 线索 → 沟通</div>
+          <div class="tool"><code>open_request</code> 用户任务</div>
+          <div class="req"><span class="pill warn">进行中</span><b>跟进苏州启明科技</b><span class="muted">下发人 小林 · 由小林验收</span></div>
+        </div></div>
+        <div class="msg"><div class="av h">林</div><div>
+          <div class="head"><b>小林</b><span class="pill">主持人</span><span class="t">10:30 · 经插件“销售漏斗”发送</span></div>
+          <div class="body">本周漏斗：新增 5 条，进入报价 2 条（启明、华策），成交 1 条（瑞丰 ¥32 万）。<span class="mention">@报价专员</span> 华策的方案周五前给我。</div>
+        </div></div>
+        <div class="msg"><div class="av a">报</div><div>
+          <div class="head"><b>报价专员</b><span class="pill">阿杰的 Agent</span><span class="t">10:31</span></div>
+          <div class="body">收到。我先查华策的拜访记录，再出方案。</div>
+          <div class="tool"><code>plugin_records</code> visits · company = 华策 · 3 条</div>
+        </div></div>
+        <p class="annot">触发只做一件事：发一条 @ 成员的消息。之后谁做、要不要委托、怎么验收，都走原来的路，网络不替 Agent 派活。</p>
+        <p class="annot">经插件发的消息署名是看页面的那个人，发之前他在确认卡上看过原文。</p>
+      </div>
+    </section>
+
+    <!-- ================= ④ 数据怎么走 ================= -->
+    <section class="scene" id="scene-arch">
+      <div class="page-head"><div><div class="crumb">设计</div><div class="crumb"><strong>插件的数据怎么走</strong></div></div></div>
+      <svg class="flow" viewBox="0 0 1100 520" role="img" aria-label="插件数据流">
+        <defs>
+          <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#8b93ff"/></marker>
+          <marker id="ap" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 10 5 0 10z" fill="#5cc8d6"/></marker>
+        </defs>
+        <!-- 浏览器 -->
+        <rect x="20" y="20" width="400" height="300" rx="12" fill="#121318" stroke="rgba(255,255,255,.13)"/>
+        <text x="40" y="46" class="t">浏览器（正在看页面的人）</text>
+        <rect x="40" y="62" width="360" height="240" rx="10" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="58" y="86" class="t">宿主页面（Matrix）</text>
+        <text x="58" y="104" class="m">带登录 cookie，按这个人的权限调 /api/*</text>
+        <rect x="58" y="120" width="200" height="160" rx="9" fill="rgba(92,200,214,.08)" stroke="#5cc8d6" stroke-dasharray="5 4"/>
+        <text x="72" y="144" class="t" style="fill:#5cc8d6">插件 iframe</text>
+        <text x="72" y="164" class="m">sandbox="allow-scripts"</text>
+        <text x="72" y="180" class="m">不透明来源 · 无 cookie</text>
+        <text x="72" y="196" class="m">CSP connect-src 'none'</text>
+        <text x="72" y="222">看板、表单、图表</text>
+        <text x="72" y="240">（插件自己的 HTML/JS）</text>
+        <rect x="290" y="150" width="96" height="100" rx="9" fill="#1f2229" stroke="#8b93ff"/>
+        <text x="338" y="186" text-anchor="middle" class="t">桥</text>
+        <text x="338" y="166" text-anchor="middle" class="m" style="font-size:10px">postMessage</text>
+        <text x="338" y="204" text-anchor="middle" class="m">按能力裁剪</text>
+        <text x="338" y="219" text-anchor="middle" class="m">按可见性过滤</text>
+        <text x="338" y="234" text-anchor="middle" class="m">发群聊弹确认</text>
+        <path d="M258 185 H288" stroke="#5cc8d6" stroke-width="2" marker-end="url(#ap)"/>
+        <path d="M290 215 H260" stroke="#5cc8d6" stroke-width="2" marker-end="url(#ap)"/>
+                <!-- 外部 -->
+        <rect x="20" y="360" width="400" height="140" rx="12" fill="#121318" stroke="rgba(255,255,255,.13)"/>
+        <text x="40" y="388" class="t">外部系统</text>
+        <text x="40" y="412">官网表单、工单、电商、CRM</text>
+        <text x="40" y="432" class="m">POST /hooks/&lt;安装级令牌&gt;，可选签名校验、限速</text>
+        <text x="40" y="460">定时（cron，最小 10 分钟）</text>
+        <!-- 网络 -->
+        <rect x="520" y="20" width="560" height="480" rx="12" fill="#121318" stroke="rgba(255,255,255,.13)"/>
+        <text x="540" y="46" class="t">网络（服务端，不执行插件代码）</text>
+        <rect x="540" y="66" width="250" height="92" rx="9" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="556" y="90" class="t">/api/projects/&lt;id&gt;/plugins/*</text>
+        <text x="556" y="110" class="m">记录读写按清单校验</text>
+        <text x="556" y="126" class="m">变更追加到 log.jsonl（不变量 17）</text>
+        <text x="556" y="142" class="m">/plugin-frame/&lt;短期令牌&gt; 只给静态文件</text>
+        <rect x="820" y="66" width="240" height="92" rx="9" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="836" y="90" class="t">项目档案</text>
+        <text x="836" y="110" class="m">plugins/&lt;名字&gt;/  固定版本的包</text>
+        <text x="836" y="126" class="m">plugin-data/&lt;名字&gt;/&lt;表&gt;.json</text>
+        <text x="836" y="142" class="m">skills/ ← 插件的打法</text>
+        <rect x="540" y="190" width="250" height="92" rx="9" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="556" y="214" class="t">触发</text>
+        <text x="556" y="234" class="m">外部回调 / 定时 / 记录变化</text>
+        <text x="556" y="250" class="m">→ 写一条记录（可选）</text>
+        <text x="556" y="266" class="m">→ 群聊消息 @ 成员，代表启用它的人</text>
+        <rect x="820" y="190" width="240" height="92" rx="9" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="836" y="214" class="t">项目群聊</text>
+        <text x="836" y="234" class="m">@ 谁，谁接任务（原有流程）</text>
+        <text x="836" y="250" class="m">用户任务的下发人 = 启用触发的人</text>
+        <rect x="540" y="320" width="520" height="160" rx="9" fill="#181a20" stroke="rgba(255,255,255,.07)"/>
+        <text x="556" y="344" class="t">成员 Agent 的一轮</text>
+        <text x="556" y="368">推送：纲要、决定 + 已装插件的摘要（表名、字段、条数）</text>
+        <text x="556" y="390">技能：项目技能 &gt; 插件打法 &gt; 连接器自带 &gt; 我的</text>
+        <text x="556" y="412">工具：plugin_records / plugin_write（凭执行上下文令牌）</text>
+        <text x="556" y="434">委托、验收照旧（不变量 2、5、6）；网络不按插件派委托</text>
+        <text x="556" y="462" class="m">Agent 写记录不触发“记录变化”，防止 Agent 经插件互相唤醒、成环</text>
+        <!-- 连线 -->
+        <path d="M386 190 C460 190 470 112 538 112" stroke="#8b93ff" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+        <text x="428" y="98" class="m">以这个人身份</text>
+        <path d="M790 112 H818" stroke="#8b93ff" stroke-width="2" marker-end="url(#ar)"/>
+        <path d="M420 420 C480 420 480 236 538 236" stroke="#5cc8d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+        <path d="M790 236 H818" stroke="#5cc8d6" stroke-width="2" marker-end="url(#ap)"/>
+        <path d="M940 282 V318" stroke="#5cc8d6" stroke-width="2" marker-end="url(#ap)"/>
+        <path d="M1040 320 C1080 260 1080 180 1050 160" stroke="#8b93ff" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+        <text x="1000" y="300" class="m">读写记录</text>
+        <!-- 不允许的 -->
+        <path d="M158 280 V336" stroke="#ef6b65" stroke-width="2" stroke-dasharray="6 5" fill="none"/>
+        <text x="168" y="342" class="m" style="fill:#ef6b65">✕ 插件直接访问网络 / 外部地址</text>
+      </svg>
+      <div class="legend"><span>以人的身份、带权限检查</span><span class="p">插件 / 触发的路径</span><span class="x">沙箱挡住的</span></div>
+      <p class="annot">已知风险：沙箱挡不住插件页面把自己跳转到外部地址、带出它读到的数据，所以桥只给全体参与者本来就看得到的内容。插件要人安装，按版本固定。</p>
+    </section>
+  </main>
+</div>
+
+<!-- 确认卡：宿主页面画的，插件改不了它的内容 -->
+<div class="overlay" id="confirm" role="dialog" aria-modal="true" aria-labelledby="cf-title">
+  <div class="card">
+    <div class="from"><span class="pill plugin">销售漏斗</span>想以<b style="color:var(--text)">你</b>的名义在群聊里发一条消息</div>
+    <h2 id="cf-title">发到“华东渠道拓展”群聊</h2>
+    <blockquote>本周漏斗：新增 5 条，进入报价 2 条（启明、华策），成交 1 条（瑞丰 ¥32 万）。@报价专员 华策的方案周五前给我。</blockquote>
+    <p class="fine">会 @ <b>报价专员</b>（阿杰的 Agent），它会被唤醒处理。联合项目里所有参与者都看得到。只对这一条生效。</p>
+    <div class="acts"><button class="ghost" id="cf-cancel">取消</button><button id="cf-send">发送</button></div>
+  </div>
+</div>
+
+<script>
+const leads = {
+  "线索": [["苏州启明科技", "官网表单", "销售助理", true], ["杭州云栖教育", "展会", "销售助理"], ["宁波海拓", "转介绍", ""]],
+  "沟通": [["上海华策咨询", "老客户", "销售助理"], ["无锡锐思", "官网表单", "小林"]],
+  "报价": [["南京恒远", "展会", "报价专员"], ["合肥新途", "转介绍", "报价专员"]],
+  "成交": [["常州瑞丰 ¥32 万", "老客户", "小林"]],
+  "流失": [["温州海联", "官网表单", ""]],
+};
+const board = document.getElementById("board");
+board.innerHTML = Object.entries(leads).map(([stage, rows]) => `
+  <div class="col"><header><span>${stage}</span><span class="muted">${rows.length}</span></header>
+  ${rows.map(([n, src, who, isNew]) => `<div class="lead${isNew ? " new" : ""}" data-n="${n}" data-stage="${stage}" data-src="${src}" data-who="${who}">
+    ${n}<div class="meta"><span>${src}</span><span class="who">${who ? "@" + who : "未分配"}</span></div></div>`).join("")}
+  </div>`).join("");
+
+const drawer = document.getElementById("drawer");
+board.addEventListener("click", (e) => {
+  const c = e.target.closest(".lead"); if (!c) return;
+  const d = c.dataset;
+  drawer.classList.add("on");
+  drawer.innerHTML = `<div style="display:flex;align-items:center;gap:10px"><b>${d.n}</b><span class="pill">${d.stage}</span>
+    <span class="muted" style="margin-left:auto;font-size:12px">记录 leads / L-0147</span></div>
+    <dl><dt>来源</dt><dd>${d.src}</dd><dt>负责成员</dt><dd>${d.who ? "@" + d.who : "未分配"}</dd><dt>备注</dt><dd>制造业，约 200 人，想做渠道培训。</dd></dl>
+    <div class="hist"><div>10:04 · 销售助理（Agent）经工具 plugin_write · 阶段 线索 → 沟通</div>
+    <div>10:02 · 外部回调（小林启用的触发）新增</div>
+    <div class="muted">变更都在项目的 log.jsonl 里；联合项目里所有参与者都看得到这些记录。</div></div>`;
+});
+
+const confirmBox = document.getElementById("confirm");
+document.getElementById("post-summary").addEventListener("click", () => confirmBox.classList.add("on"));
+document.getElementById("cf-cancel").addEventListener("click", () => confirmBox.classList.remove("on"));
+document.getElementById("cf-send").addEventListener("click", () => { confirmBox.classList.remove("on"); show("chat"); });
+
+function show(name) {
+  document.querySelectorAll(".scene").forEach((s) => s.classList.toggle("on", s.id === "scene-" + name));
+  document.querySelectorAll(".proto-bar nav button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.scene === name)));
+  document.querySelector("main").scrollTop = 0;
+}
+document.querySelectorAll("[data-scene]").forEach((b) => b.addEventListener("click", () => show(b.dataset.scene)));
+document.querySelectorAll("[data-goto]").forEach((b) => b.addEventListener("click", () => show(b.dataset.goto)));
+</script>
+</body>
+</html>

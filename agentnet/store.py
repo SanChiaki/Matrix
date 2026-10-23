@@ -236,6 +236,18 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def project_plugins_dir(self, project_id: str) -> Path:
+        """项目装了的插件包（固定版本的拷贝）：项目档案的一部分，只有主持人安装 / 升级 / 卸载。"""
+        d = self.root / "projects" / project_id / "plugins"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def plugin_data_dir(self, project_id: str, plugin: str) -> Path:
+        """插件的记录：每张表一个 JSON 文件。卸载不删，重新装回来还在。"""
+        d = self.root / "projects" / project_id / "plugin-data" / plugin
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def user_skills_dir(self, user_id: str) -> Path:
         """我的技能：人维护的技能库，勾给自己的 Agent。和 Agent 的私有目录分开。"""
         d = self.root / "users" / user_id / "skills"

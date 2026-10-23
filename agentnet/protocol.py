@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     MCP_PREFIX, PROJECT_FILES, SKILLS, ABILITY_TOOLS,
+                     MCP_PREFIX, PLUGIN_TOOLS, PROJECT_FILES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -98,6 +98,10 @@ TOOL_GUIDE: dict[str, str] = {
     "suggest_connector": ("需要某个外部服务（如飞书、GitHub、某个数据库）却没有对应的连接器时，提醒你的所有者"
                           "（connector：哪个服务，reason：拿来做什么）。只是提醒，不会授权或安装；提醒完用现有的能力继续。"),
     "read_chat": "读项目群聊的消息（query 按关键词找，limit 条数，默认最近 20 条）：了解群聊里交代过、讨论过、定下过什么。",
+    "plugin_records": ("查项目插件里的记录（plugin：插件名，table：表名，query：关键词，where：JSON 字符串按字段精确匹配，"
+                       "如 {\"stage\": \"沟通\"}，limit 条数）。只有项目档案里列出的插件与表。"),
+    "plugin_write": ("新增或修改项目插件里的一条记录（plugin、table，record_id：修改时填，fields：JSON 字符串，"
+                     "只写清单里的字段，如 {\"stage\": \"报价\"}）。写进去项目里所有人都看得到。"),
     "read_request": "读项目里一个用户任务的详情（request_id）：原始要求、状态、交付说明、为它发起的委托与结果。",
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
@@ -105,11 +109,12 @@ TOOL_GUIDE: dict[str, str] = {
 }
 
 
-def _network_tools(project: Project, can_delegate: bool) -> list[str]:
+def _network_tools(project: Project, can_delegate: bool, plugins: bool = False) -> list[str]:
     archive = [
         "", f"## 项目档案：「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
         f"- `./{PROJECT_FILES}/` 是项目档案文件的只读副本，改动不会保存。",
+        *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in PLUGIN_TOOLS) if plugins else ()),
     ]
     if project.kind == "joint":
         archive.append("- 这是联合项目：写进档案的内容、你在群聊里的回复，所有参与方（不同的人）都看得到。"
@@ -121,7 +126,7 @@ def _network_tools(project: Project, can_delegate: bool) -> list[str]:
     return archive + [
         "", f"## 协作：你所在的项目「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()
-          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS),
+          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -218,7 +223,8 @@ def format_decision(d: Decision, name: Callable[[str | None], str], email: Calla
 
 
 def format_archive(g: Project, active: list[Decision], files: list[str], name: Callable[[str | None], str],
-                   email: Callable[[str | None], str], skills: list[tuple[str, str]] | None = None) -> str:
+                   email: Callable[[str | None], str], skills: list[tuple[str, str]] | None = None,
+                   plugins: list[Any] | None = None) -> str:
     """项目档案的推送部分：纲要、最近的有效决定、文件与资源的指针。作为背景，不附带任何“先读档案”的指令。"""
     parts = [f"## 项目档案（「{g.name}」）"]
     if g.brief:
@@ -234,6 +240,18 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
     if skills:
         parts += ["### 项目技能（大家约定的做法，和你自己的技能重名时以这里为准）",
                   *(f"- {n}：{d}" for n, d in skills[:40])]
+    if plugins:  # 插件：业务场景的表结构；记录本身不推送，要用就查
+        parts.append("### 插件（这个项目的业务场景；记录归项目，写进去所有人都看得到）")
+        for m in plugins:
+            line = f"- {m.title}（`{m.name}`）：{m.description}"
+            if m.agent_tools and m.tables:
+                tools = "、".join(t for t, c in (("plugin_records", "records.read"), ("plugin_write", "records.write"))
+                                 if c in m.agent_tools)
+                line += f"。可用 {tools} 读写：" + "；".join(
+                    f"表 `{t.key}`（{t.title}）字段 " + "、".join(
+                        f"{f.key}" + (f"[{'/'.join(f.options)}]" if f.options else f"（{f.type}）") for f in t.fields)
+                    for t in m.tables)
+            parts.append(line)
     if g.refs:
         parts += ["### 相关资源（只是引用，不代表你能访问）",
                   *(f"- {r.name}：{r.location}" + (f" —— {r.note}" if r.note else "") for r in g.refs)]
@@ -242,7 +260,7 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
 
 def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | None, can_delegate: bool,
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
-                      home: bool = True, joint: bool = False) -> str:
+                      home: bool = True, joint: bool = False, plugins: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
@@ -277,7 +295,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
         authority_lines(agent.authority),
     ]
     if project is not None and conv.kind in ("project", "session"):
-        parts += _network_tools(project, can_delegate)
+        parts += _network_tools(project, can_delegate, plugins)
     if project is not None and conv.kind == "session":
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
@@ -380,7 +398,7 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, project: Project, can_delegate: bool,
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
-                      home: bool = True) -> str:
+                      home: bool = True, plugins: bool = False) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -397,7 +415,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *([ "", archive] if archive else []),
         *(["", f"## 附件（委托方转交，只读副本，改动不会保存）", *format_attachments(task.attachments)]
           if task.attachments else []),
-        *_network_tools(project, can_delegate),
+        *_network_tools(project, can_delegate, plugins),
         *_abilities(),
         *_knowledge(knowledge),
         *_home(home_writable, home),

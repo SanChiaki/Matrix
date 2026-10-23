@@ -66,6 +66,29 @@ SKILLS_TOTAL = 2_000_000   # 每轮下发到端侧的技能合计上限
 SKILLS_PER_AGENT = 50
 
 
+# 项目插件（docs/project-plugins.md）：插件包 = plugin.json + page/（沙箱里跑的页面代码）+ skills/（打法）。
+PLUGIN_LIMIT = 2_000_000   # 一个插件包的总大小上限（字节）
+PLUGIN_FILES = 300         # 一个插件包最多多少个文件
+PLUGINS_PER_PROJECT = 10
+PLUGIN_TABS = 5            # 一个插件最多加几个项目页标签
+PLUGIN_TABLES = 10
+PLUGIN_FIELDS = 40         # 每张表最多多少个字段
+PLUGIN_RECORDS = 5000      # 每张表最多多少条记录
+PLUGIN_RECORD_LIMIT = 32_000  # 一条记录的字段合计上限（字节）
+PLUGIN_TRIGGERS = 20
+# 插件页面经桥能申请的能力（实际 = 申请的 ∩ 看页面的人本身有的）；Agent 那一侧只有记录工具
+PLUGIN_PAGE_CAPS: dict[str, str] = {
+    "records.read": "读插件自己的表",
+    "records.write": "写插件自己的表（按清单校验字段）",
+    "archive.read": "读纲要、有效决定、项目文件、资源引用",
+    "members.read": "读成员 Agent 的名片",
+    "chat.read": "读群聊里对所有参与者公开的消息",
+    "chat.post": "以看页面的人的名义在群聊里发消息（每次确认）",
+    "requests.read": "读看页面的人自己看得到的用户任务",
+}
+PLUGIN_AGENT_CAPS = ("records.read", "records.write")
+
+
 def attachment_rel(a: dict[str, Any]) -> str:
     """附件在工作目录里的相对路径：attachments/<sha 前 8 位>/<原文件名>。文件名保留扩展名，前缀避免同名冲突。"""
     return f"{ATTACHMENTS}/{a['sha'][:8]}/{a['name']}"
@@ -77,6 +100,8 @@ ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_b
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
 # 项目会话工具：只有项目会话里的助理有，读项目的现状（按会话主人的可见性过滤）。
 SESSION_TOOLS = ("read_chat", "read_request")
+# 插件记录工具：项目里装了把它们开给 Agent 的插件时才有（档案类工具，不需要 delegate）
+PLUGIN_TOOLS = ("plugin_records", "plugin_write")
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
 
@@ -224,6 +249,10 @@ class Project:
     connector_needs: list[ConnectorNeed] = field(default_factory=list)
     # 联合项目里由所有者逐个打开的连接器：{agent_id: [connection_id]}。默认没有（不变量 19）
     connections_enabled: dict[str, list[str]] = field(default_factory=dict)
+    # 装了的插件（包在 projects/<id>/plugins/<名字>/，记录在 plugin-data/<名字>/）：
+    # {名字: {version, title, source: catalog | upload, by_user, installed_at, data_rev,
+    #        triggers: {key: {enabled, by_user, failures, paused, last_run, hook_hash}}}}
+    plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 
@@ -250,6 +279,7 @@ class Message:
     audience: list[str] = field(default_factory=list)  # 只给这些用户看（空 = 对话里的所有人），如席位的失败说明
     private_to: list[str] = field(default_factory=list)  # steps / wake 只给这些用户看（Agent 的所有者）
     attachments: list[dict[str, Any]] = field(default_factory=list)  # user：附件 {sha, name, size, mime}，文件在对话的附件区
+    via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）
     ts: float = field(default_factory=time.time)
 
 
