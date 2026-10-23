@@ -269,3 +269,43 @@ def test_skill_routes(tmp_path: Path):
     assert c.get(f"/api/projects/{g.id}/skills/triage").json()["body"] == "b"
     assert c.delete(f"/api/projects/{g.id}/skills/triage").status_code == 200
     assert c.delete("/api/me/skills/weekly-report").json() == {"ok": True}
+
+
+def _zip(files: dict[str, bytes]) -> bytes:
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for p, b in files.items():
+            z.writestr(p, b)
+    return buf.getvalue()
+
+
+SKILL_MD = b'---\nname: pdf-tools\ndescription: "\xe5\xa4\x84\xe7\x90\x86 PDF"\n---\n\n# steps\n'
+
+
+def test_skill_package_upload(tmp_path: Path):
+    """标准技能包：zip 或文件夹，可多一层顶层目录、可带二进制文件；名字取 frontmatter；坏包拒绝。"""
+    net = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    c = client(net, "alice@x.io")
+    z = _zip({"pdf/SKILL.md": SKILL_MD, "pdf/scripts/run.py": b"print(1)", "pdf/assets/logo.png": b"\x89PNG\x00\xff",
+              "__MACOSX/pdf/._SKILL.md": b"junk"})
+    r = c.post("/api/me/skills/upload", content=z, headers={"Content-Type": "application/zip"})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "pdf-tools" and r.json()["description"] == "处理 PDF"
+    assert sorted(r.json()["files"]) == ["assets/logo.png", "scripts/run.py"]
+    folder = {"files": [{"path": "x/SKILL.md", "data": base64.b64encode(SKILL_MD.replace(b"pdf-tools", b"other")).decode()}]}
+    assert c.post("/api/me/skills/upload", json=folder).json()["name"] == "other"
+    assert {s["name"] for s in c.get("/api/me/skills").json()} == {"pdf-tools", "other"}
+    bad = [_zip({"a.txt": b"x"}), _zip({"SKILL.md": b"---\nname: Bad\ndescription: x\n---\n"}),
+           _zip({"SKILL.md": b"---\nname: ok\n---\n"}), _zip({"SKILL.md": SKILL_MD, "../evil": b"x"}),
+           _zip({"a/SKILL.md": SKILL_MD, "b/x": b"x"}), b"not a zip"]
+    for b in bad:
+        assert c.post("/api/me/skills/upload", content=b, headers={"Content-Type": "application/zip"}).status_code in (400, 409)
+    assert not (tmp_path / "evil").exists()
+    g = net.create_project("P", "", [], actor=alice)
+    r = c.post(f"/api/projects/{g.id}/skills/upload", content=z, headers={"Content-Type": "application/zip"})
+    assert r.status_code == 200 and net.store.projects[g.id].skills["pdf-tools"]["by_user"] == alice
+    bob, = users(net, "bob@x.io")
+    assert client(net, "bob@x.io").post(f"/api/projects/{g.id}/skills/upload", content=z,
+                                        headers={"Content-Type": "application/zip"}).status_code == 404

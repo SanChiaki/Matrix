@@ -148,6 +148,77 @@ def add_file(root: Path, name: str, rel: str, data: bytes) -> None:
     dest.write_bytes(data)
 
 
+def unzip(data: bytes) -> list[tuple[str, bytes]]:
+    """把上传的 zip 读成 [(路径, 内容)]。不解到磁盘，路径交给 install 校验。"""
+    import io
+    import zipfile
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise SkillError("不是有效的 zip 文件") from e
+    out, total = [], 0
+    for m in z.infolist():
+        if m.is_dir():
+            continue
+        total += m.file_size
+        if total > SKILL_LIMIT or len(out) >= 500:
+            raise SkillError(f"技能包超过 {SKILL_LIMIT // 1000} KB")
+        out.append((m.filename, z.read(m)))
+    return out
+
+
+def install(root: Path, entries: list[tuple[str, bytes]]) -> SkillInfo:
+    """装一个标准技能包（Agent Skills：`SKILL.md` 的 frontmatter 有 name、description，可带 scripts/ 等目录）。
+
+    包可以多一层顶层目录（zip 或上传文件夹常见）。同名的整个替换。名字取 frontmatter，不取目录名。
+    """
+    entries = [(p.replace("\\", "/").lstrip("/"), b) for p, b in entries]
+    entries = [(p, b) for p, b in entries
+               if not any(part in ("__MACOSX", ".DS_Store") for part in p.split("/"))]
+    tops = [p.split("/") for p, _ in entries if p.split("/")[-1] == SKILL_FILE]
+    if not tops:
+        raise SkillError("技能包里没有 SKILL.md")
+    prefix = min(tops, key=len)[:-1]
+    if len(prefix) > 1:
+        raise SkillError("SKILL.md 要在技能包的根目录（或唯一的顶层文件夹）里")
+    cut = len(prefix)
+    files: dict[Path, bytes] = {}
+    for p, b in entries:
+        parts = p.split("/")
+        if parts[:cut] != prefix:
+            raise SkillError("技能包里只能有一个技能")
+        rel = safe_rel("/".join(parts[cut:]))
+        if rel is None or any(part.startswith(".") for part in rel.parts):
+            raise SkillError(f"非法的文件名：{p!r}")
+        files[rel] = b
+    if sum(len(b) for b in files.values()) > SKILL_LIMIT:
+        raise SkillError(f"技能包超过 {SKILL_LIMIT // 1000} KB")
+    head = files.get(Path(SKILL_FILE))
+    if head is None:
+        raise SkillError("技能包里没有 SKILL.md")
+    try:
+        text = head.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillError("SKILL.md 要是 UTF-8 文本") from e
+    name, description, _ = parse(text)
+    name = check_name(name)
+    if not description.strip():
+        raise SkillError("SKILL.md 的 frontmatter 要有 description：什么时候用它")
+    if len(description) > 1024:
+        raise SkillError("description 最长 1024 个字符")
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f".upload-{name}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    for rel, b in files.items():
+        (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp / rel).write_bytes(b)
+    shutil.rmtree(root / name, ignore_errors=True)
+    tmp.rename(root / name)
+    i = info(root / name)
+    assert i is not None
+    return i
+
+
 def remove(root: Path, name: str) -> bool:
     d = root / check_name(name)
     if not d.is_dir():

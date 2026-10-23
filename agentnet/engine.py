@@ -835,6 +835,16 @@ class Network:
         self.bus.emit("skills.updated", user_id=uid)
         return self.my_skill(name, actor)
 
+    def upload_my_skill(self, entries: list[tuple[str, bytes]], actor: str | None) -> dict[str, Any]:
+        """装一个标准技能包（SKILL.md + 可选目录）。同名的整个替换。"""
+        uid = self._need_user(actor)
+        try:
+            i = skillfs.install(self.store.user_skills_dir(uid), entries)
+        except skillfs.SkillError as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("skills.updated", user_id=uid)
+        return i.public()
+
     def add_my_skill_file(self, name: str, rel: str, data: bytes, actor: str | None) -> dict[str, Any]:
         uid = self._need_user(actor)
         try:
@@ -918,6 +928,22 @@ class Network:
         self._archive_saved(g, f"主持人{'新增' if created else '更新'}了项目技能「{name}」：{_short(description, 80)}")
         return self.project_skill(project_id, name, actor)
 
+    def upload_project_skill(self, project_id: str, entries: list[tuple[str, bytes]],
+                             actor: str | None = None) -> dict[str, Any]:
+        """主持人上传标准技能包进项目档案（不变量 17）。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            root = self.store.project_skills_dir(g.id)
+            try:
+                i = skillfs.install(root, entries)
+            except skillfs.SkillError as e:
+                raise NetworkError(str(e)) from e
+            created = i.name not in g.skills
+            g.skills[i.name] = {"by_user": actor, "by_agent": None, "approved_by": None, "updated_at": time.time()}
+            self._archive_changed(g, "skill.create" if created else "skill.update", by_user=actor, skill=i.name)
+        self._archive_saved(g, f"主持人{'上传' if created else '更新'}了项目技能「{i.name}」：{_short(i.description, 80)}")
+        return i.public()
+
     def add_project_skill_file(self, project_id: str, name: str, rel: str, data: bytes,
                                actor: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -981,7 +1007,7 @@ class Network:
             layers.append(("项目技能", self.store.project_skills_dir(g.id), None))
         self._sync_connector_skills()
         for c in conns:
-            spec = self.connectors.get(c.connector_id) if c.where == "cloud" else None
+            spec = self._spec(c) if c.where == "cloud" else None
             if spec is not None and spec.skills:
                 layers.append((f"连接器「{spec.name}」", self.store.connector_skills_dir(spec.id), None))
         if agent.owner_id and agent.skills:
@@ -1030,8 +1056,9 @@ class Network:
     def _connection_view(self, c: Connection) -> dict[str, Any]:
         """调用方持有锁。给授权人自己看的：没有凭证，只有名字、状态、给了谁。"""
         d = c.public()
-        spec = self.connectors.get(c.connector_id) if c.where == "cloud" else None
+        spec = self._spec(c) if c.where == "cloud" else None
         d["kind"] = "cloud" if c.where == "cloud" else "device"
+        d["custom"] = bool(c.url)
         d["description"] = spec.description if spec else ""
         d["skills"] = [s.name for s in spec.skills] if spec else []
         d["agents"] = [a.id for a in self.store.agents.values() if c.id in a.connections]
@@ -1087,6 +1114,47 @@ class Network:
                     a = self.store.agents.get(aid)
                     if a is not None and a.owner_id == uid and not a.device_runtime and c.id not in a.connections:
                         a.connections.append(c.id)
+            self.store.save()
+            view = self._connection_view(c)
+        self.bus.emit("connection.updated", user_id=uid, connection_id=c.id)
+        return view
+
+    CUSTOM_PER_USER = 20
+
+    def add_custom_connector(self, name: str, url: str, header: str, value: str, actor: str | None,
+                             agent_ids: list[str] | None = None) -> dict[str, Any]:
+        """自定义的远程 MCP（云端）：地址由用户填，只能是 https 公网地址；网络代连时每次重新解析、
+        直连校验过的地址、不跟重定向（不能被当跳板访问内网）。凭证同样只进保管库（不变量 19）。"""
+        import re as _re
+        from .mcp_client import check_public_url
+        uid = self._need_user(actor)
+        name = " ".join((name or "").split())[:60]
+        if not name:
+            raise NetworkError("给连接器起个名字")
+        try:
+            url = check_public_url(url)
+        except MCPError as e:
+            raise NetworkError(str(e)) from e
+        header, value = (header or "").strip(), (value or "").strip()
+        if value and not header:
+            header = "Authorization"
+        if header and not _re.match(r"^[A-Za-z0-9-]{1,64}$", header):
+            raise NetworkError("请求头名只能是字母、数字和 -")
+        with self._lock:
+            if sum(1 for x in self.store.connections.values() if x.owner_id == uid and x.url) >= self.CUSTOM_PER_USER:
+                raise NetworkError(f"最多 {self.CUSTOM_PER_USER} 个自定义连接器")
+            slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "mcp"
+            c = Connection(id=new_id("conn"), owner_id=uid, connector_id=f"custom-{slug}", name=name, url=url)
+            self.store.connections[c.id] = c
+            self.vault.put(c.id, {"header": header, "value": value})
+        status, error = self._probe(c)
+        with self._lock:
+            c.status, c.error, c.updated_at = status, error, time.time()
+            assistant = self.assistant_of(uid)
+            for aid in (agent_ids if agent_ids is not None else ([assistant.id] if assistant else [])):
+                a = self.store.agents.get(aid)
+                if a is not None and a.owner_id == uid and not a.device_runtime and c.id not in a.connections:
+                    a.connections.append(c.id)
             self.store.save()
             view = self._connection_view(c)
         self.bus.emit("connection.updated", user_id=uid, connection_id=c.id)
@@ -1177,7 +1245,7 @@ class Network:
             c = self.store.connections.get(cid)
             if c is None or c.owner_id != agent.owner_id or c.status != "ok" or not self._placed_for(c, agent):
                 continue
-            if c.where == "cloud" and self.connectors.get(c.connector_id) is None:
+            if c.where == "cloud" and self._spec(c) is None:
                 continue
             if opened is not None and cid not in opened:
                 continue
@@ -1193,14 +1261,25 @@ class Network:
         except (MCPError, VaultError, NetworkError) as e:
             return "error", str(e)[:300]
 
+    def _spec(self, c: Connection) -> ConnectorSpec | None:
+        """云端连接对应的接入说明：目录里的，或用户自定义的（地址在连接上，请求头名与值在保管库里）。"""
+        if c.url:
+            return ConnectorSpec(id=c.connector_id, name=c.name, url=c.url)
+        return self.connectors.get(c.connector_id)
+
     def _remote(self, c: Connection) -> RemoteMCP:
-        spec = self.connectors.get(c.connector_id)
+        spec = self._spec(c)
         if spec is None:
             raise NetworkError(f"部署方已下架连接器 {c.connector_id}")
         with self._lock:
             r = self._remotes.get(c.id)
             if r is None or r.url != spec.url:
-                r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
+                if c.url:
+                    v = self.vault.get(c.id)
+                    headers = {v["header"]: v["value"]} if v.get("header") and v.get("value") else {}
+                    r = RemoteMCP(c.url, headers, public_only=True)
+                else:
+                    r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
                 self._remotes[c.id] = r
             return r
 
@@ -1215,7 +1294,7 @@ class Network:
         for cid in ctx.connections:
             with self._lock:
                 c = self.store.connections.get(cid)
-            spec = self.connectors.get(c.connector_id) if c is not None else None
+            spec = self._spec(c) if c is not None else None
             if c is None or spec is None:
                 continue
             cached = self._remote_tools.get(cid)

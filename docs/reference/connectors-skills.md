@@ -15,6 +15,10 @@
 | 我的技能 | `users/<uid>/skills/<名字>/`；Agent 勾选在 `Agent.skills` | 本人 | 只有本人（不变量 13）；勾上的跟着 Agent 进联合项目 |
 | Agent 自己攒的 | 私有目录里的 `agent-home/skills/` | Agent 自己 | 网络不读（不变量 8） |
 
+- **维护方式**：技能按 Agent Skills 标准在本地写好（一个文件夹：`SKILL.md` 的 frontmatter 有 `name`、`description`，
+  可带 `scripts/`、`references/`、`assets/` 等，二进制也行），打包成 zip 或选文件夹上传（`POST .../skills/upload`，
+  zip 请求体，或 JSON `{files: [{path, data(base64)}]}`）。可以多一层顶层目录；名字取 frontmatter；同名整个替换；
+  `__MACOSX`、`.DS_Store` 忽略，点开头或越界的路径拒绝。页面上只展示名字与描述，不在线编辑。
 - 名字：小写字母、数字、`-`，不以 `-` 开头结尾，≤64；单个技能 ≤256 KB，一轮合计 ≤2 MB，最多 50 个（`models.SKILL*`）。
 - `SKILL.md` 的 frontmatter 只有 `name`、`description`（JSON 转义），正文是做法。附带文件不能叫 `SKILL.md`、不能有点开头的路径段。
 - **重名**：网络按 项目技能 > 连接器自带 > 我的技能 合并进工作目录的 `skills/`（只读副本，运行后丢弃），
@@ -52,6 +56,13 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
   每次调用记进 `connections/<id>/calls.jsonl`（工具名、成败、耗时，不含参数与结果），`GET /api/me/connections/<id>/calls` 只给授权人。
 - 桥连不上网络时 `tools/list` 为空、`tools/call` 回错误，不让整轮起不来（`failOnStartupError: false`）。
 
+### 自定义（云端）
+
+- `POST /api/me/connections/custom`：`{name, url, header?, value?}`，接入任意远程 MCP（Streamable HTTP）。
+  地址只能是 `https://` 的**公网**地址：解析出的每个地址都要 `is_global`，连接时直连校验过的 IP（防 DNS 重绑定），
+  不跟重定向，不走代理（`mcp_client.check_public_url` / `public_only`）。地址存在 `Connection.url`，
+  请求头名与值只进保管库。每人最多 20 个。
+
 ### 我的电脑
 
 - Matrix 客户端上线时在每个 AI 工具的能力报告里带 `connectors`（只有名字，≤100 个）：dsh 读 `--dump-config` 里的
@@ -74,8 +85,9 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 
 | 路由 | 用途 |
 | --- | --- |
-| `GET/PUT /api/me/skills`、`GET/DELETE /api/me/skills/<名字>`、`POST .../files` | 我的技能库 |
-| `GET/PUT /api/projects/<id>/skills`、`GET/DELETE .../skills/<名字>`、`POST .../files` | 项目技能（主持人写，成员读） |
+| `GET /api/me/skills`、`POST /api/me/skills/upload`、`DELETE /api/me/skills/<名字>` | 我的技能库 |
+| `POST /api/projects/<id>/skills/upload`、`DELETE .../skills/<名字>` | 项目技能（主持人上传，成员读） |
+| `POST /api/me/connections/custom` | 自定义云端 MCP（只连公网） |
 | `GET /api/connectors` | 云端连接器目录（不含地址） |
 | `GET/POST /api/me/connections`、`POST .../<id>/check`、`DELETE .../<id>`、`GET .../<id>/calls` | 我的连接 |
 | `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 项目需要的连接器 |

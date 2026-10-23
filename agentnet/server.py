@@ -87,6 +87,14 @@ class SkillFileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
+class CustomConnectorIn(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    url: str = Field(min_length=8, max_length=2000)       # 只接受 https 公网地址
+    header: str = Field("", max_length=64)
+    value: str = Field("", max_length=4000)               # 只进加密保管，不回显
+    agent_ids: list[str] | None = None
+
+
 class AuthorizeIn(BaseModel):
     connector_id: str = Field(min_length=1, max_length=40)
     values: dict[str, str] = Field(default_factory=dict)  # 授权字段；secret 的只进加密保管，任何接口都不回显
@@ -294,6 +302,26 @@ def current_user(request: Request) -> User:
 
 # 模块级定义：文件开头的 `from __future__ import annotations` 让注解变成字符串，FastAPI 要在模块作用域解析它
 Me = Annotated[User, Depends(current_user)]
+
+
+async def skill_package(request: Request) -> list[tuple[str, bytes]]:
+    """技能包：请求体是 zip（application/zip），或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
+    import base64
+    from .models import SKILL_LIMIT
+    cap = SKILL_LIMIT * 2  # base64 膨胀
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(413, f"技能包超过 {SKILL_LIMIT // 1000} KB")
+    from .skills import SkillError, unzip
+    try:
+        if "json" in request.headers.get("content-type", ""):
+            files = json.loads(bytes(buf)).get("files") or []
+            return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:500]]
+        return unzip(bytes(buf))
+    except (SkillError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise HTTPException(400, str(e) or "技能包格式不对") from e
 
 
 def create_app(network: Network) -> FastAPI:
@@ -516,6 +544,12 @@ def create_app(network: Network) -> FastAPI:
         network.save_project_skill(project_id, body.name, body.description, body.body, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
+    @app.post("/api/projects/{project_id}/skills/upload")
+    async def upload_project_skill(project_id: str, request: Request, user: Me) -> dict:
+        await run_in_threadpool(network.hosted_project, project_id, user.id)  # 先查权限，不收无权者的内容
+        entries = await skill_package(request)
+        return await run_in_threadpool(network.upload_project_skill, project_id, entries, user.id)
+
     @app.post("/api/projects/{project_id}/skills/{name}/files")
     def add_project_skill_file(project_id: str, name: str, body: SkillFileIn, user: Me) -> dict:
         return network.add_project_skill_file(project_id, name, body.path, body.content.encode(), actor=user.id)
@@ -554,6 +588,11 @@ def create_app(network: Network) -> FastAPI:
     def save_my_skill(body: SkillIn, user: Me) -> dict:
         return network.save_my_skill(body.name, body.description, body.body, user.id)
 
+    @app.post("/api/me/skills/upload")
+    async def upload_my_skill(request: Request, user: Me) -> dict:
+        entries = await skill_package(request)
+        return await run_in_threadpool(network.upload_my_skill, entries, user.id)
+
     @app.post("/api/me/skills/{name}/files")
     def add_my_skill_file(name: str, body: SkillFileIn, user: Me) -> dict:
         return network.add_my_skill_file(name, body.path, body.content.encode(), user.id)
@@ -577,6 +616,11 @@ def create_app(network: Network) -> FastAPI:
         # 会试连外部服务：放到线程里
         return await asyncio.to_thread(network.authorize_connector, body.connector_id, body.values, user.id,
                                        body.agent_ids)
+
+    @app.post("/api/me/connections/custom")
+    async def add_custom(body: CustomConnectorIn, user: Me) -> dict:
+        return await asyncio.to_thread(network.add_custom_connector, body.name, body.url, body.header, body.value,
+                                       user.id, body.agent_ids)
 
     @app.post("/api/me/connections/{connection_id}/check")
     async def recheck(connection_id: str, user: Me) -> dict:

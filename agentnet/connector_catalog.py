@@ -18,7 +18,7 @@
   `secret` 的字段只进加密保管，任何接口都不回显。没有字段的连接器不需要授权（公开服务）。
 - `skills`：连接器自带的技能（docs/connectors-and-skills.md）。名字规则同技能。
 - 没有这个文件：不提供云端连接器。文件写坏了保留上一份能用的。
-- 地址只来自这份文件，用户不能填（避免把网络当跳板访问内网）。
+- 这份文件里的地址由部署方负责；用户自定义的连接器另走 `mcp_client.public_only`，只连公网。
 """
 
 from __future__ import annotations

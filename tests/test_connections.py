@@ -492,3 +492,19 @@ def test_dsh_driver_disables_unallowed_mcp_plugins(monkeypatch, tmp_path: Path):
     assert d.mcp_plugins() == {"notion": "my-notion", "linear": "my-linear"}
     y = build_patch_yaml([], extra_disabled=["my-linear"])
     assert "- id: my-linear\n  disabled: true" in y
+
+
+def test_custom_connector_public_only(tmp_path):
+    """不变量 19 / 安全：自定义的云端 MCP 地址只能是 https 公网地址，内网、回环、http 一律拒绝；凭证只进保管库。"""
+    from agentnet.mcp_client import MCPError, check_public_url
+    for bad in ["http://example.com/mcp", "https://127.0.0.1/mcp", "https://localhost/mcp", "https://10.0.0.5/x",
+                "https://169.254.169.254/latest", "https://[::1]/x", "https://user:pw@example.com/", "ftp://x"]:
+        with pytest.raises(MCPError):
+            check_public_url(bad)
+    net = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False)
+    alice, = users(net, "alice@x.io")
+    c = client(net, "alice@x.io")
+    r = c.post("/api/me/connections/custom", json={"name": "内网", "url": "https://127.0.0.1:8813/mcp",
+                                                   "header": "Authorization", "value": "Bearer s3cret"})
+    assert r.status_code == 409 and "s3cret" not in r.text
+    assert c.get("/api/me/connections").json() == []

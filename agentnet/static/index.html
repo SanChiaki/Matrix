@@ -145,8 +145,8 @@
   <section id="view-skills" class="view" hidden aria-label="我的技能">
     <div class="pane">
       <div class="view-head">
-        <div><h1>技能</h1><p>你的技能库：一种做法写一个技能，比如怎么写周报、怎么做竞品分析。勾给哪些 Agent，它们就会用；带进联合项目也一样，但正文只有你看得到。项目里大家约定的做法写在项目页的“技能”里，重名时项目的优先。</p></div>
-        <button type="button" id="skill-new">新建技能</button>
+        <div><h1>技能</h1><p>你的技能库：按通用的技能格式（一个含 SKILL.md 的文件夹，可带脚本与模板）在本地写好，打包成 zip 或直接选文件夹上传。勾给哪些 Agent，它们就会用；带进联合项目也一样，但内容只有你看得到。项目里大家约定的做法写在项目页的“技能”里，重名时项目的优先。</p></div>
+        <div class="actions"><button type="button" id="skill-new">上传技能</button><button type="button" class="ghost" id="skill-new-dir">上传文件夹</button></div>
       </div>
       <ul id="skill-list" class="cards"></ul>
     </div>

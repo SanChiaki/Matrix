@@ -2,7 +2,7 @@
 
 只实现网络要用的三件事：initialize、tools/list、tools/call。响应可以是 JSON，也可以是 SSE 流
 （取 id 对得上的那一条）。会话 id（`Mcp-Session-Id`）由服务端发，过期（404）时重新初始化一次。
-地址只来自部署方维护的连接器目录，不接受用户填写（避免把网络当跳板访问内网）。
+目录里的地址来自部署方；用户自定义的地址用 `public_only`：只连 https 公网、防 DNS 重绑定、不跟重定向。
 """
 
 from __future__ import annotations
@@ -17,13 +17,75 @@ from typing import Any
 PROTO = "2025-06-18"
 
 
+def _public_ip(host: str, port: int) -> str:
+    """解析 host，所有地址都得是公网地址，返回第一个。连接时直连这个地址，防 DNS 重绑定。"""
+    import ipaddress
+    import socket
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as e:
+        raise MCPError(f"解析不了地址 {host}：{e}") from e
+    ips = [i[4][0] for i in infos]
+    for ip in ips:
+        a = ipaddress.ip_address(ip.split("%")[0])
+        if getattr(a, "ipv4_mapped", None):
+            a = a.ipv4_mapped
+        if not a.is_global or a.is_multicast:
+            raise MCPError(f"{host} 指向内网或保留地址，自定义连接器只能连公网服务")
+    if not ips:
+        raise MCPError(f"解析不了地址 {host}")
+    return ips[0]
+
+
+def check_public_url(url: str) -> str:
+    """自定义连接器的地址：只能是 https 的公网地址（网络代连，不能被当跳板访问内网）。"""
+    from urllib.parse import urlsplit
+    u = (url or "").strip()
+    p = urlsplit(u)
+    if p.scheme != "https" or not p.hostname or p.username or p.password or len(u) > 2000:
+        raise MCPError("地址要是 https://… 的公网地址")
+    _public_ip(p.hostname, p.port or 443)
+    return u
+
+
+def _public_opener() -> urllib.request.OpenerDirector:
+    import http.client
+    import socket
+    import ssl
+
+    class Conn(http.client.HTTPSConnection):
+        def connect(self) -> None:
+            ip = _public_ip(self.host, self.port)
+            sock = socket.create_connection((ip, self.port), self.timeout)
+            self.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+
+    class Https(urllib.request.HTTPSHandler):
+        def https_open(self, req: Any) -> Any:
+            return self.do_open(Conn, req)
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a: Any, **k: Any) -> None:
+            return None  # 不跟重定向：重定向可以指回内网
+
+    class NoHttp(urllib.request.HTTPHandler):
+        def http_open(self, req: Any) -> Any:
+            raise urllib.error.URLError("只允许 https")
+
+    return urllib.request.build_opener(Https, NoRedirect, NoHttp, urllib.request.ProxyHandler({}))
+
+
+_PUBLIC_OPENER = _public_opener()
+
+
 class MCPError(RuntimeError):
     pass
 
 
 class RemoteMCP:
-    def __init__(self, url: str, headers: dict[str, str] | None = None, timeout_s: float = 60):
+    def __init__(self, url: str, headers: dict[str, str] | None = None, timeout_s: float = 60,
+                 public_only: bool = False):
         self.url = url
+        self.public_only = public_only   # 用户自己填的地址：只连公网、不跟重定向（check_public_url）
         self.headers = dict(headers or {})
         self.timeout_s = timeout_s
         self.session_id: str | None = None
@@ -38,7 +100,10 @@ class RemoteMCP:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=headers, method="POST")
         try:
-            resp = urllib.request.urlopen(req, timeout=self.timeout_s)  # noqa: S310 —— 地址来自部署方的目录
+            if self.public_only:
+                resp = _PUBLIC_OPENER.open(req, timeout=self.timeout_s)
+            else:
+                resp = urllib.request.urlopen(req, timeout=self.timeout_s)  # noqa: S310 —— 地址来自部署方的目录
         except urllib.error.HTTPError as e:
             if e.code == 404 and self.session_id:
                 raise _Expired() from e

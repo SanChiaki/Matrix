@@ -146,5 +146,5 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
 - `/internal/tools`、`/internal/approval`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准；覆盖层要一直关掉 dsh 的默认技能根。
-- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录，也不要让用户填连接器地址（网络会被当跳板访问内网）。
+- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录，用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽。
 - 已知风险：沙箱只管写、不管读。接入第二个运行时或任何多机部署之前，必须先做读隔离。

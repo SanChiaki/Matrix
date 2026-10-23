@@ -159,7 +159,11 @@ async function start() {
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
-  $("#skill-new").addEventListener("click", () => { S.skillSel = null; S.skillNew = true; renderSkillsView(); $("#sk-name")?.focus(); });
+  const upMine = (folder) => pickSkillPackage("/api/me/skills", folder).then(async (x) => {
+    if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
+  }).catch((e) => alert(e.message));
+  $("#skill-new").addEventListener("click", () => upMine(false));
+  $("#skill-new-dir").addEventListener("click", () => upMine(true));
   // 设备详情里的服务标签：跳到连接器页并选中它
   document.addEventListener("click", (e) => {
     const t = e.target.closest("[data-conn]");
@@ -1113,9 +1117,9 @@ function renderSkillsTab(box, d, st) {
       ${list.map((k) => `<tr class="${st.skill === k.name ? "selected" : ""}"><td class="name"><div class="cell"><span class="file-ico ref">${ICON.skill}</span>
         <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button></div></td>
         <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，点下面的“新建技能”" : ""}。</td></tr>`}
+      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能包" : ""}。</td></tr>`}
     </tbody></table></div>
-    ${host && !st.skillNew ? '<div class="actions"><button type="button" class="ghost" id="ps-new">新建技能</button></div>' : ""}
+    ${host ? '<div class="actions"><button type="button" class="ghost" id="ps-new">上传技能（zip）</button><button type="button" class="ghost" id="ps-new-dir">上传文件夹</button></div>' : ""}
     <div id="ps-detail"></div>`;
   const base = `/api/projects/${d.id}/skills`;
   const done = async (what, name) => {
@@ -1126,25 +1130,25 @@ function renderSkillsTab(box, d, st) {
   box.querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => {
     st.skill = st.skill === b.dataset.skill ? null : b.dataset.skill; st.skillNew = false; st.note = ""; renderProjectPage(true);
   }));
-  $("#ps-new", box)?.addEventListener("click", () => { st.skillNew = true; st.skill = null; renderProjectPage(true).then(() => $("#sk-name")?.focus()); });
+  const up = (folder) => pickSkillPackage(base, folder).then((x) => x && done("saved", x.name))
+    .catch((e) => { st.note = e.message; st.bad = true; renderProjectPage(true); });
+  $("#ps-new", box)?.addEventListener("click", () => up(false));
+  $("#ps-new-dir", box)?.addEventListener("click", () => up(true));
   box.querySelectorAll("[data-sug]").forEach((b) => b.addEventListener("click", async () => {
     try { await api(`/api/projects/${d.id}/suggestions/${b.dataset.sug}`, { method: "POST", body: { accept: b.dataset.ok === "1" } }); st.note = ""; }
     catch (e) { st.note = e.message; st.bad = true; }
     await reload(); renderProjectPage(true);
   }));
   const detail = $("#ps-detail", box);
-  if (st.skillNew && host) {
-    detail.innerHTML = `<h3>新建项目技能</h3>${skillFormHtml({ name: "", description: "", body: "", files: [] }, true)}`;
-    bindSkillForm(detail, base, true, done);
-  } else if (st.skill) {
-    api(`${base}/${encodeURIComponent(st.skill)}`).then((x) => {
-      if (!detail.isConnected) return;
-      const by = x.by_agent ? `${aname(x.by_agent)} 提议，${d.participant_emails?.[x.approved_by] || "主持人"} 批准` : d.participant_emails?.[x.by_user] || "";
-      detail.innerHTML = host ? `<h3>${esc(x.name)} <span class="muted">${esc(by)}</span></h3>${skillFormHtml(x, false)}`
-        : `<h3>${esc(x.name)} <span class="muted">${esc(by)}</span></h3><p>${esc(x.description)}</p><div class="md">${renderMarkdown(x.body)}</div>
-           ${x.files.length ? `<p class="hint">附带文件：${x.files.map((p) => `<code>${esc(p)}</code>`).join(" ")}</p>` : ""}`;
-      if (host) bindSkillForm(detail, base, false, done);
-    }).catch(() => { detail.innerHTML = ""; });
+  const x = st.skill && list.find((k) => k.name === st.skill);
+  if (x) {
+    const by = x.by_agent ? `${aname(x.by_agent)} 提议，${d.participant_emails?.[x.approved_by] || "主持人"} 批准` : x.author || "";
+    detail.innerHTML = skillCardHtml(x, esc(by), host);
+    $("#sk-del", detail)?.addEventListener("click", async () => {
+      if (!confirm(`删除项目技能「${x.name}」？`)) return;
+      try { await api(`${base}/${encodeURIComponent(x.name)}`, { method: "DELETE" }); } catch (e) { $(".error", detail).textContent = e.message; return; }
+      await done("deleted", x.name);
+    });
   }
 }
 
@@ -2362,93 +2366,63 @@ function renderSkillsView() {
   const users = (name) => mineAgents().filter((a) => (a.skills || []).includes(name));
   $("#skill-list").innerHTML = !list ? '<li class="empty">正在读取…</li>' : list.map((k) => `
     <li class="${S.skillSel === k.name ? "selected" : ""}"><div class="card">
-      <button type="button" class="card-main" data-name="${esc(k.name)}" aria-label="编辑技能 ${esc(k.name)}">
+      <button type="button" class="card-main" data-name="${esc(k.name)}" aria-label="查看技能 ${esc(k.name)}">
         <div class="card-head"><span class="ability-ico">${ICON.skill}</span><span class="name">${esc(k.name)}</span></div>
         <p class="card-desc">${esc(k.description)}</p>
         <div class="card-meta">${users(k.name).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没有 Agent 用它</span>'}
           ${k.files.length ? `<span class="muted">${k.files.length} 个附带文件</span>` : ""}</div>
-      </button></div></li>`).join("") || '<li class="empty">还没有技能。点“新建技能”，把一种做法写下来：怎么写周报、怎么做竞品分析、怎么排查线上问题……</li>';
+      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准技能包（含 SKILL.md 的 zip 或文件夹）。</li>';
   $("#skill-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
-    S.skillSel = b.dataset.name; S.skillNew = false; renderSkillsView();
+    S.skillSel = b.dataset.name; renderSkillsView();
   }));
   renderSkillEditor();
 }
 
 async function renderSkillEditor() {
   const box = $("#skill-editor");
-  if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
-  if (S.skillNew) {
-    if (!box.querySelector("#skill-form[data-new]")) {
-      box.innerHTML = `<h2 class="panel-title">新建技能</h2><p class="muted">写下一种做法。勾给 Agent 之后，它在需要时会按这里的说明做。</p>
-        ${skillFormHtml({ name: "", description: "", body: "", files: [] }, true)}`;
-      bindSkillForm(box, "/api/me/skills", true, async (what, name) => { S.skillNew = false; S.skillSel = name; await loadMine(true); renderSkillsView(); });
-    }
-    return;
-  }
-  if (!S.skillSel) { box.innerHTML = placeholder("选择一个技能编辑，或新建。"); return; }
-  let x = S.skillCache?.name === S.skillSel ? S.skillCache : null;
-  if (!x) {
-    x = await api(`/api/me/skills/${encodeURIComponent(S.skillSel)}`).catch(() => null);
-    if (!x) { S.skillSel = null; box.innerHTML = placeholder("这个技能已删除。"); return; }
-    S.skillCache = x;
-  }
-  const sig = JSON.stringify(x);
-  if (box.dataset.sig === sig && box.querySelector("#skill-form")) return;
-  box.dataset.sig = sig;
+  if (!S.skillSel) { box.innerHTML = placeholder("选择一个技能看详情，或点“上传技能”。"); return; }
+  const x = (S.mySkills || []).find((k) => k.name === S.skillSel);
+  if (!x) { S.skillSel = null; box.innerHTML = placeholder("这个技能已删除。"); return; }
   const users = mineAgents().filter((a) => (a.skills || []).includes(x.name));
-  box.innerHTML = `<h2 class="panel-title">${esc(x.name)}</h2>
-    <p class="muted">${users.length ? `${users.map((a) => esc(a.name)).join("、")} 在用。` : "还没有 Agent 用它，在 Agent 编辑页里勾上。"}</p>
-    ${skillFormHtml(x, false)}`;
-  bindSkillForm(box, "/api/me/skills", false, async (what) => {
-    if (what === "deleted") S.skillSel = null;
-    box.dataset.sig = ""; await loadMine(true); await reload(); renderSkillsView();
+  box.innerHTML = skillCardHtml(x, users.length ? `${users.map((a) => esc(a.name)).join("、")} 在用。` : "还没有 Agent 用它，在 Agent 编辑页里勾上。", true);
+  $("#sk-del", box).addEventListener("click", async () => {
+    if (!confirm(`删除技能「${x.name}」？用到它的 Agent 之后就没有这个做法了。`)) return;
+    try { await api(`/api/me/skills/${encodeURIComponent(x.name)}`, { method: "DELETE" }); } catch (e) { $(".error", box).textContent = e.message; return; }
+    S.skillSel = null; await loadMine(true); await reload(); renderSkillsView();
   });
 }
 
-// 技能表单：我的技能与项目技能共用；base 是接口前缀（/api/me/skills 或 /api/projects/<id>/skills）
-function skillFormHtml(x, isNew) {
-  return `<form class="editor" id="skill-form" ${isNew ? "data-new" : ""}>
-    <div class="field"><label for="sk-name">名字</label>
-      <input id="sk-name" name="name" required maxlength="64" pattern="[a-z0-9]([a-z0-9\\-]*[a-z0-9])?" value="${esc(x.name)}" ${isNew ? "" : "readonly"} placeholder="weekly-report" spellcheck="false">
-      <p class="hint">小写字母、数字和 -，例如 weekly-report。${isNew ? "建好后不能改名。" : ""}</p></div>
-    <div class="field"><label for="sk-desc">什么时候用</label>
-      <input id="sk-desc" name="description" required maxlength="500" value="${esc(x.description)}" placeholder="写周报时：本周进展、风险、下周计划">
-      <p class="hint">Agent 先只看到这一句，靠它判断要不要读下面的做法。</p></div>
-    <div class="field"><label for="sk-body">做法</label>
-      <textarea id="sk-body" name="body" rows="12" maxlength="64000" placeholder="一步一步写清楚怎么做、注意什么；可以引用下面的附带文件。">${esc(x.body)}</textarea></div>
-    ${isNew ? "" : `<div class="field"><label>附带文件</label>
-      <ul class="files">${x.files.map((p) => `<li><code>${esc(p)}</code></li>`).join("") || '<li class="empty">没有。模板、示例可以作为附带文件放进来。</li>'}</ul>
-      <label class="button ghost sm file-up">添加文本文件<input type="file" id="sk-file" hidden></label></div>`}
-    <p class="error" role="alert"></p>
-    <div class="actions"><button type="submit">${isNew ? "创建" : "保存"}</button>${isNew ? "" : '<button type="button" class="danger" id="sk-del">删除</button>'}</div>
-  </form>`;
+// 技能只展示名字与描述；内容按 Agent Skills 标准（SKILL.md + 可选目录）在别处维护，打包上传
+function skillCardHtml(x, note, canDelete) {
+  return `<h2 class="panel-title">${esc(x.name)}</h2><p>${esc(x.description)}</p>
+    ${note ? `<p class="muted">${note}</p>` : ""}
+    ${x.files?.length ? `<p class="hint">${x.files.length} 个附带文件</p>` : ""}
+    <p class="hint">更新：重新上传同名的技能包。</p><p class="error" role="alert"></p>
+    ${canDelete ? '<div class="actions"><button type="button" class="danger" id="sk-del">删除</button></div>' : ""}`;
 }
 
-function bindSkillForm(box, base, isNew, after) {
-  const f = $("#skill-form", box), err = (e) => { $(".error", f).textContent = e.message; };
-  f.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const name = f.name.value.trim();
-    try { await api(base, { method: "PUT", body: { name, description: f.description.value.trim(), body: f.body.value } }); }
-    catch (e2) { err(e2); return; }
-    document.activeElement?.blur();
-    await after("saved", name);
-  });
-  $("#sk-del", box)?.addEventListener("click", async () => {
-    if (!confirm(`删除技能「${f.name.value}」？用到它的 Agent 之后就没有这个做法了。`)) return;
-    try { await api(`${base}/${encodeURIComponent(f.name.value)}`, { method: "DELETE" }); } catch (e2) { err(e2); return; }
-    await after("deleted", f.name.value);
-  });
-  $("#sk-file", box)?.addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    e.target.value = "";
-    if (!file) return;
-    if (file.size > 200_000) { err(new Error("附带文件最多 200 KB")); return; }
-    const path = prompt("放在技能里的路径（可以带子目录，如 templates/report.md）：", file.name);
-    if (!path) return;
-    try { await api(`${base}/${encodeURIComponent(f.name.value)}/files`, { method: "POST", body: { path: path.trim(), content: await file.text() } }); }
-    catch (e2) { err(e2); return; }
-    await after("file", f.name.value);
+// 选 zip 或文件夹，上传到 base（/api/me/skills 或 /api/projects/<id>/skills）
+function pickSkillPackage(base, folder) {
+  return new Promise((resolve, reject) => {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    if (folder) inp.webkitdirectory = true; else inp.accept = ".zip,.skill,application/zip";
+    inp.addEventListener("change", async () => {
+      const files = [...inp.files];
+      if (!files.length) return resolve(null);
+      try {
+        let res;
+        if (folder) {
+          const enc = async (f) => { const b = new Uint8Array(await f.arrayBuffer()); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(t); };
+          const body = { files: await Promise.all(files.map(async (f) => ({ path: f.webkitRelativePath || f.name, data: await enc(f) }))) };
+          res = await api(`${base}/upload`, { method: "POST", body });
+        } else {
+          res = await api(`${base}/upload`, { method: "POST", body: files[0], headers: { "Content-Type": "application/zip" } });
+        }
+        resolve(res);
+      } catch (e) { reject(e); }
+    });
+    inp.click();
   });
 }
 
@@ -2461,7 +2435,7 @@ function renderConnectorsView() {
     <li class="${S.connSel === c.id ? "selected" : ""}"><div class="card">
       <button type="button" class="card-main" data-id="${esc(c.id)}" aria-label="查看连接器 ${esc(c.name)}">
         <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">${esc(c.name)}</span>${connPill(c)}</div>
-        <p class="card-desc">${c.kind === "cloud" ? esc(c.description || "云端") : `${connWhere(c)} 里配好的服务`}</p>
+        <p class="card-desc">${c.kind === "cloud" ? esc(c.custom ? "自定义 · 云端" : c.description || "云端") : `${connWhere(c)} 里配好的服务`}</p>
         <div class="card-meta">${users(c).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没给任何 Agent</span>'}</div>
       </button></div></li>`).join("")
     || '<li class="empty">还没有连接器。在下面授权一个云端服务；你电脑上 Claude Code、Codex、dsh 里配好的服务，连上设备后会自动出现在这里。</li>';
@@ -2475,7 +2449,13 @@ function renderConnectorsView() {
       </button>
       <div class="card-foot"><span class="muted">云端</span><span class="button sm" aria-hidden="true">${have ? "更新授权" : "授权"}</span></div>
     </div></li>`;
-  }).join("") || '<li class="empty">部署方还没有提供云端连接器。</li>';
+  }).join("") + `<li class="${S.connPanel === "__custom" ? "selected" : ""}"><div class="card">
+      <button type="button" class="card-main" data-add="__custom" aria-label="添加自定义连接器">
+        <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">自定义</span></div>
+        <p class="card-desc">填一个服务地址接入（远程 MCP，需 https 公网地址）。电脑上的服务在那台电脑的 AI 工具里配好就会出现。</p>
+      </button>
+      <div class="card-foot"><span class="muted">云端</span><span class="button sm" aria-hidden="true">添加</span></div>
+    </div></li>`;
   $("#conn-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
     S.connSel = b.dataset.id; S.connPanel = null; renderConnectorsView();
   }));
@@ -2488,6 +2468,38 @@ function renderConnectorsView() {
 function renderConnDetail() {
   const box = $("#conn-detail");
   if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
+  if (S.connPanel === "__custom") {
+    if (box.querySelector("#custom-form")) return;
+    const cloud = mineAgents().filter((a) => !a.device_runtime);
+    box.innerHTML = `<h2 class="panel-title">自定义连接器</h2>
+      <form class="editor" id="custom-form">
+        <div class="field"><label for="cu-name">名字</label><input id="cu-name" name="name" required maxlength="60" placeholder="团队知识库"></div>
+        <div class="field"><label for="cu-url">服务地址</label><input id="cu-url" name="url" required type="url" placeholder="https://example.com/mcp" spellcheck="false">
+          <p class="hint">只能是 https 的公网地址，不能是内网。</p></div>
+        <div class="field"><label for="cu-header">认证请求头（可选）</label><input id="cu-header" name="header" maxlength="64" placeholder="Authorization" spellcheck="false"></div>
+        <div class="field"><label for="cu-value">认证值（可选）</label><input id="cu-value" name="value" type="password" autocomplete="off" placeholder="Bearer …"></div>
+        <fieldset class="checks"><legend>给哪些 Agent 用</legend>
+          ${cloud.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${a.id === S.me?.assistant_id ? "checked" : ""}><span class="opt">${esc(a.name)}</span></label>`).join("") || '<p class="hint">你还没有在云端跑的 Agent。</p>'}
+        </fieldset>
+        <p class="hint">认证值加密保存，Agent 拿不到，页面也不再显示。</p>
+        <p class="error" role="alert"></p>
+        <div class="actions"><button type="submit">添加</button><button type="button" class="ghost" id="cu-cancel">取消</button></div>
+      </form>`;
+    const f = $("#custom-form", box);
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = f.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "正在试连…";
+      try {
+        const c = await api("/api/me/connections/custom", { method: "POST", body: { name: f.name.value.trim(), url: f.url.value.trim(),
+          header: f.header.value.trim(), value: f.value.value, agent_ids: [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value) } });
+        S.connPanel = null; S.connSel = c.id; document.activeElement?.blur();
+        await loadMine(true); await reload();
+      } catch (err) { $(".error", f).textContent = err.message; btn.disabled = false; btn.textContent = "添加"; }
+    });
+    $("#cu-cancel").addEventListener("click", () => { S.connPanel = null; renderConnectorsView(); });
+    return;
+  }
   const spec = (S.catalog || []).find((k) => k.id === S.connPanel);
   if (spec) {
     if (box.querySelector(`#auth-form-${CSS.escape(spec.id)}`)) return;
