@@ -793,10 +793,6 @@ table.csv th { background: var(--surface-2); font-weight: 600; }
 #ps-detail { margin-top: 16px; max-width: 760px; }
 #ps-detail .md { margin-top: 8px; }
 .assets tr.selected td { background: var(--accent-soft); }
-.member-list .joint-conns { font-size: 11px; color: var(--muted); white-space: nowrap; }
-.member-list .joint-conns summary { cursor: pointer; }
-.member-list .joint-conns .switch { display: flex; font-size: 11px; gap: 4px; margin-top: 4px; }
-.member-list li:has(.joint-conns[open]) { flex-wrap: wrap; }
 .net-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; font-size: 13px; color: var(--text-2); }
 .net-stats b { color: var(--text); }
 
@@ -841,3 +837,27 @@ dialog.confirm-card .preview-card { padding: 18px 20px; width: min(480px, 92vw);
 dialog.confirm-card blockquote.draft { margin: 12px 0; padding: 10px 12px; background: var(--bg); border-radius: 8px;
   border-left: 3px solid var(--plugin); white-space: pre-wrap; font-size: 13px; }
 dialog.confirm-card .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* 项目页：说明 / 资料 / 连接器面板 */
+.brief-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 24px; max-width: 1100px; }
+@media (max-width: 900px) { .brief-grid { grid-template-columns: 1fr; } }
+.sec-h { font-size: 13px; margin: 18px 0 8px; color: var(--text-2); }
+.sec-h:first-of-type { margin-top: 4px; }
+.links-sec { margin-top: 8px; }
+.r-dot.warn { background: var(--human); }
+.conn-src { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin-top: 8px; font-size: 12.5px; }
+.conn-src > .muted { margin-right: 4px; }
+.conn-src .tag .x { border: 0; background: none; padding: 0 0 0 6px; color: var(--muted); cursor: pointer; font-size: 13px; line-height: 1; }
+.conn-src .tag .x:hover { color: var(--rejected); }
+.grants { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.grants h4 { margin: 0 0 6px; font-size: 12.5px; font-weight: 600; }
+.grants ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+.grants li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.grants select { width: auto; font-size: 12.5px; padding: 3px 8px; }
+.unrecognized { max-width: 760px; margin-bottom: 16px; }
+.unrecognized h3 { font-size: 13px; margin: 0 0 8px; }
+.unrecognized ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.unrecognized li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+.unrecognized code { color: var(--muted); overflow-wrap: anywhere; }
+.unrecognized select { width: auto; font-size: 12.5px; padding: 3px 8px; }
+.loc .tag { margin-left: 6px; text-decoration: none; }

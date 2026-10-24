@@ -191,3 +191,25 @@ def test_migrated_state_reloads_unchanged(tmp_path: Path):
     again = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert again["projects"] == first["projects"] and again["conversations"] == first["conversations"]
     assert (s.project_dir("group-1") / "a.md").is_file()
+
+
+def test_connector_settings_move_into_the_connector_panel(tmp_path: Path):
+    """连接器面板之前的项目：逐个打开的连接器改成“这个项目里都可以”；关联了资源引用的需要并进那条链接，
+    没关联的留作手动添加。再加载一次不再变。"""
+    project = {"id": "prj-1", "name": "J", "description": "", "member_ids": ["a1"], "owner_id": "u1",
+               "participants": ["u2"],
+               "refs": [{"id": "ref-1", "name": "PRD", "location": "https://x.feishu.cn/docx/1", "note": "需求"}],
+               "connector_needs": [{"id": "need-1", "connector_id": "feishu", "purpose": "读需求", "ref_id": "ref-1"},
+                                   {"id": "need-2", "connector_id": "github", "purpose": "查议题"}],
+               "connections_enabled": {"a1": ["conn-1", "conn-2"], "a2": []}}
+    _write(tmp_path, {"agents": [_agent("a1")], "users": _users("u1", "u2"), "projects": [project]})
+    p = Store(tmp_path).projects["prj-1"]
+    assert p.connector_grants == {"a1": {"conn-1": "always", "conn-2": "always"}}
+    assert p.refs[0].connector_id == "feishu" and p.refs[0].note == "需求；读需求"
+    assert [(n.id, n.ref_id) for n in p.connector_needs] == [("need-2", None)]
+    s = Store(tmp_path)
+    s.save()
+    again = Store(tmp_path).projects["prj-1"]
+    assert again.connector_grants == p.connector_grants and again.refs == p.refs and again.connector_needs == p.connector_needs
+    raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["projects"][0]
+    assert "connections_enabled" not in raw

@@ -292,16 +292,9 @@ function renderBoard() {
   const inProject = (r) => !psel.value || (psel.value === "none" ? !r.project_id : r.project_id === psel.value);
   const reqs = b.requests.filter((r) => (!sel.value || r.agent_id === sel.value) && inProject(r));
 
-  // 待我处理：工作区外溢申请（我是 Agent 所有者）+ 我对话里的 Agent 提议
+  // 待我处理：工作区外溢申请、共享项目里用我的连接器（我是 Agent 所有者）+ 我对话里的 Agent 提议
   const todo = [
-    ...b.approvals.map((ap) => `<li class="todo-item approval">
-      <div class="who">${avatar(aname(ap.agent_id), "sm")}<b>${esc(aname(ap.agent_id))}</b> 申请在工作目录以外操作 ${pill("pending")}
-        <span class="muted">${time(ap.created_at)}</span></div>
-      <p class="reason">${esc(ap.reason)}</p>
-      <div class="actions"><button type="button" data-ap="${esc(ap.id)}" data-allow="1">允许这一次</button>
-        <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button>
-        <a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a></div>
-      <p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p></li>`),
+    ...b.approvals.map((ap) => `<li class="todo-item approval">${approvalBody(ap, true, true)}</li>`),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> 提议新建
       「${esc(p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
     ...(b.invitations || []).map((iv) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
@@ -316,7 +309,7 @@ function renderBoard() {
       : heldCard(h).replace('<li class="msg proposal">', '<li class="todo-item held">')),
     ...(b.suggestions || []).map((x) => `<li class="todo-item"><span class="avatar sm group" aria-hidden="true">#</span>
       <span><b>${esc(x.by_agent ? aname(x.by_agent) : "参与者")}</b> ${x.kind === "skill" ? `提议给「${esc(x.project_name)}」新增技能 <code>${esc(x.skill_name)}</code>` : `建议修改「${esc(x.project_name)}」的纲要`}</span>
-      <a class="button sm" href="#${x.kind === "skill" ? `project-${esc(x.project_id)}` : `p-${esc(x.project_id)}`}" ${x.kind === "skill" ? 'data-pagetab="skills"' : ""}>去看看</a></li>`),
+      <a class="button sm" href="#project-${esc(x.project_id)}" data-pagetab="${x.kind === "skill" ? "skills" : "brief"}">去看看</a></li>`),
   ];
   $("#todo").hidden = !todo.length;
   const editing = $("#todo-list").contains(document.activeElement) && document.activeElement.matches("textarea");
@@ -328,12 +321,7 @@ function renderBoard() {
     await loadBoard(); await reload();
   }));
   if (!editing) bindHeld($("#todo-list"), async () => { await loadBoard(); await reload(); });
-  if (!editing) $("#todo-list").querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
-    btn.closest(".actions").querySelectorAll("button").forEach((x) => { x.disabled = true; });
-    try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1" } }); }
-    catch (err) { alert(err.message); }
-    await loadBoard(); await reload();
-  }));
+  if (!editing) bindApprovals($("#todo-list"), loadBoard);
 
   const card = (r) => `<li><button type="button" class="task-card ${S.reqSel === r.id ? "selected" : ""}" data-id="${esc(r.id)}">
       <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span></span>
@@ -909,8 +897,10 @@ function renderProjectEditor(isNew = false) {
   if (g) renderPeople($("#gf-people"), g);
 }
 
-// ---- 项目页（主区域，#project-<项目>）：面包屑 + 标签（资产 / 资源引用）；右侧是“项目配置”（renderProjectEditor）
-// 资产 = 项目档案里的文件：所有成员可预览、下载，主持人可上传（也可以拖进来）、删除；“更新人”取日志里最近一次发布它的人 / Agent。
+// ---- 项目页（主区域，#project-<项目>）：面包屑 + 四块（说明 / 资料 / 技能 / 连接器）+ 插件；右侧是“项目配置”（renderProjectEditor）
+// 说明 = 纲要 + 已定的事（每轮推送给成员）；资料 = 文件（存在这里）+ 链接（指向别处）；技能 = 项目技能；
+// 连接器 = 这个项目用到的外部服务，从资料、插件、实际调用、手动添加汇总，项目从不持有谁的授权。
+// 文件：所有成员可预览、下载，主持人可上传（也可以拖进来）、删除；“更新人”取日志里最近一次发布它的人 / Agent。
 // 预览只在页面里转义后渲染（Markdown 走 renderMarkdown），不让浏览器直接打开文件：文件可能来自其他参与方或 Agent。
 const ASSET_LIMIT = 200_000;  // 与 models.FILE_LIMIT 一致
 const TEXT_EXT = ["MD", "TXT", "CSV", "TSV", "JSON", "YAML", "YML", "LOG", "XML", "HTML", "PY", "JS", "TS", "SH"];
@@ -952,8 +942,9 @@ async function renderProjectPage(force = false) {
   const d = await api(`/api/projects/${g.id}`).catch(() => null);
   if (!d || S.projectSel !== g.id) return;
   const st = S.assets = S.assets?.pid === g.id ? S.assets
-    : { pid: g.id, tab: "files", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
+    : { pid: g.id, tab: "brief", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
   if (S.pendingTab) { st.tab = S.pendingTab; S.pendingTab = null; }
+  st.tab = { refs: "files", needs: "connectors" }[st.tab] || st.tab;  // 旧的标签名（资源引用并进资料，需要的连接器换成连接器面板）
   // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
   const plugins = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken);  // 停用的插件不出标签页
   const ptab = st.tab.startsWith("plugin:") ? st.tab.split(":") : null;  // plugin:<插件>:<标签>
@@ -965,12 +956,13 @@ async function renderProjectPage(force = false) {
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
-    aria-controls="pp-panel">${label}<span class="count">${n}</span></button>`;
+    aria-controls="pp-panel">${label}${n == null ? "" : `<span class="count">${n}</span>`}</button>`;
+  const asks = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill").length;
   page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#projects">项目</a><span aria-hidden="true">/</span>
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
       <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("files", "资产", d.files.length)}${tab("refs", "资源引用", d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("needs", "需要的连接器", (d.connector_readiness || []).length)}${tab("plugins", "插件", plugins.length)}${
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${
       plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
         data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
         title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}</div>
@@ -981,7 +973,67 @@ async function renderProjectPage(force = false) {
   }));
   if (st.tab.startsWith("plugin:")) { renderPluginFrame($("#pp-panel", page), d, st); return; }
   S.pluginFrame = null;
-  ({ refs: renderRefsTab, skills: renderSkillsTab, needs: renderNeedsTab, plugins: renderPluginsTab }[st.tab] || renderFilesTab)($("#pp-panel", page), d, st);
+  ({ brief: renderBriefTab, files: renderFilesTab, skills: renderSkillsTab, connectors: renderConnectorsTab, plugins: renderPluginsTab }[st.tab]
+    || renderBriefTab)($("#pp-panel", page), d, st);
+}
+
+// 说明：纲要（主持人写，别人建议修改）+ 已定的事（谁都能记、能撤销）。每一轮都推送给所有成员（不变量 17）
+const BRIEF_STALE_DAYS = 14;
+function renderBriefTab(box, d, st) {
+  const host = d.is_host;
+  const who = (x) => x.by_agent ? aname(x.by_agent) : x.by_user === S.me?.id ? "你" : (d.participant_emails?.[x.by_user] || "");
+  const stale = d.brief && d.brief_updated_at && (Date.now() / 1000 - d.brief_updated_at) > BRIEF_STALE_DAYS * 86400;
+  const active = d.decisions.filter((x) => x.status === "active").reverse();
+  const inactive = d.decisions.filter((x) => x.status !== "active").reverse();
+  const pend = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill");
+  const decision = (x) => `<li class="${x.status}"><div>${esc(x.text)}${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}</div>
+    <div class="meta">${esc(who(x))} · ${time(x.created_at)}${x.supersedes ? " · 取代了一条旧的" : ""}
+      ${x.status === "active" ? `<button type="button" class="link" data-revoke="${esc(x.id)}">撤销</button>` : ` · ${x.status === "revoked" ? "已撤销" : "已被取代"}`}</div></li>`;
+  box.innerHTML = `<p class="muted tab-intro">这件事是什么、已经定了什么。每一轮都会推送给所有成员${d.shared ? "；共享项目里所有参与者都看得到" : ""}。</p>
+    ${assetNote(st)}
+    <div class="brief-grid">
+    <section class="archive-sec" aria-labelledby="pb-brief"><h3 id="pb-brief">纲要</h3>
+      ${stale ? `<p class="hint warn">超过 ${BRIEF_STALE_DAYS} 天没确认，还准确吗？${host ? '<button type="button" class="link" id="brief-ok">还准确</button>' : ""}</p>` : ""}
+      ${host ? `<form id="brief-form"><label for="brief-text" class="sr-only">纲要</label>
+        <textarea id="brief-text" rows="10" maxlength="4000" placeholder="目标、范围、成功标准、当前阶段。">${esc(d.brief)}</textarea>
+        <div class="bar"><span class="hint">${d.brief.length} / 4000</span><button type="submit">保存</button></div></form>`
+        : `<div class="md brief">${d.brief ? renderMarkdown(d.brief) : '<span class="muted">主持人还没写纲要。</span>'}</div>
+        <details><summary>建议修改</summary><form id="suggest-form" class="stack">
+          <label for="sug-text" class="sr-only">新的纲要</label><textarea id="sug-text" rows="6" maxlength="4000" required>${esc(d.brief)}</textarea>
+          <label for="sug-reason" class="sr-only">理由</label><input id="sug-reason" placeholder="为什么要改">
+          <button type="submit">提交给主持人</button></form></details>`}
+      ${pend.length && host ? `<ul class="suggestions">${pend.map((x) => `<li><div class="who"><b>${esc(who(x))}</b> 建议修改纲要</div>
+        ${x.reason ? `<p class="muted">${esc(x.reason)}</p>` : ""}<div class="md">${renderMarkdown(x.text)}</div>
+        <div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">采纳</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不采纳</button></div></li>`).join("")}</ul>`
+        : pend.length ? `<p class="hint">${pend.length} 条修改建议等主持人决定。</p>` : ""}
+    </section>
+    <section class="archive-sec" aria-labelledby="pb-dec"><h3 id="pb-dec">已定的事 · ${active.length}</h3>
+      <ul class="decisions">${active.map(decision).join("") || '<li class="empty">还没有。群聊里定下来的事，Agent 会记在这里，你也可以自己记。</li>'}</ul>
+      <form id="decision-form" class="stack"><label for="dec-text" class="sr-only">新决定</label>
+        <input id="dec-text" required maxlength="2000" placeholder="记下一件定了的事">
+        <label for="dec-reason" class="sr-only">理由</label><input id="dec-reason" maxlength="2000" placeholder="理由（可选）">
+        <label for="dec-sup" class="sr-only">取代哪一条</label>
+        <select id="dec-sup"><option value="">不取代旧的</option>${active.map((x) => `<option value="${esc(x.id)}">取代：${esc(x.text.slice(0, 40))}</option>`).join("")}</select>
+        <button type="submit">记下</button></form>
+      ${inactive.length ? `<details><summary>已取代 / 撤销 · ${inactive.length}</summary><ul class="decisions">${inactive.map(decision).join("")}</ul></details>` : ""}
+    </section></div>`;
+  const call = async (path, opts, msg = "") => {
+    try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    document.activeElement?.blur();
+    await reload(); renderProjectPage(true);
+  };
+  const gid = d.id;
+  $("#brief-form", box)?.addEventListener("submit", (e) => { e.preventDefault(); call(`/api/projects/${gid}/brief`, { method: "PUT", body: { text: $("#brief-text").value } }, "纲要已保存"); });
+  $("#brief-ok", box)?.addEventListener("click", () => call(`/api/projects/${gid}/brief/confirm`, { method: "POST", body: {} }));
+  $("#suggest-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/projects/${gid}/suggestions`, { method: "POST", body: { text: $("#sug-text").value, reason: $("#sug-reason").value } }, "已提交给主持人"); });
+  box.querySelectorAll("[data-sug]").forEach((b) => b.addEventListener("click", () =>
+    call(`/api/projects/${gid}/suggestions/${b.dataset.sug}`, { method: "POST", body: { accept: b.dataset.ok === "1" } })));
+  $("#decision-form", box).addEventListener("submit", (e) => { e.preventDefault();
+    call(`/api/projects/${gid}/decisions`, { method: "POST", body: { text: $("#dec-text").value, reason: $("#dec-reason").value, supersedes: $("#dec-sup").value || null } }, "已记下"); });
+  box.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("撤销这一条？之后不再推送给成员。")) call(`/api/projects/${gid}/decisions/${b.dataset.revoke}`, { method: "DELETE" });
+  }));
 }
 
 const assetNote = (st) => st.note ? `<p class="asset-note ${st.bad ? "bad" : ""}" role="status">${esc(st.note)}</p>` : "";
@@ -1003,12 +1055,15 @@ function renderFilesTab(box, d, st) {
       <td class="row-act"><a class="icon-btn" href="${fileUrl(d.id, f.name)}" download title="下载" aria-label="下载 ${esc(f.name)}">${ICON.down}</a>${host
         ? `<button type="button" class="icon-btn bad" data-rmasset="${esc(f.name)}" title="删除" aria-label="删除 ${esc(f.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("");
     if (d.files.length) return `<tr><td colspan="6" class="empty">没有匹配的文件 · <button type="button" class="link" data-clear>清除筛选</button></td></tr>`;
-    return `<tr><td colspan="6" class="empty"><div class="empty-state">${fileIcon("")}<b>还没有资产</b>
+    return `<tr><td colspan="6" class="empty"><div class="empty-state">${fileIcon("")}<b>还没有文件</b>
       <span>在群聊里让 Agent 把产出发布到项目${host ? "，或者把文件拖到这里" : ""}。发布进来的文件所有成员都能看到。</span>${host ? upBtn() : ""}</div></td></tr>`;
   };
   const th = (key, label) => `<th aria-sort="${st.by === key ? (st.asc ? "ascending" : "descending") : "none"}"><button type="button" class="sort" data-sort="${key}">
     ${label}<span aria-hidden="true">${st.by === key ? (st.asc ? "↑" : "↓") : "↕"}</span></button></th>`;
-  box.innerHTML = `<div class="asset-bar">
+  box.innerHTML = `<p class="muted tab-intro">这个项目的材料：文件存在这里，链接指向别处。成员 Agent 每一轮都拿得到文件的只读副本，
+      链接作为背景告诉它们${d.shared ? "；共享项目里所有参与者都看得到" : ""}。</p>
+    <h3 class="sec-h">文件 · ${d.files.length}</h3>
+    <div class="asset-bar">
       ${host && d.files.length ? upBtn("ghost") : ""}
       <span class="muted">${d.files.length} 个文件 · ${fmtSize(total)}</span>
       <span class="grow"></span>
@@ -1020,7 +1075,8 @@ function renderFilesTab(box, d, st) {
     <div class="table-wrap"><table class="assets"><thead><tr>${th("name", "名称")}<th>类型</th><th>更新人</th>${th("updated_at", "更新时间")}${th("size", "大小")}
       <th><span class="sr-only">操作</span></th></tr></thead><tbody>${body()}</tbody></table>
       ${host ? `<div class="drop-mask" aria-hidden="true">${ICON.upload}松开，上传到「${esc(d.name)}」</div>` : ""}</div>
-    ${d.shared ? '<p class="hint">共享项目：资产对所有参与者可见。</p>' : ""}`;
+    <section class="links-sec" id="pp-links" aria-labelledby="pp-links-h"></section>`;
+  renderLinks($("#pp-links", box), d, st);
   st.fresh = [];  // 刚上传的行只高亮这一次
   const bindRows = () => {
     box.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => previewAsset(d, d.files.find((f) => f.name === b.dataset.open))));
@@ -1078,20 +1134,23 @@ async function uploadAssets(d, st, files) {
   await reload();
 }
 
-function renderRefsTab(box, d, st) {
+// 资料里的链接：仓库、路径、文档。只是指针，不授予访问权限；认得出服务的标上用哪个连接器打开（在连接器面板里看谁能打开）
+function renderLinks(box, d, st) {
   const host = d.is_host;
+  const service = {};
+  d.connector_panel.services.forEach((x) => x.sources.forEach((src) => { if (src.kind === "ref") service[src.ref_id] = x.name; }));
   const loc = (x) => /^https?:\/\//i.test(x.location)
     ? `<a href="${esc(x.location)}" target="_blank" rel="noopener noreferrer">${esc(x.location)}</a>` : `<code>${esc(x.location)}</code>`;
-  box.innerHTML = `<p class="muted tab-intro">项目用到的仓库、路径、文档。引用作为背景推送给成员，但不授予任何访问权限：Agent 能不能读，仍由它自身的权限决定。</p>
-    ${assetNote(st)}
+  const via = (x) => service[x.id] ? ` <a class="tag" href="#project-${esc(d.id)}" data-pagetab="connectors" title="在连接器面板里看谁能打开">${esc(service[x.id])}</a>` : "";
+  box.innerHTML = `<h3 class="sec-h" id="pp-links-h">链接 · ${d.refs.length}</h3>
     <div class="table-wrap"><table class="assets"><thead><tr><th>名称</th><th>位置</th><th>说明</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>
-      ${d.refs.map((x) => `<tr><td class="name"><div class="cell"><span class="file-ico ref">${ICON.link}</span><span>${esc(x.name)}</span></div></td><td class="loc">${loc(x)}</td>
+      ${d.refs.map((x) => `<tr><td class="name"><div class="cell"><span class="file-ico ref">${ICON.link}</span><span>${esc(x.name)}</span></div></td><td class="loc">${loc(x)}${via(x)}</td>
         <td class="ref-note">${esc(x.note) || '<span class="muted">—</span>'}</td>
         <td class="row-act"><button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
           ? `<button type="button" class="icon-btn bad" data-rmref="${esc(x.id)}" title="移除" aria-label="移除 ${esc(x.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="empty">还没有引用资源${host ? "，在下面添加" : "，由主持人添加"}。</td></tr>`}
+      || `<tr><td colspan="4" class="empty">还没有链接${host ? "，在下面添加" : "，由主持人添加"}。</td></tr>`}
     </tbody></table></div>
-    ${host ? `<form class="ref-add" id="pp-ref-form" aria-label="添加资源引用">
+    ${host ? `<form class="ref-add" id="pp-ref-form" aria-label="添加链接">
       <label class="sr-only" for="pr-name">名称</label><input id="pr-name" required maxlength="200" placeholder="名称，如：前端仓库">
       <label class="sr-only" for="pr-loc">位置</label><input id="pr-loc" required maxlength="1000" placeholder="路径或 URL">
       <label class="sr-only" for="pr-note">说明</label><input id="pr-note" maxlength="500" placeholder="说明（可选）">
@@ -1108,11 +1167,14 @@ function renderRefsTab(box, d, st) {
   });
   box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => {
     const x = d.refs.find((r) => r.id === b.dataset.rmref);
-    if (confirm(`移除引用「${x?.name}」？`)) done(`/api/projects/${d.id}/refs/${b.dataset.rmref}`, { method: "DELETE" }, `已移除 ${x?.name}`);
+    if (confirm(`移除链接「${x?.name}」？`)) done(`/api/projects/${d.id}/refs/${b.dataset.rmref}`, { method: "DELETE" }, `已移除 ${x?.name}`);
   }));
   box.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
     try { await navigator.clipboard.writeText(b.dataset.copy); b.title = "已复制"; b.classList.add("ok"); setTimeout(() => { b.title = "复制位置"; b.classList.remove("ok"); }, 1200); }
     catch { prompt("复制这个位置：", b.dataset.copy); }
+  }));
+  box.querySelectorAll("[data-pagetab]").forEach((a) => a.addEventListener("click", (e) => {
+    e.preventDefault(); e.stopPropagation(); st.tab = a.dataset.pagetab; st.note = ""; renderProjectPage(true);
   }));
 }
 
@@ -1167,8 +1229,6 @@ function renderSkillsTab(box, d, st) {
   }
 }
 
-// 需要的连接器：项目只声明需要什么，不持有任何人的授权；就绪状态按成员给，不给是谁的账号
-const READY_CN = { ready: ["ok", "就绪"], not_enabled: ["", "授权了，没在这里打开"], unauthorized: ["bad", "没授权"] };
 // 定时触发给人看的说法：常见写法换成“每天 / 每周几 / 每月几号 几点”，其余原样显示
 function cronText(expr) {
   const [mi, h, dom, mon, dow] = String(expr || "").trim().split(/\s+/);
@@ -1183,29 +1243,54 @@ function cronText(expr) {
   return `定时「${expr}」`;
 }
 
-function renderNeedsTab(box, d, st) {
-  const host = d.is_host, needs = d.connector_readiness || [];
-  const refName = (id) => d.refs.find((r) => r.id === id)?.name;
-  box.innerHTML = `<p class="muted tab-intro">这个项目要用到的外部服务。项目不持有任何人的授权：每个成员的 Agent 用的是它所有者自己授权的${d.shared ? "，而且要所有者在这个项目里打开" : ""}。要用别人的服务，就委托他的 Agent。</p>
+// 连接器面板：这个项目用到的外部服务，从四处汇总——资料里的链接（按域名认，或主持人指定）、插件声明的、实际调用过的、
+// 主持人手动添加的。项目不持有任何人的授权：就绪状态按成员给，不给是谁的账号；“你的授权”只有你自己看得到（不变量 19）
+const READY_CN = { ready: ["ok", "能用"], ask: ["warn", "用到时问所有者"], not_enabled: ["", "没开放"], unauthorized: ["bad", "还没连"] };
+const GRANT_CN = { ask: "用到时问我", always: "这个项目里都可以", deny: "不行" };
+function connSources(x, d) {
+  return x.sources.map((src) => src.kind === "ref" ? `<span class="tag">资料「${esc(src.name)}」${src.assigned ? "（指定）" : ""}</span>`
+    : src.kind === "plugin" ? `<span class="tag">插件「${esc(src.title)}」</span>`
+    : src.kind === "manual" ? `<span class="tag">手动添加${src.purpose ? `：${esc(src.purpose)}` : ""}${d.is_host
+      ? `<button type="button" class="x" data-rmneed="${esc(src.need_id)}" title="去掉" aria-label="去掉手动添加的 ${esc(x.name)}">×</button>` : ""}</span>`
+    : `<span class="tag">用过 ${src.count} 次${src.last_at ? ` · 最近 ${dateTime(src.last_at)}` : ""}${src.last_agent ? `（${esc(src.last_agent)}）` : ""}${d.is_host
+      ? `<button type="button" class="x" data-rmusage="${esc(x.connector_id)}" title="收起这条记录" aria-label="收起 ${esc(x.name)} 的使用记录">×</button>` : ""}</span>`).join("");
+}
+
+function renderConnectorsTab(box, d, st) {
+  const host = d.is_host, { services, unrecognized } = d.connector_panel;
+  const catalogOpts = (sel = "") => (S.catalog || []).map((k) => `<option value="${esc(k.id)}" ${k.id === sel ? "selected" : ""}>${esc(k.name)}</option>`).join("");
+  const memberRow = (m) => {
+    const [cls, t] = READY_CN[m.status] || ["", m.status], mine = agent(m.agent_id)?.mine;
+    const text = m.status === "not_enabled" ? (d.shared ? "没勾给它，或所有者在这里选了不行" : "授权了，没勾给它")
+      : m.status === "ask" && mine ? "用到时问你" : t;
+    return `<li><span class="r-dot ${cls}" aria-hidden="true"></span>${esc(m.agent)}<span class="muted">${mine ? "你的" : `${esc(m.owner || "")} 的`} · ${text}</span>
+      ${mine && m.status === "unauthorized" ? '<a href="#connectors">去连接</a>' : ""}${mine && m.status === "not_enabled" ? '<a href="#connectors">勾给它</a>' : ""}</li>`;
+  };
+  // 电脑上的服务网络拦不到调用：没有“用到时问”，没设就是不给
+  const grantRow = (g) => `<li><label for="gr-${esc(g.agent_id)}-${esc(g.connection_id)}">${esc(g.agent)} 用你的「${esc(g.connection)}」</label>
+    <select id="gr-${esc(g.agent_id)}-${esc(g.connection_id)}" data-grant="${esc(g.agent_id)}" data-conn="${esc(g.connection_id)}">${
+      (g.cloud ? ["ask", "always", "deny"] : ["always", "deny"]).map((k) => `<option value="${k}" ${(g.grant === k || (!g.cloud && g.grant === "ask" && k === "deny")) ? "selected" : ""}>${GRANT_CN[k]}</option>`).join("")}</select>
+    ${g.cloud ? "" : '<span class="muted">电脑上的服务，不能用到时再问</span>'}</li>`;
+  box.innerHTML = `<p class="muted tab-intro">这个项目用到的外部服务：从资料里的链接、插件、实际调用和手动添加汇总到这里。项目不持有任何人的授权，
+      每个成员的 Agent 用的是它所有者自己连接的${d.shared ? "；别人让你的 Agent 用你的服务时，第一次会先问你" : ""}。要用别人的服务，就委托他的 Agent。</p>
     ${assetNote(st)}
-    <ul class="needs">${needs.map((n) => `<li><div class="need-head"><span class="ability-ico">${ICON.plug}</span><b>${esc(n.name)}</b>
-        ${n.purpose ? `<span class="muted">${esc(n.purpose)}</span>` : ""}${n.ref_id && refName(n.ref_id) ? `<span class="tag">${esc(refName(n.ref_id))}</span>` : ""}
-        <span class="grow"></span>${host ? `<button type="button" class="icon-btn bad" data-rmneed="${esc(n.id)}" title="移除" aria-label="移除 ${esc(n.name)}">${ICON.trash}</button>` : ""}</div>
-      <ul class="ready">${n.members.map((m) => {
-        const [cls, t] = READY_CN[m.status] || ["", m.status], mine = agent(m.agent_id)?.mine;
-        const text = m.status === "not_enabled" && !d.shared ? "授权了，没勾给它" : t;
-        return `<li><span class="r-dot ${cls}" aria-hidden="true"></span>${esc(m.agent)}<span class="muted">${mine ? "你的" : `${esc(m.owner || "")} 的`} · ${text}</span>
-          ${mine && m.status === "unauthorized" ? '<a href="#connectors">去授权</a>' : ""}${mine && m.status === "not_enabled" ? (d.shared ? `<a href="#p-${esc(d.id)}">在成员栏里打开</a>` : '<a href="#connectors">勾给它</a>') : ""}</li>`;
-      }).join("") || '<li class="muted">项目里还没有成员</li>'}</ul></li>`).join("")
-      || `<li class="empty">还没有声明${host ? "，在下面添加" : "，由主持人添加"}。</li>`}</ul>
-    ${host ? `<form class="ref-add" id="pp-need-form" aria-label="添加需要的连接器">
+    <ul class="needs">${services.map((x) => `<li><div class="need-head"><span class="ability-ico">${ICON.plug}</span><b>${esc(x.name)}</b></div>
+      <div class="conn-src"><span class="muted">用在</span>${connSources(x, d)}</div>
+      <ul class="ready">${x.members.map(memberRow).join("") || '<li class="muted">项目里还没有成员</li>'}</ul>
+      ${x.mine.length ? `<div class="grants"><h4>你的授权<span class="muted"> · 只有你看得到</span></h4><ul>${x.mine.map(grantRow).join("")}</ul></div>` : ""}
+      </li>`).join("")
+      || `<li class="empty">还没有用到外部服务。贴进资料的链接认得出服务时会自动出现在这里${host ? "，也可以在下面手动添加" : ""}。</li>`}</ul>
+    ${unrecognized.length ? `<section class="unrecognized" aria-labelledby="pc-unk"><h3 id="pc-unk">认不出服务的链接 · ${unrecognized.length}</h3>
+      <ul>${unrecognized.map((u) => `<li><span class="file-ico ref">${ICON.link}</span><b>${esc(u.name)}</b><code>${esc(u.location)}</code>${host
+        ? `<label class="sr-only" for="pc-map-${esc(u.ref_id)}">用哪个服务打开</label><select id="pc-map-${esc(u.ref_id)}"><option value="">用哪个服务打开…</option>${catalogOpts()}</select>
+           <button type="button" class="ghost sm" data-map="${esc(u.ref_id)}">指定</button>` : ""}</li>`).join("")}</ul>
+      <p class="hint">多数网页不需要连接器，不用管；要登录才能看的（公司文档、内部系统）指定一下，大家就知道谁打得开。</p></section>` : ""}
+    ${host ? `<form class="ref-add" id="pp-need-form" aria-label="手动添加连接器">
       <label class="sr-only" for="pn-conn">连接器</label>
-      <select id="pn-conn" required>${(S.catalog || []).map((k) => `<option value="${esc(k.id)}">${esc(k.name)}</option>`).join("")}
-        <option value="">其他（电脑上配好的服务）…</option></select>
+      <select id="pn-conn">${catalogOpts()}<option value="">其他（电脑上配好的服务）…</option></select>
       <label class="sr-only" for="pn-other">服务名</label><input id="pn-other" maxlength="80" placeholder="服务名，如 notion" hidden>
       <label class="sr-only" for="pn-purpose">用来做什么</label><input id="pn-purpose" maxlength="300" placeholder="用来做什么（可选）">
-      <label class="sr-only" for="pn-ref">关联的资源</label><select id="pn-ref"><option value="">不关联资源</option>${d.refs.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("")}</select>
-      <button type="submit">添加</button></form>` : ""}`;
+      <button type="submit">手动添加</button></form>` : ""}`;
   const done = async (path, opts, msg) => {
     try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
     document.activeElement?.blur();
@@ -1216,11 +1301,24 @@ function renderNeedsTab(box, d, st) {
   sel?.addEventListener("change", sync); sync();
   $("#pp-need-form", box)?.addEventListener("submit", (e) => {
     e.preventDefault();
-    const id = sel.value || other.value.trim();
-    done(`/api/projects/${d.id}/needs`, { method: "POST", body: { connector_id: id, purpose: $("#pn-purpose").value, ref_id: $("#pn-ref").value || null } }, "已添加");
+    done(`/api/projects/${d.id}/needs`, { method: "POST", body: { connector_id: sel.value || other.value.trim(), purpose: $("#pn-purpose").value } }, "已添加");
   });
   box.querySelectorAll("[data-rmneed]").forEach((b) => b.addEventListener("click", () => {
-    if (confirm("不再声明需要这个连接器？")) done(`/api/projects/${d.id}/needs/${b.dataset.rmneed}`, { method: "DELETE" }, "已移除");
+    if (confirm("去掉手动添加的这一项？资料、插件或调用记录里还用到它的话，这一行会留着。"))
+      done(`/api/projects/${d.id}/needs/${b.dataset.rmneed}`, { method: "DELETE" }, "已去掉");
+  }));
+  box.querySelectorAll("[data-rmusage]").forEach((b) => b.addEventListener("click", () =>
+    done(`/api/projects/${d.id}/connector-usage/${encodeURIComponent(b.dataset.rmusage)}`, { method: "DELETE" }, "已收起使用记录")));
+  box.querySelectorAll("[data-map]").forEach((b) => b.addEventListener("click", () => {
+    const v = $(`#pc-map-${CSS.escape(b.dataset.map)}`, box).value;
+    if (v) done(`/api/projects/${d.id}/refs/${b.dataset.map}/connector`, { method: "PUT", body: { connector_id: v } }, "已指定");
+  }));
+  box.querySelectorAll("[data-grant]").forEach((x) => x.addEventListener("change", () => {
+    if (x.value === "always" && !confirm("选“这个项目里都可以”：别的参与者 @ 它时，它会直接用你连接的这个服务、读你账号里的数据，回复别人也看得到。确定？")) {
+      $("#project-page").dataset.sig = ""; renderProjectPage(true); return;
+    }
+    done(`/api/projects/${d.id}/grants`, { method: "PUT", body: { agent_id: x.dataset.grant, connection_id: x.dataset.conn, grant: x.value } },
+      `已改成“${GRANT_CN[x.value]}”`);
   }));
 }
 
@@ -1792,102 +1890,31 @@ function sideTab(which, open = true) {
   if (which === "archive") renderArchive();
 }
 
-// ---------- 项目档案：纲要、决定、文件、资源引用 ----------
-// 归项目所有，不放进任何项目仓库。纲要和仍然有效的决定每轮推送给成员；文件只读挂载；资源只是引用。
-const BRIEF_STALE_DAYS = 14;
-
+// ---------- 群聊旁的项目概览：纲要与已定的事（只读）+ 去项目页的入口 ----------
+// 编辑都在项目页（说明 / 资料 / 技能 / 连接器），这里只给聊天时顺手看一眼。
 async function renderArchive() {
   const box = $("#archive-panel"), c = S.conv;
   const has = !!c && (c.kind === "project" || c.kind === "session") && !!c.project_id && !c.archived && !!proj(c.project_id);
   $("#tab-archive").hidden = !has;
   if (!has && S.sideTab === "archive") { sideTab("members", false); return; }
   if (!has || box.hidden) return;
-  // 正在填表时不重绘（事件驱动的刷新会清掉输入）
-  if (box.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
   const d = await api(`/api/projects/${c.project_id}`).catch(() => null);
   if (!d || S.conv?.project_id !== c.project_id) return;
-  const host = d.is_host, joint = d.shared;
-  const who = (x) => x.by_agent ? aname(x.by_agent) : (d.participant_emails?.[x.by_user] || "");
-  const stale = d.brief && d.brief_updated_at && (Date.now() / 1000 - d.brief_updated_at) > BRIEF_STALE_DAYS * 86400;
   const active = d.decisions.filter((x) => x.status === "active").reverse();
-  const inactive = d.decisions.filter((x) => x.status !== "active").reverse();
-  const pend = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill");
-  const pendSkills = d.suggestions.filter((x) => x.status === "pending" && x.kind === "skill");
-  const decision = (x) => `<li class="${x.status}"><div>${esc(x.text)}${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}</div>
-    <div class="meta"><code>${esc(x.id)}</code> · ${esc(who(x))} · ${time(x.created_at)}${x.supersedes ? ` · 取代 <code>${esc(x.supersedes)}</code>` : ""}
-      ${x.status === "active" ? `<button type="button" class="link" data-revoke="${esc(x.id)}">撤销</button>` : ` · ${x.status === "revoked" ? "已撤销" : "已被取代"}`}</div></li>`;
-  box.innerHTML = `${joint ? '<p class="hint warn-box">共享项目：档案对所有参与者可见，写进去等于对所有参与方公开。</p>' : ""}
-    <section class="archive-sec" aria-labelledby="ar-brief"><h3 id="ar-brief">纲要</h3>
-      ${stale ? `<p class="hint warn">超过 ${BRIEF_STALE_DAYS} 天没确认，还准确吗？${host ? '<button type="button" class="link" id="brief-ok">还准确</button>' : ""}</p>` : ""}
-      ${host ? `<form id="brief-form"><label for="brief-text" class="sr-only">纲要</label>
-        <textarea id="brief-text" rows="6" maxlength="4000" placeholder="目标、范围、成功标准、当前阶段。每一轮都会推送给所有成员。">${esc(d.brief)}</textarea>
-        <div class="bar"><span class="hint">${d.brief.length} / 4000</span><button type="submit">保存</button></div></form>`
-        : `<div class="md brief">${d.brief ? renderMarkdown(d.brief) : '<span class="muted">主持人还没写纲要。</span>'}</div>
-        <details><summary>建议修改</summary><form id="suggest-form">
-          <label for="sug-text" class="sr-only">新的纲要</label><textarea id="sug-text" rows="5" maxlength="4000" required>${esc(d.brief)}</textarea>
-          <label for="sug-reason" class="sr-only">理由</label><input id="sug-reason" placeholder="为什么要改">
-          <div class="bar"><span></span><button type="submit">提交给主持人</button></div></form></details>`}
-      ${pend.length && host ? `<ul class="suggestions">${pend.map((x) => `<li><div class="who"><b>${esc(who(x))}</b> 建议修改纲要</div>
-        ${x.reason ? `<p class="muted">${esc(x.reason)}</p>` : ""}<div class="md">${renderMarkdown(x.text)}</div>
-        <div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">采纳</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不采纳</button></div></li>`).join("")}</ul>`
-        : pend.length ? `<p class="hint">${pend.length} 条修改建议等主持人决定。</p>` : ""}
+  const pend = d.suggestions.filter((x) => x.status === "pending").length;
+  const go = (tab, label, n) => `<li><a href="#project-${esc(d.id)}" data-pagetab="${tab}">${label}</a><span class="muted">${n}</span></li>`;
+  box.innerHTML = `<section class="archive-sec" aria-labelledby="ar-brief"><h3 id="ar-brief">纲要
+      <a class="h3-link" href="#project-${esc(d.id)}" data-pagetab="brief">${d.is_host ? "编辑" : "查看"}</a></h3>
+      <div class="md brief">${d.brief ? renderMarkdown(d.brief) : '<span class="muted">还没写纲要。</span>'}</div>
+      ${pend ? `<p class="hint">${pend} 条建议等${d.is_host ? "你" : "主持人"}决定，<a href="#project-${esc(d.id)}" data-pagetab="brief">去看看</a>。</p>` : ""}
     </section>
-    <section class="archive-sec" aria-labelledby="ar-skills"><h3 id="ar-skills">技能 · ${(d.skill_list || []).length}
-      <a class="h3-link" href="#project-${esc(d.id)}" data-pagetab="skills">在项目页查看</a></h3>
-      <ul class="files">${(d.skill_list || []).map((k) => `<li><code>${esc(k.name)}</code><span class="muted">${esc(k.description)}</span></li>`).join("")
-        || '<li class="empty">还没有项目技能。Agent 可以用 propose_skill 提议，主持人批准后生效。</li>'}</ul>
-      ${pendSkills.length ? `<p class="hint">${pendSkills.length} 条技能提议等${host ? "你" : "主持人"}决定，<a href="#project-${esc(d.id)}" data-pagetab="skills">去看看</a>。</p>` : ""}
+    <section class="archive-sec" aria-labelledby="ar-dec"><h3 id="ar-dec">已定的事 · ${active.length}</h3>
+      <ul class="decisions">${active.slice(0, 8).map((x) => `<li><div>${esc(x.text)}</div></li>`).join("") || '<li class="empty">还没有</li>'}</ul>
+      ${active.length > 8 ? `<a href="#project-${esc(d.id)}" data-pagetab="brief">全部 ${active.length} 条</a>` : ""}
     </section>
-    <section class="archive-sec" aria-labelledby="ar-dec"><h3 id="ar-dec">决定 · ${active.length}</h3>
-      <ul class="decisions">${active.map(decision).join("") || '<li class="empty">还没有决定</li>'}</ul>
-      <form id="decision-form" class="stack"><label for="dec-text" class="sr-only">新决定</label>
-        <input id="dec-text" required maxlength="2000" placeholder="记录一个决定">
-        <label for="dec-reason" class="sr-only">理由</label><input id="dec-reason" maxlength="2000" placeholder="理由（可选）">
-        <label for="dec-sup" class="sr-only">取代哪一条</label>
-        <select id="dec-sup"><option value="">不取代旧决定</option>${active.map((x) => `<option value="${esc(x.id)}">取代：${esc(x.text.slice(0, 40))}</option>`).join("")}</select>
-        <button type="submit">记录</button></form>
-      ${inactive.length ? `<details><summary>已取代 / 撤销 · ${inactive.length}</summary><ul class="decisions">${inactive.map(decision).join("")}</ul></details>` : ""}
-    </section>
-    <section class="archive-sec" aria-labelledby="ar-files"><h3 id="ar-files">文件 · ${d.files.length}
-      ${d.files.length ? `<a class="h3-link" href="#project-${esc(d.id)}">在项目页预览</a>` : ""}</h3>
-      <ul class="files">${d.files.map((x) => `<li><a href="/api/projects/${esc(d.id)}/files/${encodeURIComponent(x.name)}" download>${esc(x.name)}</a>
-        <span class="muted">${(x.size / 1024).toFixed(1)} KB</span>${host ? `<button type="button" class="link" data-rmfile="${esc(x.name)}">删除</button>` : ""}</li>`).join("")
-        || '<li class="empty">还没有文件。Agent 可以用 publish_file 发布，你也可以上传文本文件。</li>'}</ul>
-      <label class="button ghost sm file-up">上传文本文件<input type="file" id="file-up" accept=".md,.txt,.csv,.json,text/*" hidden></label>
-    </section>
-    <section class="archive-sec" aria-labelledby="ar-refs"><h3 id="ar-refs">相关资源</h3>
-      <ul class="refs">${d.refs.map((x) => `<li><b>${esc(x.name)}</b> <code>${esc(x.location)}</code>${x.note ? `<span class="muted"> · ${esc(x.note)}</span>` : ""}
-        ${host ? `<button type="button" class="link" data-rmref="${esc(x.id)}">移除</button>` : ""}</li>`).join("") || '<li class="empty">还没有引用资源（仓库、路径、文档）</li>'}</ul>
-      ${host ? `<form id="ref-form" class="stack"><label for="rf-name" class="sr-only">资源名称</label><input id="rf-name" required placeholder="名称">
-        <label for="rf-loc" class="sr-only">位置</label><input id="rf-loc" required placeholder="路径或 URL">
-        <label for="rf-note" class="sr-only">说明</label><input id="rf-note" placeholder="说明（可选）"><button type="submit">添加</button></form>` : ""}
-      <p class="hint">引用只是指针，不授予任何访问权限：Agent 能不能读某个仓库，仍由它自身的权限决定。</p>
-    </section>
-    <p class="error" role="alert"></p>`;
-  const gid = d.id, err = (e) => { $(".error", box).textContent = e.message; };
-  const call = async (path, opts) => { try { await api(path, opts); await reload(); renderArchive(); } catch (e) { err(e); } };
-  $("#brief-form", box)?.addEventListener("submit", (e) => { e.preventDefault(); call(`/api/projects/${gid}/brief`, { method: "PUT", body: { text: $("#brief-text").value } }); });
-  $("#brief-ok", box)?.addEventListener("click", () => call(`/api/projects/${gid}/brief/confirm`, { method: "POST", body: {} }));
-  $("#suggest-form", box)?.addEventListener("submit", (e) => { e.preventDefault(); call(`/api/projects/${gid}/suggestions`, { method: "POST", body: { text: $("#sug-text").value, reason: $("#sug-reason").value } }); });
-  box.querySelectorAll("[data-sug]").forEach((b) => b.addEventListener("click", () =>
-    call(`/api/projects/${gid}/suggestions/${b.dataset.sug}`, { method: "POST", body: { accept: b.dataset.ok === "1" } })));
-  $("#decision-form", box).addEventListener("submit", (e) => { e.preventDefault();
-    call(`/api/projects/${gid}/decisions`, { method: "POST", body: { text: $("#dec-text").value, reason: $("#dec-reason").value, supersedes: $("#dec-sup").value || null } }); });
-  box.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", () => {
-    if (confirm("撤销这个决定？之后不再推送给成员。")) call(`/api/projects/${gid}/decisions/${b.dataset.revoke}`, { method: "DELETE" });
-  }));
-  box.querySelectorAll("[data-rmfile]").forEach((b) => b.addEventListener("click", () => {
-    if (confirm(`删除文件 ${b.dataset.rmfile}？`)) call(`/api/projects/${gid}/files/${encodeURIComponent(b.dataset.rmfile)}`, { method: "DELETE" });
-  }));
-  $("#file-up", box).addEventListener("change", async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (file.size > 200_000) { err(new Error("文件太大：最多 200 KB")); return; }
-    call(`/api/projects/${gid}/files`, { method: "POST", body: { name: file.name, content: await file.text() } });
-  });
-  $("#ref-form", box)?.addEventListener("submit", (e) => { e.preventDefault();
-    call(`/api/projects/${gid}/refs`, { method: "POST", body: { name: $("#rf-name").value, location: $("#rf-loc").value, note: $("#rf-note").value } }); });
-  box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => call(`/api/projects/${gid}/refs/${b.dataset.rmref}`, { method: "DELETE" })));
+    <section class="archive-sec" aria-labelledby="ar-more"><h3 id="ar-more">项目页</h3>
+      <ul class="files">${go("files", "资料", `${d.files.length} 个文件 · ${d.refs.length} 个链接`)}${go("skills", "技能", (d.skill_list || []).length)}${go("connectors", "连接器", d.connector_panel.services.length)}</ul>
+    </section>`;
 }
 
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。
@@ -1958,10 +1985,9 @@ function renderMembers() {
   const others = S.snap.agents.filter((a) => a.mine && !g.member_ids.includes(a.id));  // 只能加入自己的 Agent
   const rm = (a) => (a.mine || host) ? `<button type="button" class="ghost icon sm rm" data-id="${esc(a.id)}"
       aria-label="把 ${esc(a.name)} 移出项目" title="移出项目"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h8"/></svg></button>` : "";
-  // 共享项目：标出属于谁；自己的 Agent 在这里能用哪些连接器
-  const extra = (a) => joint && a.mine ? jointConns(g, a) : "";
+  // 共享项目：标出属于谁（我的连接器在这个项目里怎么用，在项目页的连接器面板里设）
   box.innerHTML = `<h3>成员 · ${members.length}</h3>
-    <ul class="member-list">${members.map((a) => row(a, extra(a) + rm(a), joint ? (a.mine ? "你的" : `${a.owner_email || ""} 的`) : "")).join("")
+    <ul class="member-list">${members.map((a) => row(a, rm(a), joint ? (a.mine ? "你的" : `${a.owner_email || ""} 的`) : "")).join("")
       || '<li class="empty">还没有成员</li>'}</ul>
     ${others.length ? `<form class="add-member" aria-label="添加成员">
       <label for="add-member-sel" class="sr-only">添加你的 Agent</label>
@@ -1974,12 +2000,6 @@ function renderMembers() {
     ${workdirsHtml(c)}`;
   bindWorkdirs(box, c);
   const err = (e) => { $(".error", box).textContent = e.message; };
-  box.querySelectorAll("[data-jconn]").forEach((cb) => cb.addEventListener("change", async () => {
-    const aid = cb.dataset.jconn, ids = [...box.querySelectorAll(`[data-jconn="${CSS.escape(aid)}"]:checked`)].map((x) => x.value);
-    if (cb.checked && !confirm("在这个共享项目里打开：别的参与者 @ 它时，它会用你授权的这个服务、动你账号里的数据。确定打开？")) { cb.checked = false; return; }
-    try { await api(`/api/projects/${g.id}/members/${aid}/connections`, { method: "PUT", body: { connection_ids: ids } }); await reload(); }
-    catch (e) { err(e); }
-  }));
   $("#leave-project", box)?.addEventListener("click", async () => {
     if (!confirm(`退出 ${g.name}？你的 Agent 会一并移出，之后看不到这个项目和群聊。`)) return;
     try { await api(`/api/projects/${g.id}/leave`, { method: "POST", body: {} }); location.hash = "projects"; await reload(); }
@@ -1995,15 +2015,6 @@ function renderMembers() {
     try { await api(`/api/projects/${g.id}/members`, { method: "POST", body: { agent_id: $("#add-member-sel").value } }); await reload(); }
     catch (e2) { err(e2); }
   });
-}
-
-// 共享项目里我的 Agent 能用我的哪些连接器：默认都关，逐个打开；只有我看得到（connections_enabled 只给所有者）
-function jointConns(g, a) {
-  const conns = (S.myConns || []).filter((c) => (a.connections || []).includes(c.id));
-  if (!conns.length) return "";
-  const on = g.connections_enabled?.[a.id] || [];
-  return `<details class="joint-conns"><summary title="在这个项目里用你授权的服务">连接器 · ${conns.filter((c) => on.includes(c.id)).length}/${conns.length}</summary>
-    ${conns.map((c) => `<label class="switch"><input type="checkbox" data-jconn="${esc(a.id)}" value="${esc(c.id)}" ${on.includes(c.id) ? "checked" : ""}> ${esc(c.name)}</label>`).join("")}</details>`;
 }
 
 function renderThread() {
@@ -2040,7 +2051,7 @@ function renderThread() {
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
   const stale = S.convError ? `<span class="net-warn" role="status" title="${esc(S.convError)}">网络不稳定，显示的可能不是最新内容，正在重试…</span>` : "";
   const pageBtn = g && !c.archived && (c.kind === "project" || sess)
-    ? `<a class="button ghost" href="#project-${esc(g.id)}" title="资产、资源引用与项目配置">项目页</a>` : "";
+    ? `<a class="button ghost" href="#project-${esc(g.id)}" title="说明、资料、技能、连接器与项目配置">项目页</a>` : "";
   const sideBtn = c.missing ? "" : c.is_home ? `<button type="button" class="ghost" id="side-open" title="你的助理与定时">助理与定时</button>`
     : `<button type="button" class="ghost" id="side-open" title="成员、项目档案与委托详情">成员与档案</button>`;
   $("#tab-members").textContent = c.is_home ? "助理与定时" : "成员";
@@ -2115,11 +2126,7 @@ function renderThread() {
   });
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
-    <div class="who"><b>${esc(aname(ap.agent_id))}</b> 申请在工作目录以外操作 ${pill("pending")}</div>
-    <p class="reason">${esc(ap.reason)}</p>
-    ${ap.can_decide ? `<div class="actions"><button type="button" data-ap="${esc(ap.id)}" data-allow="1">允许这一次</button>
-      <button type="button" class="ghost" data-ap="${esc(ap.id)}" data-allow="0">拒绝</button></div>`
-      : '<p class="hint">等这个 Agent 的所有者审批。</p>'}</div></div></li>`));
+    ${approvalBody(ap, ap.can_decide)}</div></div></li>`));
   if (c.status === "waiting") {
     const open = c.tasks.filter((t) => t.status === "running" && !t.parent_task_id);
     items.push(`<li class="msg system"><div class="content"><div class="body">等 ${open.length} 个委托回报：
@@ -2159,11 +2166,7 @@ function renderThread() {
   bindDrafts(th);
   bindHeld(th);
   th.querySelectorAll("[data-req]").forEach((a) => a.addEventListener("click", () => { S.reqSel = a.dataset.req; S.taskSel = null; }));
-  th.querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
-    btn.parentElement.querySelectorAll("button").forEach((x) => { x.disabled = true; });
-    try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1" } }); await reload(); }
-    catch (err) { alert(err.message); }
-  }));
+  bindApprovals(th);
   th.querySelectorAll(".resume").forEach((b) => b.addEventListener("click", async () => {
     b.disabled = true;
     try { await api(`/api/conversations/${c.id}/resume`, { method: "POST", body: { agent_id: b.dataset.agent } }); await reload(); }
@@ -2177,6 +2180,34 @@ function renderThread() {
 }
 
 // 助理起草、要以你的名义发进项目群聊的消息：你确认（可以改）才发出
+// 申请卡片：工作目录以外的操作（dsh 沙箱升权，只放行这一次调用），或共享项目里第一次用我的连接器（不变量 19：
+// 只这一轮 / 这个项目里都可以 / 不行；选“都可以”和在连接器面板里选的一样，之后可以在那里改回来）
+function approvalBody(ap, canDecide, board = false) {
+  const conn = ap.kind === "connector", id = esc(ap.id);
+  const head = `<div class="who">${board ? avatar(aname(ap.agent_id), "sm") : ""}<b>${esc(aname(ap.agent_id))}</b>
+    ${conn ? "想用你的连接器" : "申请在工作目录以外操作"} ${pill("pending")}${board ? `<span class="muted">${time(ap.created_at)}</span>` : ""}</div>
+    <p class="reason">${esc(ap.reason)}</p>`;
+  if (!canDecide) return `${head}<p class="hint">等这个 Agent 的所有者${conn ? "同意" : "审批"}。</p>`;
+  const look = board ? `<a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a>` : "";
+  return conn ? `${head}<div class="actions"><button type="button" data-ap="${id}" data-allow="1" data-scope="once">只这一次</button>
+      <button type="button" class="ghost" data-ap="${id}" data-allow="1" data-scope="project">这个项目里都可以</button>
+      <button type="button" class="ghost" data-ap="${id}" data-allow="0">不行</button>${look}</div>
+    <p class="hint">“只这一次”只管这一轮；选“都可以”之后不再问，可以在项目页的连接器面板里改。</p>`
+    : `${head}<div class="actions"><button type="button" data-ap="${id}" data-allow="1">允许这一次</button>
+      <button type="button" class="ghost" data-ap="${id}" data-allow="0">拒绝</button>${look}</div>
+    ${board ? '<p class="hint">获批后只放行这一次调用（以完全访问权限运行），不是放行某个目录。</p>' : ""}`;
+}
+
+function bindApprovals(root, after) {
+  root.querySelectorAll("[data-ap]").forEach((btn) => btn.addEventListener("click", async () => {
+    btn.closest(".actions").querySelectorAll("button").forEach((x) => { x.disabled = true; });
+    try { await api(`/api/approvals/${btn.dataset.ap}`, { method: "POST", body: { allow: btn.dataset.allow === "1", scope: btn.dataset.scope || "once" } }); }
+    catch (err) { alert(err.message); }
+    if (after) await after();
+    await reload();
+  }));
+}
+
 function draftCard(d) {
   const joint = d.project_shared;
   const head = `<div class="who"><b>${esc(d.agent_name)}</b> 起草了发往「${esc(d.project_name)}」群聊的消息
@@ -2705,7 +2736,7 @@ function renderPairing(box, panel) {
 
 // ================= 技能与连接器（docs/reference/connectors-skills.md） =================
 // 个人层在这里：“技能”页是我的技能库，“连接器”页是我授权的外部服务与我电脑上配好的服务。勾给哪些 Agent
-// 在 Agent 编辑页或连接器详情里改。项目层（项目技能、需要的连接器）在项目页。界面不出现 MCP、命令行之类的实现名词。
+// 在 Agent 编辑页或连接器详情里改。项目层（项目技能、连接器面板）在项目页。界面不出现 MCP、命令行之类的实现名词。
 async function loadMine(force = false) {
   if (S.mineLoading) return S.mineLoading;
   if (!force && S.mySkills && S.myConns && S.catalog) return;

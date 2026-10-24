@@ -448,7 +448,7 @@ footer a { color: var(--text-2); }
       <article class="card reveal"><h3>信息只流向当时在场的人</h3>
         <p>Agent 带着技能和在这个项目里写的笔记进来；别处写的笔记不挂，要用先读、读了以后的回复先给你确认。网络只比对来源标签，不用模型、不看内容。</p></article>
     </div>
-    <p class="note reveal"><b>项目档案</b>：纲要、决定与文件归项目所有，不放进任何人的代码仓库。每轮作为背景推送给成员，写入只经人的操作或档案工具，每次变更都留日志。</p>
+    <p class="note reveal"><b>项目档案</b>：说明（纲要、已定的事）、资料（文件、链接）与技能归项目所有，不放进任何人的代码仓库。每轮作为背景推送给成员，写入只经人的操作或档案工具，每次变更都留日志。项目页的连接器面板汇总这个项目用到了哪些外部服务、谁能用，项目从不持有谁的授权。</p>
   </div>
 </section>
 <section id="runtime" class="line">
@@ -500,7 +500,7 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-human"><div><div class="parts">
-          <div class="part"><h4>单页前端</h4><p>助理（和自己的助理对话）· 看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（档案、文件预览）· 网络图 · 设备配对</p></div>
+          <div class="part"><h4>单页前端</h4><p>助理（和自己的助理对话）· 看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（说明、资料、技能、连接器面板）· 网络图 · 设备配对</p></div>
           <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”</p></div>
           <div class="part"><h4>CLI</h4><p><code>matrix.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP；<code>matrix-plugin check</code> 在本地校验插件包</p></div>
           <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt）、HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
@@ -525,9 +525,9 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>委托与验收</h4><p><code>delegate</code> 立即返回；有效权限 = 自身 ∩ 授予 ∩ 可强制；约束沿链累加；防环、限深（默认 3）；只有直接委托方验收</p></div>
             <div class="part"><h4>失败与续接</h4><p>运行时错误分类；格式错、空回复、超时自动续接一次，仍失败只阻塞这一个席位，人点“继续”从中断处接着做</p></div>
             <div class="part"><h4>治理与审批</h4><p>网络不自动建 Agent，只接受提议、由人批准；工作区外溢由所有者逐次批准；每次越权都留痕</p></div>
-            <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（纲要、决定、文件、资源引用）按版本推送给成员</p></div>
+            <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（说明、资料、技能）按版本推送给成员</p></div>
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经项目；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
-            <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里逐个打开；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
+            <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
             <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、打法（技能）与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
             <div class="part"><h4>助理对话与定时</h4><p>注册即有一个助理，和它的私聊在侧栏最上面：每轮推送按你的可见性过滤的跨项目总览，共享项目单列；往项目里说话只能起草、你确认才以你的名义发出；读到共享项目内容的那一轮不能调连接器。定时只属于你、只唤醒你自己的 Agent，默认工作日早报，没有新情况不打扰</p></div>
             <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
@@ -621,7 +621,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">14</span><b>外溢由所有者批准</b><span>工作目录以外的写，逐次批准、只对那一次有效</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">17</span><b>项目档案只走网络</b><span>写入只经人的操作或档案工具，留变更日志</span><span class="test">✓ tested</span></div>
-      <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；共享项目里默认关</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；共享项目里用到时先问授权人</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">20</span><b>插件只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">21</span><b>助理只替主人读与起草</b><span>发进项目要主人确认；读到共享项目的那一轮不调连接器；定时只属于主人</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">22</span><b>信息只流向当时在场的人</b><span>私有目录按来源挂载；用到别处资料的输出先给所有者确认；判断不用模型</span><span class="test">✓ tested</span></div>

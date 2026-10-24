@@ -114,6 +114,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 | `page_permissions` | 否 | 页面要用的能力，见下 |
 | `agent_tools` | 否 | 开给 Agent 的记录工具：`records.read`、`records.write` |
 | `triggers` | 否 | 触发，见第 6 节 |
+| `connectors` | 否 | 插件用到的外部服务：连接器目录里的 id（如 `feishu`）或电脑上配好的服务名，最多 10 个，每个 ≤80。只是声明：装上并启用后出现在项目的连接器面板里，让成员看到要连什么；不授予任何访问权限 |
 
 表名、字段名、标签 key、触发 key 都是同一种写法：小写字母开头，小写字母、数字、下划线，≤40（注意和插件名不同，**用 `_` 不用 `-`**）。
 
