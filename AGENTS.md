@@ -22,7 +22,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - **Agent**：网络里的节点，只属于、只为它的所有者工作；有自身权限上限，可跑在云侧或用户端侧。每个人有一个**助理**（自己的一个 Agent，注册即有），进项目时自动加入。
 - **助理对话**：侧栏最上面的“助理”，和自己助理的私聊。助理在这里看得到你各个项目的进展，替你起草要发进项目的消息（你确认才发），按你的话定时提醒（默认工作日早报）。
-- **项目**：成员集合与委托边界，没有主 Agent。`internal` 只有所有者；`joint`（联合项目）是跨用户协作的唯一途径。
+- **项目**：成员集合与委托边界，没有主 Agent，也没有类型：邀请了别人就是共享的，这是跨用户协作的唯一途径。
 - **对话**：每个项目一个群聊（被 @ 的成员接任务）；人在项目里可以开多个**项目会话**，和自己的助理私下聊、带项目上下文；每个 Agent 一个私聊。**席位**是 Agent 在一个对话里的执行上下文。
 - **委托（Task）**：Agent ↔ Agent 的一次授权，异步执行、收件箱唤醒，由委托方验收。
 - **用户任务（UserRequest）**：人交代的有交付目标的事，看板上只有它。
@@ -34,7 +34,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 要改 / 要了解 | 先读 |
 | --- | --- |
 | 模型字段、状态结构、权限词表 | [docs/reference/domain.md](docs/reference/domain.md) |
-| 群聊、项目会话、私聊、@ 唤醒、成员变动、联合项目与可见性 | [docs/reference/conversations.md](docs/reference/conversations.md) |
+| 群聊、项目会话、私聊、@ 唤醒、成员变动、共享项目与可见性 | [docs/reference/conversations.md](docs/reference/conversations.md) |
 | 委托、收件箱、失败与续接、看板与用户任务 | [docs/reference/execution.md](docs/reference/execution.md) |
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
@@ -50,7 +50,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 | 文件 | 职责 |
 | --- | --- |
-| `matrix/engine.py` | `Network` 核心：Agent/项目/对话管理、联合项目的参与者与可见性、项目档案、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
+| `matrix/engine.py` | `Network` 核心：Agent/项目/对话管理、项目的参与者与可见性、项目档案、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、信息流（来源标签、`open_note`、拦截确认）、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
 | `matrix/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
 | `matrix/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
 | `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
@@ -69,6 +69,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
 | `matrix/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `matrix/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
+| `matrix/flow.py` | 信息流的判断（不变量 22）：私有目录文件的来源标签、在场的人、挂载与放行，纯函数集合比较，不用模型 |
 | `matrix/store.py` | 持久化、旧数据迁移（`_merge_groups`：群组 + 项目两层合成一层，`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 一个研究项目；服务默认不预置，CLI 与测试预置） |
 | `matrix/compat.py` | 改名兼容（代码原名 agentnet）：部署方环境变量 `MATRIX_*` 没设时读 `AGENTNET_*`（`env`）、默认数据目录沿用旧的 `.agentnet`（`data_dir`）、旧网络工具名换成 `mcp__matrix_net__*`（`current_tool`，用于旧 state.json 与没升级的连接器）。改名相关的兼容都放这里 |
 | `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
@@ -76,7 +77,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、打法、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（联合项目、项目档案）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -113,7 +114,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 5. **只有直接委托方能验收**。
 6. **协作只走网络**：Agent 之间的协作必须经过网络工具。
 7. **上下文默认隔离**：每个席位、每个任务独立会话、独立工作目录。
-8. **私有目录归 Agent 自己**：网络不读取、不注入。
+8. **私有目录归 Agent 自己**：网络不为自己读取、不注入，只代 Agent 本人取用并记来源。
 9. **知识只显式共享**。
 10. **身份由网络认定**：凭执行上下文令牌，不信任模型自报。
 11. **越权必留痕**。
@@ -121,12 +122,13 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 13. **归属与可见性**：无权限一律按“不存在”（404）。
 14. **工作区外溢由所有者批准**：逐次批准，只对那一次调用生效。
 15. **并发不抢占**：私有目录写回按文件三方合并。
-16. **Agent 不跨信任域**：跨用户协作只能通过联合项目。
+16. **Agent 不跨信任域**：跨用户协作只能通过项目（邀请了别人就是共享项目）。
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
-19. **连接器凭证只属于授权的人**：网络代调用，联合项目里默认不开。
+19. **连接器凭证只属于授权的人**：网络代调用，共享项目里默认不开。
 20. **插件代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
-21. **助理对话只替主人读与起草**：读到联合项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
+21. **助理对话只替主人读与起草**：读到共享项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
+22. **信息只流向当时在场的人**：私有目录按来源场合挂载，用到别处资料的输出先给所有者确认，判断不用模型。
 
 ### 二、工作方式
 

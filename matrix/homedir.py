@@ -3,12 +3,15 @@
 私有目录在每次运行时拷进工作目录的 `agent-home/`（沙箱只允许写工作目录），运行后按文件三方比较写回：
 这次运行改了、而私有目录里同一文件在这期间也被别的运行改过，就把这次的版本另存为冲突副本，不覆盖别人的修改。
 没有 `file.write` 时只拷入、不写回（只读）。调用方负责按 Agent 加锁。
+
+云侧可以只挂一部分（`hide`，按来源场合决定，见 flow.py）：没挂的文件这次运行看不到，写回时同名的一律另存为冲突副本，
+不会覆盖；`frozen` 前缀下的改动不写回（有别人的场合里技能只读）。
 """
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -16,6 +19,14 @@ from pathlib import Path
 class HomeMount:
     base: dict[str, tuple[int, int]]   # 挂载时拷进工作目录的版本
     home: dict[str, tuple[int, int]]   # 挂载时 home 里的版本（写回时据此判断期间有没有别的运行改过）
+    hidden: frozenset[str] = frozenset()  # 这次没挂的文件
+
+
+@dataclass
+class SyncResult:
+    written: list[str] = field(default_factory=list)    # 写进私有目录的文件（含冲突副本）
+    deleted: list[str] = field(default_factory=list)
+    conflicts: list[str] = field(default_factory=list)  # 其中的冲突副本
 
 
 def fingerprint(root: Path) -> dict[str, tuple[int, int]]:
@@ -31,32 +42,40 @@ def safe_tag(key: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in key)[:80]
 
 
-def mount(home: Path, dest: Path) -> HomeMount:
-    """把私有目录拷到 dest（工作目录的 agent-home/）。"""
+def mount(home: Path, dest: Path, hide: set[str] | frozenset[str] = frozenset()) -> HomeMount:
+    """把私有目录拷到 dest（工作目录的 agent-home/）；hide 里的文件不拷。"""
     home.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(dest, ignore_errors=True)
     shutil.copytree(home, dest, symlinks=False)
-    return HomeMount(base=fingerprint(dest), home=fingerprint(home))
+    for rel in hide:
+        (dest / rel).unlink(missing_ok=True)
+    return HomeMount(base=fingerprint(dest), home=fingerprint(home), hidden=frozenset(hide))
 
 
-def sync_back(home: Path, dest: Path, before: HomeMount, ctx_id: str = "") -> list[str]:
-    """写回并移除 dest；返回产生的冲突副本（相对路径）。"""
+def sync_back(home: Path, dest: Path, before: HomeMount, ctx_id: str = "",
+              frozen: tuple[str, ...] = ()) -> SyncResult:
+    """写回并移除 dest。"""
+    out = SyncResult()
     if not dest.is_dir():
-        return []
-    conflicts: list[str] = []
+        return out
     after, now = fingerprint(dest), fingerprint(home)
     for rel, fp in after.items():
-        if before.base.get(rel) == fp:
-            continue  # 这次运行没改
+        if before.base.get(rel) == fp or rel.startswith(frozen):
+            continue  # 这次运行没改，或者这里只读
         target = rel
-        if now.get(rel) != before.home.get(rel):  # 别的运行在这期间也改过（或删过 / 新建过）
+        # 别的运行在这期间也改过（或删过 / 新建过），或者这次根本没挂这个文件：另存，不覆盖
+        if now.get(rel) != before.home.get(rel) or rel in before.hidden:
             p = Path(rel)
             target = p.with_name(f"{p.stem}.conflict-{safe_tag(ctx_id)[-24:]}{p.suffix}").as_posix()
-            conflicts.append(target)
+            out.conflicts.append(target)
         (home / target).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(dest / rel, home / target)
+        out.written.append(target)
     for rel in before.base.keys() - after.keys():
+        if rel.startswith(frozen):
+            continue
         if now.get(rel) == before.home.get(rel):  # 别人没动过才删
             (home / rel).unlink(missing_ok=True)
+            out.deleted.append(rel)
     shutil.rmtree(dest, ignore_errors=True)
-    return conflicts
+    return out

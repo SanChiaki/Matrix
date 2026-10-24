@@ -206,7 +206,7 @@ Agent 写的记录在页面上照常显示、照常发 `records.changed`，但**
 
 ```js
 {
-  project: { id, name, kind },            // kind："internal" | "joint"（联合项目，记录对所有参与方可见）
+  project: { id, name, kind, shared },    // shared：邀请了别人（记录对所有参与方可见）；kind 是推导出来的 "internal" | "joint"，保留兼容
   plugin: { name, version, title },
   viewer: { is_host },                    // 看页面的人是不是主持人
   tables: [{ key, title, fields: [{ key, label, type, options, required }] }],
