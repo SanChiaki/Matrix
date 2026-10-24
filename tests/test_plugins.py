@@ -85,6 +85,19 @@ def test_manifest_validation(bad, why):
         pluginfs.parse_manifest(manifest(**bad))
 
 
+def test_manifest_connectors_are_listed_in_the_connector_panel(tmp_path: Path):
+    """插件清单可以声明用到的外部服务：只是声明，出现在项目的连接器面板里。"""
+    assert pluginfs.parse_manifest(manifest(connectors=["feishu", "feishu", "crm"])).connectors == ("feishu", "crm")
+    with pytest.raises(pluginfs.PluginError, match="connectors"):
+        pluginfs.parse_manifest(manifest(connectors="feishu"))
+    net, _rt, host, _sales, g = setup(tmp_path)
+    net.upload_plugin(g.id, package(manifest(connectors=["crm"])), actor=host)
+    rows = net.project_detail(g.id, actor=host)["connector_panel"]["services"]
+    assert [(x["connector_id"], [s["kind"] for s in x["sources"]]) for x in rows] == [("crm", ["plugin"])]
+    net.set_plugin_enabled(g.id, "deals", False, actor=host)
+    assert net.project_detail(g.id, actor=host)["connector_panel"]["services"] == []
+
+
 def test_package_rules():
     files = pluginfs.package_files(package())  # 多一层顶层目录可以
     assert pluginfs.check_package(files).name == "deals"

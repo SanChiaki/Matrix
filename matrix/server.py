@@ -122,11 +122,16 @@ class AuthorizeIn(BaseModel):
 class NeedIn(BaseModel):
     connector_id: str = Field(min_length=1, max_length=80)
     purpose: str = Field("", max_length=300)
-    ref_id: str | None = None
 
 
-class ProjectConnectionsIn(BaseModel):
-    connection_ids: list[str] = Field(default_factory=list, max_length=50)
+class GrantIn(BaseModel):
+    agent_id: str
+    connection_id: str
+    grant: Literal["ask", "always", "deny"]
+
+
+class RefConnectorIn(BaseModel):
+    connector_id: str = Field("", max_length=80)
 
 
 class ConnectorCallIn(BaseModel):
@@ -303,6 +308,7 @@ class CredentialsIn(BaseModel):
 class DecisionIn(BaseModel):
     allow: bool
     note: str = Field("", max_length=500)
+    scope: Literal["once", "project"] = "once"   # 连接器的申请：只这一轮 / 这个项目里以后都可以
 
 
 class ApprovalIn(BaseModel):
@@ -591,7 +597,7 @@ def create_app(network: Network) -> FastAPI:
         network.delete_file(project_id, name, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    # ---- 项目技能（项目档案的一部分）与项目需要的连接器（只是声明） ----
+    # ---- 项目技能（项目档案的一部分）与项目的连接器面板（项目不持有凭证） ----
     @app.get("/api/projects/{project_id}/skills/{name}")
     def project_skill(project_id: str, name: str, user: Me) -> dict:
         return network.project_skill(project_id, name, actor=user.id)
@@ -618,7 +624,7 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/needs")
     def add_need(project_id: str, body: NeedIn, user: Me) -> dict:
-        network.add_connector_need(project_id, body.connector_id, body.purpose, body.ref_id, actor=user.id)
+        network.add_connector_need(project_id, body.connector_id, body.purpose, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     @app.delete("/api/projects/{project_id}/needs/{need_id}")
@@ -626,10 +632,20 @@ def create_app(network: Network) -> FastAPI:
         network.remove_connector_need(project_id, need_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    @app.put("/api/projects/{project_id}/members/{agent_id}/connections")
-    def project_connections(project_id: str, agent_id: str, body: ProjectConnectionsIn, user: Me) -> dict:
-        """联合项目里给自己的 Agent 逐个打开连接器（默认都关）。"""
-        network.set_project_connections(project_id, agent_id, body.connection_ids, actor=user.id)
+    @app.put("/api/projects/{project_id}/grants")
+    def connector_grant(project_id: str, body: GrantIn, user: Me) -> dict:
+        """共享项目里我的 Agent 怎么用我的某个连接器：用到时问（默认）/ 这个项目里都可以 / 不行。"""
+        network.set_connector_grant(project_id, body.agent_id, body.connection_id, body.grant, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/refs/{ref_id}/connector")
+    def ref_connector(project_id: str, ref_id: str, body: RefConnectorIn, user: Me) -> dict:
+        network.set_ref_connector(project_id, ref_id, body.connector_id, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/connector-usage/{connector_id}")
+    def clear_usage(project_id: str, connector_id: str, user: Me) -> dict:
+        network.clear_connector_usage(project_id, connector_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
     # ---- 我的技能、我的连接器（只有自己看得到） ----
@@ -957,7 +973,7 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/approvals/{approval_id}")
     def decide(approval_id: str, body: DecisionIn, user: Me) -> dict:
-        return network.decide_approval(approval_id, body.allow, actor=user.id, note=body.note).to_dict()
+        return network.decide_approval(approval_id, body.allow, actor=user.id, note=body.note, scope=body.scope).to_dict()
 
     # ---- 事件流（按用户过滤） ----
     @app.get("/api/events")

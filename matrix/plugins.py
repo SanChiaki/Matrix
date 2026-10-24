@@ -35,6 +35,7 @@ VERSION = re.compile(r"^\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?$")
 FIELD_TYPES = ("text", "longtext", "number", "date", "select", "bool", "agent", "file")
 TRIGGER_TYPES = ("webhook", "schedule", "record")
 TEXT_MAX, LONGTEXT_MAX = 500, 8000
+PLUGIN_CONNECTORS = 10
 
 
 class PluginError(ValueError):
@@ -97,6 +98,7 @@ class Manifest:
     page_permissions: tuple[str, ...]
     agent_tools: tuple[str, ...]
     triggers: tuple[Trigger, ...]
+    connectors: tuple[str, ...] = ()     # 插件用到的外部服务（连接器目录 id 或服务名）：只是声明，列进项目的连接器面板
 
     def table(self, key: str) -> Table | None:
         return next((t for t in self.tables if t.key == key), None)
@@ -113,6 +115,7 @@ class Manifest:
                                     "required": f.required} for f in t.fields]} for t in self.tables],
             "page_permissions": [{"key": p, "label": PLUGIN_PAGE_CAPS[p]} for p in self.page_permissions],
             "agent_tools": list(self.agent_tools),
+            "connectors": list(self.connectors),
             "triggers": [{"key": t.key, "type": t.type, "to": t.to, "text": t.text, "table": t.table, "cron": t.cron,
                           "when": ({"field": t.when_field, "equals": t.when_equals} if t.when_field else
                                    {"event": "create"} if t.on_create else None)} for t in self.triggers],
@@ -244,7 +247,12 @@ def parse_manifest(data: Any) -> Manifest:
         triggers.append(Trigger(key, ttype, to, text, table, cron, when_field, when_equals, on_create))
     if not tabs and not tables and not triggers:
         raise PluginError("插件至少要有一个标签、一张表或一个触发")
-    return Manifest(name, version, title, description, tuple(tabs), tuple(tables), perms, agent, tuple(triggers))
+    conns = data.get("connectors") or []
+    if not isinstance(conns, list) or len(conns) > PLUGIN_CONNECTORS:
+        raise PluginError(f"connectors 必须是列表，最多 {PLUGIN_CONNECTORS} 个")
+    connectors = tuple(dict.fromkeys(_s(c, f"connectors[{i}]", 80) for i, c in enumerate(conns)))
+    return Manifest(name, version, title, description, tuple(tabs), tuple(tables), perms, agent, tuple(triggers),
+                    connectors)
 
 
 def _caps(v: Any, allowed: Any, what: str) -> tuple[str, ...]:

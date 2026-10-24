@@ -1,5 +1,5 @@
-"""连接器（docs/connectors-and-skills.md）：授权与加密保管、网络代调用、权限收窄、联合项目里默认关、
-电脑上的连接器（上报与只开允许的）、项目需要的连接器。"""
+"""连接器（docs/connectors-and-skills.md）：授权与加密保管、网络代调用、权限收窄、共享项目里用到时先问所有者、
+电脑上的连接器（上报与只开允许的）、项目的连接器面板。"""
 
 from __future__ import annotations
 
@@ -92,7 +92,7 @@ def fake():
 def catalog_file(tmp_path: Path, url: str) -> Path:
     p = tmp_path / "connectors.json"
     p.write_text(json.dumps({"connectors": [{
-        "id": "docs", "name": "文档库", "description": "公司文档", "url": url,
+        "id": "docs", "name": "文档库", "description": "公司文档", "url": url, "domains": ["docs.example.com"],
         "auth": {"fields": [{"key": "token", "label": "访问令牌", "header": "Authorization",
                              "template": "Bearer {value}"}]},
         "skills": [{"name": "doc-search", "description": "怎么查公司文档", "body": "先搜标题"}]}]}))
@@ -120,7 +120,7 @@ def test_authorize_keeps_the_secret_out_of_state_events_and_api(tmp_path: Path, 
     a = net.create_agent("Helper", "助理", [], ["connector.use"], actor=alice)
     c = client(net, "alice@x.io")
     assert c.get("/api/connectors").json()[0] == {
-        "id": "docs", "name": "文档库", "description": "公司文档",
+        "id": "docs", "name": "文档库", "description": "公司文档", "domains": ["docs.example.com"],
         "fields": [{"key": "token", "label": "访问令牌", "secret": True}],
         "skills": [{"name": "doc-search", "description": "怎么查公司文档"}]}  # 不含地址
     r = c.post("/api/me/connections", json={"connector_id": "docs", "values": {"token": SECRET}})
@@ -292,49 +292,141 @@ def test_connector_bridge_script_speaks_mcp_and_fails_soft():
     assert res[1]["result"]["tools"] == [] and res[2]["result"]["isError"] is True
 
 
-# ================= 联合项目：默认关，逐个打开 =================
-def test_joint_projects_keep_personal_connectors_off_until_the_owner_opens_them(tmp_path: Path, fake: FakeMCP):
-    """不变量 16、19：别人主持的联合项目里，我的 Agent 默认不能用我的连接器；我在这个项目里打开后才行。
-    别人看不到我打开了哪些。"""
+# ================= 共享项目：用到时先问所有者 =================
+def ask_round(net: Network, chat_id: str, text: str, actor: str, decide=None) -> list:
+    """在后台跑一轮；出现连接器申请就交给 decide(申请) 处理。返回这一轮出现过的申请。"""
+    seen: list = []
+    t = threading.Thread(target=net.send_message, args=(chat_id, text), kwargs={"actor": actor, "background": False})
+    t.start()
+    while t.is_alive():
+        for ap in net.pending_approvals(None):
+            if ap.kind == "connector" and ap.id not in {x.id for x in seen}:
+                seen.append(ap)
+                if decide is not None:
+                    decide(ap)
+        t.join(0.02)
+    return seen
+
+
+def test_shared_projects_ask_the_owner_before_using_their_connector(tmp_path: Path, fake: FakeMCP):
+    """不变量 16、19：共享项目里我的 Agent 第一次要用我的连接器时先问我；只这一次 / 这个项目里都可以 / 不行。
+    别人看不到我的授权。"""
     net = network(tmp_path, search, fake.url)
     host, guest = users(net, "host@x.io", "guest@x.io")
     ga = net.create_agent("GuestAgent", "参与者的", [], ["connector.use"], actor=guest)
     conn = net.authorize_connector("docs", {"token": SECRET}, guest)
     g, chat = joint(net, host, "guest@x.io", guest)
-    net.send_message(chat.id, "@GuestAgent 查", actor=host, background=False)
-    assert chat.messages[-1].text == "没有连接器" and fake.calls == []
+    # 不行：调用被拦下，不碰服务，也不记违规
+    asks = ask_round(net, chat.id, "@GuestAgent 查", host, lambda ap: net.decide_approval(ap.id, False, actor=guest))
+    assert len(asks) == 1 and asks[0].owner_id == guest and asks[0].requested_by == host
+    assert "host@x.io在「J」里让 GuestAgent 用你的「文档库」" in asks[0].reason
+    assert "没有同意" in chat.messages[-1].text and fake.calls == []
     with pytest.raises(NetworkError):
-        net.set_project_connections(g.id, ga.id, [conn["id"]], actor=host)  # 不是我的 Agent
-    net.set_project_connections(g.id, ga.id, [conn["id"]], actor=guest)
-    net.send_message(chat.id, "@GuestAgent 再查", actor=host, background=False)
+        net.decide_approval(asks[0].id, True, actor=host)  # 只有所有者能决定（已处理过，也按不存在 / 已处理拒绝）
+    # 只这一轮：这一轮能用，下一轮再问
+    ok_once = lambda ap: net.decide_approval(ap.id, True, actor=guest, scope="once")  # noqa: E731
+    assert len(ask_round(net, chat.id, "@GuestAgent 再查", host, ok_once)) == 1
     assert chat.messages[-1].text == "找到：季度目标"
-    assert net.project_detail(g.id, actor=host)["connections_enabled"] == {}
-    assert net.project_detail(g.id, actor=guest)["connections_enabled"] == {ga.id: [conn["id"]]}
-    internal = net.create_project("Mine", "", [], actor=guest)
+    # 这个项目里都可以：写进授权，之后不再问
+    ok_all = lambda ap: net.decide_approval(ap.id, True, actor=guest, scope="project")  # noqa: E731
+    assert len(ask_round(net, chat.id, "@GuestAgent 查第三次", host, ok_all)) == 1
+    assert ask_round(net, chat.id, "@GuestAgent 查第四次", host) == []
+    assert chat.messages[-1].text == "找到：季度目标"
+    assert net.project_detail(g.id, actor=host)["connector_grants"] == {}
+    assert net.project_detail(g.id, actor=guest)["connector_grants"] == {ga.id: {conn["id"]: "always"}}
+    # 面板里选“不行”：这个项目里不再给它
+    net.set_connector_grant(g.id, ga.id, conn["id"], "deny", actor=guest)
+    assert ask_round(net, chat.id, "@GuestAgent 查第五次", host) == []
+    assert chat.messages[-1].text == "没有连接器"
+    with pytest.raises(NetworkError):
+        net.set_connector_grant(g.id, ga.id, conn["id"], "always", actor=host)  # 不是我的 Agent
+    internal = net.create_project("Mine", "", [ga.id], actor=guest)
     with pytest.raises(NetworkError, match="只有你自己的项目"):
-        net.set_project_connections(internal.id, ga.id, [conn["id"]], actor=guest)
+        net.set_connector_grant(internal.id, ga.id, conn["id"], "always", actor=guest)
 
 
-def test_project_needs_show_readiness_without_accounts(tmp_path: Path, fake: FakeMCP):
-    """项目只声明需要什么；就绪状态按成员给，不给是谁的账号。"""
+def test_connector_ask_waits_once_per_round_and_times_out(tmp_path: Path, fake: FakeMCP):
+    """不变量 19：同一轮同一个连接器只问一次；所有者一直不理，调用按没同意处理。"""
+    def twice(call: ScriptCall) -> str:
+        return " | ".join(call.connector("docs__search_docs", q=q) for q in ("一", "二"))
+    net = network(tmp_path, twice, fake.url)
+    net.limits.connector_ask_timeout_s = 0.2
+    host, guest = users(net, "host@x.io", "guest@x.io")
+    ga = net.create_agent("GuestAgent", "参与者的", [], ["connector.use"], actor=guest)
+    net.authorize_connector("docs", {"token": SECRET}, guest)
+    g, chat = joint(net, host, "guest@x.io", guest)
+    asks = ask_round(net, chat.id, "@GuestAgent 查两次", host)
+    assert len(asks) == 1 and asks[0].status == "cancelled"
+    assert chat.messages[-1].text.count("没有同意") == 2 and fake.calls == []
+
+
+def test_connector_panel_gathers_four_sources_without_accounts(tmp_path: Path, fake: FakeMCP):
+    """连接器面板：资料里的链接（按域名认或主持人指定）、插件声明、实际用过、手动添加，合成每个服务一行；
+    就绪状态按成员给，不给是谁的账号；每人只看到自己的授权。"""
     net = network(tmp_path, search, fake.url)
     host, guest = users(net, "host@x.io", "guest@x.io")
     ha = net.create_agent("HostAgent", "主持人的", [], ["connector.use"], actor=host)
     ga = net.create_agent("GuestAgent", "参与者的", [], ["connector.use"], actor=guest)
     g, chat = joint(net, host, "guest@x.io", guest, [ha.id])
-    ref = net.add_ref(g.id, "需求文档", "docs://team/prd", actor=host)
-    net.add_connector_need(g.id, "docs", "共同维护需求文档", ref.id, actor=host)
+    net.add_ref(g.id, "需求文档", "https://team.docs.example.com/prd", actor=host)
+    wiki = net.add_ref(g.id, "内部 wiki", "https://wiki.corp.example/x", actor=host)
+    net.add_ref(g.id, "本地路径", "/srv/repo", actor=host)
+    net.add_connector_need(g.id, "github", "查议题", actor=host)
     with pytest.raises(NetworkError):
-        net.add_connector_need(g.id, "github", actor=guest)  # 只有主持人能声明
-    status = lambda: {m["agent"]: m["status"] for m in net.project_detail(g.id, actor=guest)["connector_readiness"][0]["members"]}  # noqa: E731
-    assert status() == {"HostAgent": "unauthorized", "GuestAgent": "unauthorized"}
+        net.add_connector_need(g.id, "linear", actor=guest)  # 只有主持人能手动添加
+    panel = lambda who: net.project_detail(g.id, actor=who)["connector_panel"]  # noqa: E731
+    p = panel(guest)
+    assert [x["name"] for x in p["services"]] == ["github", "文档库"]
+    docs = next(x for x in p["services"] if x["connector_id"] == "docs")
+    assert [s["kind"] for s in docs["sources"]] == ["ref"] and docs["sources"][0]["name"] == "需求文档"
+    assert [u["location"] for u in p["unrecognized"]] == ["https://wiki.corp.example/x"]
+    status = lambda who: {m["agent"]: m["status"] for m in next(  # noqa: E731
+        x for x in panel(who)["services"] if x["connector_id"] == "docs")["members"]}
+    assert status(guest) == {"HostAgent": "unauthorized", "GuestAgent": "unauthorized"}
     conn = net.authorize_connector("docs", {"token": SECRET}, guest)
-    assert status()["GuestAgent"] == "not_enabled"
-    net.set_project_connections(g.id, ga.id, [conn["id"]], actor=guest)
-    assert status()["GuestAgent"] == "ready"
-    readiness = json.dumps(net.project_detail(g.id, actor=host)["connector_readiness"], ensure_ascii=False)
-    assert conn["id"] not in readiness and SECRET not in readiness
-    assert any("需要连接器「文档库」" in m.text for m in net.store.conversations[chat.id].messages)
+    assert status(guest)["GuestAgent"] == "ask"
+    net.set_connector_grant(g.id, ga.id, conn["id"], "always", actor=guest)
+    assert status(host)["GuestAgent"] == "ready"
+    net.set_connector_grant(g.id, ga.id, conn["id"], "deny", actor=guest)
+    assert status(host)["GuestAgent"] == "not_enabled"
+    mine = lambda who: next(x for x in panel(who)["services"] if x["connector_id"] == "docs")["mine"]  # noqa: E731
+    assert mine(host) == [] and [(m["agent"], m["grant"]) for m in mine(guest)] == [("GuestAgent", "deny")]
+    shown = json.dumps(net.project_detail(g.id, actor=host)["connector_panel"], ensure_ascii=False)
+    assert conn["id"] not in shown and SECRET not in shown
+    # 主持人指定认不出的链接用哪个连接器
+    with pytest.raises(NetworkError):
+        net.set_ref_connector(g.id, wiki.id, "docs", actor=guest)
+    net.set_ref_connector(g.id, wiki.id, "docs", actor=host)
+    p = panel(host)
+    assert p["unrecognized"] == [] and len(next(x for x in p["services"] if x["connector_id"] == "docs")["sources"]) == 2
+    # 实际用过的记进来；主持人可以收起
+    net.set_connector_grant(g.id, ga.id, conn["id"], "always", actor=guest)
+    net.send_message(chat.id, "@GuestAgent 查", actor=host, background=False)
+    used = [s for s in next(x for x in panel(host)["services"] if x["connector_id"] == "docs")["sources"] if s["kind"] == "used"]
+    assert used and used[0]["count"] == 1 and used[0]["last_agent"] == "GuestAgent"
+    net.clear_connector_usage(g.id, "docs", actor=host)
+    assert not [s for s in next(x for x in panel(host)["services"] if x["connector_id"] == "docs")["sources"] if s["kind"] == "used"]
+    assert any("在连接器面板里添加了「github」" in m.text for m in net.store.conversations[chat.id].messages)
+
+
+def test_connector_grants_and_panel_over_http(tmp_path: Path, fake: FakeMCP):
+    net = network(tmp_path, search, fake.url)
+    host, guest = users(net, "host@x.io", "guest@x.io")
+    ga = net.create_agent("GuestAgent", "参与者的", [], ["connector.use"], actor=guest)
+    conn = net.authorize_connector("docs", {"token": SECRET}, guest)
+    g, _chat = joint(net, host, "guest@x.io", guest)
+    net.add_ref(g.id, "需求文档", "https://docs.example.com/prd", actor=host)
+    c = client(net, "guest@x.io")
+    r = c.put(f"/api/projects/{g.id}/grants", json={"agent_id": ga.id, "connection_id": conn["id"], "grant": "always"})
+    assert r.status_code == 200 and r.json()["connector_grants"] == {ga.id: {conn["id"]: "always"}}
+    assert c.put(f"/api/projects/{g.id}/grants", json={"agent_id": ga.id, "connection_id": conn["id"],
+                                                         "grant": "maybe"}).status_code == 422
+    h = client(net, "host@x.io")
+    assert h.get(f"/api/projects/{g.id}").json()["connector_grants"] == {}
+    assert h.post(f"/api/projects/{g.id}/needs", json={"connector_id": "github"}).status_code == 200
+    ref = net.store.projects[g.id].refs[0]
+    assert h.put(f"/api/projects/{g.id}/refs/{ref.id}/connector", json={"connector_id": "github"}).status_code == 200
+    assert c.put(f"/api/projects/{g.id}/refs/{ref.id}/connector", json={"connector_id": ""}).status_code == 409
 
 
 def test_suggest_connector_only_pings_the_owner(tmp_path: Path, fake: FakeMCP):
@@ -384,7 +476,7 @@ def last_request(rt):
 
 def test_device_services_become_connections_and_only_allowed_ones_are_sent(tmp_path: Path):
     """电脑上的 AI 工具里配置的服务：上线时只报名字；新出现的默认勾给那台电脑上的 Agent；
-    run.request 里只放这一轮允许的（联合项目里默认空）。"""
+    run.request 里只放这一轮允许的（共享项目里要所有者选“这个项目里都可以”）。"""
     net, alice, guest, dev, a, rt = device_net(tmp_path, {"claude-code": ["notion", "linear"]})
     conns = net.my_connections(alice)
     assert {c["name"] for c in conns} == {"notion", "linear"} and all(c["kind"] == "device" for c in conns)
@@ -403,7 +495,10 @@ def test_device_services_become_connections_and_only_allowed_ones_are_sent(tmp_p
     net.respond_invitation(g.id, True, actor=alice)
     chat = net.project_chat(g.id, actor=guest)
     net.send_message(chat.id, "@Local 来", actor=guest, background=False)
-    assert last_request(rt)["connectors"] == []
+    assert last_request(rt)["connectors"] == []  # 电脑上的服务网络拦不到调用：没有“用到时问”，要所有者选“都可以”
+    net.set_connector_grant(g.id, a.id, notion, "always", actor=alice)
+    net.send_message(chat.id, "@Local 再来", actor=guest, background=False)
+    assert last_request(rt)["connectors"] == ["notion"]
     # 云端的连接器不能勾给电脑上的 Agent，反过来也一样
     cloud_agent = net.create_agent("Cloud", "云端", [], ["connector.use"], actor=alice)
     with pytest.raises(NetworkError, match="只能给运行在"):

@@ -34,6 +34,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
 | `page_permissions` | 页面要用的能力，词表 `models.PLUGIN_PAGE_CAPS`：`records.read` `records.write` `archive.read` `members.read` `chat.read` `chat.post` `requests.read` |
 | `agent_tools` | 开给 Agent 的记录工具：`records.read` / `records.write`（`models.PLUGIN_AGENT_CAPS`） |
 | `triggers` | `[{key, type, table, cron, when, notify: {to, text}}]`，见“触发” |
+| `connectors` | 用到的外部服务（连接器 id 或服务名，≤10）：只是声明，启用时列进项目的连接器面板（`engine.connector_panel`） |
 
 ## 安装、升级、卸载
 

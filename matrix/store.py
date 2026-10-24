@@ -333,6 +333,7 @@ class Store:
             p["refs"] = [ResourceRef(**_known(ResourceRef, r)) for r in p.get("refs") or []]
             p["suggestions"] = [BriefSuggestion(**_known(BriefSuggestion, x)) for x in p.get("suggestions") or []]
             p["connector_needs"] = [ConnectorNeed(**_known(ConnectorNeed, n)) for n in p.get("connector_needs") or []]
+            _connector_panel(p)
             self.projects[p["id"]] = Project(**_known(Project, p))
         for c in raw.get("conversations", []):
             conv = _load_conversation(c)
@@ -496,3 +497,24 @@ class Store:
 
     def projects_of(self, agent_id: str) -> list[Project]:
         return [p for p in self.projects.values() if agent_id in p.member_ids]
+
+
+def _connector_panel(p: dict[str, Any]) -> None:
+    """连接器面板之前的项目：所有者逐个打开的连接器（connections_enabled）改成“这个项目里都可以”；
+    关联了资源引用的“需要的连接器”并进那条链接（ResourceRef.connector_id），用途补进链接说明。只做一次。"""
+    old = p.pop("connections_enabled", None)
+    if isinstance(old, dict) and "connector_grants" not in p:
+        p["connector_grants"] = {a: {cid: "always" for cid in ids} for a, ids in old.items() if ids}
+    refs = {r.id: r for r in p["refs"]}
+    keep = []
+    for n in p["connector_needs"]:
+        ref = refs.get(n.ref_id or "")
+        if ref is None:
+            n.ref_id = None
+            keep.append(n)
+            continue
+        ref.connector_id = ref.connector_id or n.connector_id
+        if n.purpose and n.purpose not in ref.note:
+            ref.note = f"{ref.note}；{n.purpose}" if ref.note else n.purpose
+    p["connector_needs"] = keep
+

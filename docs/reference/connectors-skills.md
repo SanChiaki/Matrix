@@ -4,7 +4,8 @@
 > 代码：`engine.py`「连接器与技能」一节、`skills.py`、`connector_catalog.py`、`vault.py`、`mcp_client.py`、`mcp_connectors.py`。
 
 两个并列的用户概念：**连接器**是外部服务的接入，要授权，动的是授权人的状态，默认隔离；**技能**是一种做法
-（`SKILL.md` + 可选文件），不要授权，是能力，可以共享。个人层管“我有什么”，项目层管“这里需要什么、这里怎么做”。
+（`SKILL.md` + 可选文件），不要授权，是能力，可以共享。个人层管“我有什么”，项目层管“这里用到了什么、这里怎么做”
+（项目页上的“技能”标签是项目技能，“连接器”标签是下面的连接器面板）。
 
 ## 技能
 
@@ -39,8 +40,9 @@
 Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（云端连接给云端 Agent；电脑上的给同一台电脑、同一个 AI 工具上的 Agent）。
 
 **一轮的有效连接器** = 勾给这个 Agent 的 ∩ 状态正常 ∩ 位置对得上 ∩ 这一轮的有效权限里有 `connector.use`
-∩（在共享项目里，包括自己主持的）所有者在这个项目里打开了的（`Project.connections_enabled`，只有所有者能改、只有所有者看得到）。
-委托不授予 `connector.use`，下游这一轮就没有（不变量 1、3）。有变化时提示词里按名字列出（`protocol.format_abilities`）。
+∩（在共享项目里，包括自己主持的）所有者在这个项目里没选“不行”的（见下面“共享项目里的授权”）。
+委托不授予 `connector.use`，下游这一轮就没有（不变量 1、3）。有变化时提示词里按名字列出（`protocol.format_abilities`），
+用到时要先问所有者的，名字后面注明“第一次调用时网络先问你的所有者”。
 
 ### 云端
 
@@ -74,12 +76,41 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 - 迁移：有连接器之前，电脑上的 Agent 一直能用本机工具里配的服务；`Store._load` 给没有 `connections` 字段的端侧 Agent 补上
   `connector.use`，只做一次。
 
-### 项目需要的连接器
+### 共享项目里的授权：用到时先问（不变量 19）
 
-- 主持人声明（`Project.connector_needs`：连接器、用途、可选的资源引用），群聊里有公开记录。项目不持有凭证，也没有“公共授权”。
-- `project_detail.connector_readiness` 按成员给就绪状态：`ready` / `not_enabled`（授权了但没在这个项目打开）/ `unauthorized`，
-  不给是谁的账号、哪个连接。要用别人的连接器，就委托给别人的 Agent（不变量 16、19）。
+共享项目里，别人 @ 我的 Agent，动的却是我的账号，读到的内容还会进大家看得到的群聊。所以每个连接器在每个共享项目里
+有一个只属于授权人的授权（`Project.connector_grants`：`{agent_id: {connection_id: always | deny}}`，没写的就是 `ask`）：
+
+| 授权 | 这一轮 |
+| --- | --- |
+| `ask`（默认，“用到时问我”） | 工具照常列出；这一轮第一次调用时 `connector_call` 先停下，给授权人一张申请卡片（`Approval.kind = "connector"`，`reason` 写明谁让哪个 Agent 用什么、回复会被谁看到），阻塞到决定或 `Limits.connector_ask_timeout_s`（540 秒，短于连接器桥的回调超时）。**只这一次**：这一轮都可以；**这个项目里都可以**：写成 `always`；**不行** / 超时：这一轮不再问，调用都回“没有同意”（收窄，不记违规）。同一轮同一个连接器并发调用只出一张卡片 |
+| `always`（“这个项目里都可以”） | 直接用 |
+| `deny`（“不行”） | 这一轮没有这个连接器 |
+
+- 只有授权人能改（`PUT /api/projects/<id>/grants`），`project_detail.connector_grants` 只给授权人自己的那几项。
+  只有自己的项目不需要授权：那里只有自己，勾给 Agent 的就能用。
+- 电脑上的服务由那台电脑上的 AI 工具直接调用、网络拦不到，没有“用到时问”：只有 `always` 才放进 `run.request.connectors`。
+- 读到的内容不另记信息流来源：调用之前已经问过授权人，卡片上写着回复会给谁看（不变量 22）。
+
+### 项目的连接器面板
+
+项目页的“连接器”标签：这个项目用到了哪些外部服务、每个成员能不能用。项目不持有凭证，也没有“公共授权”。
+`project_detail.connector_panel = {services, unrecognized}`，每个服务一行，来源有四种：
+
+| 来源 | 怎么来 | 怎么去掉 |
+| --- | --- | --- |
+| `ref` | 资料里的链接：主持人指定的（`ResourceRef.connector_id`，`PUT .../refs/<ref>/connector`），或者域名对上了连接器目录里的 `domains` | 删掉那条链接 |
+| `plugin` | 启用的插件清单里的 `connectors`（只是声明） | 停用或卸载插件 |
+| `used` | 这个项目里实际调用过（`Project.connector_usage`：次数、最近时间、哪个 Agent；不记账号）。只有网络代调用的云端连接器会记 | 主持人收起（`DELETE .../connector-usage/<连接器>`），再调用会重新出现 |
+| `manual` | 主持人手动添加（`Project.connector_needs`：连接器、用途），群聊里有公开记录 | 主持人删掉 |
+
+- 每一行的 `members` 按成员 Agent 给就绪状态：`ready` / `ask`（用到时问所有者）/ `not_enabled`（授权了但没勾给它，或所有者选了不行）/
+  `unauthorized`，不给是谁的账号、哪个连接。`mine` 是看的人自己的 Agent 对这个服务的授权（只在共享项目里有），在面板里直接改。
+- `unrecognized`：认不出服务的 http(s) 链接，主持人可以指定用哪个连接器打开。多数网页不需要。
+- 要用别人的连接器，就委托给别人的 Agent（不变量 16、19）。
 - Agent 发现缺连接器时调用 `suggest_connector`：只给它的所有者发一条提醒，不授权任何东西。Agent 没有安装、授权、开启连接器的工具。
+- 迁移（`store._connector_panel`）：旧的 `connections_enabled`（所有者逐个打开的）改成 `always`；关联了资源引用的“需要的连接器”
+  并进那条链接（`connector_id`，用途补进链接说明），没关联的留作手动添加。
 
 ## 接口
 
@@ -90,8 +121,11 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 | `POST /api/me/connections/custom` | 自定义云端 MCP（只连公网） |
 | `GET /api/connectors` | 云端连接器目录（不含地址） |
 | `GET/POST /api/me/connections`、`POST .../<id>/check`、`DELETE .../<id>`、`GET .../<id>/calls` | 我的连接 |
-| `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 项目需要的连接器 |
-| `PUT /api/projects/<id>/members/<agent>/connections` | 共享项目里打开我的连接器 |
+| `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 连接器面板里手动添加（主持人） |
+| `PUT /api/projects/<id>/refs/<ref>/connector` | 指定一条链接用哪个连接器打开（主持人；空字符串回到按域名认） |
+| `DELETE /api/projects/<id>/connector-usage/<连接器>` | 收起“用过”的记录（主持人） |
+| `PUT /api/projects/<id>/grants` | 共享项目里我的连接器怎么用：`{agent_id, connection_id, grant: ask \| always \| deny}` |
+| `POST /api/approvals/<id>` 的 `scope` | 连接器申请同意的范围：`once`（这一轮）/ `project`（这个项目里都可以） |
 | `PATCH /api/agents/<id>` 的 `skills`、`connections` | Agent 勾选 |
 | `/internal/connectors/list`、`/internal/connectors/call` | 运行时回调，只凭执行上下文令牌 |
 

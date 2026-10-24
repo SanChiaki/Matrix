@@ -49,6 +49,8 @@ MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 # 云端连接器：网络代调用的那一组工具挂在另一个 MCP 服务下，工具名是 <连接器 id>__<工具名>（docs/connectors-and-skills.md）
 CONNECTOR_SERVER = "connectors"
 CONNECTOR_PREFIX = f"mcp__{CONNECTOR_SERVER}__"
+# 共享项目里所有者对自己连接器的授权（Project.connector_grants）：没写的就是 ask
+GRANTS = {"ask": "每次问", "always": "这个项目里都可以", "deny": "不行"}
 
 AGENT_HOME = "agent-home"  # Agent 私有目录在每次运行的工作目录里的挂载名
 PROJECT_FILES = "project"  # 项目档案的文件区在工作目录里的挂载名（只读副本，运行后丢弃）
@@ -194,12 +196,13 @@ class Decision:
 
 @dataclass
 class ResourceRef:
-    """项目引用的资源（仓库、路径、文档）。只是指针，不授予任何访问权限。"""
+    """项目资料里的一条链接（仓库、路径、文档）。只是指针，不授予任何访问权限。"""
 
     id: str
     name: str
     location: str
     note: str = ""
+    connector_id: str = ""               # 主持人指定用哪个连接器打开（认不出域名时）；空 = 按域名认
 
 
 @dataclass
@@ -220,12 +223,13 @@ class BriefSuggestion:
 
 @dataclass
 class ConnectorNeed:
-    """项目声明需要的连接器：不持有凭证。每个成员 Agent 用它所有者自己的授权（不变量 16）。"""
+    """主持人在连接器面板里手动添加的一项（没有链接也能写明要用什么）：不持有凭证。
+    每个成员 Agent 用它所有者自己的授权（不变量 16）。"""
 
     id: str
     connector_id: str                    # 连接器目录 id（云端），或电脑上的服务名
     purpose: str = ""
-    ref_id: str | None = None            # 范围：项目里的一条资源引用（只是指针，不授予访问权限）
+    ref_id: str | None = None            # 旧数据：关联的链接。迁移时并进那条链接（ResourceRef.connector_id）
 
 
 @dataclass
@@ -250,9 +254,12 @@ class Project:
     suggestions: list[BriefSuggestion] = field(default_factory=list)
     # 项目技能的记录（正文在 projects/<id>/skills/<名字>/）：{名字: {description, by_user, by_agent, approved_by, updated_at}}
     skills: dict[str, dict[str, Any]] = field(default_factory=dict)
-    connector_needs: list[ConnectorNeed] = field(default_factory=list)
-    # 共享的项目里由所有者逐个打开的连接器：{agent_id: [connection_id]}。默认没有（不变量 19）
-    connections_enabled: dict[str, list[str]] = field(default_factory=dict)
+    connector_needs: list[ConnectorNeed] = field(default_factory=list)  # 连接器面板里手动添加的
+    # 共享项目里所有者对自己连接器的授权：{agent_id: {connection_id: always | deny}}；没写的是 ask（用到时问，不变量 19）。
+    # 只给所有者看
+    connector_grants: dict[str, dict[str, str]] = field(default_factory=dict)
+    # 这个项目里实际调用过的连接器：{connector_id: {count, last_at, last_agent}}（连接器面板的一种来源）
+    connector_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 装了的插件（包在 projects/<id>/plugins/<名字>/，记录在 plugin-data/<名字>/）：
     # {名字: {version, title, source: catalog | upload, by_user, installed_at, data_rev,
     #        triggers: {key: {enabled, by_user, failures, paused, last_run, hook_hash}}}}
@@ -621,8 +628,14 @@ class Approval:
     tool: str
     reason: str                          # dsh 给出的原因，含模型写的理由
     status: str = "pending"              # pending | allowed | rejected | cancelled
-    requested_by: str | None = None      # 这次运行所在对话的所有者（联合项目是主持人）
+    requested_by: str | None = None      # sandbox：这次运行所在对话的所有者；connector：@ 它的人（委托里为空）
     note: str = ""
+    # kind=connector：共享项目里第一次要用所有者的连接器（授权是 ask），先问所有者（不变量 19）。
+    # tool 是连接器工具名，scope 是同意的范围：once（这一轮）| project（这个项目里以后都可以，写进 connector_grants）
+    kind: str = "sandbox"                # sandbox | connector
+    project_id: str | None = None
+    connection_id: str | None = None
+    scope: str = ""
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
 

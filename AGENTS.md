@@ -26,7 +26,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - **对话**：每个项目一个群聊（被 @ 的成员接任务）；人在项目里可以开多个**项目会话**，和自己的助理私下聊、带项目上下文；每个 Agent 一个私聊。**席位**是 Agent 在一个对话里的执行上下文。
 - **委托（Task）**：Agent ↔ Agent 的一次授权，异步执行、收件箱唤醒，由委托方验收。
 - **用户任务（UserRequest）**：人交代的有交付目标的事，看板上只有它。
-- **项目档案**：纲要、决定、文件、资源引用，归项目所有，按版本推送给成员。
+- **项目档案**：说明（纲要、已定的事）、资料（文件、链接）、项目技能，归项目所有，按版本推送给成员。
+  项目页另有**连接器面板**：这个项目用到了哪些外部服务、每个成员能不能用，项目从不持有谁的授权。
 - **插件**：项目装上的业务扩展（表、沙箱页面、打法、触发），只往群聊里 @ 成员，不硬编排流程。
 
 ## 按需阅读
@@ -40,7 +41,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | 项目插件（表、沙箱页面与桥、打法、触发） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
-| 连接器（外部服务）与技能，个人与项目两层 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
+| 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
@@ -125,7 +126,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 16. **Agent 不跨信任域**：跨用户协作只能通过项目（邀请了别人就是共享项目）。
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
-19. **连接器凭证只属于授权的人**：网络代调用，共享项目里默认不开。
+19. **连接器凭证只属于授权的人**：网络代调用，共享项目里用到时先问授权人。
 20. **插件代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
 21. **助理对话只替主人读与起草**：读到共享项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
 22. **信息只流向当时在场的人**：私有目录按来源场合挂载，用到别处资料的输出先给所有者确认，判断不用模型。
