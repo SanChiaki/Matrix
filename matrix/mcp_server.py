@@ -250,6 +250,19 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    # ---- 私有目录里没挂上的笔记（不变量 22）：只在这一轮有没挂上的笔记的云侧运行里出现 ----
+    {
+        "name": "open_note",
+        "description": "读你私有目录里一篇没有挂上的笔记（写在别的场合）。读过以后，你的回复要先给所有者确认才会发出。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "私有目录说明里列出的文件名（相对 agent-home/ 的路径）"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "read_request",
         "description": "读项目里一个用户任务的详情：原始要求、状态、交付说明、为它发起的委托与结果。只读。",

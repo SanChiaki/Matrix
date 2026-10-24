@@ -13,7 +13,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from typing import Annotated
 
@@ -188,7 +188,6 @@ class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field("", max_length=500)
     member_ids: list[str] = Field(default_factory=list)
-    kind: str = "internal"                          # internal（只有你和你的 Agent）| joint（联合项目）
 
 
 class ReviewIn(BaseModel):
@@ -202,10 +201,6 @@ class InviteIn(BaseModel):
 
 class RespondIn(BaseModel):
     accept: bool
-
-
-class HomeMountIn(BaseModel):
-    enabled: bool
 
 
 class BriefIn(BaseModel):
@@ -255,6 +250,10 @@ class SessionPatch(BaseModel):
 
 class AssistantIn(BaseModel):
     agent_id: str
+
+
+class HeldIn(BaseModel):
+    action: Literal["send", "grant", "rewrite"]
 
 
 class DraftSendIn(BaseModel):
@@ -534,11 +533,6 @@ def create_app(network: Network) -> FastAPI:
         network.remove_participant(project_id, user_id, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    @app.put("/api/projects/{project_id}/members/{agent_id}/home")
-    def home_mount(project_id: str, agent_id: str, body: HomeMountIn, user: Me) -> dict:
-        network.set_home_mount(project_id, agent_id, body.enabled, actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
-
     # ---- 项目档案 ----
     @app.put("/api/projects/{project_id}/brief")
     def set_brief(project_id: str, body: BriefIn, user: Me) -> dict:
@@ -805,6 +799,12 @@ def create_app(network: Network) -> FastAPI:
     def discard_draft(draft_id: str, user: Me) -> dict:
         network.discard_draft(draft_id, actor=user.id)
         return {"ok": True}
+
+    # ---- 用到别处资料、等所有者确认的回复与交付（不变量 22）：只有 Agent 的所有者能决定，别人一律 404 ----
+    @app.post("/api/held/{held_id}")
+    def decide_held(held_id: str, body: HeldIn, user: Me) -> dict:
+        h = network.decide_held(held_id, body.action, actor=user.id)
+        return {"id": h.id, "status": h.status}
 
     @app.get("/api/schedules")
     def list_schedules(user: Me) -> list:

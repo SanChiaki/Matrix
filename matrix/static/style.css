@@ -308,7 +308,9 @@ button.icon.sm { width: 22px; height: 22px; padding: 3px; }
 .proposal-card .who { display: flex; align-items: center; gap: 8px; }
 .proposal-card p { margin: 0; }
 .draft-card .draft-text { width: 100%; resize: vertical; }
-.draft-card .body { white-space: pre-wrap; }
+.draft-card .body, .held-card .body { white-space: pre-wrap; }
+.held-card .body { padding: 6px 8px; border-left: 2px solid var(--border-strong); margin: 6px 0; }
+.todo-item.held { display: block; }
 .sched-list .s { white-space: normal; }
 .tag.model { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 11px; }
 fieldset.model { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
@@ -590,7 +592,6 @@ kbd { font: 11px "SF Mono", ui-monospace, monospace; padding: 1px 5px; border-ra
 
 /* ---------- 联合群组 ---------- */
 .member-list .owner { font-size: 11px; white-space: nowrap; }
-.member-list .home-mount { font-size: 11px; gap: 4px; color: var(--muted); white-space: nowrap; }
 [role="tab"][hidden] { display: none; }
 
 /* ---------- 群组档案 ---------- */

@@ -65,7 +65,7 @@ def test_standalone_group_becomes_project(tmp_path: Path):
     _write(tmp_path, state, {"groups/group-1/files/a.md": "A", "groups/group-1/log.jsonl": "{}\n"})
     s = Store(tmp_path)
     p = s.projects["group-1"]
-    assert (p.name, p.member_ids, p.brief, p.owner_id, p.kind) == ("研究组", ["a1", "a2"], "目标", "u1", "internal")
+    assert (p.name, p.member_ids, p.brief, p.owner_id, p.shared) == ("研究组", ["a1", "a2"], "目标", "u1", False)
     assert [d.text for d in p.decisions] == ["用中文"] and [r.name for r in p.refs] == ["repo"]
     assert (s.project_dir(p.id) / "a.md").read_text(encoding="utf-8") == "A"
     assert (s.project_dir(p.id).parent / "log.jsonl").is_file()
@@ -111,7 +111,7 @@ def test_project_with_internal_groups_merges(tmp_path: Path):
     s = Store(tmp_path)
     assert set(s.projects) == {"prj-1"}
     p = s.projects["prj-1"]
-    assert (p.name, p.description, p.owner_id, p.kind) == ("上线", "大事", "u1", "internal")
+    assert (p.name, p.description, p.owner_id, p.shared) == ("上线", "大事", "u1", False)
     assert p.member_ids == ["a1", "a2", "a3"]
     assert p.brief.startswith("项目目标") and "开发组" in p.brief and "开发目标" in p.brief
     texts = [d.text for d in p.decisions]
@@ -145,7 +145,7 @@ def test_joint_group_in_project_stays_its_own_project(tmp_path: Path):
     s = Store(tmp_path)
     assert set(s.projects) == {"prj-1", "group-j"}
     j = s.projects["group-j"]
-    assert (j.kind, j.participants, j.member_ids, j.home_enabled) == ("joint", ["u2"], ["a1", "b1"], ["a1"])
+    assert (j.shared, j.participants, j.member_ids) == (True, ["u2"], ["a1", "b1"])
     assert [f.name for f in s.project_dir(j.id).iterdir()] == ["spec.md"]  # 只有共享给它的
     assert s.projects["prj-1"].member_ids == ["a1"]
     assert s.requests["req-j"].project_id == "group-j"

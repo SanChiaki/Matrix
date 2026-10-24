@@ -106,6 +106,11 @@ HOME_TOOLS = ("draft_message", "schedule", "list_schedules", "cancel_schedule")
 PLUGIN_TOOLS = ("plugin_records", "plugin_write")
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
+# 私有目录工具：这一轮有没挂上的笔记时才有，读来自别的场合的笔记（不变量 22，matrix/flow.py）
+NOTE_TOOLS = ("open_note",)
+# 会让别人看到内容的网络工具：会话读过越界的来源时一律不放行（不变量 22）。群聊回复与任务交付另外拦下等所有者确认
+OUTBOUND_TOOLS = ("record_decision", "publish_file", "propose_brief", "propose_skill", "plugin_write", "delegate",
+                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request")
 
 
 class TaskStatus(StrEnum):
@@ -166,7 +171,6 @@ class AgentNode:
         return d
 
 
-PROJECT_KINDS = ("internal", "joint")
 BRIEF_LIMIT = 4000          # 纲要（brief）每轮推送给所有成员，字符上限
 DESCRIPTION_LIMIT = 2000    # Agent 描述上限：写进它自己每轮的提示词，也出现在 list_members 里供委托方挑人
 DECISIONS_PUSHED = 12       # 每轮推送的最近有效决定条数；更早的用 list_decisions 查
@@ -228,33 +232,33 @@ class ConnectorNeed:
 class Project:
     """项目 = 成员集合 + 一个项目群聊 + 一份项目档案（docs/projects.md）。委托只发给项目成员。
 
-    internal（内部项目）：只有所有者，成员只能是所有者自己的 Agent。
-    joint（联合项目，参照 Raft 的 joint channel）：主持人（owner_id）邀请其他用户成为参与者；
-    每个参与者只能加入自己的 Agent；群聊与项目档案对所有参与者可见；Agent 仍只代表它的所有者运行。"""
+    没有类型：主持人（owner_id）随时可以邀请别人；有参与者或待处理的邀请就是**共享的**（`shared`，
+    参照 Raft 的 joint channel：共享对话空间，不共享 Agent）。每个参与者只能加入自己的 Agent；
+    群聊与项目档案对所有参与者可见；Agent 仍只代表它的所有者运行。"""
 
     id: str
     name: str
     description: str
     member_ids: list[str]
-    owner_id: str | None = None          # 内部项目的所有者 / 联合项目的主持人
-    kind: str = "internal"               # internal | joint；创建后不能转换
-    participants: list[str] = field(default_factory=list)  # 联合项目里除主持人以外、已接受邀请的用户
+    owner_id: str | None = None          # 主持人（建项目的人）
+    participants: list[str] = field(default_factory=list)  # 除主持人以外、已接受邀请的用户
     invited: list[str] = field(default_factory=list)       # 已邀请、尚未接受的用户
     brief: str = ""                      # 纲要：目标、范围、成功标准、当前阶段，每轮推送给所有成员
     brief_updated_at: float | None = None
     decisions: list[Decision] = field(default_factory=list)
     refs: list[ResourceRef] = field(default_factory=list)
     suggestions: list[BriefSuggestion] = field(default_factory=list)
-    home_enabled: list[str] = field(default_factory=list)  # 联合项目里由所有者打开了私有目录挂载的 Agent
     # 项目技能的记录（正文在 projects/<id>/skills/<名字>/）：{名字: {description, by_user, by_agent, approved_by, updated_at}}
     skills: dict[str, dict[str, Any]] = field(default_factory=dict)
     connector_needs: list[ConnectorNeed] = field(default_factory=list)
-    # 联合项目里由所有者逐个打开的连接器：{agent_id: [connection_id]}。默认没有（不变量 19）
+    # 共享的项目里由所有者逐个打开的连接器：{agent_id: [connection_id]}。默认没有（不变量 19）
     connections_enabled: dict[str, list[str]] = field(default_factory=dict)
     # 装了的插件（包在 projects/<id>/plugins/<名字>/，记录在 plugin-data/<名字>/）：
     # {名字: {version, title, source: catalog | upload, by_user, installed_at, data_rev,
     #        triggers: {key: {enabled, by_user, failures, paused, last_run, hook_hash}}}}
     plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 所有者允许 Agent 在这个项目里直接用的别处来源：{agent_id: [场合]}（不变量 22，matrix/flow.py）。只给所有者看
+    flow_grants: dict[str, list[str]] = field(default_factory=dict)
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 
@@ -263,8 +267,14 @@ class Project:
         """看得到这个项目的用户：所有者 / 主持人 + 参与者。"""
         return [u for u in [self.owner_id, *self.participants] if u]
 
+    @property
+    def shared(self) -> bool:
+        """有别人：已接受的参与者或待处理的邀请。发出第一封邀请时就算，不等对方接受。"""
+        return bool(self.participants or self.invited)
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        # kind 是推导出来的，只为插件与旧客户端兼容（joint = 共享的）
+        return {**asdict(self), "shared": self.shared, "kind": "joint" if self.shared else "internal"}
 
 
 @dataclass
@@ -283,6 +293,7 @@ class Message:
     attachments: list[dict[str, Any]] = field(default_factory=list)  # user：附件 {sha, name, size, mime}，文件在对话的附件区
     via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）、哪个助理起草的
     draft_id: str | None = None          # event：助理对话里起草的一条消息（前端渲染成确认卡）
+    held_id: str | None = None           # event：一条等所有者确认的输出（所有者看到确认卡，别人只看到“等确认”）
     ts: float = field(default_factory=time.time)
 
 
@@ -305,7 +316,9 @@ class Seat:
     archive_seen: int = -1               # 已经送达过的项目档案版本（Project.archive_rev）
     abilities_seen: str = ""             # 已经送达过的“本轮可用的连接器 / 技能”说明的指纹，没变就不再送
     state_seen: str = ""                 # 项目会话 / 助理对话：已经送达过的项目现状（摘要的指纹），没变就不再送
-    joint_seen: str = ""                 # 助理对话：已经送达过的联合项目总览的指纹（送了新的，这一轮就不能用连接器）
+    joint_seen: str = ""                 # 助理对话：已经送达过的共享项目总览的指纹（送了新的，这一轮就不能用连接器）
+    # 这个模型会话读过的别处来源（场合，matrix/flow.py）：会话续接时一直有效，换新会话才清空（不变量 22）
+    session_sources: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, Any]:
@@ -380,6 +393,7 @@ class Task:
     narrowed: dict[str, str] = field(default_factory=dict)
     effective_constraints: list[str] = field(default_factory=list)
     dsh_session_id: str | None = None
+    session_sources: list[str] = field(default_factory=list)  # 同 Seat.session_sources
     result: dict[str, Any] | None = None
     evidence: list[dict[str, Any]] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
@@ -538,6 +552,30 @@ class Draft:
     home_id: str                         # 起草所在的助理对话对话
     status: str = "pending"              # pending | sent | discarded
     message_id: str | None = None        # 发出后群聊里的那条消息
+    created_at: float = field(default_factory=time.time)
+    decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Held:
+    """一次运行用到了别处的资料、要给当时不在场的人看的输出（不变量 22）：先拦下，由 Agent 的所有者决定。
+    发出（send）、以后这个项目里可以直接用这些来源（grant）、不发并让它不用这些重写（rewrite）。"""
+
+    id: str
+    agent_id: str
+    owner_id: str | None                 # 由谁决定：Agent 的所有者
+    project_id: str
+    context_kind: str                    # seat | task
+    context_id: str                      # 席位 id 或任务 id
+    kind: str                            # reply（群聊回复）| delivery（任务交付）
+    text: str
+    sources: list[str]                   # 越界的场合
+    audience: list[str]                  # 会看到它的人
+    extra: dict[str, Any] = field(default_factory=dict)  # reply：消息的 task_ids / steps / wake、重写时退回的 seen
+    status: str = "pending"              # pending | sent | granted | rewritten
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
 

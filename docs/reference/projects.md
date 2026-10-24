@@ -3,7 +3,8 @@
 > 入口见 [AGENTS.md](../../AGENTS.md)。设计见 [docs/projects.md](../projects.md)，不变量见 [invariants.md](invariants.md) 第 2、13、16–18 条。
 
 - `Project`：成员集合与委托边界，没有主 Agent；带一个项目群聊（`Conversation.kind = project`）和一份项目档案（[archive.md](archive.md)）。
-  `internal` 只有所有者，`joint` 由主持人邀请参与者（[conversations.md](conversations.md)）。
+  没有类型：主持人随时邀请参与者，有参与者或待接受的邀请就是共享的（[conversations.md](conversations.md)）；
+  私有目录在共享项目里按来源场合挂载（不变量 22，[projects.md](../projects.md) 第 6 节）。
 - **助理**（`User.assistant_id`，`Network.assistant_of`）：注册时网络给没有 Agent 的人建一个（`ensure_assistant`，见 [assistant.md](assistant.md)）；
   没指定时是用户第一个创建的 Agent（`Store.default_assistants`，删掉后取下一个），
   `PUT /api/me/assistant` 换。人进项目（创建、接受邀请）时 `_bring_assistant` 把助理加进成员并在群聊记一条事件；

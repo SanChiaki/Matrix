@@ -24,9 +24,7 @@ def test_invite_accept_leave(tmp_path: Path):
     alice, bob, carol = users(net, "alice@x.io", "bob@x.io", "carol@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=bob)
-    g = net.create_project("J", "跨团队", [a.id], actor=alice, kind="joint")
-    with pytest.raises(NetworkError, match="未知项目类型"):
-        net.create_project("X", "", [], actor=alice, kind="public")
+    g = net.create_project("J", "跨团队", [a.id], actor=alice)
     net.invite(g.id, "bob@x.io", actor=alice)
     # 接受之前：bob 只看得到邀请（名称、主持人），看不到项目与群聊
     assert net.invitations(bob) == [{"project_id": g.id, "name": "J", "description": "跨团队", "host": "alice@x.io"}]
@@ -72,8 +70,10 @@ def test_invite_accept_leave(tmp_path: Path):
     with pytest.raises(NetworkError, match="unknown conversation"):
         net.conversation_detail(chat.id, actor=bob)
     events = [m.text for m in chat.messages if m.role == "event"]
-    assert "bob@x.io 加入了联合项目" in events and "B 离开了项目（所有者已退出）" in events
-    assert "bob@x.io 退出了联合项目" in events
+    assert events[0].startswith("项目开始与他人共享")
+    assert "bob@x.io 加入了项目" in events and "B 离开了项目（所有者已退出）" in events
+    assert "bob@x.io 退出了项目" in events
+    assert not net.store.projects[g.id].shared  # 最后一个参与者走了：回到只有所有者
 
 
 def test_host_removes_participant_and_any_agent(tmp_path: Path):
@@ -215,14 +215,16 @@ def test_retry_task_only_by_delegator_owner(tmp_path: Path):
     net.retry_task(t.id, actor=alice)
 
 
-# ================= 私有目录：联合项目默认不挂载 =================
-def test_home_not_mounted_in_joint_group_by_default(tmp_path: Path):
-    seen: list[bool] = []
+# ================= 私有目录：有别人的项目里只挂能给这里的人看的（不变量 22） =================
+def test_home_in_shared_project_hides_notes_from_elsewhere(tmp_path: Path):
+    """不变量 22：有别人的项目里私有目录照常挂载，但别处写的笔记（没有标签的老文件按“只有所有者”）不挂。"""
+    seen: list[set[str]] = []
 
     def handler(call: ScriptCall) -> str:
-        seen.append((call.cwd / "agent-home").exists())
-        if (call.cwd / "agent-home").exists():
-            (call.cwd / "agent-home" / "from-joint.md").write_text("x", encoding="utf-8")
+        home = call.cwd / "agent-home"
+        seen.append({p.name for p in home.rglob("*") if p.is_file()} if home.exists() else set())
+        if home.exists():
+            (home / "from-joint.md").write_text("x", encoding="utf-8")
         return "ok"
 
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
@@ -232,18 +234,15 @@ def test_home_not_mounted_in_joint_group_by_default(tmp_path: Path):
     g, chat = joint(net, bob, "alice@x.io", alice)
     assert a.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     net.send_message(chat.id, "@A 1", background=False, actor=bob)
-    assert seen == [False]
-    assert "没有挂载" in net.runtime.calls[-1].prompt
-    with pytest.raises(NetworkError, match="unknown agent"):
-        net.set_home_mount(g.id, a.id, True, actor=bob)  # 只有所有者能打开
-    net.set_home_mount(g.id, a.id, True, actor=alice)
-    net.send_message(chat.id, "@A 2", background=False, actor=bob)
-    assert seen == [False, True]
+    assert seen == [set()]
+    assert "`secret.md`" in net.runtime.calls[-1].prompt and "open_note" in net.runtime.calls[-1].prompt
     assert (net.agent_home(a.id) / "from-joint.md").exists()
-    # 内部项目、私聊总是挂载
+    net.send_message(chat.id, "@A 2", background=False, actor=bob)
+    assert seen[-1] == {"from-joint.md"}  # 在这里写的，这里的人都在场：挂
+    # 只有所有者的项目、私聊：全都挂
     inner = net.create_project("I", "", [a.id], actor=alice)
     net.send_message(net.project_chat(inner.id, actor=alice).id, "@A 3", background=False, actor=alice)
-    assert seen[-1] is True
+    assert seen[-1] == {"secret.md", "from-joint.md"}
 
 
 # ================= 项目档案 =================
@@ -365,9 +364,10 @@ def test_archive_api(tmp_path: Path):
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     auth.register(net.store, "eve@x.io", "password-123")
     ca, cb, ce = client(net, "alice@x.io"), client(net, "bob@x.io"), client(net, "eve@x.io")
-    g = ca.post("/api/projects", json={"name": "J", "kind": "joint"}).json()
-    assert g["kind"] == "joint"
+    g = ca.post("/api/projects", json={"name": "J"}).json()
+    assert (g["kind"], g["shared"]) == ("internal", False)
     assert ca.post(f"/api/projects/{g['id']}/invitations", json={"email": "bob@x.io"}).status_code == 200
+    assert ca.get(f"/api/projects/{g['id']}").json()["shared"]  # 发出邀请就算共享
     assert cb.get(f"/api/projects/{g['id']}").status_code == 404
     assert cb.get("/api/network").json()["invitations"][0]["host"] == "alice@x.io"
     assert cb.post(f"/api/projects/{g['id']}/invitation", json={"accept": True}).status_code == 200

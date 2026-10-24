@@ -57,14 +57,13 @@ def test_device_home_is_read_only_without_enforced_file_write(tmp_path):
     assert seen[-1]["home"] == "ro"
 
 
-def test_device_home_not_mounted_in_joint_group_by_default(tmp_path):
-    """不变量 16：联合项目里端侧私有目录同样默认不挂载，所有者打开后才挂载。"""
+def test_device_home_not_mounted_in_shared_project(tmp_path):
+    """不变量 16：端侧还没有来源标签，有别人的项目里私有目录不挂载；私聊照常挂载。"""
     net, alice, bob, a, seen = device_net(tmp_path)
     g, chat = joint(net, bob, "alice@x.io", alice)
     assert a.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     net.send_message(chat.id, "@A 1", actor=bob, background=False)
-    net.set_home_mount(g.id, a.id, True, actor=alice)
-    net.send_message(chat.id, "@A 2", actor=bob, background=False)
+    net.send_message(net.direct_chat(a.id, actor=alice).id, "2", actor=alice, background=False)
     assert [s["home"] for s in seen] == [None, "rw"]
 
 

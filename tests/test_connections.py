@@ -311,7 +311,7 @@ def test_joint_projects_keep_personal_connectors_off_until_the_owner_opens_them(
     assert net.project_detail(g.id, actor=host)["connections_enabled"] == {}
     assert net.project_detail(g.id, actor=guest)["connections_enabled"] == {ga.id: [conn["id"]]}
     internal = net.create_project("Mine", "", [], actor=guest)
-    with pytest.raises(NetworkError, match="内部项目"):
+    with pytest.raises(NetworkError, match="只有你自己的项目"):
         net.set_project_connections(internal.id, ga.id, [conn["id"]], actor=guest)
 
 
@@ -398,7 +398,7 @@ def test_device_services_become_connections_and_only_allowed_ones_are_sent(tmp_p
     net.send_message(dm.id, "再来", actor=alice, background=False)
     assert last_request(rt)["connectors"] == ["notion"]
     # 联合项目里默认关
-    g = net.create_project("J", "", [], actor=guest, kind="joint")
+    g = net.create_project("J", "", [], actor=guest)
     net.invite(g.id, "alice@x.io", actor=guest)
     net.respond_invitation(g.id, True, actor=alice)
     chat = net.project_chat(g.id, actor=guest)

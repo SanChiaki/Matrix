@@ -17,7 +17,7 @@ from dataclasses import asdict, fields
 
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
-                     Decision, Delegation, Device, Draft,
+                     Decision, Delegation, Device, Draft, Held,
                      KnowledgeItem, Message, Project, Proposal, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
                      new_id, seat_id)
 
@@ -210,6 +210,7 @@ class Store:
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
         self.connections: dict[str, Connection] = {}  # 我的连接器（凭证不在这里，见 vault.py）
         self.drafts: dict[str, Draft] = {}     # 助理在助理对话里起草、等主人确认的消息
+        self.held: dict[str, Held] = {}        # 用到别处资料、等所有者确认的输出（不变量 22）
         self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
         if self.path.exists():
             self._load()
@@ -304,6 +305,7 @@ class Store:
                 "devices": [asdict(d) for d in self.devices.values()],
                 "connections": [asdict(c) for c in self.connections.values()],
                 "drafts": [d.to_dict() for d in self.drafts.values()],
+                "held": [h.to_dict() for h in self.held.values()],
                 "schedules": [x.to_dict() for x in self.schedules.values()],
             }
             tmp = self.path.with_suffix(".tmp")
@@ -352,9 +354,10 @@ class Store:
             t["evidence"] = [current_call(e) for e in t.get("evidence") or []]  # 改名前的网络工具名
             task = Task(**_known(Task, t))
             self.tasks[task.id] = task
+        held_tasks = {h.get("context_id") for h in raw.get("held", []) if h.get("status") == "pending"}
         for task in self.tasks.values():
-            if task.status != TaskStatus.RUNNING:
-                continue
+            if task.status != TaskStatus.RUNNING or task.id in held_tasks:
+                continue  # 交付等所有者确认的任务没有在跑：照旧等确认（不变量 22）
             # 端侧任务：服务器重启不代表执行者失败，回到等待，端侧上线后继续（docs/device-runtimes.md §5）
             delegatee = next((a for a in self.agents.values() if a.id == task.delegatee_id), None)
             if delegatee is not None and delegatee.device_runtime:
@@ -393,6 +396,8 @@ class Store:
             self.connections[c["id"]] = Connection(**_known(Connection, c))
         for d in raw.get("drafts", []):  # 旧数据没有这两项：缺省为空
             self.drafts[d["id"]] = Draft(**_known(Draft, d))
+        for h in raw.get("held", []):
+            self.held[h["id"]] = Held(**_known(Held, h))
         for x in raw.get("schedules", []):
             self.schedules[x["id"]] = Schedule(**_known(Schedule, x))
         self._one_trust_domain()
@@ -421,7 +426,7 @@ class Store:
                 conv = self.conversations.get(t.conversation_id)
                 t.owners = [conv.owner_id] if conv and conv.owner_id else []
         for p in self.projects.values():
-            if p.kind != "internal" or not p.owner_id:
+            if p.shared or not p.owner_id:
                 continue
             foreign = [m for m in p.member_ids if (a := self.agents.get(m)) and a.owner_id and a.owner_id != p.owner_id]
             if not foreign:
@@ -433,7 +438,7 @@ class Store:
                 for m in foreign:
                     chat.messages.append(Message(id=new_id("msg"), role="event", agent_id=m,
                                                  text=f"{self.agents[m].name} 因为不属于你而被移出项目"
-                                                      "（Agent 只能为它的所有者工作；跨用户协作请用联合项目）"))
+                                                      "（Agent 只能为它的所有者工作；跨用户协作请邀请对方加入项目）"))
 
     def claim_orphans(self, user_id: str) -> None:
         """第一个注册的用户认领所有还没有所有者的数据（旧版本的单人数据）。调用方持有锁。"""

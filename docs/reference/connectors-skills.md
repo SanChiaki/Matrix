@@ -12,7 +12,7 @@
 | --- | --- | --- | --- |
 | 项目技能 | `projects/<id>/skills/<名字>/`，元数据在 `Project.skills` | 主持人（UI）或经主持人批准的 `propose_skill` 提议 | 项目里所有人（档案的一部分，不变量 17） |
 | 连接器自带的技能 | `cache/connector-skills/<连接器>/`，从 `connectors.json` 生成 | 部署方 | 用到这个连接器的那一轮 |
-| 我的技能 | `users/<uid>/skills/<名字>/`；Agent 勾选在 `Agent.skills` | 本人 | 只有本人（不变量 13）；勾上的跟着 Agent 进联合项目 |
+| 我的技能 | `users/<uid>/skills/<名字>/`；Agent 勾选在 `Agent.skills` | 本人 | 只有本人（不变量 13）；勾上的跟着 Agent 进共享项目 |
 | Agent 自己攒的 | 私有目录里的 `agent-home/skills/` | Agent 自己 | 网络不读（不变量 8） |
 
 - **维护方式**：技能按 Agent Skills 标准在本地写好（一个文件夹：`SKILL.md` 的 frontmatter 有 `name`、`description`，
@@ -39,7 +39,7 @@
 Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（云端连接给云端 Agent；电脑上的给同一台电脑、同一个 AI 工具上的 Agent）。
 
 **一轮的有效连接器** = 勾给这个 Agent 的 ∩ 状态正常 ∩ 位置对得上 ∩ 这一轮的有效权限里有 `connector.use`
-∩（在联合项目里，包括自己主持的）所有者在这个项目里打开了的（`Project.connections_enabled`，只有所有者能改、只有所有者看得到）。
+∩（在共享项目里，包括自己主持的）所有者在这个项目里打开了的（`Project.connections_enabled`，只有所有者能改、只有所有者看得到）。
 委托不授予 `connector.use`，下游这一轮就没有（不变量 1、3）。有变化时提示词里按名字列出（`protocol.format_abilities`）。
 
 ### 云端
@@ -91,7 +91,7 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 | `GET /api/connectors` | 云端连接器目录（不含地址） |
 | `GET/POST /api/me/connections`、`POST .../<id>/check`、`DELETE .../<id>`、`GET .../<id>/calls` | 我的连接 |
 | `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 项目需要的连接器 |
-| `PUT /api/projects/<id>/members/<agent>/connections` | 联合项目里打开我的连接器 |
+| `PUT /api/projects/<id>/members/<agent>/connections` | 共享项目里打开我的连接器 |
 | `PATCH /api/agents/<id>` 的 `skills`、`connections` | Agent 勾选 |
 | `/internal/connectors/list`、`/internal/connectors/call` | 运行时回调，只凭执行上下文令牌 |
 

@@ -23,7 +23,7 @@ def users(net: Network, *emails: str) -> list[str]:
 
 def joint(net: Network, host: str, guest_email: str, guest: str, members: list[str] | None = None):
     """主持人建联合项目、邀请 guest，guest 接受。返回 (项目, 群聊)。"""
-    g = net.create_project("J", "联合", members or [], actor=host, kind="joint")
+    g = net.create_project("J", "联合", members or [], actor=host)
     net.invite(g.id, guest_email, actor=host)
     net.respond_invitation(g.id, True, actor=guest)
     return g, net.project_chat(g.id, actor=host)
@@ -104,14 +104,12 @@ def test_groups_are_private_to_owner(tmp_path: Path):
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     g = net.create_project("G", "", [a.id], actor=alice)
-    assert g.kind == "internal" and net.snapshot(bob)["projects"] == []
+    assert not g.shared and net.snapshot(bob)["projects"] == []
     with pytest.raises(NetworkError, match="unknown project"):
         net.project_chat(g.id, actor=bob)
     chat = net.project_chat(g.id, actor=alice)
     with pytest.raises(NetworkError, match="unknown conversation"):
         net.send_message(chat.id, "@A hi", actor=bob)
-    with pytest.raises(NetworkError, match="内部项目"):
-        net.invite(g.id, "bob@x.io", actor=alice)
 
 
 def test_legacy_shared_agents_migrate_to_owner_only(tmp_path: Path):

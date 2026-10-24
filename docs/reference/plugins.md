@@ -39,7 +39,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
 
 - 来源：部署方目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，默认 `<data>/plugins.json`，`{"plugins": ["相对目录", ...]}`，
   按文件与清单的修改时间热加载），或主持人上传。**只有主持人**装、升级、卸载、启停触发（`hosted_project`）；
-  联合项目的参与者看得到装了什么、申请了哪些能力（`project_detail.plugin_list`）。
+  共享项目的参与者看得到装了什么、申请了哪些能力（`project_detail.plugin_list`）。
 - 装好的包在 `projects/<id>/plugins/<name>/`，元数据在 `Project.plugins[name]`
   （`version, title, source, by_user, installed_at, data_rev, triggers: {key: {enabled, by_user, failures, paused, last_fired, error, hook_hash}}`）。
   安装、升级、卸载、启停触发都是档案变化：`archive_rev` +1、写 `log.jsonl`、群聊里一条公开说明（写明“以看页面的人的名义”与申请的能力）。
