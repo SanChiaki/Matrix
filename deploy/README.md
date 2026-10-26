@@ -16,7 +16,7 @@ docker compose up -d --build
 
 服务器的安全组要放行 TCP 80 和 443。
 
-临时关掉 basic auth：在 `.env` 里写 `MATRIX_BASIC_AUTH=off`，然后执行 `docker compose up -d`。关掉之后只剩 Matrix 自己的简易登录（没有 CSRF 防护、没有限流、令牌不过期），而 DSH 能在服务器上执行命令，所以这种状态只适合短时间的演示。
+临时关掉 basic auth：在 `.env` 里写 `MATRIX_BASIC_AUTH=off`，然后执行 `docker compose up -d`。关掉时不需要 `MATRIX_BASIC_HASH`，可以不填；只认 `on` / `off`，写成别的值 Caddy 会起不来，不会悄悄放开。关掉之后只剩 Matrix 自己的简易登录（没有 CSRF 防护、没有限流、令牌不过期），而 DSH 能在服务器上执行命令，所以这种状态只适合短时间的演示。
 
 ## 配置模型凭据（DSH）
 
