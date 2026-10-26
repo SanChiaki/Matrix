@@ -13,6 +13,7 @@ dependencies = [
 matrix = "matrix.server:main"
 matrix-connect = "matrix.connector.main:main"
 matrix-plugin = "matrix.plugin_check:main"
+matrix-dsh-check = "matrix.dsh_check:main"
 
 [build-system]
 requires = ["hatchling"]

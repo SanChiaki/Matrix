@@ -53,6 +53,35 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 （`matrix/compat.py`），方便时改成 `MATRIX_*`。已配对的电脑升级连接器后运行一次 `matrix-connect install`（不重新配对），
 见 [docs/reference/device-runtimes.md](../docs/reference/device-runtimes.md)。
 
+## 升级 dsh
+
+云端 dsh 的版本钉在 [Dockerfile](Dockerfile) 的 `ARG DSH_VERSION`，`git pull` 不会顺带升级它。仓库里改这个版本号时，
+先在本机对新版本跑一遍冒烟检查（`matrix-dsh-check`，见 `matrix/dsh_check.py`）：
+
+```bash
+npm install --prefix /tmp/dsh-new @deepseek-ai/dsh@<版本>
+uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh           # 静态：插件 id、覆盖层能加载，不调模型
+uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    # 实际跑：回复、续接、技能、委托、连接器、沙箱审批
+```
+
+`--live` 要 dsh 能调模型：本机单独装的 dsh 可能解析不了桌面 App 存的凭据，用账号登录的加 `--model deepseek-account/deepseek-flash`；
+都不行就只在本机跑静态检查，实际检查留到容器里。
+
+静态检查专门盯 dsh 的一个行为：覆盖层里写了不存在的插件 id 时 dsh 只警告、照常运行。被按权限禁用的插件在新版本里改了名，
+就会在没有权限时重新可用，所以“找不到”算失败；新出现的 `tool-*` 插件给提醒，确认要不要按权限禁用（`runtime.AUTHORITY_PLUGINS` /
+`ALWAYS_DISABLED`）再加进 `dsh_check.KNOWN_TOOLS`。
+
+服务器上更新前先备份 `dsh-home`（新版本可能改会话格式），更新后在容器里再跑一次：
+
+```bash
+docker run --rm -v matrix_dsh-home:/d -v "$PWD":/b alpine tar czf /b/dsh-home.tgz -C /d .
+cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
+docker compose exec matrix matrix-dsh-check --live
+```
+
+不想等仓库改版本号、临时换一个版本：`docker compose build --build-arg DSH_VERSION=<版本> && docker compose up -d`
+（下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `dsh-home`。
+
 ## 证书
 
 由 `deploy/.env` 里的 `MATRIX_TLS_ISSUER` 决定：

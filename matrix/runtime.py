@@ -44,6 +44,8 @@ AUTHORITY_PLUGINS: dict[str, list[str]] = {
 # （被覆盖层禁用的插件不会出现）与沙箱策略，权限不会超出父 Agent。
 ALWAYS_DISABLED = [
     "tool-plugin-manager",
+    # 0.2.1 起：会话可以切换工作目录。席位与任务的会话按工作目录存放、产物按工作目录收，不让它换
+    "tool-working-directory",
 ]
 
 # npm 在 Windows 上生成的 .cmd 包装：... "%_prog%"  "%dp0%\node_modules\<包>\<入口>.js" %*
