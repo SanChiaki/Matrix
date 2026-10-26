@@ -7,18 +7,25 @@
 	default_sni {$MATRIX_SITE}
 }
 
+# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
+# 片段只在被 import 时才解析：MATRIX_BASIC_AUTH=off 时不需要 MATRIX_BASIC_HASH
+# （只剩 Matrix 自己的登录，不安全，只用于临时演示）。
+(basic-auth-on) {
+	basic_auth {
+		{$MATRIX_BASIC_USER:matrix} {$MATRIX_BASIC_HASH}
+	}
+}
+(basic-auth-off) {
+}
+
 {$MATRIX_SITE} {
 	# 显式写 tls：default_sni 才会生成“空 SNI 也用这张证书”的连接策略
 	tls {
 		issuer {$MATRIX_TLS_ISSUER:internal}
 	}
 
-	# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
-	# MATRIX_BASIC_AUTH=off 时关掉（只剩 Matrix 自己的登录，不安全，只用于临时演示）。
-	@guarded expression `"{$MATRIX_BASIC_AUTH:on}" != "off"`
-	basic_auth @guarded {
-		{$MATRIX_BASIC_USER} {$MATRIX_BASIC_HASH}
-	}
+	# 按 MATRIX_BASIC_AUTH 选上面的片段；写错（不是 on / off）时 Caddy 起不来，不会悄悄放开
+	import basic-auth-{$MATRIX_BASIC_AUTH:on}
 
 	# /internal/* 只给容器里的 dsh / MCP 回调用（走 127.0.0.1），不对外
 	@internal path /internal/*

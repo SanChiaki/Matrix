@@ -36,7 +36,7 @@ services:
       MATRIX_TLS_ISSUER: ${MATRIX_TLS_ISSUER:-internal}   # acme = Let's Encrypt（MATRIX_SITE 须是域名）
       MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-on}   # off = 关掉 basic auth（不安全）
       MATRIX_BASIC_USER: ${MATRIX_BASIC_USER:-matrix}
-      MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:?在 deploy/.env 里设置 MATRIX_BASIC_HASH（caddy hash-password 生成）}
+      MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:-}   # caddy hash-password 生成；basic auth 开着时必填，关掉时不用
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
