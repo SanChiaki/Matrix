@@ -4,6 +4,8 @@
 
 - 静态（不调模型）：版本；headless 的组合配置读得出来；覆盖层引用的插件都还在（dsh 对找不到的插件只在 stderr 警告、
   照常运行，被禁用的插件改了名就会在没有权限时重新可用）；有没有新的工具插件要按权限管；带全部桥的覆盖层能加载。
+- 平台配的模型供应商（不调真模型：本机起一个假的 OpenAI 兼容服务）：覆盖层里的供应商生效、密钥经环境变量带上，
+  而 Agent 的命令看不到这个密钥（printenv、各进程的 /proc/*/environ、ps eww）。research: deepseek-harness#model-providers
 - 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批。
 
     uv run matrix-dsh-check [--dsh-bin dsh] [--live] [--model provider/model] [--only resume,approval] [--keep]
@@ -29,8 +31,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
-from .runtime import (ALWAYS_DISABLED, AUTHORITY_PLUGINS, ApprovalBridge, ConnectorBridge, DshRuntime, ToolBridge,
-                      argv, build_patch_yaml)
+from .model_catalog import ModelPreset, Provider, llm_config
+from .runtime import (ALWAYS_DISABLED, AUTHORITY_PLUGINS, ApprovalBridge, ConnectorBridge, DshRuntime, RunRequest,
+                      ToolBridge, argv, build_patch_yaml)
 
 # 覆盖层按 id 配置的插件（不是 insert 进去的）：必须在 dsh 的组合配置里
 CONFIGURED = ["skill-filesystem", "agent-default-model"]
@@ -125,6 +128,95 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
                else "没有权限的覆盖层：网络工具、连接器桥、审批应答者都装上，按权限禁用的插件都关了")
     return not missing
+
+
+# ================= 平台配的模型供应商（假服务，不调真模型） =================
+PROVIDER_DONE = "MATRIX-PROVIDER-OK"
+
+
+class FakeProvider:
+    """OpenAI chat completions 的最小假服务（SSE）。带工具的第一次请求让 Agent 用 bash 找密钥，之后收尾；
+    记下每次请求的认证头、模型、推理强度与工具结果。"""
+
+    def __init__(self, probe: str) -> None:
+        self.requests: list[dict[str, Any]] = []
+        fake = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                tools = {t.get("function", {}).get("name") for t in body.get("tools") or []}
+                results = [str(m.get("content")) for m in body.get("messages") or [] if m.get("role") == "tool"]
+                fake.requests.append({"auth": self.headers.get("Authorization") or self.headers.get("x-api-key") or "",
+                                      "model": body.get("model"), "effort": body.get("reasoning_effort"),
+                                      "bash": "bash" in tools, "results": results})
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+
+                def chunk(delta: dict[str, Any], finish: str | None = None) -> None:
+                    c = {"id": "x", "object": "chat.completion.chunk", "created": 0, "model": body.get("model"),
+                         "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+                    self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
+
+                if "bash" in tools and not results:
+                    args = json.dumps({"description": "check", "command": probe})
+                    chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                                                                "function": {"name": "bash", "arguments": args}}]})
+                    chunk({}, "tool_calls")
+                else:
+                    chunk({"role": "assistant", "content": PROVIDER_DONE})
+                    chunk({}, "stop")
+                self.wfile.write(b"data: [DONE]\n\n")
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
+def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: float = 120) -> None:
+    secret = "sk-matrix-check-" + secrets.token_hex(8)
+    # 命令里不能出现密钥本身（ps 会看到这条命令）：按变量名找，[Y] 让 grep 不匹配到自己
+    prov0 = Provider(id="matrix-check", name="Matrix check", api="openai-completions", base_url="http://127.0.0.1:9")
+    pattern = prov0.key_env[:-1] + "[" + prov0.key_env[-1] + "]="
+    probe = (f"printenv {prov0.key_env} >/dev/null; echo PRINTENV=$?; "
+             f"echo PROC=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{pattern}'); "
+             f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}')")
+    fake = FakeProvider(probe)
+    try:
+        prov = Provider(id=prov0.id, name=prov0.name, api=prov0.api, base_url=fake.url)
+        preset = ModelPreset(id="check", label="Fake", provider=prov.id, model="fake-1", reasoning_effort="high")
+        res = rt.run(RunRequest(agent_id="check", context_id="provider", prompt="跑一下", cwd=workdir / "provider",
+                                authority=list(AUTHORITY_PLUGINS), model=preset.run_model(), timeout_s=timeout_s,
+                                llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
+                                env={prov.key_env: secret}))
+    finally:
+        fake.server.shutdown()
+    reqs = fake.requests
+    if not reqs:
+        report.add(FAIL, "provider", f"覆盖层里的供应商没生效：dsh 没请求假服务（{res.error or '没有报错'}）"[:400])
+        return
+    bad_auth = [r for r in reqs if secret not in r["auth"]]
+    report.add(FAIL if bad_auth else OK, "provider",
+               f"{len(bad_auth)}/{len(reqs)} 次请求没带上环境变量里的密钥" if bad_auth
+               else f"覆盖层里的供应商生效，{len(reqs)} 次请求都带着环境变量里的密钥，模型 {reqs[-1]['model']}")
+    efforts = {r["effort"] for r in reqs if r["bash"]}
+    if efforts != {"high"}:
+        report.add(WARN, "effort", f"推理强度 high 到供应商那里是 {sorted(map(str, efforts))}（model_catalog.llm_config 的映射可能要改）")
+    results = " ".join(x for r in reqs for x in r["results"])
+    leaked = [k for k, ok in (("printenv", "PRINTENV=0" not in results), ("/proc", re.search(r"PROC=[1-9]", results) is None),
+                              ("ps", re.search(r"PS=[1-9]", results) is None)) if not ok]
+    if "PRINTENV=" not in results:
+        report.add(FAIL, "key-hidden", f"Agent 的 bash 没跑起来，没法确认看不到密钥：{results[:200] or res.error or res.final_text}"[:400])
+    else:
+        report.add(FAIL if leaked else OK, "key-hidden",
+                   f"Agent 的命令看得到供应商密钥（{'、'.join(leaked)}）：不能把密钥交给 dsh 进程的环境" if leaked
+                   else "Agent 的命令看不到供应商密钥（printenv、/proc/*/environ、ps eww）")
+    if PROVIDER_DONE not in (res.final_text or ""):
+        report.add(FAIL, "provider-end", f"这一轮没正常收尾：{res.error or res.final_text}"[:300])
 
 
 # ================= 实际跑（--live） =================
@@ -339,6 +431,8 @@ def main() -> None:
     root = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-"))
     report = Report()
     ok = static_checks(rt, report, root)
+    if ok:
+        provider_checks(rt, report, root)
     if args.live and ok:
         provider, _, name = args.model.partition("/")
         live_checks(rt, report, root, args.timeout, {x.strip() for x in args.only.split(",") if x.strip()},

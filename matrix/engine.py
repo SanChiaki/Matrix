@@ -15,11 +15,13 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import mimetypes
 import os
 import re
 import secrets
 import shutil
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -48,7 +50,7 @@ from .auth import Pairings
 from .workdir import DELIVERIES
 from .device import DeviceRuntime
 from .homedir import HomeMount
-from .model_catalog import ModelCatalog
+from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
@@ -365,6 +367,19 @@ class Network:
     def run_model(self, a: AgentNode) -> dict[str, str] | None:
         """交给运行时的模型；None = 运行时自己的默认。"""
         return self.model_info(a)["model"]
+
+    def _llm_provider(self, a: AgentNode) -> tuple[dict[str, Any] | None, dict[str, str]]:
+        """云侧 Agent 这一轮用平台配的供应商时：(给覆盖层的供应商配置, 只给这个 dsh 进程的环境变量)。
+        密钥只在这里解开、只进环境变量；端侧 Agent、dsh 里已配置的供应商都返回 (None, {})。"""
+        if a.device_runtime:
+            return None, {}
+        info = self.model_info(a)
+        prov = self.models.provider((info["model"] or {}).get("provider"))
+        preset = self.models.get(info["preset"])
+        if prov is None or preset is None:
+            return None, {}
+        key = self.vault.get(_provider_vault(prov.id)).get("api_key")
+        return {"id": prov.id, "config": llm_config(prov, preset)}, ({prov.key_env: key} if key else {})
 
     def _check_device_runtime(self, device_id: str | None, actor: str | None) -> None:
         """只能绑定自己的、未吊销的设备（不变量 16）。调用方持有锁。"""
@@ -4003,12 +4018,14 @@ class Network:
         try:
             with self._lock:
                 materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime else []
+                llm_provider, llm_env = self._llm_provider(agent)
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
                                               approvals=approvals, materials=materials, home=home,
                                               harness=agent.harness, cancel=cancel, connectors=connectors,
-                                              local_connectors=[c.connector_id for c in conns if c.where != "cloud"]))
+                                              local_connectors=[c.connector_id for c in conns if c.where != "cloud"],
+                                              llm_provider=llm_provider, env=llm_env))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -4038,8 +4055,8 @@ class Network:
                 "model": " / ".join(x for x in (model.get("provider"), model.get("model")) if x) if model else None,
                 "ok": res.ok, "error": "device_offline" if offline else res.error_class,
                 "tools": len(res.tool_calls), "usage": dict(res.usage)})
-        except OSError as e:
-            self.bus.emit("usage.error", error=_short(repr(e), 200))
+        except OSError as e:  # 只给部署方看日志：事件会推给所有人，错误里有服务器路径
+            print(f"[matrix] 用量台账写不进去：{e}", file=sys.stderr)
 
     # ================= 网络工具（MCP） =================
     def handle_tool(self, token: str, name: str, args: dict[str, Any]) -> tuple[str, bool]:
@@ -4896,6 +4913,68 @@ class Network:
                                connector_calls=calls, counts=counts, now=now, days=days,
                                recording_since=self.usage.first_ts())
 
+    def admin_models(self, actor: str | None) -> dict[str, Any]:
+        """管理后台的模型目录：目录本身，加上每个模型有几个云侧 Agent 在用、几个用默认，
+        以及在用但不在目录里的模型（启用目录前自己填的、选的已下架）。只给数量，不给 Agent 名。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        out = self.models.admin()
+        used: dict[str, int] = {}
+        unlisted: dict[str, dict[str, Any]] = {}
+        default_agents = 0
+        with self._lock:
+            for a in self.store.agents.values():
+                if a.device_runtime:
+                    continue
+                info = self.model_info(a)
+                if info["source"] == "preset":
+                    used[info["preset"]] = used.get(info["preset"], 0) + 1
+                    continue
+                if not (a.model or a.model_preset):
+                    default_agents += 1
+                    continue
+                if info["source"] == "default":
+                    default_agents += 1  # 选的不在目录里：这一轮起用默认
+                key = json.dumps(a.model, sort_keys=True) if a.model else f"preset:{a.model_preset}"
+                row = unlisted.setdefault(key, {**(a.model or {}), "preset": None if a.model else a.model_preset,
+                                                "agents": 0})
+                row["agents"] += 1
+        out["models"] = [{**m, "agents": used.get(m["id"], 0)} for m in out["models"]]
+        # 密钥只写不读：只告诉管理员设没设
+        out["providers"] = [{**p, "has_key": self._has_provider_key(p["id"])} for p in out["providers"]]
+        out["default_agents"] = default_agents
+        out["unlisted"] = sorted(unlisted.values(), key=lambda r: -r["agents"])
+        out["runtime_default"] = getattr(self.runtime, "default_model", lambda: None)()
+        return out
+
+    def _has_provider_key(self, provider_id: str) -> bool:
+        try:
+            return bool(self.vault.get(_provider_vault(provider_id)).get("api_key"))
+        except VaultError:  # 保管密钥换过：当作没设，管理员重新填
+            return False
+
+    def admin_save_models(self, actor: str | None, data: dict[str, Any], rev: str,
+                          keys: dict[str, str] | None = None) -> dict[str, Any]:
+        """整份保存模型目录（docs/reference/admin.md）。keys：这次新填的供应商密钥（没填的沿用原来的），
+        存进保管库，不进目录文件；删掉的供应商连同密钥一起删。保存后正在看 Agent 页的人刷新模型列表。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        before = {p.id for p in self.models.providers()}
+        try:
+            self.models.save(data, rev)
+        except CatalogConflict:
+            raise
+        except ValueError as e:
+            raise NetworkError(f"模型目录不对：{e}") from e
+        except OSError as e:  # 部署方把 --models 指到了只读的文件
+            raise NetworkError(f"模型目录写不进去（{self.models.path}）：{e.strerror or e}") from e
+        now = {p.id for p in self.models.providers()}
+        for pid in before - now:
+            self.vault.delete(_provider_vault(pid))
+        for pid, key in (keys or {}).items():
+            if pid in now and key:
+                self.vault.put(_provider_vault(pid), {"api_key": key})
+        self.bus.emit("models.updated")
+        return self.admin_models(actor)
+
     def snapshot(self, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             agents = [a for a in self.store.agents.values() if self.can_see_agent(a, actor)]
@@ -5258,6 +5337,11 @@ def _safe_filename(name: str) -> str:
     if not clean:
         raise NetworkError("文件名无效")
     return clean
+
+
+def _provider_vault(provider_id: str) -> str:
+    """平台模型供应商的密钥在保管库里的名字（连接的保管项用连接 id，不会撞上）。"""
+    return f"model-provider-{provider_id}"
 
 
 def _clean_model(v: dict[str, Any] | None) -> dict[str, str] | None:

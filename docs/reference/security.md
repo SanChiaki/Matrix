@@ -22,7 +22,13 @@
   复查时机：做读隔离、或端侧接入来源标签时。
 - **管理后台**（[admin.md](admin.md)）：管理员由部署方按邮箱指定（`--admins` / `MATRIX_ADMINS`），没指定时是最早注册的人——
   多用户部署要显式指定，不要靠“谁先注册”。后台只看用量不看内容：统计与用量台账里没有项目名、Agent 名、消息正文与提示词，
-  非管理员按不存在（404）处理。
+  非管理员按不存在（404）处理。管理员还能编辑云侧模型目录（`models.json`），它决定所有云侧 Agent 能用哪些模型。
+- **模型供应商密钥**（[admin.md](admin.md) 模型目录）：管理员填的密钥只写不读，存在 `vault/model-provider-<id>.bin`，
+  不进 `models.json`、`state.json`、事件、日志、台账与 API 返回；只在云侧用到它的那一轮放进那个 dsh 进程的环境变量，覆盖层里只有变量名，
+  端侧从不下发。Agent 的命令看不到它靠的是 dsh 按变量名过滤（名字里有 `KEY`），由 `matrix-dsh-check` 的 `key-hidden` 在真实 dsh 上核对
+  （Linux 容器里能不能经 `/proc/<pid>/environ` 读到父进程环境只有在容器里跑才知道，升级 dsh 后必须在容器里跑一次）。
+  供应商地址由管理员填，可以是内网（本机的模型服务），请求由 dsh 发出，普通用户改不了。
+  **已知风险（接受）**：读隔离之前，被诱导的云侧模型可以直接读 `--data` 下的 `vault/` 与 `vault.key` 解出密钥，和连接器凭证一样（见第一条）。
 - 项目档案文件经 `/api/projects/<id>/files/<name>` 一律以附件下载（`nosniff`），不在本站点内渲染；文件名经 `_safe_filename` 只取最后一段。
   对话附件（`/api/conversations/<id>/attachments/<sha>`）同样以附件下载，上传、下载都先查对话可见性；上传的内容按大小上限流式截断（413）。
 - 没有 `file.write` 的 Agent 运行在只读沙箱；有则只能写自己的工作目录。不要绕过 `build_patch_yaml` 生成的限制，

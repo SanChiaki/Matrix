@@ -45,7 +45,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
-| 管理后台、用量台账（只看用量不看内容） | [docs/reference/admin.md](docs/reference/admin.md) |
+| 管理后台：用量台账（只看用量不看内容）、云侧模型目录 | [docs/reference/admin.md](docs/reference/admin.md) |
 | 需求与实现状态 | [REQUIREMENTS.md](REQUIREMENTS.md) |
 
 ## 模块地图
@@ -63,13 +63,13 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
-| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
+| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
 | `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
 | `matrix/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `MATRIX_CONNECTORS`），热加载；地址只来自这里 |
-| `matrix/vault.py` | 连接器凭证的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |
+| `matrix/vault.py` | 连接器凭证与模型供应商密钥的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |
 | `matrix/mcp_client.py` | 网络这一侧的远程 MCP 客户端（Streamable HTTP，JSON / SSE），代调用云端连接器 |
 | `matrix/mcp_connectors.py` | 运行时这一侧的 stdio 桥：把连接器工具转发到 `/internal/connectors/*`，只带执行上下文令牌 |
-| `matrix/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写 |
+| `matrix/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（管理后台的“模型”页也编辑它，带版本整份保存）（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写。也存平台配的模型供应商（协议、地址；密钥在 vault），用到时覆盖层只写那一个供应商（`llm_config` / `Network._llm_provider`） |
 | `matrix/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `matrix/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
 | `matrix/flow.py` | 信息流的判断（不变量 22）：私有目录文件的来源标签、在场的人、挂载与放行，纯函数集合比较，不用模型 |
@@ -167,5 +167,5 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
 - `/internal/tools`、`/internal/approval`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准；覆盖层要一直关掉 dsh 的默认技能根。
-- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录，用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽。
+- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽。
 - 已知风险：沙箱只管写、不管读。接入第二个运行时或任何多机部署之前，必须先做读隔离。

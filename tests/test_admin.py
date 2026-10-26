@@ -124,3 +124,25 @@ def test_admins_named_by_deployer(tmp_path: Path):
     assert _login(partner, "partner@example.com")["admin"] is True
     assert owner.get("/api/admin/usage").status_code == 404
     assert partner.get("/api/admin/usage").status_code == 200
+
+
+def test_admin_usage_counts_connector_calls(tmp_path: Path):
+    """连接器调用来自各连接的 calls.jsonl，按授权人算（只数次数与成败，不看调用内容）。"""
+    from matrix.models import Connection
+    net = Network(ScriptedRuntime(_talk), tmp_path, seed=False)
+    c = TestClient(create_app(net))
+    me = _login(c, "owner@example.com")
+    conn = Connection(id="conn-1", owner_id=me["id"], connector_id="docs", name="文档")
+    net.store.connections[conn.id] = conn
+    log = tmp_path / "connections" / conn.id / "calls.jsonl"
+    log.parent.mkdir(parents=True)
+    now = time.time()
+    log.write_text("\n".join([json.dumps({"ts": now, "ok": True, "tool": SECRET}),
+                              json.dumps({"ts": now, "ok": False, "tool": "search"}),
+                              json.dumps({"ts": now - 400 * 86400, "ok": True}),  # 范围外
+                              "{broken"]) + "\n", encoding="utf-8")
+    r = c.get("/api/admin/usage", params={"days": 7})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["totals"]["connector_calls"] == 2 and d["totals"]["connector_failed"] == 1
+    assert d["users"][0]["connector_calls"] == 2 and SECRET not in r.text

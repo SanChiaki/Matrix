@@ -504,7 +504,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”</p></div>
           <div class="part"><h4>CLI</h4><p><code>matrix.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP；<code>matrix-plugin check</code> 在本地校验插件包；<code>matrix-dsh-check</code> 在升级云端 dsh 前后对真实 dsh 跑冒烟检查</p></div>
           <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt）、HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
-          <div class="part"><h4>管理后台</h4><p><code>/admin</code> 给部署方指定的管理员看整个网络的用量：人数、轮次、token、失败原因，按天、按用户、按模型分组；只有计数，不含任何对话与项目内容</p></div>
+          <div class="part"><h4>管理后台</h4><p><code>/admin</code> 给部署方指定的管理员看整个网络的用量：人数、轮次、token、失败原因，按天、按用户、按模型分组，只有计数、不含任何对话与项目内容；并配置云侧 Agent 能选的模型与模型供应商（协议、地址、密钥）</p></div>
           <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准工作区外溢与沙箱升权 · 确认助理起草的消息 · 验收、退回、取消自己下发的用户任务 · 看、停、删自己的定时</p></div>
         </div></div></div>
       </div>
@@ -553,7 +553,7 @@ footer a { color: var(--text-2); }
           <li><code>flow/&lt;id&gt;.json</code>私有目录文件的来源标签，Agent 写不到</li>
           <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code>；<code>plugins/</code> 装好的插件包，<code>plugin-data/</code> 插件记录</li>
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
-          <li><code>vault/</code>连接器凭证，加密保存，只在代调用时解开</li>
+          <li><code>vault/</code>连接器凭证与模型供应商密钥，加密保存，只在代调用或那一轮运行时解开</li>
           <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
           <li><code>models.json</code> · <code>connectors.json</code> · <code>plugins.json</code>云侧预置模型、云端连接器与插件目录，改文件即生效</li>
         </ul></div></div>
@@ -570,7 +570,7 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-cloud"><div><div class="parts">
-          <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型；只读网络给的技能，不读服务机上的</p></div>
+          <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型与平台配的供应商（密钥只经那个进程的环境变量）；只读网络给的技能，不读服务机上的</p></div>
           <div class="part"><h4>网络工具</h4><p>stdio MCP 服务回调 <code>/internal/tools</code>，凭这一轮的执行上下文令牌</p></div>
           <div class="part"><h4>连接器桥</h4><p>外部服务的工具也回调网络（<code>/internal/connectors</code>），网络查这一轮能用哪些，带上凭证代为调用并记录</p></div>
           <div class="part"><h4>审批应答</h4><p>沙箱升权申请转给 Agent 所有者决定，从不自动批准</p></div>

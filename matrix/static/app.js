@@ -454,6 +454,7 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "plugin.violation") return;
+  if (ev.type === "models.updated") { loadModels(); return; }  // 管理后台改了模型目录
   if (ev.type === "schedule.updated") { loadSchedules(); return; }
   if (ev.type === "draft.updated" && S.view === "board") loadBoard();
   if (ev.type === "held.updated") {
