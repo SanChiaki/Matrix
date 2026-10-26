@@ -45,6 +45,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
+| 管理后台、用量台账（只看用量不看内容） | [docs/reference/admin.md](docs/reference/admin.md) |
 | 需求与实现状态 | [REQUIREMENTS.md](REQUIREMENTS.md) |
 
 ## 模块地图
@@ -74,12 +75,13 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/flow.py` | 信息流的判断（不变量 22）：私有目录文件的来源标签、在场的人、挂载与放行，纯函数集合比较，不用模型 |
 | `matrix/store.py` | 持久化、旧数据迁移（`_merge_groups`：群组 + 项目两层合成一层，`_one_chat_each`、`_one_trust_domain`）与种子数据（5 个种子 Agent + 一个研究项目；服务默认不预置，CLI 与测试预置） |
 | `matrix/compat.py` | 改名兼容（代码原名 agentnet）：部署方环境变量 `MATRIX_*` 没设时读 `AGENTNET_*`（`env`）、默认数据目录沿用旧的 `.agentnet`（`data_dir`）、旧网络工具名换成 `mcp__matrix_net__*`（`current_tool`，用于旧 state.json 与没升级的连接器）。改名相关的兼容都放这里 |
+| `matrix/usage.py` | 用量台账（`<data>/usage.jsonl`，每次运行时调用一行，不记内容）与管理后台的统计（纯函数）；引擎里的管理员认定与汇总在 `engine.py`「管理后台」一节 |
 | `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、打法、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -95,6 +97,7 @@ uv run matrix                                   # 使用 DSH 运行时（需 PAT
 uv run matrix --models models.json              # 云侧只允许 models.json 里的预置模型（改文件即生效）
 uv run matrix --connectors connectors.json      # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
 uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
+uv run matrix --admins you@example.com                             # 管理后台 /admin 给谁看（默认最早注册的人）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent

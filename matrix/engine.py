@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
@@ -52,6 +52,7 @@ from .model_catalog import ModelCatalog
 from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
+from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
 
 
 @dataclass
@@ -133,7 +134,7 @@ class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
-                 plugins: pluginfs.PluginCatalog | None = None):
+                 plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -146,6 +147,9 @@ class Network:
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
         self.connectors = connectors or ConnectorCatalog(self.store.root / "connectors.json")
         self.vault = Vault(self.store.root)
+        # 管理后台（docs/reference/admin.md）：每次运行时调用记一行用量；管理员由部署方按邮箱指定
+        self.usage = UsageLog(self.store.root)
+        self.admins = {a.strip().lower() for a in (admins or []) if a.strip()}
         self.connector_url = tool_url.rsplit("/", 1)[0] + "/connectors"
         self._remotes: dict[str, RemoteMCP] = {}            # connection id → 远程 MCP 客户端（带着解开的凭证，只在内存）
         self._remote_tools: dict[str, tuple[float, list[dict[str, Any]]]] = {}  # connection id → (取的时间, 工具)
@@ -3992,8 +3996,10 @@ class Network:
                 self._contexts.pop(token, None)
                 agent.active = max(0, agent.active - 1)
             self.bus.emit("agent.updated", agent=agent.to_dict())
-            return RunResult(session_id or "", "", ok=False,
-                             error=f"TRANSPORT 端侧运行时 {self._where(agent)} 未连接")
+            res = RunResult(session_id or "", "", ok=False, error=f"TRANSPORT 端侧运行时 {self._where(agent)} 未连接")
+            self._record_usage(ctx, agent, res, time.time(), offline=True)
+            return res
+        started = time.time()
         try:
             with self._lock:
                 materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime else []
@@ -4013,7 +4019,27 @@ class Network:
         if cancel is not None and cancel.is_set() and res.error_class != "stopped":
             # 人终止了这一轮：不管运行时最后报的是什么，都按终止处理（不自动续接，不当成交付）
             res = RunResult(res.session_id, res.final_text, res.tool_calls, res.usage, ok=False, error=STOPPED_ERROR)
+        self._record_usage(ctx, agent, res, started)
         return res
+
+    def _record_usage(self, ctx: ExecContext, agent: AgentNode, res: RunResult, started: float,
+                      offline: bool = False) -> None:
+        """用量台账记一行（管理后台只看用量：不记提示词、回复、工具参数）。记账失败不影响这一轮。"""
+        with self._lock:
+            conv = self.store.conversations.get(ctx.conversation_id)
+            venue = ("task" if ctx.kind == "task" else "home" if ctx.home else "session" if ctx.session
+                     else conv.kind if conv is not None else "other")
+            model = self.run_model(agent)
+        try:
+            self.usage.record({
+                "ts": started, "ms": int((time.time() - started) * 1000), "user": agent.owner_id, "agent": agent.id,
+                "project": ctx.project_id, "venue": venue, "where": "device" if agent.device_runtime else "cloud",
+                "runtime": (agent.harness or "") if agent.device_runtime else self.runtime.name,
+                "model": " / ".join(x for x in (model.get("provider"), model.get("model")) if x) if model else None,
+                "ok": res.ok, "error": "device_offline" if offline else res.error_class,
+                "tools": len(res.tool_calls), "usage": dict(res.usage)})
+        except OSError as e:
+            self.bus.emit("usage.error", error=_short(repr(e), 200))
 
     # ================= 网络工具（MCP） =================
     def handle_tool(self, token: str, name: str, args: dict[str, Any]) -> tuple[str, bool]:
@@ -4809,6 +4835,66 @@ class Network:
             d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
                                    "chat_enabled")}
         return d
+
+    # ================= 管理后台 =================
+    # 部署方看整个网络的使用情况（docs/reference/admin.md）。只看用量，不看内容：返回计数、类别与账号邮箱，
+    # 不出现项目名、Agent 名、消息正文。不是管理员的人看不到这个入口（按“不存在”处理）。
+    def is_admin(self, user_id: str | None) -> bool:
+        """部署方指定了管理员（--admins / MATRIX_ADMINS）就按邮箱认；没指定时是最早注册的那个人。"""
+        with self._lock:
+            u = self.store.users.get(user_id or "")
+            if u is None:
+                return False
+            if self.admins:
+                return u.email in self.admins
+            return u.id == min(self.store.users.values(), key=lambda x: x.created_at).id
+
+    def admin_usage(self, actor: str | None, days: int = 30) -> dict[str, Any]:
+        self._check(actor is None or self.is_admin(actor), "admin")
+        days = max(1, min(MAX_DAYS, int(days)))
+        now = time.time()
+        since = now - days * 86400 - 86400  # 多读一天：按当地零点分桶的第一天
+        with self._lock:
+            st = self.store
+            logins: dict[str, float] = {}
+            for s in st.sessions.values():
+                logins[s["user_id"]] = max(logins.get(s["user_id"], 0.0), float(s.get("created_at") or 0))
+            people = [{"id": u.id, "email": u.email, "created_at": u.created_at, "admin": False,
+                       "projects": sum(1 for g in st.projects.values() if u.id in g.people),
+                       "agents": sum(1 for a in st.agents.values() if a.owner_id == u.id),
+                       "devices": sum(1 for d in st.devices.values() if d.user_id == u.id and not d.revoked),
+                       "last_login": logins.get(u.id)} for u in st.users.values()]
+            messages = [(m.user_id, m.ts) for c in st.conversations.values() for m in c.messages
+                        if m.role == "user" and m.ts >= since]
+            requests = [(r.requester_id, r.created_at) for r in st.requests.values() if r.created_at >= since]
+            owners = {c.id: c.owner_id for c in st.connections.values()}
+            agents = list(st.agents.values())
+            counts = {"users": len(st.users), "projects": len(st.projects),
+                      "shared_projects": sum(1 for g in st.projects.values() if g.shared),
+                      "agents": len(agents), "device_agents": sum(1 for a in agents if a.device_runtime),
+                      "running": sum(1 for a in agents if a.active),
+                      "devices": sum(1 for d in st.devices.values() if not d.revoked),
+                      "devices_online": sum(1 for d in st.devices.values() if not d.revoked and d.id in self._runtimes),
+                      "connections": len(st.connections), "plugins": sum(len(g.plugins) for g in st.projects.values()),
+                      "tasks": sum(1 for t in st.tasks.values() if t.created_at >= since),
+                      "pending_proposals": sum(1 for p in st.proposals.values() if p.status == "pending")}
+        for p in people:
+            p["admin"] = self.is_admin(p["id"])
+        calls: list[tuple[str | None, float, bool]] = []
+        for cid, owner in owners.items():
+            f = self.store.root / "connections" / cid / "calls.jsonl"
+            if not f.is_file():
+                continue
+            for line in f.read_text(encoding="utf-8").splitlines():
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if float(e.get("ts") or 0) >= since:
+                    calls.append((owner, float(e["ts"]), bool(e.get("ok"))))
+        return summarize_usage(self.usage.read(since), people=people, messages=messages, requests=requests,
+                               connector_calls=calls, counts=counts, now=now, days=days,
+                               recording_since=self.usage.first_ts())
 
     def snapshot(self, actor: str | None = None) -> dict[str, Any]:
         with self._lock:

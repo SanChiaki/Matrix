@@ -86,6 +86,7 @@ async function submitAuth(e) {
 async function enter() {
   S.me = await api("/api/me");
   $("#me-email").textContent = S.me.email;
+  $("#admin-link").hidden = !S.me.admin;
   if (!S.started) { S.started = true; await start(); }
   else { await reload(); route(); }
   hideGate();

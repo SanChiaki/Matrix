@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>管理后台 · Matrix</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/admin.css">
+<script>document.documentElement.dataset.theme = localStorage.getItem("theme")
+  || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
+</head>
+<body class="admin">
+<header class="admin-top">
+  <a class="brand" href="/"><img class="brand-mark" src="/static/logo.svg" alt="" width="22" height="22">Matrix</a>
+  <span class="admin-title">管理后台</span>
+  <span class="grow"></span>
+  <span class="muted" id="me"></span>
+  <a class="back" href="/">回到应用</a>
+</header>
+
+<main class="admin-main">
+  <!-- 没登录 / 不是管理员 -->
+  <section id="denied" class="admin-denied" hidden>
+    <h1 id="denied-title">没有权限</h1>
+    <p class="muted" id="denied-text"></p>
+    <p><a href="/">回到应用</a></p>
+  </section>
+
+  <div id="dash" hidden>
+    <div class="view-head">
+      <div><h1>使用情况</h1>
+        <p>整个网络的用量：只有计数与类别，不含对话、项目与 Agent 的内容。<span id="since-note"></span></p></div>
+      <div class="seg" role="radiogroup" aria-label="时间范围">
+        <label><input type="radio" name="days" value="7">近 7 天</label>
+        <label><input type="radio" name="days" value="30" checked>近 30 天</label>
+        <label><input type="radio" name="days" value="90">近 90 天</label>
+      </div>
+    </div>
+
+    <h3>这段时间</h3>
+    <div class="tiles" id="tiles-range"></div>
+
+    <div class="charts">
+      <figure class="chart-card">
+        <figcaption><b>每天运行轮次</b><span class="chart-legend">
+          <span><i class="key ok"></i>成功</span><span><i class="key fail"></i>失败</span></span></figcaption>
+        <div class="chart" id="chart-runs" role="img" aria-label="每天运行轮次的柱状图，成功与失败叠加"></div>
+      </figure>
+      <figure class="chart-card">
+        <figcaption><b>每天 token</b><span class="muted">输入 + 输出</span></figcaption>
+        <div class="chart" id="chart-tokens" role="img" aria-label="每天 token 用量的柱状图"></div>
+      </figure>
+    </div>
+
+    <h3>现在</h3>
+    <div class="tiles" id="tiles-now"></div>
+
+    <h3>用户</h3>
+    <div class="table-wrap"><table id="t-users"></table></div>
+
+    <div class="grid-2">
+      <div><h3>模型</h3><div class="table-wrap"><table id="t-models"></table></div></div>
+      <div><h3>运行位置</h3><div class="table-wrap"><table id="t-runtimes"></table></div></div>
+      <div><h3>场合</h3><div class="table-wrap"><table id="t-venues"></table></div></div>
+      <div><h3>失败原因</h3><div class="table-wrap"><table id="t-errors"></table></div></div>
+    </div>
+
+    <details class="daily">
+      <summary>按天明细</summary>
+      <div class="table-wrap"><table id="t-daily"></table></div>
+    </details>
+  </div>
+  <div id="tip" class="chart-tip" role="status" hidden></div>
+</main>
+<script type="module" src="/static/admin.js"></script>
+</body>
+</html>
