@@ -1,0 +1,68 @@
+/* 管理后台（/admin）：沿用 style.css 的颜色与控件，页面自己滚动 */
+:root { --chart-ok: #7a82f2; --chart-fail: #e0605a; }
+:root[data-theme="light"] { --chart-ok: #5a62e0; --chart-fail: #d03c36; }
+
+body.admin { display: block; overflow: auto; height: auto; min-height: 100%; }
+.admin-top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 12px 32px;
+  background: var(--glass); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+.admin-top .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); text-decoration: none; }
+.admin-title { color: var(--text-2); padding-left: 12px; border-left: 1px solid var(--border-strong); }
+.admin-top .grow { flex: 1; }
+.admin-top a.back, .admin-denied a { color: var(--accent); text-decoration: none; font-size: 13px; }
+.admin-top a.back:hover, .admin-denied a:hover { text-decoration: underline; }
+.admin-main { max-width: 1200px; margin: 0 auto; padding: 28px 32px 64px; }
+.admin-denied { padding: 64px 0; text-align: center; }
+.admin-denied h1 { margin-bottom: 8px; }
+#dash > .view-head { margin-bottom: 8px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.tile { display: flex; flex-direction: column; gap: 2px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 14px; min-width: 0; }
+.tile-label { font-size: 12px; color: var(--muted); }
+.tile b { font-size: 24px; font-weight: 600; letter-spacing: -.02em; }
+.tile-sub { font-size: 12px; color: var(--text-2); overflow-wrap: anywhere; }
+
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 12px; margin-top: 12px; }
+.chart-card { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px 10px; min-width: 0; }
+.chart-card figcaption { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+.chart-card figcaption b { font-weight: 600; }
+.chart-legend { display: inline-flex; gap: 14px; color: var(--text-2); font-size: 12px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.key { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.chart-legend .key { margin-right: 0; }
+.key.ok { background: var(--chart-ok); }
+.key.fail { background: var(--chart-fail); }
+.chart { width: 100%; min-height: 200px; }
+.chart svg { display: block; }
+.chart .grid { stroke: var(--border); stroke-width: 1; }
+.chart .axis { stroke: var(--border-strong); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .mark.ok { fill: var(--chart-ok); }
+.chart .mark.fail { fill: var(--chart-fail); }
+.chart .hit { fill: transparent; }
+.chart .hit.on { fill: var(--accent-soft); }
+.chart-tip { position: fixed; z-index: 20; pointer-events: none; background: var(--surface-3); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); padding: 8px 10px; font-size: 12px; line-height: 1.6; box-shadow: var(--shadow); min-width: 140px; }
+.chart-tip b { display: block; margin-bottom: 2px; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); column-gap: 16px; }
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.table-wrap table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.table-wrap th, .table-wrap td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.table-wrap th { font-size: 12px; font-weight: 500; color: var(--muted); background: var(--surface-2); }
+.table-wrap tbody tr:last-child td { border-bottom: 0; }
+.table-wrap tbody tr:hover td { background: var(--surface-2); }
+.table-wrap .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table-wrap td.empty { color: var(--muted); text-align: center; padding: 20px; }
+.table-wrap .tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--accent-soft); color: var(--text-2); margin-left: 4px; }
+
+.daily { margin-top: 24px; }
+.daily summary { cursor: pointer; color: var(--text-2); font-size: 13px; margin-bottom: 8px; }
+
+@media (max-width: 640px) {
+  .admin-top, .admin-main { padding-left: 16px; padding-right: 16px; }
+  .charts, .grid-2 { grid-template-columns: 1fr; }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .tile b { font-size: 20px; }
+  #me { display: none; }
+}

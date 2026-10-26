@@ -339,6 +339,8 @@ button.link { background: none; border: 0; padding: 0; color: var(--accent); fon
 button.link:hover { background: none; text-decoration: underline; }
 .rail-foot .me { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
 .rail-foot .me #me-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+.rail-foot a.link { color: var(--accent); font-weight: 500; text-decoration: none; white-space: nowrap; }
+.rail-foot a.link:hover { text-decoration: underline; }
 .tab .count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: 999px; background: var(--human); color: var(--on-human);
   font-size: 11px; font-weight: 600; text-align: center; line-height: 18px; }
 .tab .count[hidden] { display: none; }

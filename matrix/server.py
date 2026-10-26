@@ -423,6 +423,11 @@ def create_app(network: Network) -> FastAPI:
         """产品简介页：静态内容，不需要登录。"""
         return FileResponse(STATIC / "about.html")
 
+    @app.get("/admin")
+    def admin_page() -> FileResponse:
+        """管理后台页面：页面本身是静态的，数据经 /api/admin/*，只给管理员。"""
+        return FileResponse(STATIC / "admin.html")
+
     @app.get("/api/info")
     def info() -> dict:
         return {"runtime": network.runtime.name, "limits": network.limits.__dict__,
@@ -456,7 +461,13 @@ def create_app(network: Network) -> FastAPI:
         network.ensure_assistant(user.id)  # 有了这个功能之前注册、还没有 Agent 的人：补一个助理
         own = [a for a in store.agents.values() if a.owner_id == user.id]
         home = network.home_of(user.id)
-        return {**store.users[user.id].public(), "agent_count": len(own), "home_id": home.id if home else None}
+        return {**store.users[user.id].public(), "agent_count": len(own), "home_id": home.id if home else None,
+                "admin": network.is_admin(user.id)}
+
+    # ---- 管理后台（只看用量，不看内容；不是管理员按不存在处理） ----
+    @app.get("/api/admin/usage")
+    def admin_usage(user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
+        return network.admin_usage(user.id, days)
 
     @app.get("/api/network")
     def snapshot(user: Me) -> dict:
@@ -1145,14 +1156,17 @@ class MatrixServer(uvicorn.Server):
 
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
-                  models: str | None = None, connectors: str | None = None, plugins: str | None = None) -> Network:
+                  models: str | None = None, connectors: str | None = None, plugins: str | None = None,
+                  admins: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
-    models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。"""
+    models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
+    admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
     return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
                    models=ModelCatalog(Path(models).resolve()) if models else None,
                    connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None,
-                   plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None)
+                   plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None,
+                   admins=(admins or "").split(","))
 
 
 def main() -> None:
@@ -1167,13 +1181,15 @@ def main() -> None:
                    help="云端连接器目录（JSON，改了就生效）；默认 <data>/connectors.json，没有就不提供云端连接器")
     p.add_argument("--plugins", default=compat.env("PLUGINS"),
                    help="项目插件目录（JSON，改了就生效）；默认 <data>/plugins.json，没有就只能上传插件包")
+    p.add_argument("--admins", default=compat.env("ADMINS"),
+                   help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=compat.env("HOST", "127.0.0.1"))
     args = p.parse_args()
     args.data = args.data or compat.data_dir()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
-                            connectors=args.connectors, plugins=args.plugins)
+                            connectors=args.connectors, plugins=args.plugins, admins=args.admins)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     catalog = network.models
     if catalog.active:
