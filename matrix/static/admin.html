@@ -14,6 +14,10 @@
 <header class="admin-top">
   <a class="brand" href="/"><img class="brand-mark" src="/static/logo.svg" alt="" width="22" height="22">Matrix</a>
   <span class="admin-title">管理后台</span>
+  <nav class="admin-tabs" aria-label="管理后台" hidden>
+    <a href="#usage" data-tab="usage">使用情况</a>
+    <a href="#models" data-tab="models">模型</a>
+  </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
   <a class="back" href="/">回到应用</a>
@@ -27,7 +31,7 @@
     <p><a href="/">回到应用</a></p>
   </section>
 
-  <div id="dash" hidden>
+  <div id="dash" data-pane="usage" hidden>
     <div class="view-head">
       <div><h1>使用情况</h1>
         <p>整个网络的用量：只有计数与类别，不含对话、项目与 Agent 的内容。<span id="since-note"></span></p></div>
@@ -71,6 +75,79 @@
       <div class="table-wrap"><table id="t-daily"></table></div>
     </details>
   </div>
+  <div id="models" data-pane="models" hidden>
+    <div class="view-head">
+      <div><h1>模型</h1>
+        <p>平台云侧的 Agent 能用哪些模型。用户创建或编辑云侧 Agent 时只能从这里选；端侧 Agent 用自己电脑上 AI 工具的模型，不受影响。</p></div>
+      <button type="button" id="m-add">添加模型</button>
+    </div>
+    <div id="m-status" class="m-status"></div>
+    <p class="error" id="m-error" role="alert"></p>
+    <div class="table-wrap"><table id="t-presets"></table></div>
+    <div class="m-default">
+      <label for="m-default">不选模型的 Agent 用</label>
+      <select id="m-default"></select>
+      <span class="muted" id="m-default-note"></span>
+    </div>
+    <div class="m-section-head">
+      <div><h3>供应商</h3>
+        <p class="muted m-hint">平台自己接的模型服务（OpenAI / Anthropic 兼容）。密钥加密存在 Matrix，每轮只交给那一个 dsh 进程，Agent 的命令看不到；dsh 里已配置的供应商不用加在这里。</p></div>
+      <button type="button" class="ghost" id="p-add">添加供应商</button>
+    </div>
+    <div class="table-wrap"><table id="t-providers"></table></div>
+    <section id="m-unlisted-box" hidden>
+      <h3>在用、但不在目录里的模型</h3>
+      <p class="muted m-hint" id="m-unlisted-hint"></p>
+      <div class="table-wrap"><table id="t-unlisted"></table></div>
+    </section>
+  </div>
+
+  <dialog id="m-dialog" class="m-dialog">
+    <form id="m-form" method="dialog">
+      <h2 id="m-form-title">添加模型</h2>
+      <div class="m-grid">
+        <div class="field"><label for="mf-label">显示名称</label><input id="mf-label" name="label" maxlength="80" placeholder="如 DeepSeek Flash"></div>
+        <div class="field"><label for="mf-id">标识</label><input id="mf-id" name="pid" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="留空按模型名生成"></div>
+        <div class="field"><label for="mf-source">供应商</label><select id="mf-source" name="source"></select></div>
+        <div class="field" id="mf-provider-box"><label for="mf-provider">dsh 里的供应商名</label><input id="mf-provider" name="provider" maxlength="100" placeholder="如 deepseek-official"></div>
+        <div class="field"><label for="mf-model">模型</label><input id="mf-model" name="model" maxlength="200" required placeholder="如 deepseek-flash"></div>
+        <div class="field"><label for="mf-effort">推理强度</label><input id="mf-effort" name="reasoning_effort" maxlength="40" list="mf-efforts" placeholder="默认"></div>
+        <div class="field wide"><label for="mf-desc">说明</label><input id="mf-desc" name="description" maxlength="300" placeholder="给用户看的一句话，如“长文档与复杂推理”"></div>
+        <div class="field" data-ours><label for="mf-ctx">上下文长度（token）</label><input id="mf-ctx" name="context_window" type="number" min="1" placeholder="dsh 默认"></div>
+        <div class="field" data-ours><label for="mf-max">单次最多输出（token）</label><input id="mf-max" name="max_tokens" type="number" min="1" placeholder="dsh 默认"></div>
+        <label class="switch wide" data-ours><input type="checkbox" name="image"> 能看图片</label>
+      </div>
+      <datalist id="mf-efforts"><option value="off"><option value="minimal"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
+      <p class="muted m-hint" id="mf-hint"></p>
+      <p class="error" id="mf-error" role="alert"></p>
+      <div class="actions m-actions">
+        <button type="button" class="ghost" id="mf-cancel">取消</button>
+        <button type="submit" id="mf-submit">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="p-dialog" class="m-dialog">
+    <form id="p-form" method="dialog">
+      <h2 id="p-form-title">添加供应商</h2>
+      <div class="m-grid">
+        <div class="field"><label for="pf-name">名称</label><input id="pf-name" name="name" maxlength="80" required placeholder="如 Hi Code"></div>
+        <div class="field"><label for="pf-id">标识</label><input id="pf-id" name="pid" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="留空按名称生成"></div>
+        <div class="field wide"><label for="pf-api">协议</label><select id="pf-api" name="api">
+          <option value="openai-completions">OpenAI Chat Completions（多数兼容服务）</option>
+          <option value="openai-responses">OpenAI Responses</option>
+          <option value="anthropic-messages">Anthropic Messages</option>
+        </select></div>
+        <div class="field wide"><label for="pf-url">地址</label><input id="pf-url" name="base_url" maxlength="500" required placeholder="如 https://api.example.com/v1"></div>
+        <div class="field wide"><label for="pf-key">密钥</label><input id="pf-key" name="api_key" type="password" maxlength="4000" autocomplete="new-password"></div>
+      </div>
+      <p class="muted m-hint">密钥保存后不再显示；要换就填新的。删掉供应商时密钥一起删。标识保存后不能改。</p>
+      <p class="error" id="pf-error" role="alert"></p>
+      <div class="actions m-actions">
+        <button type="button" class="ghost" id="pf-cancel">取消</button>
+        <button type="submit" id="pf-submit">保存</button>
+      </div>
+    </form>
+  </dialog>
   <div id="tip" class="chart-tip" role="status" hidden></div>
 </main>
 <script type="module" src="/static/admin.js"></script>

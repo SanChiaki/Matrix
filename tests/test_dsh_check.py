@@ -39,3 +39,14 @@ def test_managed_tools_are_known():
     """运行时按权限禁用或始终禁用的工具插件，冒烟检查都认得（否则升级时会被当成新工具误报）。"""
     managed = {p for ps in AUTHORITY_PLUGINS.values() for p in ps} | set(ALWAYS_DISABLED)
     assert {p for p in managed if p.startswith("tool-")} <= KNOWN_TOOLS
+
+
+def test_provider_overlay_names_only_the_key_env():
+    """平台配的供应商：覆盖层里是 llm-pi-ai 这一段，密钥只有环境变量名（冒烟检查的 provider / key-hidden 在真实 dsh 上核对）。"""
+    from matrix.model_catalog import ModelPreset, Provider, llm_config
+    prov = Provider(id="hi", name="Hi", api="openai-completions", base_url="https://api.example.com/v1")
+    preset = ModelPreset(id="p", label="P", provider="hi", model="m1")
+    overlay = build_patch_yaml([], model=preset.run_model(), llm_provider={"id": "hi", "config": llm_config(prov, preset)})
+    assert {"llm-pi-ai", "agent-default-model"} <= plugin_ids(overlay)
+    assert '"apiKeyEnv": "MATRIX_LLM_HI_API_KEY"' in overlay
+    assert "llm-pi-ai" not in plugin_ids(build_patch_yaml([], model=preset.run_model()))  # 不用平台供应商时不碰它

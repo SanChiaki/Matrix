@@ -59,7 +59,47 @@ body.admin { display: block; overflow: auto; height: auto; min-height: 100%; }
 .daily { margin-top: 24px; }
 .daily summary { cursor: pointer; color: var(--text-2); font-size: 13px; margin-bottom: 8px; }
 
+/* 标签页 */
+.admin-tabs { display: flex; gap: 4px; margin-left: 8px; }
+.admin-tabs a { padding: 5px 12px; border-radius: var(--radius-sm); color: var(--text-2); text-decoration: none; font-size: 13px; }
+.admin-tabs a:hover { background: var(--surface-2); color: var(--text); }
+.admin-tabs a[aria-current="page"] { background: var(--accent-soft); color: var(--text); }
+
+/* 模型目录 */
+#models > .view-head { margin-bottom: 16px; }
+.m-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 12px; color: var(--text-2); font-size: 13px; }
+.m-status .warn-box { flex-basis: 100%; font-size: 13px; }
+.m-status code { word-break: break-all; }
+.pill.on { color: var(--completed); background: color-mix(in srgb, var(--completed) 12%, transparent); }
+.pill.off { color: var(--muted); background: var(--surface-3); }
+#m-error { margin-bottom: 8px; }
+#t-presets td:first-child { white-space: normal; min-width: 180px; }
+#t-presets td .muted { font-size: 12px; margin-top: 2px; }
+.row-actions { display: inline-flex; gap: 12px; }
+button.link.danger { color: var(--rejected); }
+.m-default { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0 8px; font-size: 13px; color: var(--text-2); }
+.m-default select { width: auto; min-width: 220px; }
+.m-hint { font-size: 12.5px; margin: 0 0 8px; }
+.m-dialog { padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); color: var(--text);
+  width: min(560px, 94vw); box-shadow: var(--shadow); }
+.m-dialog::backdrop { background: rgba(10, 12, 18, .45); }
+.m-dialog form { display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; }
+.m-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.m-grid .wide { grid-column: 1 / -1; }
+.m-grid [hidden] { display: none; }
+.m-grid input[readonly] { color: var(--muted); }
+.m-actions { justify-content: flex-end; }
+.m-section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-top: 28px; }
+.m-section-head h3 { margin-top: 0; }
+.m-section-head .m-hint { max-width: 760px; }
+.m-section-head button { flex: none; margin-bottom: 8px; }
+.key-state.missing { color: var(--rejected); }
+#t-providers td:nth-child(3) { white-space: normal; word-break: break-all; min-width: 160px; max-width: 320px; }
+
 @media (max-width: 640px) {
+  .admin-tabs { margin-left: 0; }
+  .admin-title { display: none; }
+  .m-grid { grid-template-columns: 1fr; }
   .admin-top, .admin-main { padding-left: 16px; padding-right: 16px; }
   .charts, .grid-2 { grid-template-columns: 1fr; }
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }

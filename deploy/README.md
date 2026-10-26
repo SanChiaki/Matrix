@@ -42,6 +42,10 @@ docker compose up -d --build
 
 从列表里删掉一个模型，用它的 Agent 下一轮起改用 `default`。文件写坏时服务沿用上一份并在日志里写原因。
 
+更方便的是在管理后台（`/admin` 的“模型”页）编辑，改的是同一份文件。后台还能配**平台自己的供应商**（OpenAI / Anthropic 兼容的服务：
+协议、地址、密钥），不用进容器改 dsh：密钥加密存在 `matrix-data` 卷的 `vault/` 里，`models.json` 里只有协议和地址。
+保管密钥（`MATRIX_VAULT_KEY` 或数据卷里的 `vault.key`）丢了，就要在后台重新填一遍各供应商的密钥。
+
 ## 更新
 
 ```bash

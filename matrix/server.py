@@ -28,7 +28,7 @@ from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
-from .model_catalog import ModelCatalog
+from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
@@ -300,6 +300,34 @@ class ResumeIn(BaseModel):
     note: str = Field("", max_length=2000)
 
 
+class PresetIn(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    label: str = Field("", max_length=80)
+    provider: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: str | None = Field(None, max_length=40)
+    description: str = Field("", max_length=300)
+    context_window: int | None = Field(None, gt=0)
+    max_tokens: int | None = Field(None, gt=0)
+    image: bool = False
+
+
+class ProviderIn(BaseModel):
+    id: str = Field(min_length=1, max_length=64)
+    name: str = Field("", max_length=80)
+    api: str = Field(min_length=1, max_length=40)
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str | None = Field(None, max_length=4000)  # 只写：空 = 沿用已存的
+
+
+class CatalogIn(BaseModel):
+    """管理后台整份保存的模型目录；rev 是读到时的版本，文件期间被改过就拒绝。"""
+    default: str | None = Field(None, max_length=64)
+    models: list[PresetIn] = Field(default_factory=list, max_length=100)
+    providers: list[ProviderIn] = Field(default_factory=list, max_length=50)
+    rev: str = Field("", max_length=64)
+
+
 class CredentialsIn(BaseModel):
     email: str = Field(min_length=3, max_length=200)
     password: str = Field(min_length=1, max_length=200)
@@ -468,6 +496,20 @@ def create_app(network: Network) -> FastAPI:
     @app.get("/api/admin/usage")
     def admin_usage(user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
         return network.admin_usage(user.id, days)
+
+    @app.get("/api/admin/models")
+    def admin_models(user: Me) -> dict:
+        return network.admin_models(user.id)
+
+    @app.put("/api/admin/models")
+    def admin_save_models(body: CatalogIn, user: Me) -> dict:
+        data = {"default": body.default or None, "models": [m.model_dump() for m in body.models],
+                "providers": [p.model_dump(exclude={"api_key"}) for p in body.providers]}
+        keys = {p.id.strip(): p.api_key.strip() for p in body.providers if p.api_key and p.api_key.strip()}
+        try:
+            return network.admin_save_models(user.id, data, body.rev, keys)
+        except CatalogConflict as e:
+            raise HTTPException(409, str(e)) from e
 
     @app.get("/api/network")
     def snapshot(user: Me) -> dict:

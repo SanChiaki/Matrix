@@ -1,4 +1,4 @@
-// 管理后台：整个网络的使用情况（/api/admin/usage）。只有计数与类别，不含内容。
+// 管理后台：整个网络的使用情况（/api/admin/usage，只有计数与类别，不含内容）与云侧模型目录（/api/admin/models）。
 const $ = (s, el = document) => el.querySelector(s);
 const svgNS = "http://www.w3.org/2000/svg";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -41,15 +41,19 @@ const shortDay = (day) => day.slice(5).replace("-", "/");
 const runtimeName = (r) => r.where === "device"
   ? `端侧 · ${S.info?.harnesses?.[r.runtime] || r.runtime || "未知"}` : `云侧 · ${r.runtime || "默认"}`;
 
-async function api(path) {
-  const r = await fetch(path, { signal: AbortSignal.timeout(30000) });
+async function api(path, opts = {}) {
+  if (opts.body) opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
+  const r = await fetch(path, { ...opts, signal: AbortSignal.timeout(30000) });
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(data.detail || `HTTP ${r.status}`), { status: r.status });
+  const detail = Array.isArray(data.detail) ? data.detail.map((x) => x.msg).join("；") : data.detail;
+  if (!r.ok) throw Object.assign(new Error(detail || `HTTP ${r.status}`), { status: r.status });
   return data;
 }
 
 function deny(title, text) {
   $("#dash").hidden = true;
+  $("#models").hidden = true;
+  $(".admin-tabs").hidden = true;
   $("#denied").hidden = false;
   $("#denied-title").textContent = title;
   $("#denied-text").textContent = text;
@@ -176,7 +180,7 @@ function table(id, cols, rows, empty = "这段时间没有记录") {
   const t = $(id);
   if (!rows.length) { t.innerHTML = `<tbody><tr><td class="empty">${empty}</td></tr></tbody>`; return; }
   t.innerHTML = `<thead><tr>${cols.map((c) => `<th${c.num ? ' class="num"' : ""} scope="col">${esc(c.label)}</th>`).join("")}</tr></thead>` +
-    `<tbody>${rows.map((r) => `<tr>${cols.map((c) => `<td${c.num ? ' class="num"' : ""}>${c.html(r)}</td>`).join("")}</tr>`).join("")}</tbody>`;
+    `<tbody>${rows.map((r, i) => `<tr>${cols.map((c) => `<td${c.num ? ' class="num"' : ""}>${c.html(r, i)}</td>`).join("")}</tr>`).join("")}</tbody>`;
 }
 const runCols = [
   { label: "轮次", num: true, html: (r) => num(r.runs) },
@@ -234,8 +238,220 @@ async function load() {
     return deny("没拿到数据", e.message);
   }
   $("#denied").hidden = true;
-  $("#dash").hidden = false;
   render();
+}
+
+// ---------- 模型目录 ----------
+const M = { data: null, edit: null, editProvider: null };
+const API_NAMES = { "openai-completions": "OpenAI Chat Completions", "openai-responses": "OpenAI Responses",
+  "anthropic-messages": "Anthropic Messages" };
+const ourProvider = (id) => M.data?.providers.find((p) => p.id === id);
+const modelText = (m) => `${ourProvider(m.provider)?.name || m.provider} / ${m.model}${m.reasoning_effort ? ` · ${m.reasoning_effort}` : ""}`;
+
+async function loadCatalog() {
+  try { M.data = await api("/api/admin/models"); }
+  catch (e) { $("#m-error").textContent = e.message; return; }
+  renderCatalog();
+}
+
+function renderCatalog() {
+  const d = M.data;
+  const rt = d.runtime_default ? modelText(d.runtime_default) : "";
+  $("#m-status").innerHTML = (d.active
+    ? `<span class="pill on">已启用</span><span>云侧 Agent 只能选下面的模型。</span>`
+    : `<span class="pill off">未启用</span><span>云侧 Agent 现在可以自由填写模型。添加第一个模型即启用：之后只能选这里的，`
+      + "已有 Agent 自己填的模型和目录里的对得上就算选了它，对不上的改用默认模型。</span>")
+    + (d.error ? `<div class="warn-box">目录文件 <code>${esc(d.path)}</code> 有错（${esc(d.error)}），`
+      + `${d.active ? "现在用的是上一份能用的" : "现在只能用运行时默认"}。在这里保存会整份覆盖它。</div>` : "");
+  table("#t-presets", [
+    { label: "名称", html: (m) => `<b>${esc(m.label)}</b>${m.id === d.default ? ' <span class="tag">默认</span>' : ""}`
+      + (m.description ? `<div class="muted">${esc(m.description)}</div>` : "") },
+    { label: "模型", html: (m) => `<code>${esc(modelText(m))}</code>`
+      + (ourProvider(m.provider) && !ourProvider(m.provider).has_key ? ' <span class="key-state missing">供应商没设密钥</span>' : "") },
+    { label: "标识", html: (m) => `<code>${esc(m.id)}</code>` },
+    { label: "在用的 Agent", num: true, html: (m) => num(m.agents) },
+    { label: "", html: (m) => `<span class="row-actions"><button type="button" class="link" data-edit="${esc(m.id)}">编辑</button>`
+      + `<button type="button" class="link danger" data-del="${esc(m.id)}">删除</button></span>` },
+  ], d.models, d.active ? "目录是空的：云侧 Agent 只能用运行时默认的模型" : "还没有模型");
+  table("#t-providers", [
+    { label: "名称", html: (p) => `<b>${esc(p.name)}</b> <code>${esc(p.id)}</code>` },
+    { label: "协议", html: (p) => esc(API_NAMES[p.api] || p.api) },
+    { label: "地址", html: (p) => `<code>${esc(p.base_url)}</code>` },
+    { label: "密钥", html: (p) => p.has_key ? '<span class="key-state">已设置</span>' : '<span class="key-state missing">未设置</span>' },
+    { label: "模型", num: true, html: (p) => num(d.models.filter((m) => m.provider === p.id).length) },
+    { label: "", html: (p) => `<span class="row-actions"><button type="button" class="link" data-pedit="${esc(p.id)}">编辑</button>`
+      + `<button type="button" class="link danger" data-pdel="${esc(p.id)}">删除</button></span>` },
+  ], d.providers, "还没有：模型都用 dsh 里已配置的供应商");
+  const sel = $("#m-default");
+  sel.innerHTML = `<option value="">运行时默认${rt ? `（${esc(rt)}）` : ""}</option>`
+    + d.models.map((m) => `<option value="${esc(m.id)}" ${m.id === d.default ? "selected" : ""}>${esc(m.label)}</option>`).join("");
+  sel.disabled = !d.models.length;
+  $("#m-default-note").textContent = `${num(d.default_agents)} 个云侧 Agent 用默认模型`;
+  $("#m-unlisted-box").hidden = !d.unlisted.length;
+  $("#m-unlisted-hint").textContent = d.active
+    ? "这些 Agent 选的模型不在目录里（启用目录前自己填的，或选的已经删掉），这一轮起改用默认模型。加回目录后它们自动用回原来的。"
+    : "这些是 Agent 现在自己填的模型。启用目录前先加进来，它们就会继续用原来的模型，否则改用默认。";
+  table("#t-unlisted", [
+    { label: "模型", html: (r) => r.provider ? `<code>${esc(modelText(r))}</code>` : `已删除的 <code>${esc(r.preset)}</code>` },
+    { label: "Agent", num: true, html: (r) => num(r.agents) },
+    { label: "", html: (r, i) => `<button type="button" class="link" data-adopt="${i}">加入目录</button>` },
+  ], d.unlisted);
+}
+
+function slug(text, taken, fallback) {
+  const base = String(text).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^[^a-z0-9]+|-+$/g, "").slice(0, 56) || fallback;
+  let id = base, n = 2;
+  while (taken.some((x) => x.id === id)) id = `${base}-${n++}`;
+  return id;
+}
+
+// 整份保存：没改的部分取当前的。供应商的密钥只在 keys 里（这次新填的），不回传已存的
+async function saveCatalog({ models = M.data.models, dflt = M.data.default, providers = M.data.providers, keys = {} } = {}) {
+  const body = { default: dflt || null, rev: M.data.rev,
+    models: models.map((m) => ({ id: m.id, label: m.label || "", provider: m.provider, model: m.model,
+      reasoning_effort: m.reasoning_effort || null, description: m.description || "",
+      context_window: m.context_window || null, max_tokens: m.max_tokens || null, image: !!m.image })),
+    providers: providers.map((p) => ({ id: p.id, name: p.name, api: p.api, base_url: p.base_url,
+      api_key: keys[p.id] || null })) };
+  M.data = await api("/api/admin/models", { method: "PUT", body });
+  renderCatalog();
+}
+
+const DSH = "__dsh";  // 模型表单里“dsh 里已配置的供应商”
+
+function syncModelForm() {
+  const f = $("#m-form"), ours = f.source.value !== DSH;
+  $("#mf-provider-box").hidden = ours;
+  f.provider.required = !ours;
+  for (const el of f.querySelectorAll("[data-ours]")) el.hidden = !ours;
+  $("#mf-hint").textContent = (ours
+    ? "模型名照供应商文档写。推理强度用 dsh 的名字（off、minimal、low、medium、high、xhigh、max），原样交给供应商。"
+    : "供应商名与模型要和 dsh 里配置的一致，服务器上的 dsh 要有对应的凭据。") + "标识保存后不能改：Agent 按它记住选了哪个。";
+}
+
+function openForm(m = null, prefill = {}) {
+  M.edit = m;
+  const f = $("#m-form");
+  f.reset();
+  const v = m || prefill;
+  f.source.innerHTML = M.data.providers.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")
+    + `<option value="${DSH}">dsh 里已配置的供应商</option>`;
+  f.source.value = ourProvider(v.provider) ? v.provider : (v.provider || !M.data.providers.length ? DSH : M.data.providers[0].id);
+  for (const k of ["label", "model", "reasoning_effort", "description", "context_window", "max_tokens"]) f[k].value = v[k] || "";
+  f.provider.value = f.source.value === DSH ? v.provider || "" : "";
+  f.image.checked = !!v.image;
+  f.pid.value = v.id || "";
+  f.pid.readOnly = !!m;
+  syncModelForm();
+  $("#m-form-title").textContent = m ? `编辑 ${m.label}` : "添加模型";
+  $("#mf-error").textContent = "";
+  $("#m-dialog").showModal();
+  f.label.focus();
+}
+
+async function submitForm(ev) {
+  ev.preventDefault();
+  const f = ev.target, v = (k) => f[k].value.trim(), ours = f.source.value !== DSH;
+  const int = (k) => (ours && v(k) ? Number(v(k)) : null);
+  const m = { id: M.edit?.id || v("pid") || slug(v("model"), M.data.models, "model"), label: v("label"),
+    provider: ours ? f.source.value : v("provider"), model: v("model"), reasoning_effort: v("reasoning_effort"),
+    description: v("description"), context_window: int("context_window"), max_tokens: int("max_tokens"),
+    image: ours && f.image.checked };
+  if (!M.edit && M.data.models.some((x) => x.id === m.id)) { $("#mf-error").textContent = `标识 ${m.id} 已经有了`; return; }
+  const models = M.edit ? M.data.models.map((x) => (x.id === M.edit.id ? m : x)) : [...M.data.models, m];
+  $("#mf-submit").disabled = true;
+  try { await saveCatalog({ models }); $("#m-dialog").close(); }
+  catch (e) { $("#mf-error").textContent = e.message; if (e.status === 409 && /别处/.test(e.message)) loadCatalog(); }
+  finally { $("#mf-submit").disabled = false; }
+}
+
+function openProvider(p = null) {
+  M.editProvider = p;
+  const f = $("#p-form");
+  f.reset();
+  for (const k of ["name", "base_url"]) f[k].value = p?.[k] || "";
+  f.api.value = p?.api || "openai-completions";
+  f.pid.value = p?.id || "";
+  f.pid.readOnly = !!p;
+  f.api_key.required = !p?.has_key;
+  f.api_key.placeholder = p?.has_key ? "已设置，留空不改" : "必填：dsh 没有密钥不会发请求";
+  $("#p-form-title").textContent = p ? `编辑 ${p.name}` : "添加供应商";
+  $("#pf-error").textContent = "";
+  $("#p-dialog").showModal();
+  f.name.focus();
+}
+
+async function submitProvider(ev) {
+  ev.preventDefault();
+  const f = ev.target, v = (k) => f[k].value.trim();
+  const p = { id: M.editProvider?.id || v("pid") || slug(v("name"), M.data.providers, "provider"), name: v("name"),
+    api: f.api.value, base_url: v("base_url") };
+  if (!M.editProvider && M.data.providers.some((x) => x.id === p.id)) { $("#pf-error").textContent = `标识 ${p.id} 已经有了`; return; }
+  if (!M.data.active && !confirm("保存供应商会启用模型目录：之后云侧 Agent 只能选目录里的模型，自己填的模型对不上的改用默认。"
+    + "接着把要用的模型加进来。继续？")) return;
+  const providers = M.editProvider ? M.data.providers.map((x) => (x.id === p.id ? p : x)) : [...M.data.providers, p];
+  $("#pf-submit").disabled = true;
+  try {
+    await saveCatalog({ providers, keys: v("api_key") ? { [p.id]: v("api_key") } : {} });
+    f.api_key.value = "";
+    $("#p-dialog").close();
+  } catch (e) { $("#pf-error").textContent = e.message; if (e.status === 409 && /别处/.test(e.message)) loadCatalog(); }
+  finally { $("#pf-submit").disabled = false; }
+}
+
+function bindCatalog() {
+  $("#m-add").addEventListener("click", () => openForm());
+  $("#p-add").addEventListener("click", () => openProvider());
+  $("#mf-cancel").addEventListener("click", () => $("#m-dialog").close());
+  $("#pf-cancel").addEventListener("click", () => $("#p-dialog").close());
+  $("#m-form").addEventListener("submit", submitForm);
+  $("#p-form").addEventListener("submit", submitProvider);
+  $("#mf-source").addEventListener("change", syncModelForm);
+  $("#m-default").addEventListener("change", async (ev) => {
+    try { await saveCatalog({ dflt: ev.target.value }); }
+    catch (e) { $("#m-error").textContent = e.message; loadCatalog(); }
+  });
+  $("#models").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    const d = M.data;
+    $("#m-error").textContent = "";
+    if (b.dataset.edit) openForm(d.models.find((m) => m.id === b.dataset.edit));
+    if (b.dataset.pedit) openProvider(d.providers.find((p) => p.id === b.dataset.pedit));
+    if (b.dataset.adopt) {
+      const r = d.unlisted[Number(b.dataset.adopt)];
+      openForm(null, r.provider ? { ...r, label: r.model } : { id: r.preset });
+    }
+    if (b.dataset.del) {
+      const m = d.models.find((x) => x.id === b.dataset.del);
+      const users = m.agents ? `${m.agents} 个 Agent 在用它，删掉后这些 Agent 改用默认模型。` : "";
+      if (!confirm(`删除 ${m.label}？${users}`)) return;
+      try { await saveCatalog({ models: d.models.filter((x) => x.id !== m.id), dflt: d.default === m.id ? null : d.default }); }
+      catch (e) { $("#m-error").textContent = e.message; loadCatalog(); }
+    }
+    if (b.dataset.pdel) {
+      const p = d.providers.find((x) => x.id === b.dataset.pdel);
+      const using = d.models.filter((m) => m.provider === p.id);
+      if (using.length) {
+        $("#m-error").textContent = `${p.name} 还有 ${using.length} 个模型在用（${using.map((m) => m.label).join("、")}），先删掉或改用别的供应商。`;
+        return;
+      }
+      if (!confirm(`删除供应商 ${p.name}？保存的密钥一起删掉。`)) return;
+      try { await saveCatalog({ providers: d.providers.filter((x) => x.id !== p.id) }); }
+      catch (e) { $("#m-error").textContent = e.message; loadCatalog(); }
+    }
+  });
+}
+
+// ---------- 标签页 ----------
+function showTab() {
+  const tab = location.hash === "#models" ? "models" : "usage";
+  for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
+  $("#dash").hidden = tab !== "usage";
+  $("#models").hidden = tab !== "models";
+  if (tab === "models") loadCatalog();
+  else if (!S.data) load();
+  else render();
 }
 
 async function init() {
@@ -245,12 +461,16 @@ async function init() {
     me.status === 401 ? "登录后再打开管理后台。" : me.message);
   $("#me").textContent = me.email;
   if (!me.admin) return deny("没有权限", "管理后台只给部署方指定的管理员。");
+  $(".admin-tabs").hidden = false;
+  bindCatalog();
   for (const r of document.querySelectorAll('input[name="days"]')) {
     r.addEventListener("change", () => { S.days = Number(r.value); load(); });
   }
   let t;
-  new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => S.data && renderCharts(S.data), 80); }).observe($(".charts"));
-  await load();
+  new ResizeObserver(() => { clearTimeout(t); t = setTimeout(() => S.data && !$("#dash").hidden && renderCharts(S.data), 80); })
+    .observe($(".charts"));
+  addEventListener("hashchange", showTab);
+  showTab();
 }
 
 init();
