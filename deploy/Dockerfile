@@ -2,7 +2,7 @@
 # 只在 compose 网络里对 Caddy 开放 8765，不对宿主机发布端口；对外访问一律经 Caddy（HTTPS + basic auth）。
 FROM python:3.14-slim-bookworm
 
-ARG DSH_VERSION=0.2.0-rc.2
+ARG DSH_VERSION=0.2.1-rc.2
 ARG NODE_MAJOR=24
 ARG UV_VERSION=0.12.1
 
