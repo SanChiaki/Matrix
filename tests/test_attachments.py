@@ -222,3 +222,27 @@ def test_old_state_without_attachments_loads(tmp_path: Path):
     store = Store(tmp_path, seed=False)
     assert all(m.attachments == [] for m in store.conversations[chat.id].messages)
     assert os.path.exists(tmp_path / "state.json")
+
+
+def test_read_only_copies_are_removed_where_read_only_files_cannot_be_deleted(tmp_path, monkeypatch):
+    """附件存成只读、拷进工作目录也是只读副本；Windows 不让删只读文件，丢弃副本、清理附件区时要先去掉只读。
+    这里在别的系统上模拟同样的限制，否则只有在 Windows 上跑才会发现。"""
+    real_unlink = os.unlink
+
+    def windows_unlink(path, *args, dir_fd=None, **kw):
+        if not os.stat(path, dir_fd=dir_fd).st_mode & stat.S_IWUSR:
+            raise PermissionError(13, "拒绝访问", str(path))
+        real_unlink(path, *args, dir_fd=dir_fd, **kw)
+
+    monkeypatch.setattr(os, "unlink", windows_unlink)
+    seen: list[ScriptCall] = []
+    net = Network(ScriptedRuntime(_capture(seen)), tmp_path, seed=False)
+    alice = users(net, "alice@x.io")[0]
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    chat = net.direct_chat(a.id, actor=alice)
+    meta = net.upload_attachment(chat.id, "notes.txt", b"hello attachment", "text/plain", actor=alice)
+    net.send_message(chat.id, "看附件", attachments=[meta], background=False, actor=alice)
+    assert seen[-1].files == {attachment_rel(meta): b"hello attachment"}  # 运行时拷进去了
+    assert not (tmp_path / chat.seats[a.id].workdir / ATTACHMENTS).exists()  # 运行后的只读副本删掉了
+    net.clear_conversation(chat.id, actor=alice)
+    assert not (net.store.attachment_dir(chat.id) / meta["sha"]).exists()  # 不再被引用的附件删掉了

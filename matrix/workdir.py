@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import io
+import os
 import shutil
+import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -63,6 +65,26 @@ def resolve(root: Path, rel: str) -> Path | None:
         return None
     path = Path(rel)
     return root / path if path in set(outputs(root)) else None
+
+
+def _writable_retry(func, path, _exc) -> None:
+    """Windows 不让删只读文件：去掉只读再删一次；还删不掉就算了（和 ignore_errors 一样）。"""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def discard(path: Path) -> None:
+    """删掉文件或目录，只读的也删（附件等只读副本）；不存在、删不掉都不报错。"""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, onexc=_writable_retry)
+    else:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            _writable_retry(os.unlink, path, e)
 
 
 def snapshot(src: Path, dst: Path) -> tuple[list[str], int]:
