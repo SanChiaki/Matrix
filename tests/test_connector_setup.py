@@ -183,13 +183,13 @@ def test_windows_install_registers_a_logon_task(tmp_path):
     home, scripts = tmp_path / "home", tmp_path / "venv" / "Scripts"
     scripts.mkdir(parents=True)
     exe = scripts / "matrix-connect.exe"
-    exe.write_text("")
+    exe.write_text("", encoding="utf-8")
     py = str(scripts / "python.exe")  # 运行 setup 的 Python 和 matrix-connect.exe 在同一个 venv
     config = tmp_path / "my config.json"
     cfg.save(cfg.Config(server="http://127.0.0.1:8765", token="s3cret-token"), config)
     with pytest.raises(service.ServiceError):  # 没有 pythonw.exe：不装
         service.install(str(exe), config, system="Windows", home=home, run=ran.append, python=py, started=up)
-    (scripts / "pythonw.exe").write_text("")
+    (scripts / "pythonw.exe").write_text("", encoding="utf-8")
 
     path = service.install(str(exe), config, system="Windows", home=home, run=ran.append, python=py, started=up)
     assert path == home / "AppData/Local/matrix-connect/task.xml" and path.exists()
@@ -223,8 +223,8 @@ def test_windows_launcher_is_the_pythonw_of_the_running_env(tmp_path):
     tool = tmp_path / "AppData" / "Roaming" / "uv" / "tools" / "matrix" / "Scripts"
     for d in (bin_exe.parent, tool):
         d.mkdir(parents=True)
-    bin_exe.write_text("")
-    (tool / "pythonw.exe").write_text("")
+    bin_exe.write_text("", encoding="utf-8")
+    (tool / "pythonw.exe").write_text("", encoding="utf-8")
     assert service.windows_launcher(str(bin_exe), str(tool / "python.exe")) == tool / "pythonw.exe"
 
     with pytest.raises(service.ServiceError, match="pythonw"):  # 两处都没有：不装
@@ -232,7 +232,7 @@ def test_windows_launcher_is_the_pythonw_of_the_running_env(tmp_path):
 
     cache = tmp_path / "AppData" / "Local" / "uv" / "cache" / "archive-v0" / "x" / "Scripts"
     cache.mkdir(parents=True)
-    (cache / "pythonw.exe").write_text("")
+    (cache / "pythonw.exe").write_text("", encoding="utf-8")
     with pytest.raises(service.ServiceError):
         service.windows_launcher(str(bin_exe), str(cache / "python.exe"))
 
@@ -265,7 +265,7 @@ def test_install_reuses_the_existing_pairing(tmp_path, monkeypatch, capsys):
 def test_install_waits_for_the_log(tmp_path):
     """确认任务起来了靠连接器启动时写的日志：之前的旧日志不算。"""
     log = tmp_path / "matrix-connect.log"
-    log.write_text("旧")
+    log.write_text("旧", encoding="utf-8")
     assert not service._started(log, time.time() + 5, timeout=0.6)
     assert service._started(log, time.time() - 5, timeout=0.6)
     assert not service._started(tmp_path / "none.log", 0, timeout=0.6)
@@ -299,10 +299,10 @@ def test_run_log_captures_output(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "stderr", sys.stderr)
     log = tmp_path / "logs" / "matrix-connect.log"
     log.parent.mkdir()
-    log.write_text("旧" * 10)
+    log.write_text("旧" * 10, encoding="utf-8")
     monkeypatch.setattr("matrix.connector.main.LOG_MAX_BYTES", 10)
     with pytest.raises(SystemExit):
         main(["run", "--config", str(tmp_path / "none.json"), "--log", str(log)])
     sys.stderr.close()
     assert "启动" in log.read_text(encoding="utf-8") and "setup" in log.read_text(encoding="utf-8")
-    assert (tmp_path / "logs" / "matrix-connect.log.1").read_text() == "旧" * 10
+    assert (tmp_path / "logs" / "matrix-connect.log.1").read_text(encoding="utf-8") == "旧" * 10

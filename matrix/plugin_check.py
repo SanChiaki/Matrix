@@ -132,6 +132,8 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import utf8_stdio
+    utf8_stdio()
     p = argparse.ArgumentParser(prog="matrix-plugin", description="Matrix 项目插件的本地工具")
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check", help="校验一个插件目录或 zip：装得上吗、有没有多半写错的地方")

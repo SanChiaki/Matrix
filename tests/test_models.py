@@ -264,7 +264,7 @@ def test_catalog_providers_are_checked(tmp_path: Path):
 
     cat = ModelCatalog(tmp_path / "models.json")
     cat.save({"models": [ours], "providers": [{**HI, "api_key": "sk-secret"}]}, "")
-    text = (tmp_path / "models.json").read_text()
+    text = (tmp_path / "models.json").read_text(encoding="utf-8")
     assert "sk-secret" not in text and json.loads(text)["providers"] == [HI]
     assert cat.provider("hi-code").base_url == HI["base_url"] and cat.provider("deepseek-official") is None
 
@@ -290,7 +290,7 @@ def test_provider_key_only_reaches_the_dsh_process(tmp_path: Path):
                                               "providers": [{**HI, "api_key": secret}]})
     assert r.status_code == 200 and r.json()["providers"] == [{**HI, "has_key": True}]
     assert secret not in r.text and secret not in admin.get("/api/admin/models").text
-    assert secret not in (tmp_path / "models.json").read_text() and secret not in (tmp_path / "state.json").read_text()
+    assert secret not in (tmp_path / "models.json").read_text(encoding="utf-8") and secret not in (tmp_path / "state.json").read_text(encoding="utf-8")
     assert secret.encode() not in (tmp_path / "vault" / "model-provider-hi-code.bin").read_bytes()  # 加密保存
     assert "base_url" not in user.get("/api/models").text  # 用户只看到模型，看不到供应商地址
 
@@ -307,7 +307,7 @@ def test_provider_key_only_reaches_the_dsh_process(tmp_path: Path):
     overlay = build_patch_yaml([], model={"provider": "hi-code", "model": "claude-opus-5-5"}, llm_provider=prov)
     assert "- id: llm-pi-ai" in overlay and secret not in overlay
     assert all(secret not in json.dumps(ev.data, ensure_ascii=False, default=str) for ev in net.bus.wait(seq, 0.1))
-    assert secret not in (tmp_path / "usage.jsonl").read_text()
+    assert secret not in (tmp_path / "usage.jsonl").read_text(encoding="utf-8")
 
     a.device_runtime = "dev_x"  # 端侧：不受目录约束，也拿不到平台的供应商与密钥
     assert net._llm_provider(a) == (None, {})

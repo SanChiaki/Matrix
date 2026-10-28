@@ -48,7 +48,7 @@ def test_tokens_normalizes_runtime_fields():
 def test_usage_log_skips_broken_lines(tmp_path: Path):
     log = UsageLog(tmp_path)
     log.record({"ts": 100.0, "ok": True})
-    with log.path.open("a") as f:
+    with log.path.open("a", encoding="utf-8") as f:
         f.write('{"ts": 2\n')  # 写到一半断电
     log.record({"ts": 300.0, "ok": False})
     assert [e["ts"] for e in log.read()] == [100.0, 300.0]

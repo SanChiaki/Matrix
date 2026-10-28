@@ -220,6 +220,8 @@ def _legacy(argv: list[str]) -> None:
     run(args.url, args.token, args.driver, Path(args.workroot), args.bin)
 
 def main(argv: list[str] | None = None) -> None:
+    from .. import utf8_stdio
+    utf8_stdio()
     argv = list(sys.argv[1:] if argv is None else argv)
     if any(a == "--url" or a.startswith("--url=") for a in argv):
         _legacy(argv)

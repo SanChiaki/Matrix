@@ -40,12 +40,12 @@ def test_dsh_overlay_never_reads_default_skill_roots(tmp_path: Path):
     import json
     fake = fake_bin(tmp_path, "fake-dsh",   # 只记录覆盖层，不真的跑模型
                     "import pathlib\np=sys.argv[sys.argv.index('--patch')+1]\n"
-                    "pathlib.Path(p).with_name('seen.yml').write_text(pathlib.Path(p).read_text())\n"
+                    "pathlib.Path(p).with_name('seen.yml').write_text(pathlib.Path(p).read_text(encoding='utf-8'), encoding='utf-8')\n"
                     "print(json.dumps({'type':'final','text':'ok'}))\n")
     cwd = tmp_path / "w"
     res = DshRuntime(fake).run(RunRequest(agent_id="a", context_id="c", prompt="hi", cwd=cwd, authority=[]))
     assert res.ok, res.error
-    seen = (cwd / "seen.yml").read_text()
+    seen = (cwd / "seen.yml").read_text(encoding="utf-8")
     assert "includeDefaultRoots: false" in seen
     assert json.dumps([str((cwd / "skills").resolve()), str((cwd / "agent-home" / "skills").resolve())]) in seen
 
@@ -183,7 +183,7 @@ def test_project_skills_are_archive_writes_logged_and_public(tmp_path: Path):
     host, guest, other = users(net, "host@x.io", "guest@x.io", "other@x.io")
     g, chat = joint(net, host, "guest@x.io", guest)
     net.save_project_skill(g.id, "triage", "整理议题", "按影响排序", actor=host)
-    log = [json.loads(x) for x in (tmp_path / "projects" / g.id / "log.jsonl").read_text().splitlines()]
+    log = [json.loads(x) for x in (tmp_path / "projects" / g.id / "log.jsonl").read_text(encoding="utf-8").splitlines()]
     assert log[-1]["action"] == "skill.create" and log[-1]["skill"] == "triage" and log[-1]["by_user"] == host
     assert any("新增了项目技能「triage」" in m.text for m in net.store.conversations[chat.id].messages)
     assert net.project_skill(g.id, "triage", actor=guest)["body"] == "按影响排序"

@@ -25,6 +25,8 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      PYTHONWARNDEFAULTENCODING: "1"   # 没写编码的文本读写算失败（pyproject 的 filterwarnings），Linux 上也抓得到
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7

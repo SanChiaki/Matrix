@@ -24,6 +24,9 @@ packages = ["matrix"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# 读写文本不写编码时，Windows 上（Python 3.14）按区域编码（cp1252 / GBK）处理，中文就会坏。
+# 设了 PYTHONWARNDEFAULTENCODING=1（CI 三端都设）时这类调用一律算失败，在哪个系统上都能发现。
+filterwarnings = ["error::EncodingWarning"]
 
 [dependency-groups]
 dev = [

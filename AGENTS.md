@@ -141,7 +141,8 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 1. 先读后改：改引擎前读 `engine.py` 与相关测试；保持现有风格（dataclass、类型标注、中文 docstring 与提示词、小工具函数）。
 2. 新行为或修 bug 先补测试，用 `ScriptedRuntime` 写确定性测试，不依赖真实 DSH 或网络。
 3. 每次改动后运行 `uv run pytest -q`，全部通过再交付。PR 与 main 上的提交由 GitHub Actions 在 Linux、Windows、macOS 上各跑一遍
-   （`.github/workflows/test.yml`），某一端的问题看那里的结果，不必另找机器手动验证。
+   （`.github/workflows/test.yml`），某一端的问题看那里的结果，不必另找机器手动验证。读写文本、子进程的文本管道一律写
+   `encoding`：CI 设了 `PYTHONWARNDEFAULTENCODING=1`，漏写的在三端都会变红（本地加上这个环境变量跑也能查）。
 4. 新增权限时同步改三处：`models.AUTHORITIES`、`models.TOOL_AUTHORITY`、`runtime.AUTHORITY_PLUGINS`；
    `test_authorities_registered_everywhere` 会在漏改时变红。
 5. 新增网络工具时同步改：`mcp_server.TOOLS`（schema）、`engine.TOOL_HANDLERS`（实现）、`protocol.TOOL_GUIDE`（提示词）；

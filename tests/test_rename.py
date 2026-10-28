@@ -103,7 +103,9 @@ def test_old_connector_tool_calls_are_renamed():
 
 
 def test_server_cli_entry_point():
-    """入口改名为 matrix：`python -m matrix.server --help` 能跑，帮助里说明数据目录的沿用。"""
+    """入口改名为 matrix：`python -m matrix.server --help` 能跑，帮助里说明数据目录的沿用。
+    输出到管道时一律 UTF-8：这里把管道编码设成 cp1252（英文 Windows 上 Python 3.14 的默认），在哪个系统上都能复现。"""
     out = subprocess.run([sys.executable, "-m", "matrix.server", "--help"], capture_output=True, text=True,
-                         encoding="utf-8", cwd=ROOT, env={**os.environ}, timeout=60)
+                         encoding="utf-8", cwd=ROOT, env={**os.environ, "PYTHONIOENCODING": "cp1252"}, timeout=60)
+    assert "数据目录" in out.stdout
     assert out.returncode == 0 and "--data" in out.stdout and ".agentnet" in out.stdout
