@@ -372,7 +372,7 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
     async for chunk in request.stream():
         buf += chunk
         if len(buf) > cap:
-            raise HTTPException(413, f"技能包超过 {SKILL_LIMIT // 1000} KB")
+            raise HTTPException(413, f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
     from .skills import SkillError, unzip
     try:
         if "json" in request.headers.get("content-type", ""):

@@ -23,6 +23,10 @@ const gcolor = (id) => PROJECT_COLORS[Math.max(0, S.snap.projects.findIndex((g) 
 // 错误带上 HTTP 状态码（断网、超时为 0）：调用方据此区分“确实不存在”（404）和“这次没拿到”。
 // 慢网、网关（如 Caddy 连不上后端时的 502）下后者很常见，不能当成前者显示。
 const API_TIMEOUT_MS = 30000;
+// 快捷键的修饰键按系统显示：Mac 是 ⌘，Windows / Linux 是 Ctrl（两种按法都接，见 bindComposer）
+const IS_MAC = /mac|iphone|ipad|ipod/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);
+const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
+const SEND_HINT = `<kbd>${MOD_KEY}</kbd> <kbd>Enter</kbd> 发送`;
 const httpError = (message, status) => Object.assign(new Error(message), { status });
 
 async function api(path, opts = {}) {
@@ -1974,7 +1978,10 @@ function renderMembers() {
   if (c.kind === "session") {
     const a = agent(c.agent_id);
     const chat = S.snap.conversations.find((x) => x.kind === "project" && x.project_id === g.id && !x.archived);
+    const more = (c.members || []).filter((id) => id !== c.agent_id).map(agent).filter(Boolean);
     box.innerHTML = `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : placeholder("助理已删除。")}
+      ${more.length ? `<h3>也能 @ · ${more.length}</h3><ul class="member-list">${more.map((x) => row(x)).join("")}</ul>
+        <p class="hint">你在这个项目里的其他 Agent：@ 它就直接交给它，没 @ 时交给助理。别人的 Agent 看不到这里，要找它们去群聊。</p>` : ""}
       <p class="hint">项目会话只有你看得到。助理每一轮都会拿到「${esc(g.name)}」的纲要、决定、成员、没结束的任务和群聊里最近的消息，
         也能委托项目成员、登记任务；它写纲要、决定、文件时会在群聊里留一条事件。</p>
       <p><a href="#${esc(chat ? chat.id : `p-${g.id}`)}">回到项目群聊</a> · ${g.member_ids.length} 名成员</p>
@@ -2446,7 +2453,8 @@ function bindAttachments() {
 }
 
 // ---------- 输入框：@ 成员 ----------
-// 群聊里 @ 谁谁接任务：输入 @ 弹出成员列表补全。私聊不需要 @。
+// 群聊里 @ 谁谁接任务：输入 @ 弹出成员列表补全。项目会话里能 @ 自己在项目里的其他 Agent（成员列表由网络给，
+// 只有自己的），没 @ 时交给助理。私聊不需要 @。
 const members = () => (S.conv?.members || proj(S.conv?.project_id)?.member_ids || []).map(agent).filter(Boolean);
 const mentionedIn = (text) => members().filter((a) => text.toLowerCase().includes(`@${a.name.toLowerCase()}`));
 
@@ -2459,15 +2467,22 @@ function composerHint() {
   const c = S.conv;
   if (!c) return;
   const m = $("#msg"), who = mentionedIn(m.value);
-  if (c.kind === "dm" || c.kind === "session") {
-    m.placeholder = c.kind === "session" ? "问问项目里的情况，或者交代一件事" : "和它说点什么";
-    $("#msg-hint").innerHTML = "<kbd>⌘</kbd> <kbd>Enter</kbd> 发送";
+  if (c.kind === "dm") {
+    m.placeholder = "和它说点什么";
+    $("#msg-hint").innerHTML = SEND_HINT;
+    return;
+  }
+  if (c.kind === "session") {
+    const others = members().length > 1;
+    m.placeholder = others ? "问问项目里的情况，或者交代一件事；@ 你的其他 Agent 直接交给它" : "问问项目里的情况，或者交代一件事";
+    $("#msg-hint").innerHTML = (who.length ? `交给 ${who.map((a) => esc(a.name)).join("、")}`
+      : others ? "交给助理 · @ 你的其他 Agent 直接交给它" : "交给助理") + ` · ${SEND_HINT}`;
     return;
   }
   m.placeholder = "@ 一个成员把任务交给它，例如：@Product Strategy Agent 研究一个新的 AI 产品机会";
   $("#msg-hint").innerHTML = (who.length ? `交给 ${who.map((a) => esc(a.name)).join("、")}`
     : m.value.trim() ? '<span class="warn">没有 @ 任何人：消息会留在群聊里，但不会有 Agent 处理</span>' : "@ 谁，谁接任务")
-    + " · <kbd>⌘</kbd> <kbd>Enter</kbd> 发送";
+    + ` · ${SEND_HINT}`;
 }
 
 function insertMention(a) {
@@ -2490,7 +2505,7 @@ function mentionQuery() {
 
 function openMentionPop() {
   const q = mentionQuery(), pop = $("#mention-pop");
-  if (S.conv?.kind !== "project" || q === null) return closeMentionPop();
+  if (!["project", "session"].includes(S.conv?.kind) || q === null) return closeMentionPop();
   const opts = members().filter((a) => a.name.toLowerCase().includes(q));
   if (!opts.length) return closeMentionPop();
   S.popIndex = Math.min(S.popIndex || 0, opts.length - 1);
@@ -2603,7 +2618,7 @@ function copyButton(btnSel, preSel, statusSel, text) {
     } catch {  // 剪贴板不可用（非安全上下文等）：选中文本，让人手动复制
       const r = document.createRange(); r.selectNodeContents($(preSel));
       const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r);
-      $(statusSel).textContent = "无法自动复制，已选中命令，请按 ⌘C / Ctrl+C。";
+      $(statusSel).textContent = `无法自动复制，已选中命令，请按 ${IS_MAC ? "⌘C" : "Ctrl+C"}。`;
     }
   });
 }
@@ -2836,9 +2851,9 @@ function pickSkillPackage(base, folder) {
         if (folder) {
           const enc = async (f) => { const b = new Uint8Array(await f.arrayBuffer()); let t = ""; for (let i = 0; i < b.length; i += 0x8000) t += String.fromCharCode(...b.subarray(i, i + 0x8000)); return btoa(t); };
           const body = { files: await Promise.all(files.map(async (f) => ({ path: f.webkitRelativePath || f.name, data: await enc(f) }))) };
-          res = await api(`${base}/upload`, { method: "POST", body });
+          res = await api(`${base}/upload`, { method: "POST", body, timeoutMs: 300000 });
         } else {
-          res = await api(`${base}/upload`, { method: "POST", body: files[0], headers: { "Content-Type": "application/zip" } });
+          res = await api(`${base}/upload`, { method: "POST", body: files[0], headers: { "Content-Type": "application/zip" }, timeoutMs: 300000 });
         }
         resolve(res);
       } catch (e) { reject(e); }

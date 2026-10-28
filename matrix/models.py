@@ -63,8 +63,8 @@ SKILLS = "skills"  # 本轮生效的技能在工作目录里的挂载名（只�
 # （dsh 的技能名规则），中文写在描述里。
 SKILL_NAME_RE = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 SKILL_NAME_MAX = 64
-SKILL_LIMIT = 256_000      # 单个技能目录的总大小上限（字节）
-SKILLS_TOTAL = 2_000_000   # 每轮下发到端侧的技能合计上限
+SKILL_LIMIT = 8_000_000    # 单个技能目录的总大小上限（字节）；官方的 docx / pptx / xlsx 技能都在 1 MB 上下，带字体的到 5 MB
+SKILLS_TOTAL = 16_000_000  # 每轮下发到端侧的技能合计上限
 SKILLS_PER_AGENT = 50
 
 

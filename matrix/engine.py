@@ -2816,8 +2816,9 @@ class Network:
         self.bus.emit("conversation.deleted", conversation_id=conv_id)
 
     def resolve_mentions(self, conv: Conversation, text: str, explicit: list[str] | None = None) -> list[str]:
-        """消息里 @ 到的项目成员（按名称匹配，最长优先），加上调用方显式给出的成员 id。私聊、项目会话总是对方。"""
-        if conv.kind in ("dm", "session"):
+        """消息里 @ 到的项目成员（按名称匹配，最长优先），加上调用方显式给出的成员 id。私聊总是对方；
+        项目会话里 @ 到的是会话主人自己在项目里的 Agent，没 @ 任何人时交给助理。"""
+        if conv.kind == "dm":
             return [conv.agent_id] if conv.agent_id else []
         g = self.store.projects.get(conv.project_id or "")
         members = [self.store.agents[m] for m in self._members(conv)]
@@ -2832,7 +2833,10 @@ class Network:
             if any(a.id == mid for a in members) and mid not in found:
                 found.append(mid)
             elif not any(a.id == mid for a in members):
-                raise NetworkError(f"{self._name(mid)} 不是项目「{g.name if g else ''}」的成员")
+                raise NetworkError(f"{self._name(mid)} 不是项目「{g.name if g else ''}」的成员"
+                                   + ("里你的 Agent（项目会话只有你看得到，别人的 Agent 请在群聊里 @）" if conv.kind == "session" else ""))
+        if conv.kind == "session" and not found:
+            return [conv.agent_id] if conv.agent_id else []
         return found
 
     def send_message(self, conv_id: str, text: str, mentions: list[str] | None = None,
@@ -5073,11 +5077,16 @@ class Network:
         return d
 
     def _members(self, conv: Conversation) -> list[str]:
-        """调用方持有锁。可以 @ 的成员：群聊是项目成员，私聊、项目会话是对方。"""
-        if conv.kind in ("dm", "session"):
+        """调用方持有锁。可以 @ 的成员：群聊是项目成员；私聊是对方；项目会话是助理加上会话主人自己在项目里的
+        其他 Agent（会话只属于它的人，不变量 18：别人的 Agent 不进来，要找它们去群聊）。"""
+        if conv.kind == "dm":
             return [conv.agent_id] if conv.agent_id else []
         g = self.store.projects.get(conv.project_id or "")
-        return [m for m in (g.member_ids if g else []) if m in self.store.agents]
+        ids = [m for m in (g.member_ids if g else []) if m in self.store.agents]
+        if conv.kind == "session":
+            mine = [m for m in ids if m != conv.agent_id and self.can_use_agent(self.store.agents[m], conv.owner_id)]
+            return ([conv.agent_id] if conv.agent_id else []) + mine
+        return ids
 
     def task_detail(self, task_id: str, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
