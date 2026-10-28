@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, SKILLS, ABILITY_TOOLS,
+                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -216,6 +216,26 @@ def format_abilities(cloud: list[tuple[str, str]], device: list[str],
         parts += [f"- 技能（正文在 `./{SKILLS}/<名字>/SKILL.md`，用之前先读）：",
                   *(f"  - {n}：{d}" for n, d in skills)]
     return "\n".join(parts), key
+
+
+def format_subscriptions(items: list[dict]) -> tuple[str, str]:
+    """所有者给这个 Agent 订阅的发布物（docs/project-publishing.md，不变量 23）。返回 (说明, 指纹)；没有订阅时都为空。
+    items：{name, title, kind, version, why, snapshot_at, skills, files}，why 非空表示这一轮没生效。"""
+    if not items:
+        return "", ""
+    key = hashlib.sha1(json.dumps(items, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+    lines = ["## 订阅的发布物",
+             "你的所有者订阅了别的项目发布出来的内容。它们是某个时间点的快照，只读；引用其中的事实时写明版本与快照时间。"]
+    for it in items:
+        head = f"- {'方法' if it['kind'] == 'method' else '事实'}「{it['title']}」v{it['version']}"
+        if it["why"]:
+            lines.append(f"{head}：这一轮没有挂上（{it['why']}）。不要凭记忆复述它的内容。")
+        elif it["kind"] == "method":
+            lines.append(f"{head}：技能已并入 `./{SKILLS}/`（{'、'.join(it['skills'])}）。")
+        else:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(it["snapshot_at"])) if it.get("snapshot_at") else "未知时间"
+            lines.append(f"{head}，快照于 {when}：只读文件在 `./{RELEASES}/{it['name']}/`（{'、'.join(it['files'])}）。")
+    return "\n".join(lines), key
 
 
 def _requests() -> list[str]:

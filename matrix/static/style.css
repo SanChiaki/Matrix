@@ -875,3 +875,28 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .need-add { max-width: 760px; }
 .need-add .mcp-field { margin-top: 10px; }
 .need-add .ref-add select { width: auto; }
+
+/* ---------- 发布与订阅（docs/project-publishing.md） ---------- */
+:root { --release: #e0a95c; --release-soft: rgba(224, 169, 92, .14); }
+:root[data-theme="light"] { --release: #a8661a; --release-soft: rgba(168, 102, 26, .1); }
+.pill.rel-fact { background: var(--release-soft); color: var(--release); }
+.pill.rel-method { background: var(--accent-soft); color: var(--accent); }
+.rel-facts { display: grid; grid-template-columns: 90px 1fr; gap: 6px 14px; margin: 4px 0 16px; font-size: 13px; }
+.rel-facts dt { color: var(--muted); }
+.rel-facts dd { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rel-sub { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin: 0 0 16px; background: var(--surface); }
+.rel-sub h3 { margin-top: 0; }
+.rel-agents { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.rel-agents label, .rel-form label.check, .rel-form fieldset label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; }
+.rel-view .sandbox { margin-top: 0; }
+.rel-skills { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 8px; }
+.rel-skills li { display: flex; gap: 10px; align-items: flex-start; }
+.rel-feedback { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 8px; font-size: 13px; }
+.rel-fb { display: flex; gap: 8px; align-items: flex-end; }
+.rel-fb textarea { flex: 1; }
+.rel-form { display: grid; gap: 10px; max-width: 640px; margin-top: 10px; }
+.rel-form > label:not(.check) { display: grid; gap: 4px; font-size: 12.5px; color: var(--text-2); }
+.rel-form fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; }
+.rel-form legend { font-size: 12.5px; color: var(--text-2); padding: 0 4px; }
+.rel-form .seg { display: flex; gap: 18px; }
+@media (max-width: 640px) { .rel-facts { grid-template-columns: 1fr; } .rel-fb { flex-direction: column; align-items: stretch; } }

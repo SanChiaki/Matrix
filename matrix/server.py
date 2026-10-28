@@ -183,6 +183,41 @@ class AgentPatch(BaseModel):
     max_delegations: int | None = Field(None, ge=1)
     skills: list[str] | None = Field(None, max_length=50)       # 勾上的“我的技能”
     connections: list[str] | None = Field(None, max_length=50)  # 勾上的“我的连接器”
+    subscriptions: list[str] | None = Field(None, max_length=30)  # 订阅的发布物（不变量 23）
+
+
+class ReleaseIn(BaseModel):
+    """主持人发布（docs/project-publishing.md）：方法带技能，事实带档案文件（可带一个插件视图）。读者按邮箱。"""
+    name: str = Field(..., min_length=1, max_length=64)
+    kind: str = Field(..., pattern="^(method|fact)$")
+    title: str = Field(..., min_length=1, max_length=80)
+    description: str = Field("", max_length=2000)
+    skills: list[str] | None = Field(None, max_length=30)
+    files: list[str] | None = Field(None, max_length=30)
+    view: dict[str, str] | None = None
+    readers: list[str] | None = Field(None, max_length=200)
+    public: bool = False
+    follow: bool = False
+
+
+class ReleasePatch(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=80)
+    description: str | None = Field(None, max_length=2000)
+    skills: list[str] | None = Field(None, max_length=30)
+    files: list[str] | None = Field(None, max_length=30)
+    view: dict[str, str] | None = None
+    readers: list[str] | None = Field(None, max_length=200)
+    public: bool | None = None
+    follow: bool | None = None
+
+
+class SubscribeIn(BaseModel):
+    agent_id: str
+    on: bool = True
+
+
+class FeedbackIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
 
 
 class ProposalApprove(BaseModel):
@@ -870,6 +905,71 @@ def create_app(network: Network) -> FastAPI:
             return FileResponse(network.plugin_frame_file(token, path), headers=PLUGIN_FRAME_HEADERS)
         except NetworkError:
             raise HTTPException(404, "not found") from None
+
+    # ---- 发布与订阅（docs/project-publishing.md，不变量 23） ----
+    @app.get("/api/releases")
+    def releases(user: Me) -> list[dict]:
+        return network.releases_for(user.id)
+
+    @app.get("/api/releases/{release_id}")
+    def release(release_id: str, user: Me) -> dict:
+        return network.release_detail(release_id, actor=user.id)
+
+    @app.get("/api/releases/{release_id}/files/{name}")
+    def release_file(release_id: str, name: str, user: Me) -> FileResponse:
+        path = network.release_file(release_id, name, actor=user.id)
+        # 同项目文件：一律当作附件下载，不在本站点内渲染
+        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
+
+    @app.post("/api/releases/{release_id}/subscribe")
+    def subscribe_release(release_id: str, body: SubscribeIn, user: Me) -> dict:
+        network.set_subscription(release_id, body.agent_id, body.on, actor=user.id)
+        return network.release_detail(release_id, actor=user.id)
+
+    @app.post("/api/releases/{release_id}/feedback")
+    def release_feedback(release_id: str, body: FeedbackIn, user: Me) -> dict:
+        return network.release_feedback(release_id, body.text, actor=user.id)
+
+    @app.post("/api/releases/{release_id}/frame")
+    def release_frame(release_id: str, user: Me) -> dict:
+        return {"src": f"/release-frame/{network.release_frame(release_id, actor=user.id)}"}
+
+    @app.post("/api/releases/{release_id}/bridge")
+    def release_bridge(release_id: str, body: BridgeIn, user: Me) -> dict:
+        """发布物里的插件页面：只读这个版本的快照（父页面代转）。"""
+        return {"result": network.release_bridge(release_id, body.op, body.args, actor=user.id)}
+
+    @app.get("/release-frame/{token}/{path:path}")
+    def release_frame_file(token: str, path: str) -> FileResponse:
+        try:
+            if path == "_matrix/sdk.js":
+                network.release_frame_check(token)
+                return FileResponse(STATIC / "plugin-sdk.js", headers=PLUGIN_FRAME_HEADERS,
+                                    media_type="text/javascript")
+            return FileResponse(network.release_frame_file(token, path), headers=PLUGIN_FRAME_HEADERS)
+        except NetworkError:
+            raise HTTPException(404, "not found") from None
+
+    @app.post("/api/projects/{project_id}/releases")
+    def create_release(project_id: str, body: ReleaseIn, user: Me) -> dict:
+        r = network.create_release(project_id, actor=user.id, **body.model_dump())
+        return network.release_detail(r.id, actor=user.id)
+
+    @app.patch("/api/projects/{project_id}/releases/{release_id}")
+    def update_release(project_id: str, release_id: str, body: ReleasePatch, user: Me) -> dict:
+        r = network.update_release(project_id, release_id, actor=user.id, **body.model_dump(exclude_unset=True))
+        return network.release_detail(r.id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/releases/{release_id}/publish")
+    def publish_release(project_id: str, release_id: str, user: Me) -> dict:
+        r = network.publish_release_version(project_id, release_id, actor=user.id)
+        return network.release_detail(r.id, actor=user.id)
+
+    @app.delete("/api/projects/{project_id}/releases/{release_id}")
+    def withdraw_release(project_id: str, release_id: str, user: Me) -> dict:
+        r = network.withdraw_release(project_id, release_id, actor=user.id)
+        return network.release_detail(r.id, actor=user.id)
 
     @app.post("/hooks/{token}")
     async def plugin_webhook(token: str, request: Request) -> dict:

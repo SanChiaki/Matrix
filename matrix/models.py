@@ -90,6 +90,16 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
 }
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
+# 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
+RELEASES = "releases"      # 订阅的事实发布物在工作目录里的挂载名（只读副本，运行后丢弃）
+RELEASE_KINDS = {"method": "方法", "fact": "事实"}
+RELEASES_PER_PROJECT = 20
+RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
+RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
+RELEASE_VERSIONS_KEPT = 3  # 快照保留最近几个版本
+RELEASE_FEEDBACK = 200     # 一份发布物最多保留多少条反馈
+SUBSCRIPTIONS_PER_AGENT = 30
+
 
 def attachment_rel(a: dict[str, Any]) -> str:
     """附件在工作目录里的相对路径：attachments/<sha 前 8 位>/<原文件名>。文件名保留扩展名，前缀避免同名冲突。"""
@@ -153,6 +163,8 @@ class AgentNode:
     # 所有者勾给它的“我的连接器”（Connection id）与“我的技能”（技能名）。只能是同一所有者的
     connections: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    # 所有者给它勾的订阅：看得到的发布物（Release id）。方法进技能层，事实只读挂到 releases/（不变量 23）
+    subscriptions: list[str] = field(default_factory=list)
     created_by: str = "seed"             # seed | human | signup（注册时网络给的助理）| proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
@@ -643,6 +655,35 @@ class Approval:
     scope: str = ""
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Release:
+    """项目发出去的一份发布物（docs/project-publishing.md，不变量 23）：只有主持人发布，按版本固定成快照
+    （releases/<id>/v<N>/）。方法（method）是一组技能，可以给所有人；事实（fact）是一组档案文件（可带一个插件视图），
+    只给点名的读者。订阅只在订阅者自己的 Agent 上生效，发布方看不到谁订阅了。"""
+
+    id: str
+    project_id: str
+    name: str                            # kebab-case，项目内唯一；也是订阅者工作目录里 releases/<name>/ 的名字
+    kind: str                            # method | fact
+    title: str
+    description: str = ""
+    skills: list[str] = field(default_factory=list)   # method：项目技能或插件打法的名字
+    files: list[str] = field(default_factory=list)    # fact：档案文件名
+    view: dict[str, str] | None = None   # fact：{plugin, tab}，插件在清单 release_views 里声明过的标签
+    readers: list[str] = field(default_factory=list)  # 点名的读者（用户 id）；项目参与者总是看得到
+    public: bool = False                 # method：部署里所有登录用户都看得到
+    follow: bool = False                 # fact：跟随档案。列出的文件更新时网络自动切新版本（主持人开的长期许可）
+    version: int = 0
+    published_at: float | None = None
+    published_by: str | None = None      # 这个版本是谁发的（跟随档案切的版本记为开跟随的主持人）
+    status: str = "active"               # active | withdrawn
+    feedback: list[dict[str, Any]] = field(default_factory=list)  # 读者自己写的反馈：{id, user_id, text, at}
+    created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

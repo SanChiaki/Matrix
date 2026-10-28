@@ -18,7 +18,7 @@ from dataclasses import asdict, fields
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held,
-                     KnowledgeItem, Message, Project, Proposal, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
+                     KnowledgeItem, Message, Project, Proposal, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
                      new_id, seat_id)
 
 
@@ -212,6 +212,7 @@ class Store:
         self.drafts: dict[str, Draft] = {}     # 助理在助理对话里起草、等主人确认的消息
         self.held: dict[str, Held] = {}        # 用到别处资料、等所有者确认的输出（不变量 22）
         self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
+        self.releases: dict[str, Release] = {}    # 项目发出去的发布物（不变量 23）
         if self.path.exists():
             self._load()
         else:
@@ -283,6 +284,12 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def release_dir(self, release_id: str) -> Path:
+        """发布物的快照：每个版本一个 v<N>/（skills/、files/、page/、manifest.json），固定不变，只有网络写入。"""
+        d = self.root / "releases" / release_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def task_dir(self, task_id: str) -> Path:
         d = self.root / "tasks" / task_id
         d.mkdir(parents=True, exist_ok=True)
@@ -307,6 +314,7 @@ class Store:
                 "drafts": [d.to_dict() for d in self.drafts.values()],
                 "held": [h.to_dict() for h in self.held.values()],
                 "schedules": [x.to_dict() for x in self.schedules.values()],
+                "releases": [r.to_dict() for r in self.releases.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -401,6 +409,8 @@ class Store:
             self.held[h["id"]] = Held(**_known(Held, h))
         for x in raw.get("schedules", []):
             self.schedules[x["id"]] = Schedule(**_known(Schedule, x))
+        for r in raw.get("releases", []):  # 旧数据没有：缺省为空
+            self.releases[r["id"]] = Release(**_known(Release, r))
         self._one_trust_domain()
         self.default_assistants()
         if migrated:
