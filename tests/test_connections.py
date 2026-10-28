@@ -32,6 +32,7 @@ class FakeMCP:
         self.sse = sse
         self.calls: list[dict] = []
         self.auth_seen: list[str] = []
+        self.headers_seen: list[dict[str, str]] = []
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -41,6 +42,7 @@ class FakeMCP:
             def do_POST(self):  # noqa: N802
                 msg = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 outer.auth_seen.append(self.headers.get("Authorization", ""))
+                outer.headers_seen.append(dict(self.headers))
                 if self.headers.get("Authorization") != f"Bearer {SECRET}":
                     self.send_response(401)
                     self.end_headers()
@@ -618,3 +620,129 @@ def test_custom_connector_public_only(tmp_path):
                                                    "header": "Authorization", "value": "Bearer s3cret"})
     assert r.status_code == 409 and "s3cret" not in r.text
     assert c.get("/api/me/connections").json() == []
+
+
+# ================= 自定义连接器：手工写的 MCP 配置 =================
+@pytest.fixture
+def local_ok(monkeypatch):
+    """测试里的 MCP 服务在本机：放开“只连公网”的那一层（真实的校验另有 test_custom_connector_public_only）。"""
+    import matrix.engine as engine_mod
+    import matrix.mcp_client as mcp_mod
+    monkeypatch.setattr(mcp_mod, "check_public_url", lambda u: u.strip())
+    monkeypatch.setattr(mcp_mod, "check_url_shape", lambda u: u.strip())
+    monkeypatch.setattr(engine_mod, "RemoteMCP", lambda url, headers=None, **k: RemoteMCP(url, headers))
+
+
+def test_mcp_config_accepts_common_shapes_and_rejects_others():
+    """自定义连接器的接入方式是远程 MCP：认 mcpServers / 单个服务 / 直接一项三种写法，本机的（command）、SSE、写法不对的都说清楚为什么。"""
+    from matrix.mcp_client import parse_server_config
+    entry = {"type": "http", "url": "https://kb.example.com/mcp", "headers": {"Authorization": "Bearer x", "X-Team": "t1"}}
+    want = ("团队知识库", "https://kb.example.com/mcp", {"Authorization": "Bearer x", "X-Team": "t1"})
+    assert parse_server_config({"mcpServers": {"团队知识库": entry}}) == want
+    assert parse_server_config(json.dumps({"团队知识库": entry})) == want
+    assert parse_server_config({"url": " https://kb.example.com/mcp ", "type": "streamable-http"}) == ("", "https://kb.example.com/mcp", {})
+    for bad, why in [("{oops", "不是合法的 JSON"), ({"mcpServers": {"a": entry, "b": entry}}, "正好写一个"),
+                     ({"x": {"command": "npx", "args": ["-y", "srv"]}}, "本机"), ({"type": "sse", "url": "https://a.io/sse"}, "SSE"),
+                     ({"type": "ws", "url": "https://a.io"}, "认不出 type"), ({"type": "http"}, "url"),
+                     ({"url": "https://a.io", "headers": ["Authorization"]}, "headers"),
+                     ({"url": "https://a.io", "headers": {"Bad Header": "v"}}, "请求头名")]:
+        with pytest.raises(MCPError, match=why):
+            parse_server_config(bad)
+    with pytest.raises(MCPError) as e:
+        parse_server_config({"url": "https://a.io", "headers": {"Authorization": 42}})
+    assert "42" not in str(e.value)
+
+
+def test_custom_connector_edits_its_mcp_config_without_echoing_secrets(tmp_path: Path, fake: FakeMCP, local_ok):
+    """不变量 19：手工写的 MCP 配置可以有多个请求头，值只进保管库；页面回显“已保存”，改配置时原样交回就沿用。"""
+    net = network(tmp_path, search, fake.url)
+    alice, = users(net, "alice@x.io")
+    c = client(net, "alice@x.io")
+    config = {"mcpServers": {"团队知识库": {"type": "http", "url": fake.url,
+                                         "headers": {"Authorization": f"Bearer {SECRET}", "X-Team": "t1"}}}}
+    r = c.post("/api/me/connections/custom", json={"config": json.dumps(config)})
+    assert r.status_code == 200, r.text
+    conn = r.json()
+    assert conn["name"] == "团队知识库" and conn["status"] == "ok" and conn["access"] == "mcp"
+    assert conn["config"] == {"type": "http", "url": fake.url, "headers": {"Authorization": "<已保存>", "X-Team": "<已保存>"}}
+    assert SECRET not in r.text and SECRET not in c.get("/api/me/connections").text
+    assert fake.headers_seen[-1]["X-Team"] == "t1"
+    # 改一个请求头，另一个原样交回
+    edited = {"type": "http", "url": fake.url, "headers": {"Authorization": "<已保存>", "X-Team": "t2"}}
+    r = c.put(f"/api/me/connections/{conn['id']}/custom", json={"name": "知识库", "config": edited})
+    assert r.status_code == 200 and r.json()["name"] == "知识库" and r.json()["status"] == "ok"
+    assert fake.headers_seen[-1]["X-Team"] == "t2" and fake.auth_seen[-1] == f"Bearer {SECRET}"
+    r = c.put(f"/api/me/connections/{conn['id']}/custom", json={"config": {"url": fake.url, "headers": {"X-New": "<已保存>"}}})
+    assert r.status_code == 409 and "X-New" in r.json()["detail"]
+    assert c.put(f"/api/me/connections/{conn['id']}/custom", json={"config": {"command": "npx"}}).status_code == 409
+    assert SECRET not in (tmp_path / "data" / "state.json").read_text(encoding="utf-8")
+    # 旧写法（单个地址 + 一个请求头）照样能用
+    r = c.post("/api/me/connections/custom", json={"name": "旧", "url": fake.url, "value": f"Bearer {SECRET}"})
+    assert r.status_code == 200 and r.json()["config"]["headers"] == {"Authorization": "<已保存>"}
+    # 目录里的连接器没有手工配置
+    docs = net.authorize_connector("docs", {"token": SECRET}, alice)
+    assert "config" not in docs
+    assert c.put(f"/api/me/connections/{docs['id']}/custom", json={"config": {"url": fake.url}}).status_code == 409
+
+
+def test_project_custom_connector_holds_only_templates(tmp_path: Path, fake: FakeMCP, local_ok):
+    """不变量 19：主持人在项目里手工写自定义连接器的 MCP 配置，请求头的值只能是 ${变量} 模板；
+    成员按这份配置用自己的凭证连接，得到的是自己的连接，项目里没有任何人的凭证。"""
+    want: dict[str, str] = {}
+
+    def use_kb(call: ScriptCall) -> str:
+        tool = f"{want.get('id')}__search_docs"
+        return call.connector(tool, q="路线图") if tool in call.connector_tools() else "没有连接器"
+    net = network(tmp_path, use_kb, fake.url)
+    net.limits.connector_ask_timeout_s = 0.2
+    host, guest = users(net, "host@x.io", "guest@x.io")
+    ga = net.create_agent("GuestAgent", "参与者的", [], ["connector.use"], actor=guest)
+    g, chat = joint(net, host, "guest@x.io", guest)
+    h, c = client(net, "host@x.io"), client(net, "guest@x.io")
+    entry = {"type": "http", "url": fake.url, "headers": {"Authorization": f"Bearer {SECRET}"}}
+    r = h.post(f"/api/projects/{g.id}/needs", json={"name": "团队知识库", "config": {"团队知识库": entry}})
+    assert r.status_code == 409 and "模板" in r.json()["detail"] and SECRET not in r.text
+    assert h.post(f"/api/projects/{g.id}/needs", json={"config": {"kb": {"command": "npx"}}}).status_code == 409
+    entry["headers"] = {"Authorization": "Bearer ${TOKEN}", "X-Team": "${TEAM}"}
+    r = h.post(f"/api/projects/{g.id}/needs", json={"config": {"团队知识库": entry}, "purpose": "查路线图"})
+    assert r.status_code == 200, r.text
+    assert c.post(f"/api/projects/{g.id}/needs", json={"config": {"别的": entry}}).status_code == 409  # 只有主持人
+    row = next(x for x in c.get(f"/api/projects/{g.id}").json()["connector_panel"]["services"] if "custom" in x)
+    assert row["name"] == "团队知识库" and row["custom"]["access"] == "mcp" and row["custom"]["vars"] == ["TOKEN", "TEAM"]
+    assert row["custom"]["config"] == {"type": "http", "url": fake.url, "headers": entry["headers"]}
+    assert {m["agent"]: m["status"] for m in row["members"]} == {"GuestAgent": "unauthorized"}
+    need = row["custom"]["need_id"]
+    # 别人的同名自定义连接器（地址不同）不算连上了这个
+    other = net.add_custom_connector("团队知识库", {"url": fake.url + "?other", "headers": {"Authorization": f"Bearer {SECRET}"}},
+                                     guest, agent_ids=[ga.id])
+    assert other["status"] == "ok"
+    status = lambda: {m["agent"]: m["status"] for m in next(  # noqa: E731
+        x for x in net.project_detail(g.id, actor=host)["connector_panel"]["services"] if "custom" in x)["members"]}
+    assert status() == {"GuestAgent": "unauthorized"}
+    # 成员连接：变量要填全；填的值只进保管库
+    assert c.post(f"/api/projects/{g.id}/needs/{need}/connect", json={"values": {"TOKEN": SECRET}}).status_code == 409
+    r = c.post(f"/api/projects/{g.id}/needs/{need}/connect", json={"values": {"TOKEN": SECRET, "TEAM": "t9"}})
+    assert r.status_code == 200 and r.json()["status"] == "ok" and SECRET not in r.text
+    assert r.json()["agents"] == [ga.id]
+    assert status() == {"GuestAgent": "ask"}
+    assert h.post(f"/api/projects/{g.id}/needs/{need}/connect", json={"values": {"TOKEN": "x", "TEAM": "y"}}).json()["agents"] == []
+    for who in (h, c):
+        assert SECRET not in who.get(f"/api/projects/{g.id}").text
+    assert SECRET not in (tmp_path / "data" / "state.json").read_text(encoding="utf-8")
+    # 共享项目里照样“用到时先问”；同意后 Agent 用的是成员自己的凭证
+    conn = net.store.connections[r.json()["id"]]
+    want["id"] = conn.connector_id
+    net.set_connector_grant(g.id, ga.id, conn.id, "always", actor=guest)
+    net.send_message(chat.id, "@GuestAgent 查一下路线图", actor=host, background=False)
+    assert chat.messages[-1].text == "找到：路线图"
+    assert fake.headers_seen[-1]["Authorization"] == f"Bearer {SECRET}" and fake.headers_seen[-1]["X-Team"] == "t9"
+    assert any("自定义连接器「团队知识库」（接入方式 MCP" in m.text for m in chat.messages)
+    # 主持人改了地址：成员原来的连接对不上了，要重新连
+    moved = dict(entry, url=fake.url + "?v2")
+    assert c.put(f"/api/projects/{g.id}/needs/{need}", json={"config": moved}).status_code == 409
+    assert h.put(f"/api/projects/{g.id}/needs/{need}", json={"config": moved}).status_code == 200
+    assert status() == {"GuestAgent": "unauthorized"}
+    assert any("各成员要重新连接" in m.text for m in chat.messages)
+    again = c.post(f"/api/projects/{g.id}/needs/{need}/connect", json={"values": {"TOKEN": SECRET, "TEAM": "t9"}}).json()
+    assert again["id"] == conn.id and conn.url == fake.url + "?v2" and status() == {"GuestAgent": "ready"}
+    assert other["connector_id"] != conn.connector_id

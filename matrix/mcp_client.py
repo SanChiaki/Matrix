@@ -48,6 +48,89 @@ def check_public_url(url: str) -> str:
     return u
 
 
+def check_url_shape(url: str) -> str:
+    """不解析域名、只看写法的那一半：https、有主机名、不带账号密码，写成 IP 的得是公网地址。
+    项目里写下的配置先这样查（写的时候不去连），成员连接时再按 check_public_url 全查。"""
+    import ipaddress
+    from urllib.parse import urlsplit
+    u = (url or "").strip()
+    p = urlsplit(u)
+    if p.scheme != "https" or not p.hostname or p.username or p.password or len(u) > 2000:
+        raise MCPError("地址要是 https://… 的公网地址")
+    try:
+        a = ipaddress.ip_address(p.hostname)
+    except ValueError:
+        if p.hostname.lower() == "localhost" or p.hostname.lower().endswith(".localhost"):
+            raise MCPError("自定义连接器只能连公网服务") from None
+        return u
+    if not a.is_global or a.is_multicast:
+        raise MCPError("自定义连接器只能连公网服务")
+    return u
+
+
+# ---- 手工编辑的 MCP 配置：自定义连接器的接入方式（目前只有远程 MCP） ----
+HTTP_TYPES = {"http", "streamable-http", "streamable_http", "streamablehttp"}
+MAX_HEADERS = 10
+
+
+def parse_server_config(raw: Any) -> tuple[str, str, dict[str, str]]:
+    """认常见 MCP 客户端配置的三种写法：`{"mcpServers": {"名字": {...}}}`、`{"名字": {...}}`、直接一项 `{...}`。
+    只认远程 MCP（Streamable HTTP）：`url` + 可选 `headers`，其余字段忽略。返回 (名字或空, 地址, 请求头)。
+    地址只查是字符串，是否公网由调用方另查；请求头的值可能是凭证，报错信息里不带。"""
+    import re
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise MCPError(f"MCP 配置不是合法的 JSON：第 {e.lineno} 行第 {e.colno} 列，{e.msg}") from None
+    if not isinstance(raw, dict):
+        raise MCPError("MCP 配置要是一个 JSON 对象")
+    name, entry = "", raw
+    if "mcpServers" in raw:
+        servers = raw["mcpServers"]
+        if not isinstance(servers, dict) or len(servers) != 1:
+            raise MCPError("mcpServers 里要正好写一个服务（一个连接器对应一个 MCP 服务）")
+        (name, entry), = servers.items()
+    elif not raw.keys() & {"url", "type", "command", "headers"} and len(raw) == 1:
+        (name, entry), = raw.items()
+    if not isinstance(entry, dict):
+        raise MCPError("MCP 服务的配置要是一个 JSON 对象")
+    kind = str(entry.get("type") or "").strip().lower()
+    if "command" in entry or kind == "stdio":
+        raise MCPError("这是在本机启动的 MCP（command）。自定义连接器由网络在云端代连，只能写远程服务的 url；"
+                       "本机的服务配在你电脑上的 AI 工具里，Matrix 客户端会自动认出")
+    if kind == "sse":
+        raise MCPError("只支持 Streamable HTTP（type 写 http），不支持旧的 SSE 传输")
+    if kind and kind.replace(" ", "") not in HTTP_TYPES:
+        raise MCPError(f"认不出 type「{entry.get('type')}」，远程 MCP 写 http")
+    url = entry.get("url")
+    if not isinstance(url, str) or not url.strip():
+        raise MCPError("要写服务地址 url")
+    headers = entry.get("headers") or {}
+    if not isinstance(headers, dict):
+        raise MCPError("headers 要是一个 JSON 对象：{\"请求头名\": \"值\"}")
+    if len(headers) > MAX_HEADERS:
+        raise MCPError(f"请求头最多 {MAX_HEADERS} 个")
+    clean: dict[str, str] = {}
+    for k, v in headers.items():
+        if not re.match(r"^[A-Za-z0-9-]{1,64}$", str(k)):
+            raise MCPError(f"请求头名「{str(k)[:64]}」只能是字母、数字和 -")
+        if not isinstance(v, str) or len(v) > 4000:
+            raise MCPError(f"请求头 {k} 的值要是不超过 4000 字的字符串")
+        clean[str(k)] = v.strip()
+    if not isinstance(name, str):
+        name = ""
+    return " ".join(name.split())[:60], url.strip(), clean
+
+
+def server_config(url: str, headers: dict[str, str]) -> dict[str, Any]:
+    """一个远程 MCP 服务的配置（和 parse_server_config 认的写法一致），给页面显示与编辑。"""
+    out: dict[str, Any] = {"type": "http", "url": url}
+    if headers:
+        out["headers"] = dict(headers)
+    return out
+
+
 def _public_opener() -> urllib.request.OpenerDirector:
     import http.client
     import socket

@@ -227,9 +227,14 @@ class ConnectorNeed:
     每个成员 Agent 用它所有者自己的授权（不变量 16）。"""
 
     id: str
-    connector_id: str                    # 连接器目录 id（云端），或电脑上的服务名
+    connector_id: str                    # 连接器目录 id（云端），电脑上的服务名，或自定义的 custom-<名字>
     purpose: str = ""
     ref_id: str | None = None            # 旧数据：关联的链接。迁移时并进那条链接（ResourceRef.connector_id）
+    # 自定义连接器（接入方式：远程 MCP）：主持人手工写的配置。请求头的值只是 ${变量} 模板，
+    # 每个成员连接时填自己的，项目里没有任何人的凭证（不变量 19）
+    name: str = ""
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

@@ -44,7 +44,7 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_shared_knowledge, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
-from .mcp_client import MCPError, RemoteMCP
+from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
 from .auth import Pairings
 from .workdir import DELIVERIES, discard
@@ -1122,6 +1122,9 @@ class Network:
         spec = self._spec(c) if c.where == "cloud" else None
         d["kind"] = "cloud" if c.where == "cloud" else "device"
         d["custom"] = bool(c.url)
+        if c.url:  # 自定义的：接入方式与手工写的配置，请求头只回显名字
+            d["access"] = "mcp"
+            d["config"] = server_config(c.url, {k: self.KEEP_SECRET for k in self._custom_headers(c)})
         d["description"] = spec.description if spec else ""
         d["skills"] = [s.name for s in spec.skills] if spec else []
         d["agents"] = [a.id for a in self.store.agents.values() if c.id in a.connections]
@@ -1183,44 +1186,89 @@ class Network:
         return view
 
     CUSTOM_PER_USER = 20
+    KEEP_SECRET = "<已保存>"   # 页面上回显的请求头值：原样交回就沿用保管库里的，页面拿不到真实的值
 
-    def add_custom_connector(self, name: str, url: str, header: str, value: str, actor: str | None,
-                             agent_ids: list[str] | None = None) -> dict[str, Any]:
-        """自定义的远程 MCP（云端）：地址由用户填，只能是 https 公网地址；网络代连时每次重新解析、
-        直连校验过的地址、不跟重定向（不能被当跳板访问内网）。凭证同样只进保管库（不变量 19）。"""
-        import re as _re
-        from .mcp_client import check_public_url
-        uid = self._need_user(actor)
-        name = " ".join((name or "").split())[:60]
-        if not name:
-            raise NetworkError("给连接器起个名字")
+    def _custom_headers(self, c: Connection) -> dict[str, str]:
+        """自定义连接器的请求头（只在保管库里）；兼容只有一个请求头的旧写法。"""
+        v = self.vault.get(c.id)
+        if isinstance(v.get("headers"), dict):
+            return {str(k): str(x) for k, x in v["headers"].items() if x}
+        return {v["header"]: v["value"]} if v.get("header") and v.get("value") else {}
+
+    @staticmethod
+    def _custom_id(name: str, taken: set[str], always_suffix: bool = False) -> str:
+        """自定义连接器的 id（也是工具名前缀 <id>__<工具>）：custom-<名字>，和 taken 里的重了就加随机后缀。
+        中文名取不出字母，都会落到 custom-mcp，不加后缀同一个 Agent 的工具名会撞上。"""
+        base = cid = "custom-" + (re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "mcp")
+        while always_suffix or cid in taken:
+            cid, always_suffix = f"{base}-{secrets.token_hex(2)}", False
+        return cid
+
+    @staticmethod
+    def _custom_config(raw: Any) -> tuple[str, str, dict[str, str]]:
+        """手工写的 MCP 配置：解析，并全查地址（只连 https 公网，不能被当跳板访问内网）。"""
+        from .mcp_client import check_public_url, parse_server_config
         try:
-            url = check_public_url(url)
+            name, url, headers = parse_server_config(raw)
+            return name, check_public_url(url), headers
         except MCPError as e:
             raise NetworkError(str(e)) from e
-        header, value = (header or "").strip(), (value or "").strip()
-        if value and not header:
-            header = "Authorization"
-        if header and not _re.match(r"^[A-Za-z0-9-]{1,64}$", header):
-            raise NetworkError("请求头名只能是字母、数字和 -")
+
+    def add_custom_connector(self, name: str, config: Any, actor: str | None,
+                             agent_ids: list[str] | None = None) -> dict[str, Any]:
+        """自定义连接器：接入方式目前只有远程 MCP，配置由用户手工写（mcpServers 的写法，可以有多个请求头）。
+        地址只能是 https 公网地址；网络代连时每次重新解析、直连校验过的地址、不跟重定向。
+        请求头的值只进保管库（不变量 19）。"""
+        uid = self._need_user(actor)
+        cname, url, headers = self._custom_config(config)
+        name = " ".join((name or "").split())[:60] or cname
+        if not name:
+            raise NetworkError("给连接器起个名字")
+        if self.KEEP_SECRET in headers.values():
+            raise NetworkError("请求头的值要填上")
         with self._lock:
             if sum(1 for x in self.store.connections.values() if x.owner_id == uid and x.url) >= self.CUSTOM_PER_USER:
                 raise NetworkError(f"最多 {self.CUSTOM_PER_USER} 个自定义连接器")
-            slug = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:30] or "mcp"
-            c = Connection(id=new_id("conn"), owner_id=uid, connector_id=f"custom-{slug}", name=name, url=url)
+            taken = {x.connector_id for x in self.store.connections.values() if x.owner_id == uid}
+            c = Connection(id=new_id("conn"), owner_id=uid, connector_id=self._custom_id(name, taken), name=name, url=url)
             self.store.connections[c.id] = c
-            self.vault.put(c.id, {"header": header, "value": value})
+            assistant = self.assistant_of(uid)
+        return self._save_custom(c, headers, agent_ids if agent_ids is not None else ([assistant.id] if assistant else []))
+
+    def edit_custom_connector(self, connection_id: str, name: str, config: Any, actor: str | None) -> dict[str, Any]:
+        """改自定义连接器的名字与 MCP 配置。请求头的值写回显的“已保存”就沿用原来的。"""
+        uid = self._need_user(actor)
+        with self._lock:
+            c = self._own_connection(connection_id, uid)
+            if not c.url:
+                raise NetworkError("只有自定义连接器能改 MCP 配置")
+            old = self._custom_headers(c)
+        cname, url, headers = self._custom_config(config)
+        headers = {k: old.get(k, "") if v == self.KEEP_SECRET else v for k, v in headers.items()}
+        missing = [k for k, v in headers.items() if not v]
+        if missing:
+            raise NetworkError(f"请求头 {'、'.join(missing)} 没有保存过的值，要填上")
+        with self._lock:
+            c.name = " ".join((name or "").split())[:60] or cname or c.name
+            c.url = url
+        return self._save_custom(c, headers, [])
+
+    def _save_custom(self, c: Connection, headers: dict[str, str], agent_ids: list[str]) -> dict[str, Any]:
+        """自定义连接器的请求头进保管库，试连一次，勾给授权人自己的云端 Agent。"""
+        with self._lock:
+            self.vault.put(c.id, {"headers": headers})
+            self._remotes.pop(c.id, None)
+            self._remote_tools.pop(c.id, None)
         status, error = self._probe(c)
         with self._lock:
             c.status, c.error, c.updated_at = status, error, time.time()
-            assistant = self.assistant_of(uid)
-            for aid in (agent_ids if agent_ids is not None else ([assistant.id] if assistant else [])):
+            for aid in agent_ids:
                 a = self.store.agents.get(aid)
-                if a is not None and a.owner_id == uid and not a.device_runtime and c.id not in a.connections:
+                if a is not None and a.owner_id == c.owner_id and not a.device_runtime and c.id not in a.connections:
                     a.connections.append(c.id)
             self.store.save()
             view = self._connection_view(c)
-        self.bus.emit("connection.updated", user_id=uid, connection_id=c.id)
+        self.bus.emit("connection.updated", user_id=c.owner_id, connection_id=c.id)
         return view
 
     def recheck_connection(self, connection_id: str, actor: str | None = None) -> dict[str, Any]:
@@ -1343,9 +1391,7 @@ class Network:
             r = self._remotes.get(c.id)
             if r is None or r.url != spec.url:
                 if c.url:
-                    v = self.vault.get(c.id)
-                    headers = {v["header"]: v["value"]} if v.get("header") and v.get("value") else {}
-                    r = RemoteMCP(c.url, headers, public_only=True)
+                    r = RemoteMCP(c.url, self._custom_headers(c), public_only=True)
                 else:
                     r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
                 self._remotes[c.id] = r
@@ -1495,21 +1541,121 @@ class Network:
 
     # ---- 项目的连接器面板：这个项目用到了哪些服务、每个成员能不能用（项目从不持有凭证） ----
     # 四种来源：资料里的链接（按域名认，或主持人指定）、插件清单声明的、这个项目里实际调用过的、主持人手动添加的。
-    def add_connector_need(self, project_id: str, connector_id: str, purpose: str = "",
-                           actor: str | None = None) -> ConnectorNeed:
-        connector_id = connector_id.strip()
-        if not connector_id or len(connector_id) > 80:
-            raise NetworkError("要写明用哪个连接器")
+    # 自定义连接器写进项目时，请求头的值只能是模板：${变量} 加一小段固定前缀（如 "Bearer "）。
+    # 配置所有成员都看得到，凭证由每个人连接时填自己的（不变量 19）
+    NEED_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]{0,63})\}")
+    NEED_LITERAL = re.compile(r"^[A-Za-z ]{0,16}$")
+
+    def _need_config(self, raw: Any) -> tuple[str, str, dict[str, str]]:
+        """项目里手工写的 MCP 配置：地址只查写法（成员连接时再全查），请求头的值只能是模板。"""
+        from .mcp_client import check_url_shape, parse_server_config
+        try:
+            name, url, headers = parse_server_config(raw)
+            url = check_url_shape(url)
+        except MCPError as e:
+            raise NetworkError(str(e)) from e
+        for k, v in headers.items():
+            if not self.NEED_VAR.search(v) or not self.NEED_LITERAL.match(self.NEED_VAR.sub("", v)):
+                raise NetworkError(f"请求头 {k} 的值要写成模板，如 \"Bearer ${{TOKEN}}\"：项目里所有人都看得到这份配置，"
+                                   "凭证由每个成员连接时填自己的")
+        return name, url, headers
+
+    def _need_vars(self, headers: dict[str, str]) -> list[str]:
+        """成员连接时要填的变量（按出现顺序，去重）。"""
+        return list(dict.fromkeys(m.group(1) for v in headers.values() for m in self.NEED_VAR.finditer(v)))
+
+    def add_connector_need(self, project_id: str, connector_id: str = "", purpose: str = "",
+                           actor: str | None = None, *, config: Any = None, name: str = "") -> ConnectorNeed:
+        """主持人手动添加：目录里的连接器、电脑上配好的服务名，或者自定义连接器（config：手工写的 MCP 配置）。"""
+        custom = config is not None
+        if custom:
+            cname, url, headers = self._need_config(config)
+            name = " ".join((name or "").split())[:60] or cname
+            if not name:
+                raise NetworkError("给自定义连接器起个名字")
+        else:
+            connector_id = connector_id.strip()
+            if not connector_id or len(connector_id) > 80:
+                raise NetworkError("要写明用哪个连接器")
         with self._lock:
             g = self.hosted_project(project_id, actor)
-            if any(n.connector_id == connector_id for n in g.connector_needs):
-                raise NetworkError(f"已经添加过 {self._connector_label(connector_id)}")
-            need = ConnectorNeed(id=new_id("need"), connector_id=connector_id, purpose=purpose.strip()[:300])
+            if custom:
+                if any(n.url and n.name == name for n in g.connector_needs):
+                    raise NetworkError(f"已经有叫「{name}」的自定义连接器了")
+                if sum(1 for n in g.connector_needs if n.url) >= self.CUSTOM_PER_USER:
+                    raise NetworkError(f"一个项目最多 {self.CUSTOM_PER_USER} 个自定义连接器")
+                # 总带随机后缀：成员连接时沿用这个 id，不能和他自己的自定义连接器撞上
+                connector_id = self._custom_id(name, {n.connector_id for n in g.connector_needs}, always_suffix=True)
+                need = ConnectorNeed(id=new_id("need"), connector_id=connector_id, purpose=purpose.strip()[:300],
+                                     name=name, url=url, headers=headers)
+            else:
+                if any(n.connector_id == connector_id for n in g.connector_needs):
+                    raise NetworkError(f"已经添加过 {self._connector_label(connector_id)}")
+                need = ConnectorNeed(id=new_id("need"), connector_id=connector_id, purpose=purpose.strip()[:300])
             g.connector_needs.append(need)
             self._archive_changed(g, "need.add", by_user=actor, need=need.id, connector=connector_id)
-        self._archive_saved(g, f"主持人在连接器面板里添加了「{self._connector_label(connector_id)}」"
+        label = (f"自定义连接器「{name}」（接入方式 MCP，{url}）" if custom
+                 else f"「{self._connector_label(connector_id)}」")
+        self._archive_saved(g, f"主持人在连接器面板里添加了{label}"
                                + (f"：{need.purpose}" if need.purpose else "") + "。各成员用自己的授权")
         return need
+
+    def edit_connector_need(self, project_id: str, need_id: str, config: Any, purpose: str | None = None,
+                            name: str = "", actor: str | None = None) -> ConnectorNeed:
+        """主持人改自定义连接器的 MCP 配置。连接器 id 不变；地址变了，成员原来的连接就对不上了，要重新连。"""
+        cname, url, headers = self._need_config(config)
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            need = next((n for n in g.connector_needs if n.id == need_id), None)
+            self._check(need is not None, f"need {need_id}")
+            if not need.url:
+                raise NetworkError("只有自定义连接器有 MCP 配置")
+            name = " ".join((name or "").split())[:60] or cname or need.name
+            if any(n.url and n.name == name and n.id != need.id for n in g.connector_needs):
+                raise NetworkError(f"已经有叫「{name}」的自定义连接器了")
+            moved = url != need.url
+            need.name, need.url, need.headers = name, url, headers
+            if purpose is not None:
+                need.purpose = purpose.strip()[:300]
+            self._archive_changed(g, "need.edit", by_user=actor, need=need.id, connector=need.connector_id)
+        self._archive_saved(g, f"主持人改了自定义连接器「{name}」的 MCP 配置"
+                               + (f"，地址换成 {url}，各成员要重新连接" if moved else ""))
+        return need
+
+    def connect_custom_need(self, project_id: str, need_id: str, values: dict[str, Any], actor: str | None,
+                            agent_ids: list[str] | None = None) -> dict[str, Any]:
+        """成员按项目里写好的自定义连接器连接：配置照抄，模板里的变量填自己的。得到的是这个人自己的连接
+        （和“我的连接器”里的自定义连接器一样，凭证只进保管库）；已经连过的就是换成现在的地址与凭证。
+        默认勾给自己在这个项目里的云端 Agent。"""
+        from .mcp_client import check_public_url
+        uid = self._need_user(actor)
+        with self._lock:
+            g = self.visible_project(project_id, uid)
+            need = next((n for n in g.connector_needs if n.id == need_id), None)
+            self._check(need is not None and bool(need.url), f"need {need_id}")
+            cid, name, url, templates = need.connector_id, need.name, need.url, dict(need.headers)
+            mine = [a.id for a in (self.store.agents.get(x) for x in g.member_ids)
+                    if a is not None and a.owner_id == uid and not a.device_runtime]
+            # 连过就是同一个连接（主持人改了地址也一样）：换成现在的地址与凭证，不另起一个撞名的
+            c = next((x for x in self.store.connections.values() if x.owner_id == uid and x.where == "cloud"
+                      and x.connector_id == cid), None)
+        filled = {k: str((values or {}).get(k) or "").strip() for k in self._need_vars(templates)}
+        missing = [k for k, v in filled.items() if not v]
+        if missing:
+            raise NetworkError(f"请填写：{'、'.join(missing)}")
+        headers = {k: self.NEED_VAR.sub(lambda m: filled[m.group(1)], t) for k, t in templates.items()}
+        try:
+            url = check_public_url(url)
+        except MCPError as e:
+            raise NetworkError(str(e)) from e
+        with self._lock:
+            if c is None:
+                if sum(1 for x in self.store.connections.values() if x.owner_id == uid and x.url) >= self.CUSTOM_PER_USER:
+                    raise NetworkError(f"最多 {self.CUSTOM_PER_USER} 个自定义连接器")
+                c = Connection(id=new_id("conn"), owner_id=uid, connector_id=cid, name=name, url=url)
+                self.store.connections[c.id] = c
+            c.url = url
+        return self._save_custom(c, headers, mine if agent_ids is None else agent_ids)
 
     def remove_connector_need(self, project_id: str, need_id: str, actor: str | None = None) -> Project:
         with self._lock:
@@ -1518,7 +1664,8 @@ class Network:
             self._check(need is not None, f"need {need_id}")
             g.connector_needs.remove(need)
             self._archive_changed(g, "need.remove", by_user=actor, need=need.id)
-        self._archive_saved(g, f"主持人从连接器面板里去掉了「{self._connector_label(need.connector_id)}」")
+        label = need.name if need.url else self._connector_label(need.connector_id)
+        self._archive_saved(g, f"主持人从连接器面板里去掉了「{label}」")
         return g
 
     def set_ref_connector(self, project_id: str, ref_id: str, connector_id: str, actor: str | None = None) -> ResourceRef:
@@ -1582,11 +1729,11 @@ class Network:
         self.bus.emit("project.updated", project=g.to_dict())
         return g
 
-    def _readiness(self, g: Project, a: AgentNode, connector_id: str) -> str:
+    def _readiness(self, g: Project, a: AgentNode, connector_id: str, url: str = "") -> str:
         """调用方持有锁。一个成员 Agent 能不能用某个服务：ready | ask（用到时问所有者）| not_enabled | unauthorized。
-        只给状态，不给是谁的账号、哪个连接。"""
+        只给状态，不给是谁的账号、哪个连接。项目里写的自定义连接器（url）只认连的是同一个地址的。"""
         conns = [c for c in self.store.connections.values() if c.owner_id == a.owner_id and a.owner_id
-                 and c.connector_id == connector_id and c.status == "ok"]
+                 and c.connector_id == connector_id and c.status == "ok" and (not url or c.url == url)]
         ticked = [c for c in conns if c.id in a.connections and self._placed_for(c, a)]
         if not conns:
             return "unauthorized"
@@ -1623,6 +1770,7 @@ class Network:
                 continue
             for cid in m.connectors:
                 row(cid).append({"kind": "plugin", "plugin": name, "title": meta.get("title", name)})
+        custom = {n.connector_id: n for n in g.connector_needs if n.url}
         for n in g.connector_needs:
             row(n.connector_id).append({"kind": "manual", "need_id": n.id, "purpose": n.purpose})
         for cid, u in g.connector_usage.items():
@@ -1630,14 +1778,20 @@ class Network:
                              "last_agent": self._name(u["last_agent"]) if u.get("last_agent") else ""})
         members = [a for a in (self.store.agents.get(x) for x in g.member_ids) if a is not None]
         for cid, item in rows.items():
+            n = custom.get(cid)
+            url = n.url if n else ""
+            if n is not None:  # 自定义连接器：接入方式 MCP，配置所有成员都看得到（请求头只有模板），连接时填的变量
+                item["name"] = n.name
+                item["custom"] = {"need_id": n.id, "access": "mcp", "config": server_config(n.url, n.headers),
+                                  "vars": self._need_vars(n.headers)}
             item["members"] = [{"agent_id": a.id, "agent": a.name, "owner": self._email(a.owner_id),
-                                "status": self._readiness(g, a, cid)} for a in members]
+                                "status": self._readiness(g, a, cid, url)} for a in members]
             item["mine"] = [] if not g.shared else [
                 {"agent_id": a.id, "agent": a.name, "connection_id": c.id, "connection": c.name,
                  "cloud": c.where == "cloud", "grant": g.connector_grants.get(a.id, {}).get(c.id, "ask")}
                 for a in members if actor is not None and a.owner_id == actor
                 for c in (self.store.connections.get(x) for x in a.connections)
-                if c is not None and c.connector_id == cid and self._placed_for(c, a)]
+                if c is not None and c.connector_id == cid and (not url or c.url == url) and self._placed_for(c, a)]
         return {"services": sorted(rows.values(), key=lambda x: x["name"].lower()), "unrecognized": unrecognized}
 
     def _tool_suggest_connector(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
