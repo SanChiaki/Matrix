@@ -95,7 +95,7 @@ def catalog_file(tmp_path: Path, url: str) -> Path:
         "id": "docs", "name": "文档库", "description": "公司文档", "url": url, "domains": ["docs.example.com"],
         "auth": {"fields": [{"key": "token", "label": "访问令牌", "header": "Authorization",
                              "template": "Bearer {value}"}]},
-        "skills": [{"name": "doc-search", "description": "怎么查公司文档", "body": "先搜标题"}]}]}))
+        "skills": [{"name": "doc-search", "description": "怎么查公司文档", "body": "先搜标题"}]}]}), encoding="utf-8")
     return p
 
 
@@ -129,10 +129,11 @@ def test_authorize_keeps_the_secret_out_of_state_events_and_api(tmp_path: Path, 
     assert conn["status"] == "ok" and conn["agents"] == [a.id]  # 新授权默认勾给助理
     assert SECRET not in r.text and SECRET not in c.get("/api/me/connections").text
     data = tmp_path / "data"
-    assert SECRET not in (data / "state.json").read_text()
+    assert SECRET not in (data / "state.json").read_text(encoding="utf-8")
     vault_file = data / "vault" / f"{conn['id']}.bin"
     assert vault_file.is_file() and SECRET.encode() not in vault_file.read_bytes()
-    assert oct(vault_file.stat().st_mode & 0o777) == "0o600" and oct((data / "vault.key").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # Windows 没有 POSIX 权限位：数据目录由 ACL 限定
+        assert oct(vault_file.stat().st_mode & 0o777) == "0o600" and oct((data / "vault.key").stat().st_mode & 0o777) == "0o600"
     assert all(SECRET not in json.dumps(e.data, ensure_ascii=False) for e in net.bus.since(0))
     # 填错：试连失败，状态写明原因，凭证仍然不回显
     bad = c.post("/api/me/connections", json={"connector_id": "docs", "values": {"token": "wrong"}}).json()
@@ -528,7 +529,7 @@ def test_old_device_agents_keep_their_local_services(tmp_path: Path):
     state = {"agents": [{"id": "a1", "name": "L", "description": "d", "capabilities": [], "authority": ["file.write"],
                          "device_runtime": "dev-1"},
                         {"id": "a2", "name": "C", "description": "d", "capabilities": [], "authority": []}]}
-    (tmp_path / "state.json").write_text(json.dumps(state))
+    (tmp_path / "state.json").write_text(json.dumps(state), encoding="utf-8")
     s = Store(tmp_path)
     assert s.agents["a1"].authority == ["file.write", "connector.use"] and s.agents["a2"].authority == []
     s.save()
@@ -543,7 +544,7 @@ def test_claude_driver_loads_only_allowed_services(tmp_path: Path):
     from matrix.connector.drivers.claude import ClaudeDriver
     cfg = tmp_path / ".claude.json"
     cfg.write_text(json.dumps({"mcpServers": {"notion": {"type": "http", "url": "https://n", "headers": {"k": "v"}},
-                                              "linear": {"type": "stdio", "command": "linear-mcp"}}}))
+                                              "linear": {"type": "stdio", "command": "linear-mcp"}}}), encoding="utf-8")
     d = ClaudeDriver(bridge_url="http://127.0.0.1:1", config_path=cfg)
     assert sorted(d.services()) == ["linear", "notion"] and d.capabilities().enforces("connector.use")
     spec = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path / "w", authority=[],
@@ -560,9 +561,9 @@ def test_claude_driver_loads_only_allowed_services(tmp_path: Path):
     for root, name, text in ((w / "skills", "a", "net"), (w / "agent-home" / "skills", "a", "home"),
                              (w / "agent-home" / "skills", "b", "home")):
         (root / name).mkdir(parents=True, exist_ok=True)
-        (root / name / "SKILL.md").write_text(text)
+        (root / name / "SKILL.md").write_text(text, encoding="utf-8")
     dest = d.mount_skills(w)
-    assert (dest / "a" / "SKILL.md").read_text() == "net" and (dest / "b" / "SKILL.md").read_text() == "home"
+    assert (dest / "a" / "SKILL.md").read_text(encoding="utf-8") == "net" and (dest / "b" / "SKILL.md").read_text(encoding="utf-8") == "home"
 
 
 def test_claude_driver_keeps_users_own_matrix_service(tmp_path: Path):
@@ -571,7 +572,7 @@ def test_claude_driver_keeps_users_own_matrix_service(tmp_path: Path):
     from matrix.connector.drivers.claude import ClaudeDriver
     from matrix.models import MCP_SERVER
     cfg = tmp_path / ".claude.json"
-    cfg.write_text(json.dumps({"mcpServers": {"matrix": {"type": "stdio", "command": "matrix-chat-mcp"}}}))
+    cfg.write_text(json.dumps({"mcpServers": {"matrix": {"type": "stdio", "command": "matrix-chat-mcp"}}}), encoding="utf-8")
     d = ClaudeDriver(bridge_url="http://127.0.0.1:1", config_path=cfg)
     spec = RunSpec(run_id="r", agent_id="a", context_id="c", prompt="", workdir=tmp_path / "w", authority=[],
                    tool_names=["open_request"], connectors=["matrix"])

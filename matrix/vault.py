@@ -35,9 +35,9 @@ class Vault:
                 if not self._key_file.exists():
                     self._key_file.parent.mkdir(parents=True, exist_ok=True)
                     fd = os.open(self._key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    with os.fdopen(fd, "w") as f:
+                    with os.fdopen(fd, "w", encoding="ascii") as f:
                         f.write(Fernet.generate_key().decode())
-                key = self._key_file.read_text().strip()
+                key = self._key_file.read_text(encoding="utf-8-sig")  # 部署方用记事本放的密钥可能带 BOM.strip()
             try:
                 self._fernet = Fernet(key.encode() if isinstance(key, str) else key)
             except ValueError as e:

@@ -414,6 +414,8 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
 
 
 def main() -> None:
+    from . import utf8_stdio
+    utf8_stdio()
     p = argparse.ArgumentParser(prog="matrix-dsh-check", description="对真实的 dsh 跑一遍冒烟检查（升级 dsh 前后用）")
     p.add_argument("--dsh-bin", default="dsh")
     p.add_argument("--profile", default="headless")

@@ -167,6 +167,20 @@ ERROR_CLASSES: dict[str, tuple[str, bool]] = {
 STOPPED_ERROR = "STOPPED: 人终止了这一轮"
 
 
+def kill_tree(proc: Any) -> None:
+    """结束 harness 进程连同它启动的子进程。Windows 上 proc.kill() 只结束这一个进程：harness 经 .cmd / .bat
+    包装启动时结束的只是 cmd.exe，真正的 harness 还在跑、还占着输出管道，这一轮要等它自己退出才结束；
+    harness 开的工具进程也留在后台。用 taskkill /T 连同子进程一起结束，失败时退回 proc.kill()。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10,
+                           creationflags=no_window())
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if proc.poll() is None:
+        proc.kill()
+
+
 def watch_process(proc: Any, timeout_s: float | None, cancel: threading.Event) -> threading.Event:
     """看住一次 harness 进程：超过这一轮的超时（Agent 设置，None 不限制）或人终止（cancel）时结束它。
     返回的事件表示“因超时结束”；因 cancel 结束的由调用方看 cancel 判断。"""
@@ -178,7 +192,7 @@ def watch_process(proc: Any, timeout_s: float | None, cancel: threading.Event) -
             if cancel.wait(0.5) or (deadline is not None and time.monotonic() >= deadline):
                 if not cancel.is_set():
                     timed_out.set()
-                proc.kill()
+                kill_tree(proc)
                 return
 
     threading.Thread(target=watch, daemon=True).start()
@@ -466,7 +480,7 @@ class DshRuntime:
             proc.wait()
         finally:
             if proc.poll() is None:
-                proc.kill()
+                kill_tree(proc)
         t_err.join(timeout=2)
 
         if not final_text and texts:

@@ -22,7 +22,7 @@ import plistlib
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable
 from xml.sax.saxutils import escape
 
@@ -245,7 +245,7 @@ def runs_from(exe: str, *, system: str | None = None, home: Path | None = None) 
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-16" if system == "Windows" else "utf-8", errors="replace")
-    where = str(Path(exe).parent)
+    where = str((PureWindowsPath if system == "Windows" else PurePosixPath)(exe).parent)  # 按服务所在系统的路径写法
     return where in text or escape(where) in text
 
 

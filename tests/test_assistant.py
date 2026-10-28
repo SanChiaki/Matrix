@@ -164,7 +164,7 @@ def test_reading_joint_content_turns_connectors_off_for_that_round(tmp_path: Pat
         net.send_message(jchat.id, "合作方又说了一句", actor=bob)  # 联合项目有新内容：下一轮又关掉
         say(net, home, "查文档", alice)
         assert h.results[-1].startswith("没有连接器") and len(fake.calls) == 2
-        calls = (net.store.connection_dir(next(iter(net.store.connections))) / "calls.jsonl").read_text()
+        calls = (net.store.connection_dir(next(iter(net.store.connections))) / "calls.jsonl").read_text(encoding="utf-8")
         assert calls.count("\n") == 2  # 被拒的调用没有到连接器
     finally:
         fake.close()

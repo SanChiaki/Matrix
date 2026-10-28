@@ -1212,6 +1212,8 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
 
 
 def main() -> None:
+    from . import utf8_stdio
+    utf8_stdio()
     p = argparse.ArgumentParser(description="Matrix：Agent 协作网络")
     p.add_argument("--runtime", choices=["dsh", "scripted"], default="dsh")
     p.add_argument("--port", type=int, default=8765)

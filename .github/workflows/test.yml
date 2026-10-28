@@ -1,0 +1,39 @@
+# 每个 PR 和 main 上的提交都在 Linux、Windows、macOS 上跑全部测试（离线，不需要 dsh）。
+# 三端各自的行为（Windows 的只读文件、.cmd 包装、GBK 输出、pythonw 服务，macOS 的 launchd 服务）由测试覆盖，
+# 这里替代手动在各台机器上验证。公开仓库用标准 runner 不收费。
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      PYTHONWARNDEFAULTENCODING: "1"   # 没写编码的文本读写算失败（pyproject 的 filterwarnings），Linux 上也抓得到
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.14"   # 和本地开发一致；不固定时 uv 会用 runner 自带的更新版本
+      - name: Install
+        run: uv sync --locked
+      - name: Test
+        run: uv run pytest -q

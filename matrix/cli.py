@@ -18,6 +18,8 @@ SHOW = {"runtime.invoke", "tool.call", "task.created", "task.updated", "knowledg
 
 
 def main() -> None:
+    from . import utf8_stdio
+    utf8_stdio()
     p = argparse.ArgumentParser()
     p.add_argument("text")
     p.add_argument("--agent", default="Product Strategy Agent")
