@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>交付看板</title>
+<link rel="stylesheet" href="style.css">
+<script src="../_matrix/sdk.js"></script>
+</head>
+<body>
+<div class="viz-root">
+  <header class="top">
+    <div class="pick" id="pick"></div>
+    <div class="acts" id="acts"></div>
+  </header>
+  <p class="err" id="err" role="alert"></p>
+  <main id="board" aria-live="polite"></main>
+  <div class="tip" id="tip" role="status" hidden></div>
+</div>
+<script src="board.js"></script>
+</body>
+</html>

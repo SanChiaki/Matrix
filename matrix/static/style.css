@@ -900,3 +900,6 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .rel-form legend { font-size: 12.5px; color: var(--text-2); padding: 0 4px; }
 .rel-form .seg { display: flex; gap: 18px; }
 @media (max-width: 640px) { .rel-facts { grid-template-columns: 1fr; } .rel-fb { flex-direction: column; align-items: stretch; } }
+#release-page { gap: 12px; }
+#release-page > * { flex-shrink: 0; }  /* 列式滚动面板里，带横向滚动的表格不能被压成 0 高 */
+#release-page h3 { margin: 8px 0 0; }

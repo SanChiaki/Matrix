@@ -114,6 +114,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 | `page_permissions` | 否 | 页面要用的能力，见下 |
 | `agent_tools` | 否 | 开给 Agent 的记录工具：`records.read`、`records.write` |
 | `triggers` | 否 | 触发，见第 6 节 |
+| `release_views` | 否 | 能在**发布物**里打开的标签 key（必须在 `tabs` 里），见第 4 节“在发布物里” |
 | `connectors` | 否 | 插件用到的外部服务：连接器目录里的 id（如 `feishu`）或电脑上配好的服务名，最多 10 个，每个 ≤80。只是声明：装上并启用后出现在项目的连接器面板里，让成员看到要连什么；不授予任何访问权限 |
 
 表名、字段名、标签 key、触发 key 都是同一种写法：小写字母开头，小写字母、数字、下划线，≤40（注意和插件名不同，**用 `_` 不用 `-`**）。
@@ -270,6 +271,22 @@ matrix.ui.openFile("报价单.pdf"); // 打开项目档案里这个文件的预�
 const off = matrix.on((event, data) => {
   if (event === "records.changed") reload(data.table);   // 任何人（包括 Agent、外部回调）改了这个插件的记录
 });
+```
+
+### 在发布物里
+
+主持人可以把档案文件连同一个插件标签发布成**事实**发布物给项目外的读者（[project-publishing.md](project-publishing.md)）。
+只有清单 `release_views` 里列出的标签能这样用。读者打开时页面代码是**发布时快照的那一版**，同样跑在沙箱里，桥只有：
+
+- `context()`：`mode` 是 `"release"`，`release` 里有标题、版本、`snapshot_at`；`tables` 为空。
+- `archive.read()`：这个版本快照里的文件清单（不是项目档案）；`archive.file(name)`：读其中一个文本文件。
+
+记录、成员、群聊、`chat.post` 都没有（调用会报错）。所以能在发布物里打开的页面，数据要从档案文件来：
+例如 `examples/delivery-dashboard` 的看板页面在项目里读“看板”表找文件，在发布物里直接列快照里的 `.json`。
+
+```js
+const ctx = await matrix.context();
+if (ctx.mode === "release") { /* 只读快照：archive.read / archive.file */ } else { /* 项目里：记录 + 档案 */ }
 ```
 
 ### 跟随深浅色

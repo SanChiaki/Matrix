@@ -29,6 +29,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - **项目档案**：说明（纲要、已定的事）、资料（文件、链接）、项目技能，归项目所有，按版本推送给成员。
   项目页另有**连接器面板**：这个项目用到了哪些外部服务、每个成员能不能用，项目从不持有谁的授权。
 - **插件**：项目装上的业务扩展（表、沙箱页面、打法、触发），只往群聊里 @ 成员，不硬编排流程。
+- **发布物**：项目对外拿出的东西，主持人发布、按版本固定。方法（技能）可以公开，事实（档案文件、看板）只给点名的读者；
+  读者给自己的 Agent 订阅，用自己的授权，发布方看不到对话。项目内容离开项目只经这里。
 
 ## 按需阅读
 
@@ -40,6 +42,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
+| 发布与订阅：发布物（方法 / 事实）、读者、版本与跟随档案、订阅生效条件、发布物里的插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
 | 项目插件（表、沙箱页面与桥、打法、触发） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
@@ -52,7 +55,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 | 文件 | 职责 |
 | --- | --- |
-| `matrix/engine.py` | `Network` 核心：Agent/项目/对话管理、项目的参与者与可见性、项目档案、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、信息流（来源标签、`open_note`、拦截确认）、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
+| `matrix/engine.py` | `Network` 核心：Agent/项目/对话管理、项目的参与者与可见性、项目档案、发布与订阅（发布物、版本快照、订阅挂载、发布物里的插件视图）、助理与项目会话、助理对话（跨项目总览、起草、个人定时）、@ 解析、收件箱调度、席位与任务轮次、委托授权、验收与续接、提议审核、私有目录挂载、信息流（来源标签、`open_note`、拦截确认）、知识可见性、违规检测、项目插件（安装、记录、桥、触发） |
 | `matrix/protocol.py` | 对话 / 任务 / 通知提示词、交付与失败说明、`TOOL_GUIDE`（网络工具用法） |
 | `matrix/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
 | `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
@@ -62,6 +65,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
+| `matrix/releases.py` | 发布物的版本快照（`releases/<id>/v<N>/`：技能、文件、插件页面、`manifest.json`）的写入、清理与安全取文件；谁能发布、能看、订阅何时生效在 `engine.py`「发布与订阅」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
 | `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
 | `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
@@ -79,9 +83,10 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
+| `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、打法、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -99,6 +104,7 @@ uv run matrix --connectors connectors.json      # 云端连接器目录（默认
 uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
 uv run matrix --admins you@example.com                             # 管理后台 /admin 给谁看（默认最早注册的人）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
+uv run python examples/delivery-dashboard/setup_demo.py              # 搭交付看板演示数据（.matrix-dashboard-demo，见该目录 README）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness

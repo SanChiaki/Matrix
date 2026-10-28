@@ -1,0 +1,31 @@
+{
+  "name": "delivery-dashboard",
+  "version": "1.0.0",
+  "title": "交付看板",
+  "description": "用交付数据做看板：成员 Agent 用自己的授权查数、生成看板文件，页面渲染；做好的看板可以发布给项目外的读者",
+  "tabs": [{"key": "board", "label": "交付看板", "entry": "page/index.html"}],
+  "release_views": ["board"],
+  "tables": {
+    "dashboards": {
+      "title": "看板",
+      "fields": [
+        {"key": "title", "label": "标题", "type": "text", "required": true},
+        {"key": "file", "label": "看板文件", "type": "file"},
+        {"key": "scope", "label": "范围", "type": "text"},
+        {"key": "status", "label": "状态", "type": "select", "options": ["草稿", "待发布", "已发布"]},
+        {"key": "owner_agent", "label": "负责成员", "type": "agent"},
+        {"key": "refresh", "label": "刷新", "type": "select", "options": ["手动", "每天", "每周"]},
+        {"key": "note", "label": "备注", "type": "longtext"}
+      ]
+    }
+  },
+  "page_permissions": ["records.read", "records.write", "archive.read", "members.read", "chat.post"],
+  "agent_tools": ["records.read", "records.write"],
+  "connectors": ["delivery-data"],
+  "triggers": [
+    {"key": "daily", "type": "schedule", "cron": "0 8 * * 1-5",
+     "notify": {"to": "看板 Agent", "text": "刷新看板：按 delivery-dashboard 的做法重新查数，更新“刷新”是每天的看板文件"}},
+    {"key": "ready", "type": "record", "table": "dashboards", "when": {"field": "status", "equals": "待发布"},
+     "notify": {"to": "看板 Agent", "text": "「{title}」标为待发布：核对口径与数字，在群聊里写一段发布说明，请主持人发布"}}
+  ]
+}

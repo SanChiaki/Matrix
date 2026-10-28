@@ -2,6 +2,8 @@
 __pycache__/
 .pytest_cache/
 .matrix/
+# examples/delivery-dashboard/setup_demo.py 搭的演示数据
+.matrix-dashboard-demo/
 # 改名前的默认数据目录（没有 .matrix 时仍会沿用）
 .agentnet/
 *.pyc

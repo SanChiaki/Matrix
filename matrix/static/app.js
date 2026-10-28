@@ -1745,7 +1745,7 @@ async function renderReleasePage(force = false) {
       <div class="rel-agents">${myAgents.map((a) => `<label class="check"><input type="checkbox" data-sub="${esc(a.id)}" ${r.mine.includes(a.id) ? "checked" : ""}>${esc(a.name)}${a.id === S.me?.assistant_id ? ' <span class="muted">（助理）</span>' : ""}</label>`).join("") || '<span class="muted">你还没有 Agent。</span>'}</div>
     </section>` : ""}
     ${r.view && active ? `<section class="rel-view" aria-label="看板"><div class="sandbox"><div class="sandbox-bar"><span class="lock">插件页面</span>
-      <span>${esc(r.view.title)} · ${esc(r.view.label)} · 发布时的代码在沙箱里运行，只读这个版本的快照</span></div><p class="muted plugin-loading">正在加载…</p></div></section>` : ""}
+      <span>${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)} · 发布时的代码在沙箱里运行，只读这个版本的快照</span></div><p class="muted plugin-loading">正在加载…</p></div></section>` : ""}
     ${r.kind === "method" ? `<h3>技能 · ${r.skills.length}</h3><ul class="rel-skills">${r.skills.map((k) => `<li><span class="file-ico ref">${ICON.skill}</span><div><code>${esc(k.name)}</code><div class="muted">${esc(k.description)}</div></div></li>`).join("") || '<li class="muted">—</li>'}</ul>`
       : `<h3>文件 · ${r.files.length}</h3><div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>大小</th><th></th></tr></thead><tbody>
         ${r.files.map((f) => `<tr><td class="name"><div class="cell">${fileIcon(fileExt(f.name))}<button type="button" class="link" data-rfile="${esc(f.name)}">${esc(f.name)}</button></div></td>
@@ -1825,7 +1825,7 @@ function renderReleasesTab(box, d, st) {
         ${host && r.status === "active" ? `<button type="button" class="ghost sm" data-rel-pub="${esc(r.id)}" title="按档案现在的样子切一个新版本">发布新版本</button>
           <button type="button" class="ghost sm" data-rel-edit="${esc(r.id)}">读者</button>
           <button type="button" class="icon-btn bad" data-rel-del="${esc(r.id)}" title="撤回" aria-label="撤回 ${esc(r.title)}">${ICON.trash}</button>` : ""}</div>
-      <dl class="plugin-facts"><dt>内容</dt><dd>${(r.kind === "method" ? r.skill_names : r.file_names || []).map((x) => `<code>${esc(x)}</code>`).join(" ")}${r.view ? ` · 看板：${esc(r.view.title)} · ${esc(r.view.label)}` : ""}</dd>
+      <dl class="plugin-facts"><dt>内容</dt><dd>${(r.kind === "method" ? r.skill_names : r.file_names || []).map((x) => `<code>${esc(x)}</code>`).join(" ")}${r.view ? ` · 看板：${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)}` : ""}</dd>
         ${(r.feedback || []).length ? `<dt>反馈</dt><dd><ul class="rel-feedback">${r.feedback.slice(-3).map((x) => `<li><b>${esc(x.email)}</b>：${esc(x.text)}</li>`).join("")}</ul></dd>` : ""}</dl>
       ${host && st.relEdit === r.id ? `<form class="rel-form" data-rel-readers="${esc(r.id)}">
         <label>读者（邮箱，逗号或换行分隔；项目参与者本来就看得到）<textarea name="readers" rows="2">${esc((r.readers || []).map((x) => x.email).join("\n"))}</textarea></label>
