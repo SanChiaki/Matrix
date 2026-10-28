@@ -374,14 +374,12 @@ def test_dsh_runtime_stops_on_cancel(tmp_path):
 
     from matrix.runtime import DshRuntime, RunRequest
 
-    fake = tmp_path / "fake-dsh"
-    fake.write_text("#!" + sys.executable + "\nimport json, sys, time\nsys.stdin.read()\n"
-                    "print(json.dumps({'type': 'session', 'sessionId': 's-1'}), flush=True)\ntime.sleep(30)\n")
-    fake.chmod(0o755)
+    fake = fake_bin(tmp_path, "fake-dsh", "import time\nprint(json.dumps({'type': 'session', 'sessionId': 's-1'}), flush=True)\n"
+                    "time.sleep(30)\n")  # Windows 上是 .cmd 包装：停止要连同真正的 harness 一起结束
     stop = threading.Event()
     threading.Timer(0.5, stop.set).start()
     t0 = time.monotonic()
-    res = DshRuntime(dsh_bin=str(fake)).run(RunRequest(agent_id="a", context_id="c", prompt="hi",
+    res = DshRuntime(dsh_bin=fake).run(RunRequest(agent_id="a", context_id="c", prompt="hi",
                                                       cwd=tmp_path / "w", authority=[], cancel=stop))
     assert time.monotonic() - t0 < 10
     assert not res.ok and "STOPPED" in res.error and res.session_id == "s-1"

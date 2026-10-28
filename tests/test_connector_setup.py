@@ -240,7 +240,7 @@ def test_windows_launcher_is_the_pythonw_of_the_running_env(tmp_path):
 def test_service_knows_which_install_it_runs(tmp_path):
     """升级换了安装位置（包改名后 uv tool 装进新目录）：能看出装着的服务还在跑旧的那份。"""
     home = tmp_path / "home"
-    for system in ("Darwin", "Linux"):
+    for system in ("Darwin", "Linux") if hasattr(os, "getuid") else ("Linux",):  # launchd 的 gui/<uid> 只在 POSIX 上能算
         assert service.runs_from("/new/bin/matrix-connect", system=system, home=home) is None
         service.install("/old/bin/matrix-connect", tmp_path / "config.json", system=system, home=home,
                         run=lambda cmd: None, env_path="/usr/bin")

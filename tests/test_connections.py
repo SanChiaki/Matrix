@@ -132,7 +132,8 @@ def test_authorize_keeps_the_secret_out_of_state_events_and_api(tmp_path: Path, 
     assert SECRET not in (data / "state.json").read_text()
     vault_file = data / "vault" / f"{conn['id']}.bin"
     assert vault_file.is_file() and SECRET.encode() not in vault_file.read_bytes()
-    assert oct(vault_file.stat().st_mode & 0o777) == "0o600" and oct((data / "vault.key").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":  # Windows 没有 POSIX 权限位：数据目录由 ACL 限定
+        assert oct(vault_file.stat().st_mode & 0o777) == "0o600" and oct((data / "vault.key").stat().st_mode & 0o777) == "0o600"
     assert all(SECRET not in json.dumps(e.data, ensure_ascii=False) for e in net.bus.since(0))
     # 填错：试连失败，状态写明原因，凭证仍然不回显
     bad = c.post("/api/me/connections", json={"connector_id": "docs", "values": {"token": "wrong"}}).json()

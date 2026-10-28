@@ -36,15 +36,14 @@ def test_dsh_overlay_never_reads_default_skill_roots(tmp_path: Path):
     assert 'customSkillDirs: ["/w/skills", "/w/agent-home/skills"]' in y
 
     from matrix.runtime import DshRuntime, RunRequest
-    import json, os, stat, sys
-    fake = tmp_path / "fake-dsh"   # 只记录覆盖层，不真的跑模型
-    fake.write_text(f"#!{sys.executable}\nimport sys,json,pathlib\n"
-                    "p=sys.argv[sys.argv.index('--patch')+1]\n"
+    from tests.test_connector import fake_bin
+    import json
+    fake = fake_bin(tmp_path, "fake-dsh",   # 只记录覆盖层，不真的跑模型
+                    "import pathlib\np=sys.argv[sys.argv.index('--patch')+1]\n"
                     "pathlib.Path(p).with_name('seen.yml').write_text(pathlib.Path(p).read_text())\n"
-                    "sys.stdin.read()\nprint(json.dumps({'type':'final','text':'ok'}))\n")
-    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+                    "print(json.dumps({'type':'final','text':'ok'}))\n")
     cwd = tmp_path / "w"
-    res = DshRuntime(str(fake)).run(RunRequest(agent_id="a", context_id="c", prompt="hi", cwd=cwd, authority=[]))
+    res = DshRuntime(fake).run(RunRequest(agent_id="a", context_id="c", prompt="hi", cwd=cwd, authority=[]))
     assert res.ok, res.error
     seen = (cwd / "seen.yml").read_text()
     assert "includeDefaultRoots: false" in seen
