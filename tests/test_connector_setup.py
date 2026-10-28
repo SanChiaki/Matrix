@@ -184,13 +184,14 @@ def test_windows_install_registers_a_logon_task(tmp_path):
     scripts.mkdir(parents=True)
     exe = scripts / "matrix-connect.exe"
     exe.write_text("")
+    py = str(scripts / "python.exe")  # 运行 setup 的 Python 和 matrix-connect.exe 在同一个 venv
     config = tmp_path / "my config.json"
     cfg.save(cfg.Config(server="http://127.0.0.1:8765", token="s3cret-token"), config)
     with pytest.raises(service.ServiceError):  # 没有 pythonw.exe：不装
-        service.install(str(exe), config, system="Windows", home=home, run=ran.append, started=up)
+        service.install(str(exe), config, system="Windows", home=home, run=ran.append, python=py, started=up)
     (scripts / "pythonw.exe").write_text("")
 
-    path = service.install(str(exe), config, system="Windows", home=home, run=ran.append, started=up)
+    path = service.install(str(exe), config, system="Windows", home=home, run=ran.append, python=py, started=up)
     assert path == home / "AppData/Local/matrix-connect/task.xml" and path.exists()
     xml = path.read_text(encoding="utf-16")
     assert xml.startswith('<?xml version="1.0" encoding="UTF-16"?>')
@@ -210,9 +211,30 @@ def test_windows_install_registers_a_logon_task(tmp_path):
     # 任务注册了却没把连接器跑起来（如在打包应用的终端里装的）：撤销任务并报错，不报“已装好”
     ran.clear()
     with pytest.raises(service.ServiceError, match="没能启动"):
-        service.install(str(exe), config, system="Windows", home=home, run=ran.append,
+        service.install(str(exe), config, system="Windows", home=home, run=ran.append, python=py,
                         started=lambda log, since: False)
     assert not path.exists() and ran[-1] == ["schtasks", "/Delete", "/TN", service.TASK, "/F"]
+
+
+def test_windows_launcher_is_the_pythonw_of_the_running_env(tmp_path):
+    """uv tool 在 Windows 上把 matrix-connect.exe 复制进 ~/.local/bin，旁边没有 pythonw：
+    用运行 setup 的 Python 旁边的 pythonw（它的环境里装着 matrix），不找 PATH 上别的 Python；uvx 的临时环境不用。"""
+    bin_exe = tmp_path / ".local" / "bin" / "matrix-connect.exe"
+    tool = tmp_path / "AppData" / "Roaming" / "uv" / "tools" / "matrix" / "Scripts"
+    for d in (bin_exe.parent, tool):
+        d.mkdir(parents=True)
+    bin_exe.write_text("")
+    (tool / "pythonw.exe").write_text("")
+    assert service.windows_launcher(str(bin_exe), str(tool / "python.exe")) == tool / "pythonw.exe"
+
+    with pytest.raises(service.ServiceError, match="pythonw"):  # 两处都没有：不装
+        service.windows_launcher(str(bin_exe), str(tmp_path / "elsewhere" / "python.exe"))
+
+    cache = tmp_path / "AppData" / "Local" / "uv" / "cache" / "archive-v0" / "x" / "Scripts"
+    cache.mkdir(parents=True)
+    (cache / "pythonw.exe").write_text("")
+    with pytest.raises(service.ServiceError):
+        service.windows_launcher(str(bin_exe), str(cache / "python.exe"))
 
 
 def test_service_knows_which_install_it_runs(tmp_path):
