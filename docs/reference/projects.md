@@ -10,7 +10,8 @@
   `PUT /api/me/assistant` 换。人进项目（创建、接受邀请）时 `_bring_assistant` 把助理加进成员并在群聊记一条事件；
   人在项目里时助理不能移出（`_check_removable`）。换助理不动已有项目，新助理在下次进项目或开会话时加入。
 - **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是开会话时的助理）：
-  `POST /api/projects/<id>/sessions` 新建（已有项目里助理还不是成员时这时才加入），`GET` 列出自己的，
+  `POST /api/projects/<id>/sessions` 新建（已有项目里助理还不是成员时这时才加入；这个人已有还没发过消息的会话时沿用它，
+  侧栏也只列出发过消息的会话），`GET` 列出自己的，
   `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）。只有它的人看得到（不变量 18）；
   人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；助理不在项目里了，会话不能再发消息。
 - 会话席位和群聊席位一样：没 @ 的消息交给助理，@ 到的是会话主人自己在项目里的其他 Agent（`_members` / `resolve_mentions`，
