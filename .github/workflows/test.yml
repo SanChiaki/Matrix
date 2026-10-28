@@ -1,0 +1,35 @@
+# 每个 PR 和 main 上的提交都在 Linux 与 Windows 上跑全部测试（离线，不需要 dsh）。
+# Windows 上的行为（只读文件、.cmd 包装、GBK 输出、pythonw 后台服务）由测试覆盖，这里替代手动在 Windows 机器上验证。
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked
+      - name: Test
+        run: uv run pytest -q
