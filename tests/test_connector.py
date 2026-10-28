@@ -313,6 +313,19 @@ def test_npm_cmd_shim_runs_through_node_not_cmd_exe(tmp_path):
     assert argv(["no-such-harness-xyz"], windows=True) == ["no-such-harness-xyz"]
 
 
+def test_npm_cmd_shim_to_a_native_exe_runs_it_directly(tmp_path):
+    """新版 claude-code 的 npm 包带原生 claude.exe，.cmd 包装直接调用它：直接跑 .exe，不交给 node（node 不认 .exe）。"""
+    from matrix.runtime import argv
+    shim = tmp_path / "claude.cmd"
+    shim.write_text('@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\n'
+                    'CALL :find_dp0\r\n' r'"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe"   %*' '\r\n',
+                    encoding="utf-8")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+    (tmp_path / "node.exe").write_text("", encoding="utf-8")
+    exe = tmp_path / r"node_modules\@anthropic-ai\claude-code\bin\claude.exe"
+    assert argv([str(shim), "-p", '{"a": "b c"}'], windows=True) == [str(exe), "-p", '{"a": "b c"}']
+
+
 def test_codex_resume_trusts_windows_paths(tmp_path):
     r"""codex 的 -c 值是 TOML：Windows 路径里的反斜杠不能写进基本字符串（\U 是非法转义）。"""
     import tomllib

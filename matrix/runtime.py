@@ -49,6 +49,7 @@ ALWAYS_DISABLED = [
 ]
 
 # npm 在 Windows 上生成的 .cmd 包装：... "%_prog%"  "%dp0%\node_modules\<包>\<入口>.js" %*
+# 入口是原生程序时没有 "%_prog%"：... "%dp0%\node_modules\<包>\bin\<名字>.exe"   %*
 _NPM_SHIM = re.compile(r'"%dp0%\\([^"\r\n]+)"\s+%\*')
 
 
@@ -66,7 +67,7 @@ def argv(cmd: list[str], windows: bool = os.name == "nt") -> list[str]:
 
     Windows 上 npm 装的 CLI（dsh、claude、codex）是 .cmd 包装：CreateProcess 不按 PATHEXT 找它，
     经 cmd.exe 转一道又会改写参数里的引号与特殊字符（--mcp-config 的 JSON、带空格的路径）。
-    认得出 npm 包装时直接用 node 跑它指向的脚本；其他系统原样返回。"""
+    认得出 npm 包装时直接用 node 跑它指向的脚本，指向原生 .exe 时直接跑那个 .exe；其他系统原样返回。"""
     if not windows or not cmd:
         return cmd
     found = shutil.which(cmd[0])
@@ -77,6 +78,8 @@ def argv(cmd: list[str], windows: bool = os.name == "nt") -> list[str]:
             m = _NPM_SHIM.search(Path(found).read_text(encoding="utf-8", errors="replace"))
         except OSError:
             m = None
+        if m and m.group(1).lower().endswith((".exe", ".com")):  # 包里带的原生程序（新版 claude-code）：直接跑，不经 node
+            return [str(Path(found).parent / m.group(1)), *cmd[1:]]
         if m:
             node = Path(found).parent / "node.exe"
             return [str(node) if node.exists() else (shutil.which("node") or "node"),
