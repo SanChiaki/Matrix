@@ -1,5 +1,6 @@
-# 每个 PR 和 main 上的提交都在 Linux 与 Windows 上跑全部测试（离线，不需要 dsh）。
-# Windows 上的行为（只读文件、.cmd 包装、GBK 输出、pythonw 后台服务）由测试覆盖，这里替代手动在 Windows 机器上验证。
+# 每个 PR 和 main 上的提交都在 Linux、Windows、macOS 上跑全部测试（离线，不需要 dsh）。
+# 三端各自的行为（Windows 的只读文件、.cmd 包装、GBK 输出、pythonw 服务，macOS 的 launchd 服务）由测试覆盖，
+# 这里替代手动在各台机器上验证。公开仓库用标准 runner 不收费。
 name: tests
 
 on:
@@ -21,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
