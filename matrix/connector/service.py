@@ -20,6 +20,7 @@ import os
 import platform
 import plistlib
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -102,12 +103,15 @@ def _started(log: Path, since: float, timeout: float = 15) -> bool:
 
 
 def windows_launcher(exe: str) -> Path:
-    """后台跑用的 pythonw.exe：和 matrix-connect.exe 在同一个 Scripts 目录（venv / uv tool 都是这样）。
+    """后台跑用的 pythonw.exe：先找和 matrix-connect.exe 同一个 Scripts 目录的（venv / pipx），再找正在跑
+    这个连接器的 Python 旁边的。uv tool 在 ~/.local/bin 里放的 matrix-connect.exe 只是个启动器（不是链接），
+    真正的环境在 uv 的 tools 目录里，pythonw.exe 在那边。不能用 PATH 上随便一个 pythonw：那里没装连接器。
     直接跑 matrix-connect.exe 会一直挂着一个控制台窗口。"""
-    p = Path(exe).with_name("pythonw.exe")
-    if not p.exists():
-        raise ServiceError(f"找不到 {p}：后台服务要用 pythonw 运行（没有控制台窗口）")
-    return p
+    tried = [Path(exe).with_name("pythonw.exe"), Path(sys.executable).with_name("pythonw.exe")]
+    for p in tried:
+        if p.exists():
+            return p
+    raise ServiceError(f"找不到 {' 或 '.join(dict.fromkeys(map(str, tried)))}：后台服务要用 pythonw 运行（没有控制台窗口）")
 
 
 def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path) -> str:
@@ -239,6 +243,11 @@ def runs_from(exe: str, *, system: str | None = None, home: Path | None = None) 
         return None
     text = path.read_text(encoding="utf-16" if system == "Windows" else "utf-8", errors="replace")
     where = str(Path(exe).parent)
+    if system == "Windows":  # 任务里写的是 pythonw.exe，它可能不在 exe 旁边（uv tool）
+        try:
+            where = str(windows_launcher(exe).parent)
+        except ServiceError:
+            pass
     return where in text or escape(where) in text
 
 

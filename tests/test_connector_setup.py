@@ -177,11 +177,12 @@ def test_install_writes_the_unit_and_loads_it(tmp_path):
         service.install("/x", tmp_path / "c.json", system="Plan9", home=home, run=lambda c: None)
 
 
-def test_windows_install_registers_a_logon_task(tmp_path):
+def test_windows_install_registers_a_logon_task(tmp_path, monkeypatch):
     """Windows：当前用户的登录任务，用 pythonw 跑（没有控制台窗口），日志写文件，定义里不含令牌。"""
     ran, up = [], lambda log, since: True
     home, scripts = tmp_path / "home", tmp_path / "venv" / "Scripts"
     scripts.mkdir(parents=True)
+    monkeypatch.setattr("sys.executable", str(tmp_path / "elsewhere" / "python.exe"))
     exe = scripts / "matrix-connect.exe"
     exe.write_text("")
     config = tmp_path / "my config.json"
@@ -213,6 +214,29 @@ def test_windows_install_registers_a_logon_task(tmp_path):
         service.install(str(exe), config, system="Windows", home=home, run=ran.append,
                         started=lambda log, since: False)
     assert not path.exists() and ran[-1] == ["schtasks", "/Delete", "/TN", service.TASK, "/F"]
+
+
+def test_windows_finds_pythonw_of_a_uv_tool_install(tmp_path, monkeypatch):
+    """uv tool：~/.local/bin 里的 matrix-connect.exe 只是启动器，pythonw.exe 在 uv tools 目录的环境里，
+    就是正在跑连接器的 Python 旁边那个；状态检查也认得出服务跑的是这份安装。"""
+    home, bin_dir = tmp_path / "home", tmp_path / "home" / ".local" / "bin"
+    scripts = tmp_path / "AppData" / "Roaming" / "uv" / "tools" / "matrix" / "Scripts"
+    bin_dir.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    exe = bin_dir / "matrix-connect.exe"
+    exe.write_text("")
+    (scripts / "pythonw.exe").write_text("")
+    monkeypatch.setattr("sys.executable", str(scripts / "python.exe"))
+    assert service.windows_launcher(str(exe)) == scripts / "pythonw.exe"
+
+    path = service.install(str(exe), tmp_path / "config.json", system="Windows", home=home,
+                           run=lambda cmd: None, started=lambda log, since: True)
+    assert f"<Command>{scripts / 'pythonw.exe'}</Command>" in path.read_text(encoding="utf-16")
+    assert service.runs_from(str(exe), system="Windows", home=home) is True
+
+    monkeypatch.setattr("sys.executable", str(tmp_path / "py311" / "python.exe"))  # 换了一份没有 pythonw 的
+    with pytest.raises(service.ServiceError, match="pythonw"):
+        service.windows_launcher(str(exe))
 
 
 def test_service_knows_which_install_it_runs(tmp_path):
