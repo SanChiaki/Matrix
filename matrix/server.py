@@ -105,12 +105,28 @@ class SkillFileIn(BaseModel):
     content: str = Field(max_length=200_000)
 
 
+# 手工写的 MCP 配置：JSON 文本或对象（mcpServers 的写法，见 mcp_client.parse_server_config）
+McpConfig = str | dict[str, Any]
+
+
 class CustomConnectorIn(BaseModel):
-    name: str = Field(min_length=1, max_length=60)
-    url: str = Field(min_length=8, max_length=2000)       # 只接受 https 公网地址
+    name: str = Field("", max_length=60)                  # 不填就用配置里的服务名
+    config: McpConfig | None = Field(None)                # 接入方式：远程 MCP，地址只接受 https 公网地址
+    url: str = Field("", max_length=2000)                 # 旧写法：单个地址 + 一个请求头
     header: str = Field("", max_length=64)
     value: str = Field("", max_length=4000)               # 只进加密保管，不回显
     agent_ids: list[str] | None = None
+
+    def mcp(self) -> McpConfig:
+        if self.config is not None:
+            return self.config
+        value = self.value.strip()
+        return {"url": self.url, "headers": {self.header.strip() or "Authorization": value} if value else {}}
+
+
+class CustomEditIn(BaseModel):
+    name: str = Field("", max_length=60)
+    config: McpConfig
 
 
 class AuthorizeIn(BaseModel):
@@ -120,8 +136,21 @@ class AuthorizeIn(BaseModel):
 
 
 class NeedIn(BaseModel):
-    connector_id: str = Field(min_length=1, max_length=80)
+    connector_id: str = Field("", max_length=80)          # 目录里的连接器或电脑上的服务名
     purpose: str = Field("", max_length=300)
+    name: str = Field("", max_length=60)                  # 自定义连接器：名字与 MCP 配置（请求头的值只能是 ${变量} 模板）
+    config: McpConfig | None = None
+
+
+class NeedEditIn(BaseModel):
+    name: str = Field("", max_length=60)
+    config: McpConfig
+    purpose: str | None = Field(None, max_length=300)
+
+
+class NeedConnectIn(BaseModel):
+    values: dict[str, str] = Field(default_factory=dict)  # 模板里的变量；只进加密保管，不回显
+    agent_ids: list[str] | None = None
 
 
 class GrantIn(BaseModel):
@@ -677,8 +706,20 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/needs")
     def add_need(project_id: str, body: NeedIn, user: Me) -> dict:
-        network.add_connector_need(project_id, body.connector_id, body.purpose, actor=user.id)
+        network.add_connector_need(project_id, body.connector_id, body.purpose, actor=user.id,
+                                   config=body.config, name=body.name)
         return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/needs/{need_id}")
+    def edit_need(project_id: str, need_id: str, body: NeedEditIn, user: Me) -> dict:
+        network.edit_connector_need(project_id, need_id, body.config, body.purpose, body.name, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/needs/{need_id}/connect")
+    async def connect_need(project_id: str, need_id: str, body: NeedConnectIn, user: Me) -> dict:
+        # 会试连外部服务：放到线程里
+        return await asyncio.to_thread(network.connect_custom_need, project_id, need_id, body.values, user.id,
+                                       body.agent_ids)
 
     @app.delete("/api/projects/{project_id}/needs/{need_id}")
     def remove_need(project_id: str, need_id: str, user: Me) -> dict:
@@ -745,8 +786,11 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/me/connections/custom")
     async def add_custom(body: CustomConnectorIn, user: Me) -> dict:
-        return await asyncio.to_thread(network.add_custom_connector, body.name, body.url, body.header, body.value,
-                                       user.id, body.agent_ids)
+        return await asyncio.to_thread(network.add_custom_connector, body.name, body.mcp(), user.id, body.agent_ids)
+
+    @app.put("/api/me/connections/{connection_id}/custom")
+    async def edit_custom(connection_id: str, body: CustomEditIn, user: Me) -> dict:
+        return await asyncio.to_thread(network.edit_custom_connector, connection_id, body.name, body.config, user.id)
 
     @app.post("/api/me/connections/{connection_id}/check")
     async def recheck(connection_id: str, user: Me) -> dict:

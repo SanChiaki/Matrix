@@ -863,3 +863,15 @@ dialog.confirm-card .actions { display: flex; justify-content: flex-end; gap: 8p
 .unrecognized code { color: var(--muted); overflow-wrap: anywhere; }
 .unrecognized select { width: auto; font-size: 12.5px; padding: 3px 8px; }
 .loc .tag { margin-left: 6px; text-decoration: none; }
+/* 自定义连接器的 MCP 配置：手工写的 JSON（项目里请求头只有 ${变量} 模板） */
+.mcp-config { font: 12.5px/1.6 "SF Mono", ui-monospace, Menlo, monospace; tab-size: 2; }
+pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
+.mcp-box { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.mcp-box .tag { font-size: 11.5px; }
+.mcp-edit { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.mcp-connect { margin-top: 8px; font-size: 13px; }
+.mcp-connect summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+.mcp-connect form { margin-top: 8px; }
+.need-add { max-width: 760px; }
+.need-add .mcp-field { margin-top: 10px; }
+.need-add .ref-add select { width: auto; }

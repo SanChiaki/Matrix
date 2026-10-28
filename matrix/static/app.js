@@ -958,7 +958,7 @@ async function renderProjectPage(force = false) {
   // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
   const sig = JSON.stringify(st.tab.startsWith("plugin:")
     ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions])]
-    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook]);
+    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook, st.needKind, st.editNeed]);
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
@@ -1253,10 +1253,15 @@ function cronText(expr) {
 // 主持人手动添加的。项目不持有任何人的授权：就绪状态按成员给，不给是谁的账号；“你的授权”只有你自己看得到（不变量 19）
 const READY_CN = { ready: ["ok", "能用"], ask: ["warn", "用到时问所有者"], not_enabled: ["", "没开放"], unauthorized: ["bad", "还没连"] };
 const GRANT_CN = { ask: "用到时问我", always: "这个项目里都可以", deny: "不行" };
+// 手工写 MCP 配置时的起始模板：项目里请求头的值只能是 ${变量}，个人的自定义连接器直接填真实的值
+const MCP_TEMPLATE = JSON.stringify({ mcpServers: { "服务名": { type: "http", url: "https://example.com/mcp",
+  headers: { Authorization: "Bearer ${TOKEN}" } } } }, null, 2);
+const MCP_TEMPLATE_MINE = JSON.stringify({ mcpServers: { "服务名": { type: "http", url: "https://example.com/mcp",
+  headers: { Authorization: "Bearer 你的令牌" } } } }, null, 2);
 function connSources(x, d) {
   return x.sources.map((src) => src.kind === "ref" ? `<span class="tag">资料「${esc(src.name)}」${src.assigned ? "（指定）" : ""}</span>`
     : src.kind === "plugin" ? `<span class="tag">插件「${esc(src.title)}」</span>`
-    : src.kind === "manual" ? `<span class="tag">手动添加${src.purpose ? `：${esc(src.purpose)}` : ""}${d.is_host
+    : src.kind === "manual" ? `<span class="tag">手动添加${x.custom ? "（自定义）" : ""}${src.purpose ? `：${esc(src.purpose)}` : ""}${d.is_host
       ? `<button type="button" class="x" data-rmneed="${esc(src.need_id)}" title="去掉" aria-label="去掉手动添加的 ${esc(x.name)}">×</button>` : ""}</span>`
     : `<span class="tag">用过 ${src.count} 次${src.last_at ? ` · 最近 ${dateTime(src.last_at)}` : ""}${src.last_agent ? `（${esc(src.last_agent)}）` : ""}${d.is_host
       ? `<button type="button" class="x" data-rmusage="${esc(x.connector_id)}" title="收起这条记录" aria-label="收起 ${esc(x.name)} 的使用记录">×</button>` : ""}</span>`).join("");
@@ -1265,13 +1270,58 @@ function connSources(x, d) {
 function renderConnectorsTab(box, d, st) {
   const host = d.is_host, { services, unrecognized } = d.connector_panel;
   const catalogOpts = (sel = "") => (S.catalog || []).map((k) => `<option value="${esc(k.id)}" ${k.id === sel ? "selected" : ""}>${esc(k.name)}</option>`).join("");
-  const memberRow = (m) => {
+  const memberRow = (x) => (m) => {
     const [cls, t] = READY_CN[m.status] || ["", m.status], mine = agent(m.agent_id)?.mine;
     const text = m.status === "not_enabled" ? (d.shared ? "没勾给它，或所有者在这里选了不行" : "授权了，没勾给它")
       : m.status === "ask" && mine ? "用到时问你" : t;
     return `<li><span class="r-dot ${cls}" aria-hidden="true"></span>${esc(m.agent)}<span class="muted">${mine ? "你的" : `${esc(m.owner || "")} 的`} · ${text}</span>
-      ${mine && m.status === "unauthorized" ? '<a href="#connectors">去连接</a>' : ""}${mine && m.status === "not_enabled" ? '<a href="#connectors">勾给它</a>' : ""}</li>`;
+      ${mine && m.status === "unauthorized" && !x.custom ? '<a href="#connectors">去连接</a>' : ""}${mine && m.status === "not_enabled" ? '<a href="#connectors">勾给它</a>' : ""}</li>`;
   };
+  // 自定义连接器：接入方式 MCP，配置主持人手工写、所有成员都看得到；请求头里的 ${变量} 由每个成员连接时填自己的（不变量 19）
+  const mcpJson = (x) => JSON.stringify({ mcpServers: { [x.name]: x.custom.config } }, null, 2);
+  const mcpBox = (x) => {
+    const n = x.custom.need_id, editing = host && st.editNeed === n;
+    return `<div class="mcp-box"><div class="need-head"><span class="tag">接入方式 · MCP</span><span class="grow"></span>
+        ${host && !editing ? `<button type="button" class="ghost sm" data-editneed="${esc(n)}">编辑配置</button>` : ""}</div>
+      ${editing ? `<form class="mcp-edit" data-needform="${esc(n)}">
+          <label class="sr-only" for="pn-edit-${esc(n)}">${esc(x.name)} 的 MCP 配置</label>
+          <textarea id="pn-edit-${esc(n)}" class="mcp-config" rows="9" spellcheck="false">${esc(st.editDraft ?? mcpJson(x))}</textarea>
+          <div class="actions"><button type="submit">保存配置</button><button type="button" class="ghost" data-canceledit>取消</button></div></form>`
+        : `<pre class="mcp-config">${esc(mcpJson(x))}</pre>`}
+      ${x.custom.vars.length ? `<p class="hint">${x.custom.vars.map((v) => `<code>\${${esc(v)}}</code>`).join("、")} 由每个成员连接时填自己的，项目里不保存任何人的凭证。</p>` : ""}
+    </div>`;
+  };
+  // 我自己在这个项目里的云端 Agent 用这个自定义连接器：按配置连接，变量填自己的
+  const mcpConnect = (x) => {
+    const n = x.custom.need_id;
+    const mineCloud = x.members.filter((m) => agent(m.agent_id)?.mine && !agent(m.agent_id)?.device_runtime);
+    const missing = mineCloud.some((m) => m.status === "unauthorized");
+    return mineCloud.length ? `<details class="mcp-connect" ${missing ? "open" : ""}><summary>${missing ? "用我的凭证连接" : "换我的凭证"}</summary>
+        <form class="editor" data-connectneed="${esc(n)}">
+          ${x.custom.vars.map((v) => `<div class="field"><label for="cn-${esc(n)}-${esc(v)}">${esc(v)}</label>
+            <input id="cn-${esc(n)}-${esc(v)}" name="${esc(v)}" type="password" autocomplete="off" required spellcheck="false"></div>`).join("")}
+          <fieldset class="checks"><legend>给哪些 Agent 用</legend>${mineCloud.map((m) => `<label><input type="checkbox" name="agent" value="${esc(m.agent_id)}" checked>
+            <span class="opt">${esc(m.agent)}</span></label>`).join("")}</fieldset>
+          <p class="hint">连上的是你自己的连接器（在“我的连接器”里也能看到）。填的值加密保存，只在调用时由网络带上发给 ${esc(x.custom.config.url)}，Agent 和别的成员都拿不到。</p>
+          <div class="actions"><button type="submit">连接</button></div></form></details>` : "";
+  };
+  const kind = st.needKind || (S.catalog?.length ? "catalog" : "custom");
+  const addForm = () => `<form class="need-add" id="pp-need-form" aria-label="手动添加连接器">
+      <div class="ref-add">
+        <label class="sr-only" for="pn-kind">添加什么</label>
+        <select id="pn-kind">${[["catalog", "目录里的连接器"], ["device", "电脑上配好的服务"], ["custom", "自定义连接器（写 MCP 配置）"]]
+          .filter(([k]) => k !== "catalog" || S.catalog?.length).map(([k, t]) => `<option value="${k}" ${k === kind ? "selected" : ""}>${t}</option>`).join("")}</select>
+        ${kind === "catalog" ? `<label class="sr-only" for="pn-conn">连接器</label><select id="pn-conn">${catalogOpts()}</select>` : ""}
+        ${kind === "device" ? '<label class="sr-only" for="pn-other">服务名</label><input id="pn-other" maxlength="80" required placeholder="服务名，如 notion">' : ""}
+        <label class="sr-only" for="pn-purpose">用来做什么</label><input id="pn-purpose" maxlength="300" placeholder="用来做什么（可选）" value="${esc(st.needPurpose || "")}">
+        <button type="submit">手动添加</button>
+      </div>
+      ${kind === "device" ? '<p class="hint">成员电脑上的 AI 工具（Claude Code、Codex、dsh）里配了同名的服务，Matrix 客户端会自动认出来。</p>' : ""}
+      ${kind === "custom" ? `<div class="field mcp-field"><label for="pn-config">MCP 配置<span class="muted"> · 接入方式：MCP，远程（Streamable HTTP），由网络代连</span></label>
+        <textarea id="pn-config" class="mcp-config" rows="10" spellcheck="false">${esc(st.needDraft ?? MCP_TEMPLATE)}</textarea>
+        <p class="hint">写法同常见 MCP 客户端里的 mcpServers，一次写一个服务，服务名就是连接器的名字。项目里所有成员都看得到这份配置：
+          请求头的值写成 <code>\${TOKEN}</code> 这样的变量，每个成员连接时填自己的，项目不保存任何人的凭证。</p></div>` : ""}
+    </form>`;
   // 电脑上的服务网络拦不到调用：没有“用到时问”，没设就是不给
   const grantRow = (g) => `<li><label for="gr-${esc(g.agent_id)}-${esc(g.connection_id)}">${esc(g.agent)} 用你的「${esc(g.connection)}」</label>
     <select id="gr-${esc(g.agent_id)}-${esc(g.connection_id)}" data-grant="${esc(g.agent_id)}" data-conn="${esc(g.connection_id)}">${
@@ -1282,7 +1332,9 @@ function renderConnectorsTab(box, d, st) {
     ${assetNote(st)}
     <ul class="needs">${services.map((x) => `<li><div class="need-head"><span class="ability-ico">${ICON.plug}</span><b>${esc(x.name)}</b></div>
       <div class="conn-src"><span class="muted">用在</span>${connSources(x, d)}</div>
-      <ul class="ready">${x.members.map(memberRow).join("") || '<li class="muted">项目里还没有成员</li>'}</ul>
+      ${x.custom ? mcpBox(x) : ""}
+      <ul class="ready">${x.members.map(memberRow(x)).join("") || '<li class="muted">项目里还没有成员</li>'}</ul>
+      ${x.custom ? mcpConnect(x) : ""}
       ${x.mine.length ? `<div class="grants"><h4>你的授权<span class="muted"> · 只有你看得到</span></h4><ul>${x.mine.map(grantRow).join("")}</ul></div>` : ""}
       </li>`).join("")
       || `<li class="empty">还没有用到外部服务。贴进资料的链接认得出服务时会自动出现在这里${host ? "，也可以在下面手动添加" : ""}。</li>`}</ul>
@@ -1291,24 +1343,50 @@ function renderConnectorsTab(box, d, st) {
         ? `<label class="sr-only" for="pc-map-${esc(u.ref_id)}">用哪个服务打开</label><select id="pc-map-${esc(u.ref_id)}"><option value="">用哪个服务打开…</option>${catalogOpts()}</select>
            <button type="button" class="ghost sm" data-map="${esc(u.ref_id)}">指定</button>` : ""}</li>`).join("")}</ul>
       <p class="hint">多数网页不需要连接器，不用管；要登录才能看的（公司文档、内部系统）指定一下，大家就知道谁打得开。</p></section>` : ""}
-    ${host ? `<form class="ref-add" id="pp-need-form" aria-label="手动添加连接器">
-      <label class="sr-only" for="pn-conn">连接器</label>
-      <select id="pn-conn">${catalogOpts()}<option value="">其他（电脑上配好的服务）…</option></select>
-      <label class="sr-only" for="pn-other">服务名</label><input id="pn-other" maxlength="80" placeholder="服务名，如 notion" hidden>
-      <label class="sr-only" for="pn-purpose">用来做什么</label><input id="pn-purpose" maxlength="300" placeholder="用来做什么（可选）">
-      <button type="submit">手动添加</button></form>` : ""}`;
-  const done = async (path, opts, msg) => {
-    try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    ${host ? addForm() : ""}`;
+  // msg 可以是函数：按返回结果给出 [提示, 是否算失败]；ok 在成功时、重绘之前调用（清掉草稿）
+  const done = async (path, opts, msg, ok) => {
+    try {
+      const r = await api(path, opts);
+      [st.note, st.bad] = typeof msg === "function" ? msg(r) : [msg, false];
+      ok?.();
+    } catch (e) { st.note = e.message; st.bad = true; }
     document.activeElement?.blur();
     await reload(); renderProjectPage(true);
   };
-  const sel = $("#pn-conn", box), other = $("#pn-other", box);
-  const sync = () => { if (other) { other.hidden = !!sel.value; other.required = !sel.value; } };
-  sel?.addEventListener("change", sync); sync();
+  $("#pn-kind", box)?.addEventListener("change", (e) => { st.needKind = e.target.value; st.needPurpose = $("#pn-purpose", box).value; renderProjectPage(true); });
+  $("#pn-config", box)?.addEventListener("input", (e) => { st.needDraft = e.target.value; });
   $("#pp-need-form", box)?.addEventListener("submit", (e) => {
     e.preventDefault();
-    done(`/api/projects/${d.id}/needs`, { method: "POST", body: { connector_id: sel.value || other.value.trim(), purpose: $("#pn-purpose").value } }, "已添加");
+    const purpose = st.needPurpose = $("#pn-purpose", box).value;
+    const body = kind === "custom" ? { config: $("#pn-config", box).value, purpose }
+      : { connector_id: kind === "catalog" ? $("#pn-conn", box).value : $("#pn-other", box).value.trim(), purpose };
+    done(`/api/projects/${d.id}/needs`, { method: "POST", body }, "已添加", () => { st.needDraft = null; st.needPurpose = ""; });
   });
+  box.querySelectorAll("[data-editneed]").forEach((b) => b.addEventListener("click", () => {
+    st.editNeed = b.dataset.editneed; st.editDraft = null; renderProjectPage(true);
+  }));
+  box.querySelectorAll("[data-canceledit]").forEach((b) => b.addEventListener("click", () => {
+    st.editNeed = null; st.editDraft = null; renderProjectPage(true);
+  }));
+  box.querySelectorAll("[data-needform]").forEach((f) => {
+    const ta = f.querySelector("textarea");
+    ta.addEventListener("input", () => { st.editDraft = ta.value; });
+    f.addEventListener("submit", (e) => {
+      e.preventDefault();
+      done(`/api/projects/${d.id}/needs/${f.dataset.needform}`, { method: "PUT", body: { config: ta.value } }, "已保存配置",
+        () => { st.editNeed = null; st.editDraft = null; });
+    });
+  });
+  box.querySelectorAll("[data-connectneed]").forEach((f) => f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const btn = f.querySelector("button[type=submit]");
+    btn.disabled = true; btn.textContent = "正在试连…";
+    const values = Object.fromEntries([...f.querySelectorAll("input:not([type=checkbox])")].map((x) => [x.name, x.value]));
+    const agent_ids = [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value);
+    done(`/api/projects/${d.id}/needs/${f.dataset.connectneed}/connect`, { method: "POST", body: { values, agent_ids } },
+      (c) => c.status === "ok" ? ["已连接", false] : [`连接已保存，但试连没通过：${c.error}`, true]);
+  }));
   box.querySelectorAll("[data-rmneed]").forEach((b) => b.addEventListener("click", () => {
     if (confirm("去掉手动添加的这一项？资料、插件或调用记录里还用到它的话，这一行会留着。"))
       done(`/api/projects/${d.id}/needs/${b.dataset.rmneed}`, { method: "DELETE" }, "已去掉");
@@ -2873,7 +2951,7 @@ function renderConnectorsView() {
     <li class="${S.connSel === c.id ? "selected" : ""}"><div class="card">
       <button type="button" class="card-main" data-id="${esc(c.id)}" aria-label="查看连接器 ${esc(c.name)}">
         <div class="card-head"><span class="ability-ico">${ICON.plug}</span><span class="name">${esc(c.name)}</span>${connPill(c)}</div>
-        <p class="card-desc">${c.kind === "cloud" ? esc(c.custom ? "自定义 · 云端" : c.description || "云端") : `${connWhere(c)} 里配好的服务`}</p>
+        <p class="card-desc">${c.kind === "cloud" ? esc(c.custom ? "自定义 · MCP · 云端" : c.description || "云端") : `${connWhere(c)} 里配好的服务`}</p>
         <div class="card-meta">${users(c).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没给任何 Agent</span>'}</div>
       </button></div></li>`).join("")
     || '<li class="empty">还没有连接器。在下面授权一个云端服务；你电脑上 Claude Code、Codex、dsh 里配好的服务，连上设备后会自动出现在这里。</li>';
@@ -2905,15 +2983,17 @@ function renderConnDetail() {
     const cloud = mineAgents().filter((a) => !a.device_runtime);
     box.innerHTML = `<h2 class="panel-title">自定义连接器</h2>
       <form class="editor" id="custom-form">
-        <div class="field"><label for="cu-name">名字</label><input id="cu-name" name="name" required maxlength="60" placeholder="团队知识库"></div>
-        <div class="field"><label for="cu-url">服务地址</label><input id="cu-url" name="url" required type="url" placeholder="https://example.com/mcp" spellcheck="false">
-          <p class="hint">只能是 https 的公网地址，不能是内网。</p></div>
-        <div class="field"><label for="cu-header">认证请求头（可选）</label><input id="cu-header" name="header" maxlength="64" placeholder="Authorization" spellcheck="false"></div>
-        <div class="field"><label for="cu-value">认证值（可选）</label><input id="cu-value" name="value" type="password" autocomplete="off" placeholder="Bearer …"></div>
+        <div class="field"><label for="cu-name">名字</label><input id="cu-name" name="name" maxlength="60" placeholder="不填就用配置里的服务名">
+          <p class="hint">连接器是一个外部服务；怎么接进来是它的接入方式。</p></div>
+        <div class="field"><span class="field-label">接入方式</span><div><span class="tag">MCP · 远程（Streamable HTTP）</span></div>
+          <p class="hint">自定义连接器目前只能用 MCP 接入，由网络在云端代连。本机启动的 MCP（command）配在你电脑上的 AI 工具里，Matrix 客户端会自动认出来。</p></div>
+        <div class="field"><label for="cu-config">MCP 配置</label>
+          <textarea id="cu-config" name="config" class="mcp-config" rows="10" required spellcheck="false">${esc(MCP_TEMPLATE_MINE)}</textarea>
+          <p class="hint">写法同常见 MCP 客户端里的 mcpServers，一次写一个服务；可以直接粘贴服务文档里给的配置。地址只能是 https 的公网地址，不能是内网。</p></div>
         <fieldset class="checks"><legend>给哪些 Agent 用</legend>
           ${cloud.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${a.id === S.me?.assistant_id ? "checked" : ""}><span class="opt">${esc(a.name)}</span></label>`).join("") || '<p class="hint">你还没有在云端跑的 Agent。</p>'}
         </fieldset>
-        <p class="hint">认证值加密保存，Agent 拿不到，页面也不再显示。</p>
+        <p class="hint">请求头的值加密保存，Agent 拿不到，页面上之后只显示“&lt;已保存&gt;”。</p>
         <p class="error" role="alert"></p>
         <div class="actions"><button type="submit">添加</button><button type="button" class="ghost" id="cu-cancel">取消</button></div>
       </form>`;
@@ -2923,8 +3003,8 @@ function renderConnDetail() {
       const btn = f.querySelector("button[type=submit]");
       btn.disabled = true; btn.textContent = "正在试连…";
       try {
-        const c = await api("/api/me/connections/custom", { method: "POST", body: { name: f.name.value.trim(), url: f.url.value.trim(),
-          header: f.header.value.trim(), value: f.value.value, agent_ids: [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value) } });
+        const c = await api("/api/me/connections/custom", { method: "POST", body: { name: f.elements.name.value.trim(), config: f.elements.config.value,
+          agent_ids: [...f.querySelectorAll('[name="agent"]:checked')].map((x) => x.value) } });
         S.connPanel = null; S.connSel = c.id; document.activeElement?.blur();
         await loadMine(true); await reload();
       } catch (err) { $(".error", f).textContent = err.message; btn.disabled = false; btn.textContent = "添加"; }
@@ -2975,7 +3055,7 @@ function renderConnDetail() {
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
   box.innerHTML = `<h2 class="panel-title">${esc(c.name)} ${connPill(c)}</h2>
-    <p class="muted">${c.kind === "cloud" ? `云端 · ${esc(c.description || "")}` : `${connWhere(c)} 里配好的服务`}</p>
+    <p class="muted">${c.custom ? "云端 · 自定义 · 接入方式 MCP" : c.kind === "cloud" ? `云端 · ${esc(c.description || "")}` : `${connWhere(c)} 里配好的服务`}</p>
     ${c.error ? `<p class="hint warn">${esc(c.error)}</p>` : ""}
     <form class="editor" id="conn-agents">
       <fieldset class="checks"><legend>给哪些 Agent 用</legend>
@@ -2991,7 +3071,23 @@ function renderConnDetail() {
         ${c.kind === "cloud" ? '<button type="button" class="ghost" id="conn-check">重新检查</button><button type="button" class="danger" id="conn-del">撤销授权</button>'
           : c.status === "missing" ? '<button type="button" class="danger" id="conn-del">移除</button>' : ""}</div>
     </form>
+    ${c.custom ? `<h3>MCP 配置</h3><form class="editor" id="conn-mcp">
+      <div class="field"><label for="cm-name">名字</label><input id="cm-name" name="name" maxlength="60" value="${esc(c.name)}"></div>
+      <div class="field"><label for="cm-config">配置<span class="muted"> · 接入方式：MCP，远程（Streamable HTTP）</span></label>
+        <textarea id="cm-config" name="config" class="mcp-config" rows="9" spellcheck="false">${esc(JSON.stringify({ mcpServers: { [c.name]: c.config } }, null, 2))}</textarea>
+        <p class="hint">请求头的值显示为“&lt;已保存&gt;”，不改就原样留着；要换就直接写新的值。</p></div>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">保存配置</button></div></form>` : ""}
     ${c.kind === "cloud" ? '<h3>最近的调用</h3><div id="conn-calls"><p class="muted">正在读取…</p></div>' : ""}`;
+  $("#conn-mcp")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const m = e.target, btn = m.querySelector("button[type=submit]");
+    btn.disabled = true; btn.textContent = "正在试连…";
+    try {
+      await api(`/api/me/connections/${c.id}/custom`, { method: "PUT", body: { name: m.elements.name.value.trim(), config: m.elements.config.value } });
+      box.dataset.sig = ""; await loadMine(true); await reload();
+    } catch (err) { $(".error", m).textContent = err.message; btn.disabled = false; btn.textContent = "保存配置"; }
+  });
   const f = $("#conn-agents"), err = (e) => { $(".error", f).textContent = e.message; };
   f.addEventListener("submit", async (e) => {
     e.preventDefault();

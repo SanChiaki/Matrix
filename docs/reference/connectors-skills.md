@@ -62,10 +62,22 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 
 ### 自定义（云端）
 
-- `POST /api/me/connections/custom`：`{name, url, header?, value?}`，接入任意远程 MCP（Streamable HTTP）。
-  地址只能是 `https://` 的**公网**地址：解析出的每个地址都要 `is_global`，连接时直连校验过的 IP（防 DNS 重绑定），
+连接器是外部服务，MCP 是它的一种**接入方式**。自定义连接器目前只有这一种：远程 MCP（Streamable HTTP），由网络代连；
+界面上写“接入方式：MCP”，配置手工写、可以再改，不把“连接器”说成“MCP”。
+
+- **配置**：认常见 MCP 客户端的 `mcpServers` 写法（`mcp_client.parse_server_config`）：`{"mcpServers": {"名字": {...}}}`、
+  `{"名字": {...}}` 或直接一项 `{"type": "http", "url": ..., "headers": {...}}`，一次一个服务，名字没单独填就用服务名。
+  `type` 写 `http` / `streamable-http` 或不写；`sse` 和本机启动的（`command` / `stdio`）拒绝并说明为什么
+  （本机的 MCP 配在电脑上的 AI 工具里，由 Matrix 客户端上报）。请求头最多 10 个，名字只能是字母、数字、`-`。
+- `POST /api/me/connections/custom`：`{name?, config, agent_ids?}`（旧写法 `{name, url, header?, value?}` 照收）。
+  `PUT /api/me/connections/<id>/custom`：`{name?, config}` 改配置。
+- 地址只能是 `https://` 的**公网**地址：解析出的每个地址都要 `is_global`，连接时直连校验过的 IP（防 DNS 重绑定），
   不跟重定向，不走代理（`mcp_client.check_public_url` / `public_only`）。地址存在 `Connection.url`，
-  请求头名与值只进保管库。每人最多 20 个。
+  请求头名与值只进保管库（`{"headers": {...}}`；旧的 `{header, value}` 照读）。
+- 回显：`config` 里请求头的值一律是 `<已保存>`（`Network.KEEP_SECRET`）；改配置时原样交回就沿用保管库里的，
+  写新值就替换，新加的请求头写 `<已保存>` 会被拒绝。目录里的连接器没有 `config`（地址不给用户看）。
+- id（也是工具名前缀 `<id>__<工具>`）是 `custom-<名字>`，和自己的其他连接重了就加随机后缀（中文名都会落到 `custom-mcp`）。
+  每人最多 20 个。
 
 ### 我的电脑
 
@@ -104,11 +116,20 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 | `ref` | 资料里的链接：主持人指定的（`ResourceRef.connector_id`，`PUT .../refs/<ref>/connector`），或者域名对上了连接器目录里的 `domains` | 删掉那条链接 |
 | `plugin` | 启用的插件清单里的 `connectors`（只是声明） | 停用或卸载插件 |
 | `used` | 这个项目里实际调用过（`Project.connector_usage`：次数、最近时间、哪个 Agent；不记账号）。只有网络代调用的云端连接器会记 | 主持人收起（`DELETE .../connector-usage/<连接器>`），再调用会重新出现 |
-| `manual` | 主持人手动添加（`Project.connector_needs`：连接器、用途），群聊里有公开记录 | 主持人删掉 |
+| `manual` | 主持人手动添加（`Project.connector_needs`：连接器、用途），群聊里有公开记录。三种：目录里的连接器、电脑上配好的服务名、自定义连接器（见下） | 主持人删掉 |
 
 - 每一行的 `members` 按成员 Agent 给就绪状态：`ready` / `ask`（用到时问所有者）/ `not_enabled`（授权了但没勾给它，或所有者选了不行）/
   `unauthorized`，不给是谁的账号、哪个连接。`mine` 是看的人自己的 Agent 对这个服务的授权（只在共享项目里有），在面板里直接改。
 - `unrecognized`：认不出服务的 http(s) 链接，主持人可以指定用哪个连接器打开。多数网页不需要。
+- **项目里的自定义连接器**：主持人手工写 MCP 配置（同上面的写法），存进 `ConnectorNeed.name/url/headers`，
+  所有成员都看得到（行里的 `custom = {need_id, access: "mcp", config, vars}`）。项目不持有凭证，所以**请求头的值只能是模板**：
+  至少一个 `${变量}`，去掉变量后只剩不超过 16 个字母或空格（如 `"Bearer ${TOKEN}"`），写了真实值的拒绝且报错里不带它。
+  地址写的时候只查写法（`check_url_shape`，不解析域名），成员连接时再全查。id 是 `custom-<名字>-<随机>`，不会和成员自己的撞上。
+  - 成员连接（`POST .../needs/<need>/connect`，`{values: {变量: 值}, agent_ids?}`）：变量要填全，填进模板得到请求头，
+    建的是**这个人自己的**连接（`connector_id` 沿用项目里的，凭证进保管库），默认勾给他在这个项目里的云端 Agent；
+    再连一次就是换成现在的地址与凭证。之后和别的云端连接一样：共享项目里“用到时先问”。
+  - 就绪状态只认连的是项目里写的那个地址的；主持人改了地址（`PUT .../needs/<need>`），成员原来的连接对不上，显示“还没连”，
+    群聊里提示要重新连接。
 - 要用别人的连接器，就委托给别人的 Agent（不变量 16、19）。
 - Agent 发现缺连接器时调用 `suggest_connector`：只给它的所有者发一条提醒，不授权任何东西。Agent 没有安装、授权、开启连接器的工具。
 - 迁移（`store._connector_panel`）：旧的 `connections_enabled`（所有者逐个打开的）改成 `always`；关联了资源引用的“需要的连接器”
@@ -120,10 +141,12 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 | --- | --- |
 | `GET /api/me/skills`、`POST /api/me/skills/upload`、`DELETE /api/me/skills/<名字>` | 我的技能库 |
 | `POST /api/projects/<id>/skills/upload`、`DELETE .../skills/<名字>` | 项目技能（主持人上传，成员读） |
-| `POST /api/me/connections/custom` | 自定义云端 MCP（只连公网） |
+| `POST /api/me/connections/custom`、`PUT /api/me/connections/<id>/custom` | 自定义连接器（接入方式：远程 MCP，只连公网）：添加、改配置 |
 | `GET /api/connectors` | 云端连接器目录（不含地址） |
 | `GET/POST /api/me/connections`、`POST .../<id>/check`、`DELETE .../<id>`、`GET .../<id>/calls` | 我的连接 |
-| `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 连接器面板里手动添加（主持人） |
+| `POST /api/projects/<id>/needs`、`DELETE .../needs/<need>` | 连接器面板里手动添加（主持人）：`{connector_id, purpose}`，或自定义连接器 `{name?, config, purpose}` |
+| `PUT /api/projects/<id>/needs/<need>` | 改项目里自定义连接器的 MCP 配置（主持人） |
+| `POST /api/projects/<id>/needs/<need>/connect` | 成员按项目里的自定义连接器用自己的凭证连接 |
 | `PUT /api/projects/<id>/refs/<ref>/connector` | 指定一条链接用哪个连接器打开（主持人；空字符串回到按域名认） |
 | `DELETE /api/projects/<id>/connector-usage/<连接器>` | 收起“用过”的记录（主持人） |
 | `PUT /api/projects/<id>/grants` | 共享项目里我的连接器怎么用：`{agent_id, connection_id, grant: ask \| always \| deny}` |
