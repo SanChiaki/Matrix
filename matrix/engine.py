@@ -47,7 +47,7 @@ from .connector_catalog import ConnectorCatalog, ConnectorSpec
 from .mcp_client import MCPError, RemoteMCP
 from .vault import Vault, VaultError
 from .auth import Pairings
-from .workdir import DELIVERIES
+from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
@@ -2945,7 +2945,7 @@ class Network:
 
     def _mount_attachments(self, ctx: ExecContext, workdir: Path) -> None:
         """附件拷进工作目录的 attachments/（每轮刷新，只读副本）。"""
-        shutil.rmtree(workdir / ATTACHMENTS, ignore_errors=True)
+        discard(workdir / ATTACHMENTS)
         with self._lock:
             items = self._attachments_for(ctx)
         src = self.store.attachment_dir(ctx.conversation_id)
@@ -2963,7 +2963,7 @@ class Network:
         d = self.store.root / "attachments" / conv_id
         for f in d.iterdir() if d.is_dir() else []:
             if f.name not in keep:
-                f.unlink(missing_ok=True)
+                discard(f)  # 存的是只读文件
 
     def _seat(self, conv: Conversation, agent_id: str) -> Seat:
         """调用方持有锁。席位第一次被用到时创建。"""
@@ -3648,10 +3648,10 @@ class Network:
         finally:
             with self._lock:
                 self._stops.pop(ctx.id, None)
-            shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)  # 只读副本：运行里的改动一律丢弃
-            shutil.rmtree(workdir / ATTACHMENTS, ignore_errors=True)
+            discard(workdir / PROJECT_FILES)  # 只读副本：运行里的改动一律丢弃
+            discard(workdir / ATTACHMENTS)
             if not agent.device_runtime:
-                shutil.rmtree(workdir / SKILLS, ignore_errors=True)
+                discard(workdir / SKILLS)
             if before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx)
                 if conflicts:
@@ -3662,7 +3662,7 @@ class Network:
 
     def _mount_project_files(self, ctx: ExecContext, workdir: Path) -> None:
         """项目档案的文件区拷进工作目录的 project/（每轮刷新）。发布只能经 publish_file。"""
-        shutil.rmtree(workdir / PROJECT_FILES, ignore_errors=True)
+        discard(workdir / PROJECT_FILES)
         p = self.store.projects.get(ctx.project_id or "")
         if p is not None:
             shutil.copytree(self.store.project_dir(p.id), workdir / PROJECT_FILES, symlinks=False)

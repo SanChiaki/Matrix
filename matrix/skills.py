@@ -96,7 +96,7 @@ def info(d: Path) -> SkillInfo | None:
     if not f.is_file():
         return None
     _, description, _ = parse(f.read_text(encoding="utf-8", errors="replace"))
-    files = sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file() and p != f)  # 附带文件，不含 SKILL.md
+    files = sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file() and p != f)  # 附带文件，不含 SKILL.md
     mtime = max((p.stat().st_mtime for p in d.rglob("*") if p.is_file()), default=0.0)
     return SkillInfo(d.name, description, size_of(d), mtime, files)
 

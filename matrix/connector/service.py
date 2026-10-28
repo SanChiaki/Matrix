@@ -20,6 +20,7 @@ import os
 import platform
 import plistlib
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -101,13 +102,19 @@ def _started(log: Path, since: float, timeout: float = 15) -> bool:
     return False
 
 
-def windows_launcher(exe: str) -> Path:
-    """后台跑用的 pythonw.exe：和 matrix-connect.exe 在同一个 Scripts 目录（venv / uv tool 都是这样）。
+def windows_launcher(exe: str, python: str | None = None) -> Path:
+    """后台跑用的 pythonw.exe：优先取正在运行 setup 的 Python 旁边那个（它的环境里装着 matrix）。
+    uv tool 在 Windows 上把 matrix-connect.exe 复制（不是链接）进 ~/.local/bin，旁边没有 pythonw；
+    PATH 上的 pythonw 多半是别的 Python，没装 matrix，不能用。其次才看 matrix-connect.exe 旁边（venv 的 Scripts）。
     直接跑 matrix-connect.exe 会一直挂着一个控制台窗口。"""
-    p = Path(exe).with_name("pythonw.exe")
-    if not p.exists():
-        raise ServiceError(f"找不到 {p}：后台服务要用 pythonw 运行（没有控制台窗口）")
-    return p
+    python = python or sys.executable
+    tried = [Path(exe).with_name("pythonw.exe")]
+    if python and not is_ephemeral(python):  # uvx 的临时环境会被清理
+        tried.insert(0, Path(python).with_name("pythonw.exe"))
+    for p in tried:
+        if p.exists():
+            return p
+    raise ServiceError(f"找不到 {' 或 '.join(map(str, tried))}：后台服务要用 pythonw 运行（没有控制台窗口）")
 
 
 def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path) -> str:
@@ -165,7 +172,7 @@ def unit_path(system: str | None = None, home: Path | None = None) -> Path:
 
 
 def install(exe: str, config: Path, *, system: str | None = None, home: Path | None = None,
-            run: Run = _run, env_path: str | None = None,
+            run: Run = _run, env_path: str | None = None, python: str | None = None,
             started: Callable[[Path, float], bool] = _started) -> Path:
     system, home = system or platform.system(), Path(home or Path.home())
     path = unit_path(system, home)
@@ -183,7 +190,7 @@ def install(exe: str, config: Path, *, system: str | None = None, home: Path | N
         run(["launchctl", "bootstrap", domain, str(path)])
     elif system == "Windows":
         log = windows_log(home)
-        xml = windows_task_xml(windows_launcher(exe), Path(config), log, windows_user(), home)
+        xml = windows_task_xml(windows_launcher(exe, python), Path(config), log, windows_user(), home)
         path.write_text(xml, encoding="utf-16")  # schtasks /XML 要 UTF-16
         try:  # 已经装过：先停掉在跑的那个，再按新定义注册
             run(["schtasks", "/End", "/TN", TASK])
