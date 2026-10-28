@@ -220,6 +220,19 @@ def test_session_mentions_own_agents_only(tmp_path: Path):
         net.send_message(s.id, "你看看", mentions=[b.id], actor=alice)
 
 
+def test_new_session_reuses_the_empty_one(tmp_path: Path):
+    """没发过消息的会话不进侧栏：再点“新会话”沿用它，不攒空会话；发过消息、归档了的才另开。"""
+    net, alice, bob, a, p = setup(tmp_path)
+    s1 = net.create_session(p.id, actor=alice)
+    assert net.create_session(p.id, actor=alice).id == s1.id
+    assert net.create_session(p.id, "细节", actor=alice).id == s1.id and s1.title == "细节"
+    net.send_message(s1.id, "进展如何", actor=alice, background=False)
+    s2 = net.create_session(p.id, actor=alice)
+    assert s2.id != s1.id and s2.title == "新会话"
+    net.update_session(s2.id, archived=True, actor=alice)
+    assert net.create_session(p.id, actor=alice).id not in (s1.id, s2.id)
+
+
 def test_sessions_api(tmp_path: Path):
     """不变量 18：会话接口只对它的人开放；换助理只能换成自己的 Agent。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)

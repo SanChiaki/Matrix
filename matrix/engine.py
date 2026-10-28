@@ -2271,6 +2271,8 @@ class Network:
         return a
 
     def create_session(self, project_id: str, title: str = "", actor: str | None = None) -> Conversation:
+        """开一个项目会话。这个人在项目里已有一个还没发过消息的会话（同一个助理、没归档）时沿用它，
+        不再新建：没发消息的会话不进侧栏，反复点“新会话”不该攒下一串空会话。"""
         with self._lock:
             g = self.visible_project(project_id, actor)
             user = actor if actor is not None else g.owner_id
@@ -2278,9 +2280,15 @@ class Network:
             a = self._bring_assistant(g, user)  # 已有项目：第一次开会话时助理才加入
             if a is None:
                 raise NetworkError("你还没有助理：先创建一个 Agent，或指定一个作为助理")
-            conv = Conversation(id=new_id("conv"), kind="session", project_id=g.id, agent_id=a.id,
-                                title=title.strip()[:120] or "新会话", owner_id=user)
-            self.store.conversations[conv.id] = conv
+            empty = next((c for c in self.store.conversations.values() if c.kind == "session" and c.project_id == g.id
+                          and c.owner_id == user and c.agent_id == a.id and not c.archived and not c.messages), None)
+            if empty is not None:
+                conv = empty
+                conv.title = title.strip()[:120] or conv.title
+            else:
+                conv = Conversation(id=new_id("conv"), kind="session", project_id=g.id, agent_id=a.id,
+                                    title=title.strip()[:120] or "新会话", owner_id=user)
+                self.store.conversations[conv.id] = conv
             self.store.save()
         if joined:
             self.bus.emit("project.updated", project=g.to_dict())

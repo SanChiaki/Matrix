@@ -1693,9 +1693,11 @@ function renderConvList() {
   $("#project-chat-list").innerHTML = S.snap.projects.map((g) => {
     const c = live.find((x) => x.kind === "project" && x.project_id === g.id);
     const icon = `<span class="avatar sm group" aria-hidden="true" style="background:${gcolor(g.id)}">#</span>`;
-    // 自己在这个项目里的会话挂在项目下面（只有自己看得到）
-    const mine = live.filter((x) => x.kind === "session" && x.project_id === g.id).sort((a, b) => b.updated_at - a.updated_at);
-    return item(c ? c.id : `p-${g.id}`, opened(c), icon, g.name,
+    // 自己在这个项目里的会话挂在项目下面（只有自己看得到）；发第一条消息之前不列出，打开着时项目这一行保持选中
+    const sess = live.filter((x) => x.kind === "session" && x.project_id === g.id);
+    const mine = sess.filter((x) => x.message_count).sort((a, b) => b.updated_at - a.updated_at);
+    const blank = sess.some((x) => !x.message_count && opened(x));
+    return item(c ? c.id : `p-${g.id}`, opened(c) || blank, icon, g.name,
       plain(c?.last_message) || `${g.member_ids.length} 名成员`, c)
       + mine.map((x) => item(x.id, opened(x), '<span class="avatar sm session" aria-hidden="true">›</span>', x.title,
         plain(x.last_message) || "还没有消息", x, "nested")).join("");
