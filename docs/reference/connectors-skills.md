@@ -19,9 +19,11 @@
 - **维护方式**：技能按 Agent Skills 标准在本地写好（一个文件夹：`SKILL.md` 的 frontmatter 有 `name`、`description`，
   可带 `scripts/`、`references/`、`assets/` 等，二进制也行），打包成 zip 或选文件夹上传（`POST .../skills/upload`，
   zip 请求体，或 JSON `{files: [{path, data(base64)}]}`）。可以多一层顶层目录；名字取 frontmatter；同名整个替换；
-  `__MACOSX`、`.DS_Store` 忽略，点开头或越界的路径拒绝。页面上只展示名字与描述，不在线编辑。
-- 名字：小写字母、数字、`-`，不以 `-` 开头结尾，≤64；单个技能 ≤256 KB，一轮合计 ≤2 MB，最多 50 个（`models.SKILL*`）。
-- `SKILL.md` 的 frontmatter 只有 `name`、`description`（JSON 转义），正文是做法。附带文件不能叫 `SKILL.md`、不能有点开头的路径段。
+  `__MACOSX` 与点开头的文件、目录（`.DS_Store`、`.git/`、`.gitignore`）忽略，越界的路径拒绝。页面上只展示名字与描述，不在线编辑。
+  frontmatter 不引 YAML 库，认真实技能包常见的写法：单行（可带引号）、`>` / `|` 块、缩进续行，只取顶层的 `name` 与 `description`，
+  容忍 BOM 与 CRLF（`skills.parse`）；`description` 最长 2048 字符（标准建议 1024，官方技能里有超出一点的）。
+- 名字：小写字母、数字、`-`，不以 `-` 开头结尾，≤64；单个技能 ≤8 MB，一轮合计 ≤16 MB，最多 50 个（`models.SKILL*`）。
+- 网络自己写的 `SKILL.md`（提议、在线保存）frontmatter 只有 `name`、`description`（JSON 转义），正文是做法。附带文件不能叫 `SKILL.md`、不能有点开头的路径段。
 - **重名**：网络按 项目技能 > 连接器自带 > 我的技能 合并进工作目录的 `skills/`（只读副本，运行后丢弃），
   被盖住的发 `skills.shadowed` 事件，只给 Agent 所有者。私有目录里的 `agent-home/skills` 作为第二个技能根排在后面，
   网络不读它，重名时运行时先找到的是 `skills/` 里的。

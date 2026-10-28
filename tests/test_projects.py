@@ -193,13 +193,40 @@ def test_session_private_and_reads_by_owner_visibility(tmp_path: Path):
     assert net.store.conversations[s.id].archived
 
 
+def test_session_mentions_own_agents_only(tmp_path: Path):
+    """不变量 18：项目会话里能 @ 会话主人自己在项目里的 Agent，被 @ 的直接接手、没 @ 时交给助理；
+    别人的 Agent 不能 @（会话只属于它的人），会话的成员列表里也没有它们。"""
+    runs: list[tuple[str, str]] = []
+
+    def handler(call: ScriptCall) -> str:
+        runs.append((call.agent_id, call.prompt))
+        return "收到"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)            # alice 的助理
+    w = net.create_agent("Writer", "w", [], [], actor=alice)
+    b = net.create_agent("B", "b", [], [], actor=bob)             # bob 的助理，接受邀请时进项目
+    g, _ = joint(net, alice, "bob@x.io", bob, members=[w.id])
+    s = net.create_session(g.id, actor=alice)
+    assert net.conversation_detail(s.id, actor=alice)["members"] == [a.id, w.id]
+    net.send_message(s.id, "@Writer 写个提纲", actor=alice, background=False)
+    assert [r[0] for r in runs] == [w.id]
+    assert "项目会话" in runs[0][1] and "（@ 你）" in runs[0][1] and "默认由所有者的助理回应" in runs[0][1]
+    net.send_message(s.id, "提纲怎么样", actor=alice, background=False)
+    assert runs[-1][0] == a.id and "写个提纲" in runs[-1][1] and "收到" in runs[-1][1]
+    net.send_message(s.id, "@B 你看看", actor=alice, background=False)  # 别人的 Agent：不算 @，交给助理
+    assert runs[-1][0] == a.id and b.id not in s.seats
+    with pytest.raises(NetworkError, match="别人的 Agent 请在群聊里 @"):
+        net.send_message(s.id, "你看看", mentions=[b.id], actor=alice)
+
+
 def test_sessions_api(tmp_path: Path):
     """不变量 18：会话接口只对它的人开放；换助理只能换成自己的 Agent。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     a2 = net.create_agent("A2", "a2", [], [], actor=alice)
-    b = net.create_agent("B", "b", [], [], actor=bob)
+    b = net.create_agent("B", "b", [], [], actor=bob)             # bob 的助理，接受邀请时进项目
     g, _ = joint(net, alice, "bob@x.io", bob)
     ca, cb = client(net, "alice@x.io"), client(net, "bob@x.io")
     s = ca.post(f"/api/projects/{g.id}/sessions", json={"title": "细节"}).json()

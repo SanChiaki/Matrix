@@ -49,28 +49,60 @@ def render(name: str, description: str, body: str) -> str:
             f"description: {json.dumps(desc, ensure_ascii=False)}\n---\n\n{(body or '').strip()}\n")
 
 
+def _scalar(v: str, more: list[str]) -> str:
+    """frontmatter 里一个顶层键的值：v 是冒号后的部分，more 是它下面缩进的续行。
+    认 YAML 常见的写法：单行（可带引号）、折叠块 `>` 与字面块 `|`（可带 - / +）、缩进续行的多行值。"""
+    lines = [m.strip() for m in more]
+    if v[:1] in ("|", ">"):
+        while lines and not lines[-1]:
+            lines.pop()
+        if v[0] == "|":
+            return "\n".join(lines)
+        paras, cur = [], []
+        for ln in lines:
+            if ln:
+                cur.append(ln)
+            elif cur:
+                paras.append(" ".join(cur))
+                cur = []
+        return "\n".join(paras + ([" ".join(cur)] if cur else []))
+    v = " ".join([v, *(ln for ln in lines if ln)]).strip()
+    if v.startswith('"'):
+        try:
+            return str(json.loads(v))
+        except json.JSONDecodeError:
+            return v.strip('"')
+    if v.startswith("'") and v.endswith("'") and len(v) > 1:
+        return v[1:-1].replace("''", "'")
+    return v.split(" #")[0].rstrip()  # 普通值后面的注释
+
+
 def parse(text: str) -> tuple[str, str, str]:
-    """(name, description, body)。只认最简单的 frontmatter：`key: value` 一行一个。"""
+    """(name, description, body)。frontmatter 只取顶层的 name 与 description（嵌套在 metadata 等下面的不算），
+    不引 YAML 库，写法见 _scalar。容忍 Windows 的 BOM 与 CRLF。"""
+    text = text.lstrip("\ufeff").replace("\r\n", "\n")
     name = description = ""
     body = text
     if text.startswith("---"):
         head, sep, rest = text[3:].partition("\n---")
         if sep:
             body = rest.lstrip("-").lstrip("\n")
-            for line in head.splitlines():
+            lines = head.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                i += 1
+                if not line.strip() or line[0] in " \t#":
+                    continue
                 k, _, v = line.partition(":")
-                v = v.strip()
-                if v.startswith('"'):
-                    try:
-                        v = json.loads(v)
-                    except json.JSONDecodeError:
-                        v = v.strip('"')
-                elif v.startswith("'") and v.endswith("'"):
-                    v = v[1:-1].replace("''", "'")
+                more = []
+                while i < len(lines) and (not lines[i].strip() or lines[i][0] in " \t"):
+                    more.append(lines[i])
+                    i += 1
                 if k.strip() == "name":
-                    name = str(v)
+                    name = _scalar(v.strip(), more)
                 elif k.strip() == "description":
-                    description = str(v)
+                    description = _scalar(v.strip(), more)
     return name, description, body.strip()
 
 
@@ -126,7 +158,7 @@ def write(root: Path, name: str, description: str, body: str) -> Path:
     text = render(name, description, body)
     extra = size_of(d) - ((d / SKILL_FILE).stat().st_size if (d / SKILL_FILE).is_file() else 0) if d.is_dir() else 0
     if len(text.encode()) + extra > SKILL_LIMIT:
-        raise SkillError(f"技能 {name} 超过 {SKILL_LIMIT // 1000} KB")
+        raise SkillError(f"技能 {name} 超过 {SKILL_LIMIT // 1_000_000} MB")
     d.mkdir(parents=True, exist_ok=True)
     (d / SKILL_FILE).write_text(text, encoding="utf-8")
     return d
@@ -143,9 +175,16 @@ def add_file(root: Path, name: str, rel: str, data: bytes) -> None:
     dest = d / path
     old = dest.stat().st_size if dest.is_file() else 0
     if size_of(d) - old + len(data) > SKILL_LIMIT:
-        raise SkillError(f"技能 {name} 超过 {SKILL_LIMIT // 1000} KB")
+        raise SkillError(f"技能 {name} 超过 {SKILL_LIMIT // 1_000_000} MB")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
+
+
+def _junk(path: str) -> bool:
+    """技能包里不属于技能的东西：macOS 的 __MACOSX/、隐藏文件与目录（.DS_Store、.git/、.gitignore）。
+    `..` 不算，留给 safe_rel 拒绝。"""
+    return any(part == "__MACOSX" or (part.startswith(".") and part not in (".", ".."))
+               for part in path.split("/"))
 
 
 def unzip(data: bytes) -> list[tuple[str, bytes]]:
@@ -158,11 +197,11 @@ def unzip(data: bytes) -> list[tuple[str, bytes]]:
         raise SkillError("不是有效的 zip 文件") from e
     out, total = [], 0
     for m in z.infolist():
-        if m.is_dir():
+        if m.is_dir() or _junk(m.filename.replace("\\", "/")):
             continue
         total += m.file_size
         if total > SKILL_LIMIT or len(out) >= 500:
-            raise SkillError(f"技能包超过 {SKILL_LIMIT // 1000} KB")
+            raise SkillError(f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
         out.append((m.filename, z.read(m)))
     return out
 
@@ -173,8 +212,7 @@ def install(root: Path, entries: list[tuple[str, bytes]]) -> SkillInfo:
     包可以多一层顶层目录（zip 或上传文件夹常见）。同名的整个替换。名字取 frontmatter，不取目录名。
     """
     entries = [(p.replace("\\", "/").lstrip("/"), b) for p, b in entries]
-    entries = [(p, b) for p, b in entries
-               if not any(part in ("__MACOSX", ".DS_Store") for part in p.split("/"))]
+    entries = [(p, b) for p, b in entries if not _junk(p)]
     tops = [p.split("/") for p, _ in entries if p.split("/")[-1] == SKILL_FILE]
     if not tops:
         raise SkillError("技能包里没有 SKILL.md")
@@ -188,11 +226,11 @@ def install(root: Path, entries: list[tuple[str, bytes]]) -> SkillInfo:
         if parts[:cut] != prefix:
             raise SkillError("技能包里只能有一个技能")
         rel = safe_rel("/".join(parts[cut:]))
-        if rel is None or any(part.startswith(".") for part in rel.parts):
+        if rel is None:
             raise SkillError(f"非法的文件名：{p!r}")
         files[rel] = b
     if sum(len(b) for b in files.values()) > SKILL_LIMIT:
-        raise SkillError(f"技能包超过 {SKILL_LIMIT // 1000} KB")
+        raise SkillError(f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
     head = files.get(Path(SKILL_FILE))
     if head is None:
         raise SkillError("技能包里没有 SKILL.md")
@@ -204,8 +242,8 @@ def install(root: Path, entries: list[tuple[str, bytes]]) -> SkillInfo:
     name = check_name(name)
     if not description.strip():
         raise SkillError("SKILL.md 的 frontmatter 要有 description：什么时候用它")
-    if len(description) > 1024:
-        raise SkillError("description 最长 1024 个字符")
+    if len(description) > 2048:  # 标准建议 ≤1024，官方技能里也有超出一点的（claude-api），只挡明显不对的
+        raise SkillError("description 最长 2048 个字符")
     root.mkdir(parents=True, exist_ok=True)
     tmp = root / f".upload-{name}"
     shutil.rmtree(tmp, ignore_errors=True)

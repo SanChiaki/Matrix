@@ -9,7 +9,7 @@ import pytest
 
 from matrix import skills as skillfs
 from matrix.engine import Network, NetworkError
-from matrix.models import SKILLS
+from matrix.models import SKILL_LIMIT, SKILLS
 from matrix.runtime import ScriptCall, ScriptedRuntime, RuntimeCapabilities, build_patch_yaml
 from tests.test_users import client, joint, users
 
@@ -70,7 +70,22 @@ def test_skill_files_roundtrip_and_validation(tmp_path: Path):
         with pytest.raises(skillfs.SkillError):
             skillfs.add_file(root, "weekly-report", bad, b"x")
     with pytest.raises(skillfs.SkillError):
-        skillfs.write(root, "huge", "大", "x" * 300_000)
+        skillfs.write(root, "huge", "大", "x" * (SKILL_LIMIT + 1))
+
+
+def test_frontmatter_in_the_shapes_real_skills_use():
+    """真实技能包（如官方 anthropics/skills）的 frontmatter：折叠 / 字面块、缩进续行、嵌套的 metadata、
+    Windows 的 BOM 与 CRLF。只取顶层的 name 与 description。"""
+    folded = "---\nname: guide\ndescription: >\n  Stop and check\n  this skill.\n\n  Second para.\nlicense: MIT\n---\n\nbody"
+    assert skillfs.parse(folded) == ("guide", "Stop and check this skill.\nSecond para.", "body")
+    literal = "---\nname: x\ndescription: |-\n  line one\n  line two\n---\nbody"
+    assert skillfs.parse(literal)[1] == "line one\nline two"
+    plain = "---\nname: x\ndescription: Use when\n  the user asks.\nmetadata:\n  name: nested\n  description: no\n---\nb"
+    assert skillfs.parse(plain)[:2] == ("x", "Use when the user asks.")
+    quoted = '---\nname: "x"\ndescription: \'it\'\'s fine\'  \n---\nb'
+    assert skillfs.parse(quoted)[:2] == ("x", "it's fine")
+    crlf = "\ufeff---\r\nname: win\r\ndescription: 在 Windows 上写的 # 注释\r\n---\r\nbody\r\n"
+    assert skillfs.parse(crlf) == ("win", "在 Windows 上写的", "body")
 
 
 def test_resolve_puts_earlier_layers_first(tmp_path: Path):
@@ -297,6 +312,12 @@ def test_skill_package_upload(tmp_path: Path):
     folder = {"files": [{"path": "x/SKILL.md", "data": base64.b64encode(SKILL_MD.replace(b"pdf-tools", b"other")).decode()}]}
     assert c.post("/api/me/skills/upload", json=folder).json()["name"] == "other"
     assert {s["name"] for s in c.get("/api/me/skills").json()} == {"pdf-tools", "other"}
+    # 隐藏文件（.git/、.gitignore）不属于技能，跳过；1 MB 上下的技能（官方 docx / pptx / xlsx）装得下
+    big = _zip({"office/SKILL.md": SKILL_MD.replace(b"pdf-tools", b"office"), "office/.gitignore": b"*.pyc",
+                "office/.git/HEAD": b"ref", "office/schemas/ooxml.xsd": b"x" * 1_200_000})
+    r = c.post("/api/me/skills/upload", content=big, headers={"Content-Type": "application/zip"})
+    assert r.status_code == 200, r.text
+    assert r.json()["files"] == ["schemas/ooxml.xsd"]
     bad = [_zip({"a.txt": b"x"}), _zip({"SKILL.md": b"---\nname: Bad\ndescription: x\n---\n"}),
            _zip({"SKILL.md": b"---\nname: ok\n---\n"}), _zip({"SKILL.md": SKILL_MD, "../evil": b"x"}),
            _zip({"a/SKILL.md": SKILL_MD, "b/x": b"x"}), b"not a zip"]

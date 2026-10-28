@@ -13,7 +13,8 @@
   `POST /api/projects/<id>/sessions` 新建（已有项目里助理还不是成员时这时才加入），`GET` 列出自己的，
   `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）。只有它的人看得到（不变量 18）；
   人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；助理不在项目里了，会话不能再发消息。
-- 会话席位和群聊席位一样：消息直接交给助理（不用 @），能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
+- 会话席位和群聊席位一样：没 @ 的消息交给助理，@ 到的是会话主人自己在项目里的其他 Agent（`_members` / `resolve_mentions`，
+  别人的 Agent 不能 @），能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
   此外每轮带一份**项目现状**（`_session_state` / `protocol.format_session_state`：成员、没结束的用户任务、
   最近 `SESSION_MESSAGES` 条群聊公开消息，字节封顶），按 sha1 记在 `Seat.state_seen`，只在变化时重新推送；
   只读工具 `read_chat`、`read_request`（`SESSION_TOOLS`）只在会话里有。读到的一切按会话主人的可见性过滤。
