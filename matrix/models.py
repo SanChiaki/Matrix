@@ -649,10 +649,13 @@ class Approval:
     note: str = ""
     # kind=connector：共享项目里第一次要用所有者的连接器（授权是 ask），先问所有者（不变量 19）。
     # tool 是连接器工具名，scope 是同意的范围：once（这一轮）| project（这个项目里以后都可以，写进 connector_grants）
-    kind: str = "sandbox"                # sandbox | connector
+    # kind=connector_write：部署方目录里的连接器、工具按 MCP 标注会对外产生影响（写、且 destructive 或 open world），
+    # 每次调用都先给连接的授权人确认（不变量 19）。args 是网络实际要发出的参数，确认卡上照原样显示
+    kind: str = "sandbox"                # sandbox | connector | connector_write
     project_id: str | None = None
     connection_id: str | None = None
     scope: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
 

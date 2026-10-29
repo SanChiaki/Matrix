@@ -2469,7 +2469,23 @@ function renderThread() {
 // 助理起草、要以你的名义发进项目群聊的消息：你确认（可以改）才发出
 // 申请卡片：工作目录以外的操作（dsh 沙箱升权，只放行这一次调用），或共享项目里第一次用我的连接器（不变量 19：
 // 只这一轮 / 这个项目里都可以 / 不行；选“都可以”和在连接器面板里选的一样，之后可以在那里改回来）
+// 连接器的写操作（按 MCP 标注会对外产生影响）：每次一张卡，照原样列出网络要发出的参数，只放行这一次（不变量 19）
+function writeApprovalBody(ap, canDecide, board) {
+  const id = esc(ap.id);
+  const head = `<div class="who">${board ? avatar(aname(ap.agent_id), "sm") : ""}<b>${esc(aname(ap.agent_id))}</b>
+    要用你的连接器执行写操作 ${pill("pending")}${board ? `<span class="muted">${time(ap.created_at)}</span>` : ""}</div>
+    <p class="reason">${esc(ap.reason)}</p>
+    <div class="write-args"><span class="muted">工具</span> <code>${esc(ap.tool)}</code>
+      <pre class="code">${esc(JSON.stringify(ap.args || {}, null, 2))}</pre></div>`;
+  if (!canDecide) return `${head}<p class="hint">等这个 Agent 的所有者确认。</p>`;
+  const look = board ? `<a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a>` : "";
+  return `${head}<div class="actions"><button type="button" data-ap="${id}" data-allow="1">发出这一次</button>
+      <button type="button" class="ghost" data-ap="${id}" data-allow="0">不发</button>${look}</div>
+    <p class="hint">参数是网络实际要发出的内容，不是 Agent 的转述；同意只放行这一次调用。</p>`;
+}
+
 function approvalBody(ap, canDecide, board = false) {
+  if (ap.kind === "connector_write") return writeApprovalBody(ap, canDecide, board);
   const conn = ap.kind === "connector", id = esc(ap.id);
   const head = `<div class="who">${board ? avatar(aname(ap.agent_id), "sm") : ""}<b>${esc(aname(ap.agent_id))}</b>
     ${conn ? "想用你的连接器" : "申请在工作目录以外操作"} ${pill("pending")}${board ? `<span class="muted">${time(ap.created_at)}</span>` : ""}</div>
