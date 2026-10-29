@@ -83,10 +83,11 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
+| `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、技能、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -105,6 +106,7 @@ uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方�
 uv run matrix --admins you@example.com                             # 管理后台 /admin 给谁看（默认最早注册的人）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
 uv run python examples/delivery-dashboard/setup_demo.py              # 搭交付看板演示数据（.matrix-dashboard-demo，见该目录 README）
+uv run python examples/dashboard-system/setup_demo.py                # 搭“接入已有看板系统”演示数据（.matrix-board-demo，见该目录 README）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
@@ -137,7 +139,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 16. **Agent 不跨信任域**：跨用户协作只能通过项目（邀请了别人就是共享项目）。
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
-19. **连接器凭证只属于授权的人**：网络代调用，共享项目里用到时先问授权人。
+19. **连接器凭证只属于授权的人**：网络代调用，共享项目里用到时先问授权人；按 MCP 标注会对外产生影响的写操作每次先给授权人确认。
 20. **插件代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
 21. **助理对话只替主人读与起草**：读到共享项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
 22. **信息只流向当时在场的人**：私有目录按来源场合挂载，用到别处资料的输出先给所有者确认，判断不用模型。

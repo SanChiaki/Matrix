@@ -167,6 +167,79 @@ def _dashboard(call: ScriptCall) -> str | None:
     return None
 
 
+# ================= 接入已有的看板系统（examples/dashboard-system） =================
+# 看板系统经 MCP 包装层登记成连接器 boards：Agent 建草稿、把链接加进资料、有人说发布才发布（网络先给所有者确认）。
+BOARD = "boards__"
+
+
+def _board_system(call: ScriptCall) -> str | None:
+    text = _asked(call.prompt)
+    if not text or "看板" not in text or MCP_PREFIX + "add_link" not in call.tool_names:
+        return None
+    tools = call.connector_tools()
+    if BOARD + "create_dashboard" not in tools:
+        return None
+    region = next((r for r in REGION_SLUG if r in text), None)
+
+    def summary() -> dict | str:
+        if "delivery-data__delivery_summary" not in tools:
+            return "我还用不了交付数据：请我的所有者授权「交付数据」并勾给我。"
+        raw = call.connector("delivery-data__delivery_summary", **({"region": region} if region else {}))
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return f"交付数据没查成：{raw}"
+
+    def spec(data: dict) -> str:
+        sp = dashboard_spec(data, "")
+        return json.dumps({k: sp[k] for k in ("scope", "as_of", "kpis", "charts", "tables", "notes")}, ensure_ascii=False)
+
+    def boards() -> list[dict]:
+        try:
+            return json.loads(call.connector(BOARD + "list_dashboards"))
+        except ValueError:
+            return []
+
+    def pick() -> dict | None:
+        items = boards()
+        return next((b for b in reversed(items) if b["title"] in text), None) or (items[-1] if items else None)
+
+    if "发布" in text:
+        b = pick()
+        if b is None:
+            return "看板系统里还没有我建的看板。"
+        raw = call.connector(BOARD + "publish_dashboard", id=b["id"])
+        try:
+            done = json.loads(raw)
+        except ValueError:
+            return f"没有发布「{b['title']}」：{raw}"
+        call.tool("add_link", name=done["title"], url=done["url"], note=f"已发布 v{done['version']}（看板系统是公开的）")
+        return f"「{done['title']}」已发布 v{done['version']}：{done['url']}（公开，任何人都能打开）。项目资料里的链接已更新。"
+    if any(w in text for w in ("更新", "刷新", "改")):
+        b = pick()
+        if b is None:
+            return "看板系统里还没有我建的看板。"
+        data = summary()
+        if isinstance(data, str):
+            return data
+        d = json.loads(call.connector(BOARD + "update_dashboard", id=b["id"], spec=spec(data)))
+        return f"「{d['title']}」的草稿已更新（数据截至 {data.get('as_of')}），预览：{d['draft_url']}。已发布的版本没变，要发布就说一声。"
+    data = summary()
+    if isinstance(data, str):
+        return data
+    title = f"{region or '全部区域'}交付周报"
+    r = call.tool("open_request", title=f"在看板系统里做「{title}」", expected_outcome="看板草稿与链接")
+    req = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
+    d = json.loads(call.connector(BOARD + "create_dashboard", title=title, spec=spec(data)))
+    call.tool("add_link", name=d["title"], url=d["url"], note=f"草稿，预览：{d['draft_url']}")
+    reply = (f"「{title}」的草稿建好了（数据截至 {data.get('as_of')}：按期率 {data.get('on_time_rate', 0) * 100:.1f}%，"
+             f"延期 {data.get('delayed_projects')} 个），预览：{d['draft_url']}。链接已加进项目资料。"
+             "要发布就告诉我；看板系统是公开的，发布前会请我的所有者确认。")
+    if req:
+        call.tool("deliver_request", request_id=req, summary=reply)
+    return reply
+
+
 def _from_release(call: ScriptCall) -> str | None:
     """订阅了看板发布物的人问交付情况：只按挂上的快照回答，写明版本与快照时间。没有挂上就说明。"""
     text = _asked(call.prompt)
@@ -194,6 +267,8 @@ def scenario_handler(call: ScriptCall) -> str:
     if (reply := _from_release(call)) is not None:
         return reply
     if (reply := _dashboard(call)) is not None:
+        return reply
+    if (reply := _board_system(call)) is not None:
         return reply
     if MCP_PREFIX + "draft_message" in call.tool_names:
         return _home(call)
