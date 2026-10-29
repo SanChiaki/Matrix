@@ -764,6 +764,30 @@ class Network:
         self._archive_saved(g, f"主持人引用了资源「{ref.name}」")
         return ref
 
+    def add_link(self, project_id: str, name: str, url: str, note: str = "", agent_id: str | None = None,
+                 source: str | None = None) -> tuple[ResourceRef, bool]:
+        """Agent 把一个外部链接加进项目资料（档案变化，不变量 17）。只收 http(s)；同一个地址再加就是更新名称与说明。
+        域名对得上连接器目录的，连接器面板自动认出。返回（链接，是不是新加的）。"""
+        from urllib.parse import urlsplit
+        name, url, note = " ".join(str(name).split())[:120], str(url).strip(), str(note).strip()[:500]
+        parts = urlsplit(url)
+        if not name:
+            raise NetworkError("名称不能为空")
+        if parts.scheme not in ("http", "https") or not parts.hostname or len(url) > 500 or any(c.isspace() for c in url):
+            raise NetworkError("只能加 http 或 https 地址（不超过 500 字）")
+        with self._lock:
+            g = self._project(project_id)
+            ref = next((r for r in g.refs if r.location == url), None)
+            fresh = ref is None
+            if fresh:
+                ref = ResourceRef(id=new_id("ref"), name=name, location=url, note=note)
+                g.refs.append(ref)
+            else:
+                ref.name, ref.note = name, note or ref.note
+            self._archive_changed(g, "ref.add" if fresh else "ref.update", by_agent=agent_id, ref=ref.id, source=source)
+        self._archive_saved(g, f"{self._name(agent_id)} {'把链接加进了资料' if fresh else '更新了资料里的链接'}「{ref.name}」")
+        return ref, fresh
+
     def remove_ref(self, project_id: str, ref_id: str, actor: str | None = None) -> Project:
         with self._lock:
             g = self.hosted_project(project_id, actor)
@@ -4929,6 +4953,13 @@ class Network:
             return publish(name if name.endswith(".zip") else f"{name}.zip", workdir.pack(src)), False
         return publish(str(args.get("name", "")).strip() or src.name, src.read_bytes()), False
 
+    def _tool_add_link(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_project(ctx, delegate=False)
+        ref, fresh = self.add_link(g.id, str(args.get("name", "")), str(args.get("url", "")), str(args.get("note", "")),
+                                   agent_id=ctx.agent_id, source=ctx.id)
+        return (f"已{'加进' if fresh else '更新'}项目资料：「{ref.name}」{ref.location}。项目里所有人都能看到。"
+                + ("所有参与方都看得到。" if g.shared else "")), False
+
     def _tool_propose_brief(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_project(ctx, delegate=False)
         self.suggest_brief(g.id, str(args.get("text", "")), str(args.get("reason", "")), agent_id=ctx.agent_id)
@@ -5924,6 +5955,7 @@ TOOL_HANDLERS = {
     "record_decision": Network._tool_record_decision,
     "list_decisions": Network._tool_list_decisions,
     "publish_file": Network._tool_publish_file,
+    "add_link": Network._tool_add_link,
     "propose_brief": Network._tool_propose_brief,
     "propose_skill": Network._tool_propose_skill,
     "read_chat": Network._tool_read_chat,

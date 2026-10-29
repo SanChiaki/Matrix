@@ -161,6 +161,21 @@ TOOLS = [
         },
     },
     {
+        "name": "add_link",
+        "description": ("把一个链接（http/https）加进项目资料，比如你在外部系统里建好的看板、文档、工单。"
+                        "同一个地址再加就是更新名称与说明。项目里所有人都能看到、点开。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "给人看的名称，如“华东交付周报看板”"},
+                "url": {"type": "string", "description": "http 或 https 地址"},
+                "note": {"type": "string", "description": "可选：一句说明（是什么、给谁看、是不是草稿）"},
+            },
+            "required": ["name", "url"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_brief",
         "description": "建议修改项目纲要（目标、范围、成功标准、当前阶段）。写完整的新纲要；主持人采纳后才生效。",
         "inputSchema": {

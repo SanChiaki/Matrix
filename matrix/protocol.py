@@ -128,6 +128,8 @@ TOOL_GUIDE: dict[str, str] = {
     "list_decisions": "查看项目档案里的全部决定（include_inactive 包含已取代 / 撤销的）。",
     "publish_file": ("把当前工作目录里的一个文件（或一个目录，打成 zip）发布进项目档案，所有成员此后在 `./project/` 读到"
                      "（只发布别人要用、已经定稿的交付物）。"),
+    "add_link": ("把外部的一个链接（http/https，如你在别的系统里建好的看板、文档）加进项目资料，所有人都能点开"
+                 "（name：名称，url：地址，note：一句说明）。同一个地址再加就是更新。"),
     "propose_brief": "建议修改项目纲要（写完整的新纲要和理由），主持人决定。",
     "propose_skill": ("把一个值得反复用的做法提议为项目技能（name：小写英文与连字符，description：什么时候用，"
                       "body：怎么做，reason：为什么值得沉淀），主持人批准后项目里的成员才能用。"),
