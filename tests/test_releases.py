@@ -106,7 +106,7 @@ def test_withdraw_hides_from_readers_and_subscribers(tmp_path: Path):
 
     def handler(call: ScriptCall) -> str:
         d = call.cwd / RELEASES
-        seen.append(sorted(str(p.relative_to(d)) for p in d.rglob("*") if p.is_file()) if d.is_dir() else [])
+        seen.append(sorted(p.relative_to(d).as_posix() for p in d.rglob("*") if p.is_file()) if d.is_dir() else [])
         return "ok"
 
     net, _, host, reader, _, _, g = setup(tmp_path, handler)
