@@ -1,6 +1,7 @@
 # 连接器与技能
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。设计与取舍见 [docs/connectors-and-skills.md](../connectors-and-skills.md)。
+> 部署方怎么把已有系统接进来（包装层、工具标注、目录字段、嵌入要求、检查清单）见 [docs/connector-authoring.md](../connector-authoring.md)。
 > 代码：`engine.py`「连接器与技能」一节、`skills.py`、`connector_catalog.py`、`vault.py`、`mcp_client.py`、`mcp_connectors.py`。
 
 两个并列的用户概念：**连接器**是外部服务的接入，要授权，动的是授权人的状态，默认隔离；**技能**是一种做法

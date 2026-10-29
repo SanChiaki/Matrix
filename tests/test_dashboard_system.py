@@ -104,3 +104,9 @@ def test_rejected_publish_is_not_sent(tmp_path: Path, services: dict):
     t.join(10)
     assert published(services["api"])[0]["status"] == "草稿"
     assert "没有发布" in chat.messages[-1].text and g.refs[0].note.startswith("草稿")
+
+
+def test_wrapper_checks_ids_before_building_paths():
+    """包装层把 id 拼进 HTTP 路径：不是看板系统的 id 格式就不发请求（接入指南里的“参数先校验”）。"""
+    with pytest.raises(RuntimeError, match="id 不对"):
+        board_mcp.Api("http://127.0.0.1:9").call("get_dashboard", {"id": "../../admin"})

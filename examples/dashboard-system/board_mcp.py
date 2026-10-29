@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import secrets
 import urllib.error
 import urllib.request
@@ -60,6 +61,8 @@ class Api:
             raise RuntimeError(json.loads(e.read().decode("utf-8") or "{}").get("error") or f"HTTP {e.code}") from e
 
     def call(self, name: str, a: dict[str, Any]) -> Any:
+        if "id" in a and not re.fullmatch(r"[A-Za-z0-9_]{1,40}", str(a["id"])):  # id 拼进路径：只收看板系统的 id 格式
+            raise RuntimeError(f"看板 id 不对：{a['id']!r}")
         if name == "list_dashboards":
             return self._req("GET", "/api/dashboards")
         if name == "get_dashboard":
@@ -107,7 +110,7 @@ def serve(port: int, api: str) -> ThreadingHTTPServer:
                 p = msg.get("params") or {}
                 try:
                     text, err = json.dumps(backend.call(str(p.get("name")), p.get("arguments") or {}), ensure_ascii=False), False
-                except (RuntimeError, KeyError, OSError) as e:
+                except (RuntimeError, KeyError, OSError, ValueError) as e:
                     text, err = f"看板系统出错：{e}", True
                 return self._send(200, {"jsonrpc": "2.0", "id": mid,
                                         "result": {"content": [{"type": "text", "text": text}], "isError": err}})

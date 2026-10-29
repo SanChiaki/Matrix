@@ -1,6 +1,6 @@
 # 连接器与技能（设计）
 
-状态：**已实现**（REQUIREMENTS #47），当前实现见 [reference/connectors-skills.md](reference/connectors-skills.md)；实现时改动的决定见第 10 节。相关设计：[device-runtimes.md](device-runtimes.md)（运行时、端侧驱动）、
+状态：**已实现**（REQUIREMENTS #47、#56），当前实现见 [reference/connectors-skills.md](reference/connectors-skills.md)；实现时改动的决定见第 10 节；部署方接入已有系统的做法见 [connector-authoring.md](connector-authoring.md)。相关设计：[device-runtimes.md](device-runtimes.md)（运行时、端侧驱动）、
 [acp-runtime.md](acp-runtime.md)（ACP 能声明 MCP，端侧接入方式可能随之变化）、[projects.md](projects.md)（项目与档案）；
 约束：[AGENTS.md](../AGENTS.md)、[invariants.md](reference/invariants.md)、[security.md](reference/security.md)。
 
@@ -293,3 +293,19 @@ Agent 现在能做的事只有两个来源：运行时自带的工具（搜索�
 - **项目里也能写自定义连接器**：原来面板里手动添加只能选目录里的或填一个服务名，看不出怎么配。现在主持人可以写 MCP 配置，
   但项目层仍不持有凭证（2.3）：请求头的值只能写成 `${TOKEN}` 这样的模板，每个成员按这份配置用自己的凭证连接，
   得到的是自己的连接器。
+- **已有系统只按业界标准接**（#56，2026-10-29）：已有系统是 HTTP API、地址写死在技能里的，不给连接器加“HTTP 接入”，
+  由部署方在它旁边放一层远程 MCP 包装层、登记进目录。地址只在目录一处，Agent 只要 `connector.use`，凭证照旧不出网络；
+  同一个 MCP 服务别的 AI 工具也能用。包装层是白名单，只包愿意让 Agent 做的操作。做法见 [connector-authoring.md](connector-authoring.md)。
+- **写操作按 MCP 工具标注逐次确认**（不变量 19 的扩展）：原先连接器一旦授权、勾给 Agent，所有工具都直接调用，
+  发布、发送这类对外的动作也不例外。现在网络保留工具标注，部署方目录里不是只读、并且**明确**标了 `destructiveHint` 或
+  `openWorldHint` 的工具，每次调用前给连接的授权人一张确认卡，参数照原样列出，同意只放行这一次。
+  取舍：规范里没标注的默认值是“会改、会影响外部”，照规范就是所有没标注的现有服务每次都要确认，用不下去，所以只认明确的标注，
+  把“该确认的标上”交给部署方；规范要求不信来源不明的标注，所以自定义连接器不按标注放宽或收紧。
+  和“用到时先问”（“连接器面板与‘用到时先问’”一节）是两回事：那个是共享项目里“能不能用我的账号”，一轮问一次；这个是“这一次发不发”，每次都问。
+- **Agent 把链接加进资料**（`add_link`）：Agent 在外部系统里建好东西，要把链接留在项目里，原来只能请人手动加。
+  同一个地址再加就是更新说明（草稿 → 已发布），不重复。链接按 `domains` 认出是哪个系统，进连接器面板。
+- **外部页面标签**：项目里的东西做在外部系统里时，项目页上要能直接看到，不只是一条链接。不做成插件页面（插件页面不能联网、
+  不能嵌外部页面，不变量 20），而是部署方在目录里给连接器写 `embed`，主持人把资料里这个域名的链接设成标签，页面用 iframe 嵌入。
+  分寸：按地址认、只认部署方允许的域名；嵌进来的页面用看的人自己在那个系统的登录，Matrix 不给它桥、不读里面的内容，
+  不让它跳走项目页。能不能嵌由对方系统的响应头和登录方式决定（`frame-ancestors`、第三方 Cookie），做不到就新窗口打开。
+  页面混在 Matrix 界面里被当成 Matrix 内容的风险接受，只对可信的内部系统开（security.md）。
