@@ -1744,7 +1744,7 @@ async function renderReleasePage(force = false) {
         只在这一轮能看到 Agent 输出的人都看得到这份发布物时生效；运行用你自己的 Agent 和授权，发布方看不到你问了什么。</p>
       <div class="rel-agents">${myAgents.map((a) => `<label class="check"><input type="checkbox" data-sub="${esc(a.id)}" ${r.mine.includes(a.id) ? "checked" : ""}>${esc(a.name)}${a.id === S.me?.assistant_id ? ' <span class="muted">（助理）</span>' : ""}</label>`).join("") || '<span class="muted">你还没有 Agent。</span>'}</div>
     </section>` : ""}
-    ${r.view && active ? `<section class="rel-view" aria-label="看板"><div class="sandbox"><div class="sandbox-bar"><span class="lock">插件页面</span>
+    ${r.view && active ? `<section class="rel-view" aria-label="插件页面"><div class="sandbox"><div class="sandbox-bar"><span class="lock">插件页面</span>
       <span>${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)} · 发布时的代码在沙箱里运行，只读这个版本的快照</span></div><p class="muted plugin-loading">正在加载…</p></div></section>` : ""}
     ${r.kind === "method" ? `<h3>技能 · ${r.skills.length}</h3><ul class="rel-skills">${r.skills.map((k) => `<li><span class="file-ico ref">${ICON.skill}</span><div><code>${esc(k.name)}</code><div class="muted">${esc(k.description)}</div></div></li>`).join("") || '<li class="muted">—</li>'}</ul>`
       : `<h3>文件 · ${r.files.length}</h3><div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>大小</th><th></th></tr></thead><tbody>
@@ -1778,7 +1778,7 @@ async function renderReleasePage(force = false) {
     try { src = (await api(`/api/releases/${encodeURIComponent(r.id)}/frame`, { method: "POST" })).src; }
     catch (e) { $(".plugin-loading", box).textContent = e.message; return; }
     if (S.releaseSel !== r.id || !box.isConnected) return;
-    const frame = Object.assign(document.createElement("iframe"), { title: `「${r.title}」的看板`, src, className: "plugin-frame" });
+    const frame = Object.assign(document.createElement("iframe"), { title: `「${r.title}」的插件页面`, src, className: "plugin-frame" });
     frame.setAttribute("sandbox", "allow-scripts allow-forms");  // 同插件页面：不透明来源，读不到父页面与登录 cookie
     frame.setAttribute("referrerpolicy", "no-referrer");
     $(".plugin-loading", box).replaceWith(frame);
@@ -1814,7 +1814,7 @@ function renderReleasesTab(box, d, st) {
     .flatMap((p) => (p.release_views || []).map((k) => ({ plugin: p.name, tab: k, label: `${p.title} · ${(p.tabs || []).find((t) => t.key === k)?.label || k}` })));
   const nf = st.relForm || { kind: "fact" };
   box.innerHTML = `<p class="muted tab-intro">发布物是这个项目对外拿出的东西：按版本固定的快照。<b>技能包</b>是一组技能，可以给点名的人或所有人；
-      <b>交付件</b>是一组档案文件（可带一个插件看板），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
+      <b>交付件</b>是一组档案文件（可带一个插件页面，用来展示这些文件），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((r) => `<li class="plugin-card${r.status === "active" ? "" : " off"}">
       <div class="plugin-head">${relKindPill(r)}<div><b>${esc(r.title)}</b> <span class="muted">v${r.version} · <code>${esc(r.name)}</code></span>${r.status === "active" ? "" : ' <span class="pill bad">已撤回</span>'}
@@ -1825,7 +1825,7 @@ function renderReleasesTab(box, d, st) {
         ${host && r.status === "active" ? `<button type="button" class="ghost sm" data-rel-pub="${esc(r.id)}" title="按档案现在的样子切一个新版本">发布新版本</button>
           <button type="button" class="ghost sm" data-rel-edit="${esc(r.id)}">读者</button>
           <button type="button" class="icon-btn bad" data-rel-del="${esc(r.id)}" title="撤回" aria-label="撤回 ${esc(r.title)}">${ICON.trash}</button>` : ""}</div>
-      <dl class="plugin-facts"><dt>内容</dt><dd>${(r.kind === "method" ? r.skill_names : r.file_names || []).map((x) => `<code>${esc(x)}</code>`).join(" ")}${r.view ? ` · 看板：${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)}` : ""}</dd>
+      <dl class="plugin-facts"><dt>内容</dt><dd>${(r.kind === "method" ? r.skill_names : r.file_names || []).map((x) => `<code>${esc(x)}</code>`).join(" ")}${r.view ? ` · 插件页面：${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)}` : ""}</dd>
         ${(r.feedback || []).length ? `<dt>反馈</dt><dd><ul class="rel-feedback">${r.feedback.slice(-3).map((x) => `<li><b>${esc(x.email)}</b>：${esc(x.text)}</li>`).join("")}</ul></dd>` : ""}</dl>
       ${host && st.relEdit === r.id ? `<form class="rel-form" data-rel-readers="${esc(r.id)}">
         <label>读者（邮箱，逗号或换行分隔；项目参与者本来就看得到）<textarea name="readers" rows="2">${esc((r.readers || []).map((x) => x.email).join("\n"))}</textarea></label>
@@ -1840,7 +1840,7 @@ function renderReleasesTab(box, d, st) {
       ${nf.kind === "method" ? `<fieldset><legend>技能（发布时去掉具体项目的数据，只留做法）</legend>${(d.release_skills || []).map((k) => `<label class="check"><input type="checkbox" name="skills" value="${esc(k)}">${esc(k)}</label>`).join("") || '<span class="muted">项目里还没有技能。</span>'}</fieldset>
         <label class="check"><input type="checkbox" name="public">所有登录用户都看得到</label>`
       : `<fieldset><legend>档案文件</legend>${d.files.map((f) => `<label class="check"><input type="checkbox" name="files" value="${esc(f.name)}">${esc(f.name)}</label>`).join("") || '<span class="muted">档案里还没有文件。</span>'}</fieldset>
-        ${views.length ? `<label>看板（可选）<select name="view"><option value="">不带</option>${views.map((v) => `<option value="${esc(v.plugin)}:${esc(v.tab)}">${esc(v.label)}</option>`).join("")}</select></label>` : ""}
+        ${views.length ? `<label>插件页面（可选，读者打开时用它展示这些文件）<select name="view"><option value="">不带</option>${views.map((v) => `<option value="${esc(v.plugin)}:${esc(v.tab)}">${esc(v.label)}</option>`).join("")}</select></label>` : ""}
         <label class="check"><input type="checkbox" name="follow" checked>跟随档案：这些文件更新时自动发布新版本</label>`}
       <label>读者（邮箱，逗号或换行分隔）<textarea name="readers" rows="2" placeholder="lead@example.com"></textarea></label>
       <div class="actions"><button type="submit">发布</button></div></form>` : ""}`;

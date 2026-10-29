@@ -2741,7 +2741,7 @@ class Network:
             raise NetworkError(f"一份发布物最多带 {RELEASE_ITEMS} 项")
         if kind == "method":
             if files or view:
-                raise NetworkError("技能包只带技能；文件与看板请发布成交付件")
+                raise NetworkError("技能包只带技能；文件与插件页面请发布成交付件")
             if not skills:
                 raise NetworkError("选至少一个技能")
             have = self._release_skill_sources(g)
