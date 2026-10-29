@@ -864,6 +864,8 @@ class Network:
             d["connector_panel"] = self.connector_panel(g, actor)
             d["plugin_list"] = self.project_plugins(g)
             d["release_list"] = self.project_releases(g, actor)
+            d["embed_tabs"] = self.embed_tabs(g)
+            d["embeddable"] = {r.id: s.name for r in g.refs if (s := self._embed_spec(r)) is not None}
             d["release_skills"] = sorted(self._release_skill_sources(g)) if actor in (None, g.owner_id) else []
             d["host"] = self._email(g.owner_id)
             d["participant_emails"] = {u: self._email(u) for u in g.people}
@@ -1779,6 +1781,41 @@ class Network:
         self._archive_saved(g, f"主持人指定资料「{ref.name}」用「{self._connector_label(connector_id)}」打开"
                                if connector_id else f"资料「{ref.name}」改回按地址认服务")
         return ref
+
+    # ---- 外部页面标签：把资料里一条链接嵌进项目页。只限部署方在连接器目录里允许嵌入（embed）的域名，按地址认、
+    # 不按主持人指定的连接器认（指定不能绕过白名单）。嵌进来的页面用看的人自己在那个系统的登录，Matrix 不给它任何东西 ----
+    EMBED_TABS = 5
+
+    def _embed_spec(self, r: ResourceRef) -> ConnectorSpec | None:
+        if not r.location.lower().startswith(("https://", "http://")):
+            return None
+        return next((x for x in self.connectors.specs() if x.embed and x.matches(r.location)), None)
+
+    def set_ref_tab(self, project_id: str, ref_id: str, on: bool, actor: str | None = None) -> ResourceRef:
+        """主持人把资料里的一条链接设成 / 取消项目页标签。档案变化，群聊里公开一条。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            ref = next((r for r in g.refs if r.id == ref_id), None)
+            self._check(ref is not None, f"ref {ref_id}")
+            spec = self._embed_spec(ref)
+            if on and spec is None:
+                raise NetworkError("这个地址不在部署方允许嵌入的域名里，只能点开链接看")
+            if on and not ref.tab and sum(1 for r in g.refs if r.tab) >= self.EMBED_TABS:
+                raise NetworkError(f"一个项目最多 {self.EMBED_TABS} 个外部页面标签")
+            ref.tab = bool(on)
+            self._archive_changed(g, "ref.tab", by_user=actor, ref=ref.id, on=ref.tab)
+        self._archive_saved(g, f"主持人把「{ref.name}」设成了项目页上的标签（{spec.name}）" if on
+                               else f"主持人取消了项目页上的标签「{ref.name}」")
+        return ref
+
+    def embed_tabs(self, g: Project) -> list[dict[str, Any]]:
+        """调用方持有锁。项目页上的外部页面标签：部署方后来撤了允许的，不再显示（设置保留）。"""
+        out = []
+        for r in g.refs:
+            spec = self._embed_spec(r) if r.tab else None
+            if spec is not None:
+                out.append({"ref_id": r.id, "label": r.name, "url": r.location, "service": spec.name})
+        return out
 
     def clear_connector_usage(self, project_id: str, connector_id: str, actor: str | None = None) -> Project:
         """主持人收起一条“用过”的记录（下次再调用会重新出现）。"""

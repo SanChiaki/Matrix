@@ -767,6 +767,12 @@ def create_app(network: Network) -> FastAPI:
         network.set_connector_grant(project_id, body.agent_id, body.connection_id, body.grant, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
+    @app.put("/api/projects/{project_id}/refs/{ref_id}/tab")
+    def ref_tab(project_id: str, ref_id: str, body: TriggerIn, user: Me) -> dict:
+        """主持人把资料里的一条链接设成 / 取消项目页上的外部页面标签（`{enabled}`）。"""
+        network.set_ref_tab(project_id, ref_id, body.enabled, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
     @app.put("/api/projects/{project_id}/refs/{ref_id}/connector")
     def ref_connector(project_id: str, ref_id: str, body: RefConnectorIn, user: Me) -> dict:
         network.set_ref_connector(project_id, ref_id, body.connector_id, actor=user.id)

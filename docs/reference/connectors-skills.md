@@ -90,6 +90,21 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 - 迁移：有连接器之前，电脑上的 Agent 一直能用本机工具里配的服务；`Store._load` 给没有 `connections` 字段的端侧 Agent 补上
   `connector.use`，只做一次。
 
+### 外部页面标签
+
+部署方在 `connectors.json` 里给连接器写 `"embed": true`（必须同时有 `domains`），就允许把这些域名下的页面嵌进项目页。
+主持人在项目页“资料”里对这样的链接点“设为标签”（`PUT /api/projects/<id>/refs/<ref>/tab`，`ResourceRef.tab`），
+项目页就多一个标签，里面是那个系统的页面（`project_detail.embed_tabs`；`embeddable` 列出资料里哪些链接能设）。
+
+- 按**地址**认：主持人指定链接用哪个连接器（`connector_id`）不能绕过域名白名单（`_embed_spec`）。部署方撤了 `embed`，
+  标签就不显示，设置保留。每个项目最多 5 个。设、取消都是档案变化（`ref.tab`），群聊里公开一条。
+- 嵌入用 iframe：`sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"`
+  （`allow-same-origin` 只让它用**它自己的**来源与登录，和 Matrix 不同源，读不到 Matrix），**不给** `allow-top-navigation`
+  （不能把项目页跳走），`referrerpolicy="no-referrer"`。Matrix 不给它桥、不读里面的内容；看的人用自己在那个系统的登录，
+  权限由那个系统管。
+- 前提是那个系统允许被 Matrix 的地址嵌入（`X-Frame-Options` / CSP `frame-ancestors`），否则标签里是空白，标签栏上有“新窗口打开”。
+  浏览器默认挡第三方 Cookie 时，要登录的系统在嵌入里可能拿不到登录态，也只能新窗口打开。
+
 ### 写操作逐次确认（不变量 19）
 
 部署方目录里的连接器按 MCP 规范的工具标注（`annotations`）声明工具的性质。网络取工具列表时保留标注：

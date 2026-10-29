@@ -8,6 +8,7 @@
   用户任务工具 `open_request` / `deliver_request` / `accept_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`MATRIX_TOOLS`），网络端再按执行上下文检查一次。
 - `publish_file` 只能发布当前工作目录里的文件（不含 `project/` 与 `agent-home/`）；`project/` 是只读副本，运行里的改动丢弃。
 - `add_link` 把一个 http(s) 链接加进资料（如 Agent 在外部系统里建好的看板）：同一个地址再加是更新名称与说明，`log.jsonl` 记 `ref.add` / `ref.update` 与哪个 Agent，群聊里公开一条；域名对得上连接器目录的，连接器面板认出。人删链接仍只能主持人在项目页上做。
+- 资料里地址落在部署方允许嵌入（连接器目录 `embed`）的域名下的链接，主持人可以“设为标签”嵌进项目页（`ref.tab`，见 [connectors-skills.md](connectors-skills.md)“外部页面标签”）。
 - 纲要主持人直接改，其他参与者与 Agent 用 `propose_brief` / “建议修改”提建议，主持人采纳或拒绝。纲要超过 14 天没确认，UI 提醒主持人复核。
 - 共享项目的档案对所有参与者可见：写进去就等于对所有参与方公开（工具描述与提示词里写明）。
 - 项目页 `#project-<id>`（可收藏、刷新、前进后退）：项目列表里点项目、群聊 / 项目会话顶栏的“项目页”、“成员与档案”弹出框里“文件”旁的链接都能进。

@@ -964,9 +964,11 @@ async function renderProjectPage(force = false) {
   const plugins = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken);  // 停用的插件不出标签页
   const ptab = st.tab.startsWith("plugin:") ? st.tab.split(":") : null;  // plugin:<插件>:<标签>
   if (ptab && !plugins.some((p) => p.name === ptab[1] && (p.tabs || []).some((t) => t.key === ptab[2]))) st.tab = "plugins";
+  const embeds = d.embed_tabs || [];  // 外部页面标签：资料里主持人设成标签、部署方允许嵌入的链接
+  if (st.tab.startsWith("embed:") && !embeds.some((x) => `embed:${x.ref_id}` === st.tab)) st.tab = "files";
   // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
-  const sig = JSON.stringify(st.tab.startsWith("plugin:")
-    ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions])]
+  const sig = JSON.stringify(st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
+    ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
     : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook, st.needKind, st.editNeed,
        st.relForm, st.relEdit]);
   if (page.dataset.sig === sig) return;
@@ -981,13 +983,16 @@ async function renderProjectPage(force = false) {
     <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${tab("releases", "发布", (d.release_list || []).filter((r) => r.status === "active").length)}${
       plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
         data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
-        title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}</div>
+        title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}${
+      embeds.map((x) => `<button type="button" role="tab" class="embed-tab" id="pt-embed-${esc(x.ref_id)}" data-tab="embed:${esc(x.ref_id)}"
+        aria-selected="${st.tab === `embed:${x.ref_id}`}" aria-controls="pp-panel" title="外部页面：${esc(x.service)}">${ICON.link}${esc(x.label)}</button>`).join("")}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
   $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
     st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => page.querySelector(`[data-tab="${CSS.escape(st.tab)}"]`)?.focus());
   }));
   if (st.tab.startsWith("plugin:")) { renderPluginFrame($("#pp-panel", page), d, st); return; }
+  if (st.tab.startsWith("embed:")) { S.pluginFrame = null; renderEmbedTab($("#pp-panel", page), embeds.find((x) => `embed:${x.ref_id}` === st.tab)); return; }
   S.pluginFrame = null;
   ({ brief: renderBriefTab, files: renderFilesTab, skills: renderSkillsTab, connectors: renderConnectorsTab, plugins: renderPluginsTab,
      releases: renderReleasesTab }[st.tab]
@@ -1163,7 +1168,8 @@ function renderLinks(box, d, st) {
     <div class="table-wrap"><table class="assets"><thead><tr><th>名称</th><th>位置</th><th>说明</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>
       ${d.refs.map((x) => `<tr><td class="name"><div class="cell"><span class="file-ico ref">${ICON.link}</span><span>${esc(x.name)}</span></div></td><td class="loc">${loc(x)}${via(x)}</td>
         <td class="ref-note">${esc(x.note) || '<span class="muted">—</span>'}</td>
-        <td class="row-act"><button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
+        <td class="row-act">${host && d.embeddable?.[x.id] ? `<button type="button" class="ghost sm" data-tabref="${esc(x.id)}" data-on="${x.tab ? 0 : 1}"
+          title="${x.tab ? "从项目页上拿掉这个标签" : `把这个${esc(d.embeddable[x.id])}页面嵌进项目页`}">${x.tab ? "取消标签" : "设为标签"}</button>` : ""}<button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
           ? `<button type="button" class="icon-btn bad" data-rmref="${esc(x.id)}" title="移除" aria-label="移除 ${esc(x.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("")
       || `<tr><td colspan="4" class="empty">还没有链接${host ? "，在下面添加" : "，由主持人添加"}。</td></tr>`}
     </tbody></table></div>
@@ -1182,6 +1188,11 @@ function renderLinks(box, d, st) {
     done(`/api/projects/${d.id}/refs`, { method: "POST", body: { name: $("#pr-name").value, location: $("#pr-loc").value, note: $("#pr-note").value } },
       `已添加 ${$("#pr-name").value}`);
   });
+  box.querySelectorAll("[data-tabref]").forEach((b) => b.addEventListener("click", () => {
+    const x = d.refs.find((r) => r.id === b.dataset.tabref), on = b.dataset.on === "1";
+    done(`/api/projects/${d.id}/refs/${b.dataset.tabref}/tab`, { method: "PUT", body: { enabled: on } },
+      on ? `「${x?.name}」已设为项目页标签` : `已取消标签「${x?.name}」`);
+  }));
   box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => {
     const x = d.refs.find((r) => r.id === b.dataset.rmref);
     if (confirm(`移除链接「${x?.name}」？`)) done(`/api/projects/${d.id}/refs/${b.dataset.rmref}`, { method: "DELETE" }, `已移除 ${x?.name}`);
@@ -1549,6 +1560,20 @@ function pickPluginPackage(base, folder) {
 }
 
 // 插件标签：框上写明这是谁装的、哪一版、申请了什么，框里是插件自己的代码
+// 外部页面标签：直接嵌入部署方允许的系统页面。用看的人自己在那个系统的登录；Matrix 不给它任何东西（没有桥），
+// 它也不能把项目页跳走（不给 allow-top-navigation）。那个系统不允许被嵌入时浏览器会显示空白，留了“新窗口打开”
+function renderEmbedTab(box, x) {
+  if (!x) return;
+  box.innerHTML = `<div class="sandbox embed"><div class="sandbox-bar"><span class="lock">外部页面</span>
+      <span>${esc(x.service)} · <code>${esc(new URL(x.url).host)}</code> · 用你自己在那个系统的登录，Matrix 不读里面的内容</span>
+      <span class="grow"></span><a class="button ghost sm" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">新窗口打开</a></div></div>`;
+  const frame = Object.assign(document.createElement("iframe"), { title: `${x.service}：${x.label}`, src: x.url, className: "plugin-frame" });
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.setAttribute("allow", "");
+  $(".sandbox", box).append(frame);
+}
+
 async function renderPluginFrame(box, d, st) {
   const [, name, key] = st.tab.split(":");
   const p = (d.plugin_list || []).find((x) => x.name === name), t = p?.tabs.find((x) => x.key === key);

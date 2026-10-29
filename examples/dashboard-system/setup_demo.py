@@ -6,7 +6,8 @@
 看效果时按打印出的命令把这三个服务和 Matrix 常驻起来。
 
 跑完的状态：张工的“看板 Agent”用他的交付数据授权查数，在看板系统里建了「华东交付周报」草稿、把链接加进项目资料；
-张工说“发布”，网络先弹确认卡（参数原样），他同意后才发布，资料里的链接更新为“已发布 v1”。
+张工说“发布”，网络先弹确认卡（参数原样），他同意后才发布，资料里的链接更新为“已发布 v1”；
+张工把这条链接设成项目页上的标签，看板系统的页面直接嵌在项目页里。
 """
 
 from __future__ import annotations
@@ -81,6 +82,8 @@ def main() -> None:
     net.decide_approval(pending[0].id, True, actor=zhang, note="演示：替张工点了“发出这一次”")
     t.join(10)
     print("· 张工确认后发布了，资料里的链接更新为“已发布 v1”", flush=True)
+    net.set_ref_tab(g.id, g.refs[0].id, True, actor=zhang)  # 部署方允许嵌入看板系统（connectors.json 的 embed）
+    print("· 张工把看板设成了项目页上的标签：在 Matrix 里直接看看板系统的页面", flush=True)
 
     net.store.save()
     for s in servers:

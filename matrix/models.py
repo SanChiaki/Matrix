@@ -215,6 +215,7 @@ class ResourceRef:
     location: str
     note: str = ""
     connector_id: str = ""               # 主持人指定用哪个连接器打开（认不出域名时）；空 = 按域名认
+    tab: bool = False                    # 主持人把它设成了项目页上的一个标签（外部页面，只限部署方允许嵌入的域名）
 
 
 @dataclass
