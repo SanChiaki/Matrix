@@ -70,7 +70,7 @@ Kylon App 的发布由人审核、可见性分档（research: kylon#apps）。
   参照 Kylon 的 standing publish approval（research: kylon#apps）。没有跟随的，主持人点"发布新版本"才更新。
 - **撤回**：读者与订阅者立即看不到、用不到；快照删除；记录保留（`withdrawn`）。
 - **共享项目**：第一版只要主持人确认，群聊里公开记录，参与者看得到发出去了什么、给了谁。
-  "内容涉及谁就要谁同意"留作待决问题（research: project-publishing#matrix-decision）。
+  2026-10-29 定：发布由主持人手动决定、群聊公开记录即可，暂不做“内容涉及谁就要谁同意”、也不核对读者在数据源里的权限（发布交付件就是主持人替读者做了一次授权，由主持人负责；research: project-publishing#matrix-decision）。
 
 ## 5. 读者与可见性
 
