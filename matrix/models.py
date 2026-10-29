@@ -68,7 +68,7 @@ SKILLS_TOTAL = 16_000_000  # 每轮下发到端侧的技能合计上限
 SKILLS_PER_AGENT = 50
 
 
-# 项目插件（docs/project-plugins.md）：插件包 = plugin.json + page/（沙箱里跑的页面代码）+ skills/（打法）。
+# 项目插件（docs/project-plugins.md）：插件包 = plugin.json + page/（沙箱里跑的页面代码）+ skills/（技能）。
 PLUGIN_LIMIT = 2_000_000   # 一个插件包的总大小上限（字节）
 PLUGIN_FILES = 300         # 一个插件包最多多少个文件
 PLUGINS_PER_PROJECT = 10
@@ -91,8 +91,8 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
 # 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
-RELEASES = "releases"      # 订阅的事实发布物在工作目录里的挂载名（只读副本，运行后丢弃）
-RELEASE_KINDS = {"method": "方法", "fact": "事实"}
+RELEASES = "releases"      # 订阅的交付件在工作目录里的挂载名（只读副本，运行后丢弃）
+RELEASE_KINDS = {"method": "技能包", "fact": "交付件"}
 RELEASES_PER_PROJECT = 20
 RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
 RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
@@ -163,7 +163,7 @@ class AgentNode:
     # 所有者勾给它的“我的连接器”（Connection id）与“我的技能”（技能名）。只能是同一所有者的
     connections: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
-    # 所有者给它勾的订阅：看得到的发布物（Release id）。方法进技能层，事实只读挂到 releases/（不变量 23）
+    # 所有者给它勾的订阅：看得到的发布物（Release id）。技能包进技能层，交付件只读挂到 releases/（不变量 23）
     subscriptions: list[str] = field(default_factory=list)
     created_by: str = "seed"             # seed | human | signup（注册时网络给的助理）| proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
@@ -663,7 +663,7 @@ class Approval:
 @dataclass
 class Release:
     """项目发出去的一份发布物（docs/project-publishing.md，不变量 23）：只有主持人发布，按版本固定成快照
-    （releases/<id>/v<N>/）。方法（method）是一组技能，可以给所有人；事实（fact）是一组档案文件（可带一个插件视图），
+    （releases/<id>/v<N>/）。技能包（method）是一组技能，可以给所有人；交付件（fact）是一组档案文件（可带一个插件视图），
     只给点名的读者。订阅只在订阅者自己的 Agent 上生效，发布方看不到谁订阅了。"""
 
     id: str
@@ -672,7 +672,7 @@ class Release:
     kind: str                            # method | fact
     title: str
     description: str = ""
-    skills: list[str] = field(default_factory=list)   # method：项目技能或插件打法的名字
+    skills: list[str] = field(default_factory=list)   # method：项目技能或插件自带的技能的名字
     files: list[str] = field(default_factory=list)    # fact：档案文件名
     view: dict[str, str] | None = None   # fact：{plugin, tab}，插件在清单 release_views 里声明过的标签
     readers: list[str] = field(default_factory=list)  # 点名的读者（用户 id）；项目参与者总是看得到

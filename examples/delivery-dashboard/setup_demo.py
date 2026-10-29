@@ -8,10 +8,10 @@
 三个人（密码都是 demo-pass-123）：
 - zhang@demo.local：华东一线交付，主持「华东交付」项目；他的“看板 Agent”用他授权的交付数据（只能看华东）做看板。
 - li@demo.local：华东区域负责人，不在项目里；读者。他的助理订阅了看板发布物，问它就按快照回答。
-- wang@demo.local：华南一线交付；订阅了公开的“做交付看板”方法，在自己的项目里照着做。
+- wang@demo.local：华南一线交付；订阅了公开的技能包“做交付看板的技能包”，在自己的项目里照着做。
 
 跑完的状态：项目里装了“交付看板”插件，看板 Agent 做好了「华东交付周报」，标为待发布后写了发布说明；
-张工把打法发布成公开的方法、把看板发布成给李总的事实（带看板视图、跟随档案）；李总的助理订阅并回答了一次；
+张工把技能发布成公开的技能包、把看板发布成给李总的交付件（带看板视图、跟随档案）；李总的助理订阅并回答了一次；
 李总写了一条反馈，回到项目群聊。
 """
 
@@ -92,15 +92,15 @@ def main() -> None:
     net.wait_idle(chat.id)
     step("张工验收、标为待发布；触发叫看板 Agent 核对并写了发布说明")
 
-    method = net.create_release(g.id, "delivery-dashboard-method", "method", "做交付看板的方法",
-                                "用交付数据做看板的打法：查数口径、看板文件格式、登记与刷新。不含任何项目数据。",
+    method = net.create_release(g.id, "delivery-dashboard-method", "method", "做交付看板的技能包",
+                                "用交付数据做看板的做法：查数口径、看板文件格式、登记与刷新。不含任何项目数据。",
                                 skills=["delivery-dashboard"], public=True, actor=zhang)
     fact = net.create_release(g.id, "huadong-weekly", "fact", "华东交付周报看板",
                               "华东区域在建项目的按期率、延期与风险项目，工作日早上自动刷新。",
                               files=[rec["fields"]["file"]], view={"plugin": "delivery-dashboard", "tab": "board"},
                               readers=["li@demo.local"], follow=True, actor=zhang)
     net.write_plugin_record(g.id, "delivery-dashboard", "dashboards", {"status": "已发布"}, rec["id"], actor=zhang)
-    step("张工发布了公开的方法和给李总的看板（事实，带看板视图，跟随档案）")
+    step("张工发布了公开的技能包和给李总的看板（交付件，带看板视图，跟随档案）")
 
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)
@@ -109,7 +109,7 @@ def main() -> None:
     step("李总的助理订阅了看板并回答了一次；李总写了一条反馈，回到项目群聊")
 
     net.set_subscription(method.id, net.assistant_of(wang).id, True, actor=wang)
-    step("王工的助理订阅了公开的方法")
+    step("王工的助理订阅了公开的技能包")
 
     net.store.save()
     server.shutdown()

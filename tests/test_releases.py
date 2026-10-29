@@ -1,4 +1,4 @@
-"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；方法可以公开，事实只给读者；
+"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；技能包可以公开，交付件只给读者；
 订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效；跟随档案；撤回；发布物里的插件视图只读快照；反馈回流。"""
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def assistant(net: Network, user: str):
 
 # ================= 发布：只经主持人 =================
 def test_only_host_publishes_and_contents_are_checked(tmp_path: Path):
-    """不变量 23：只有主持人能发布；方法只带技能、事实只带档案文件；名字、读者都要对得上。"""
+    """不变量 23：只有主持人能发布；技能包只带技能、交付件只带档案文件；名字、读者都要对得上。"""
     net, _, host, reader, other, _, g = setup(tmp_path)
     net.invite(g.id, "other@x.io", actor=host)
     net.respond_invitation(g.id, True, actor=other)
@@ -54,15 +54,15 @@ def test_only_host_publishes_and_contents_are_checked(tmp_path: Path):
         net.create_release(g.id, "Bad Name", "fact", "x", files=["weekly.json"], actor=host)
     r = net.create_release(g.id, "weekly", "fact", "交付周报", files=["weekly.json"], readers=["reader@x.io"],
                            public=True, actor=host)
-    assert (r.version, r.public, r.readers) == (1, False, [reader])  # 事实不能公开
+    assert (r.version, r.public, r.readers) == (1, False, [reader])  # 交付件不能公开
     chat = net.project_chat(g.id, actor=host)
-    assert "主持人发布了事实「交付周报」v1（读者：reader@x.io）" in chat.messages[-1].text
+    assert "主持人发布了交付件「交付周报」v1（读者：reader@x.io）" in chat.messages[-1].text
     with pytest.raises(NetworkError, match="已经有"):
         net.create_release(g.id, "weekly", "fact", "again", files=["weekly.json"], actor=host)
 
 
 def test_fact_only_for_readers_method_can_be_public(tmp_path: Path):
-    """不变量 23：事实只给点名的读者（加项目参与者），看不到的一律 404；公开的方法所有登录用户都看得到。"""
+    """不变量 23：交付件只给点名的读者（加项目参与者），看不到的一律 404；公开的技能包所有登录用户都看得到。"""
     net, _, host, reader, other, _, g = setup(tmp_path)
     fact = net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], readers=["reader@x.io"], actor=host)
     method = net.create_release(g.id, "query", "method", "查数口径", skills=["delivery-query"], public=True, actor=host)
@@ -128,8 +128,8 @@ def test_withdraw_hides_from_readers_and_subscribers(tmp_path: Path):
 
 # ================= 订阅：在订阅者自己的信任域里 =================
 def test_subscriptions_follow_reach(tmp_path: Path):
-    """不变量 23：订阅的事实只在这一轮能到达的人都是读者时挂上：私聊里生效；在有不是读者的人的共享项目里不挂，
-    提示词只说明没挂上；订阅的方法进技能层。"""
+    """不变量 23：订阅的交付件只在这一轮能到达的人都是读者时挂上：私聊里生效；在有不是读者的人的共享项目里不挂，
+    提示词只说明没挂上；订阅的技能包进技能层。"""
     rounds: list[dict] = []
 
     def handler(call: ScriptCall) -> str:
@@ -150,17 +150,17 @@ def test_subscriptions_follow_reach(tmp_path: Path):
 
     net.send_message(net.direct_chat(me.id, actor=reader).id, "看看", actor=reader, background=False)
     assert rounds[-1]["files"] == ["weekly.json"] and "delivery-query" in rounds[-1]["skills"]
-    assert "事实「周报」v1，快照于" in rounds[-1]["prompt"] and f"./{RELEASES}/weekly/" in rounds[-1]["prompt"]
+    assert "交付件「周报」v1，快照于" in rounds[-1]["prompt"] and f"./{RELEASES}/weekly/" in rounds[-1]["prompt"]
 
     j, chat = joint(net, other, "reader@x.io", reader, members=[])
     net.send_message(chat.id, f"@{me.name} 说说周报", actor=other, background=False)
-    assert rounds[-1]["files"] == []  # other 不是读者：事实不挂
-    assert "delivery-query" in rounds[-1]["skills"]  # 公开的方法照常
-    assert "事实「周报」v1：这一轮没有挂上（这一轮能看到你输出的人里，有不在它读者名单上的）" in rounds[-1]["prompt"]
+    assert rounds[-1]["files"] == []  # other 不是读者：交付件不挂
+    assert "delivery-query" in rounds[-1]["skills"]  # 公开的技能包照常
+    assert "交付件「周报」v1：这一轮没有挂上（这一轮能看到你输出的人里，有不在它读者名单上的）" in rounds[-1]["prompt"]
 
 
 def test_device_materials_include_reachable_facts(tmp_path: Path):
-    """不变量 23：端侧随材料下发的订阅事实同样按能到达的人判断。"""
+    """不变量 23：端侧随材料下发的订阅交付件同样按能到达的人判断。"""
     net, _, host, reader, _, _, g = setup(tmp_path)
     r = net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], readers=["reader@x.io"], actor=host)
     me = assistant(net, reader)
@@ -265,7 +265,7 @@ def test_release_api(tmp_path: Path):
 
 
 def test_method_snapshot_reaches_skill_layer(tmp_path: Path):
-    """订阅的方法排在项目技能、插件打法之后：快照里的技能正文是发布时那一版。"""
+    """订阅的技能包排在项目技能、插件自带的技能之后：快照里的技能正文是发布时那一版。"""
     got: list[str] = []
 
     def handler(call: ScriptCall) -> str:

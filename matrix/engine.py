@@ -1068,18 +1068,18 @@ class Network:
 
     # ---- 一轮里的技能 ----
     def _skill_layers(self, ctx: ExecContext, agent: AgentNode, conns: list[Connection]) -> list[skillfs.Layer]:
-        """项目技能 > 插件打法 > 订阅的方法 > 连接器自带的 > 我的技能。Agent 自己攒的不在这里：网络不读私有目录，
+        """项目技能 > 插件自带的技能 > 订阅的技能包 > 连接器自带的 > 我的技能。Agent 自己攒的不在这里：网络不读私有目录，
         它作为运行时的第二个技能根挂上，排在这些后面（重名时运行时取前者）。"""
         layers: list[skillfs.Layer] = []
         g = self.store.projects.get(ctx.project_id or "")
         if g is not None:
             layers.append(("项目技能", self.store.project_skills_dir(g.id), None))
-            for name, meta in g.plugins.items():  # 插件的打法：排在项目技能之后；停用的不带
+            for name, meta in g.plugins.items():  # 插件自带的技能：排在项目技能之后；停用的不带
                 if meta.get("disabled"):
                     continue
                 layers.append((f"插件「{meta.get('title', name)}」",
                                self.store.project_plugins_dir(g.id) / name / pluginfs.SKILLS_DIR, None))
-        with self._lock:  # 订阅的方法：只在这一轮能到达的人都看得到它时生效（不变量 23）
+        with self._lock:  # 订阅的技能包：只在这一轮能到达的人都看得到它时生效（不变量 23）
             subs = [r for r, why in self._subscriptions_for(ctx, agent) if not why and r.kind == "method"]
             layers += [(f"订阅「{r.title}」", self._release_vdir(r) / releasefs.SKILLS_DIR, None) for r in subs]
         self._sync_connector_skills()
@@ -1830,7 +1830,7 @@ class Network:
 
     # ================= 项目插件 =================
     # 插件给项目加一个业务场景（docs/project-plugins.md）：页面（只在浏览器沙箱里跑）、记录（项目档案的一部分）、
-    # 打法（排在项目技能之后）、触发（往群聊里发一条 @ 成员的消息，代表启用它的人）。网络不执行插件代码（不变量 20）。
+    # 技能（排在项目技能之后）、触发（往群聊里发一条 @ 成员的消息，代表启用它的人）。网络不执行插件代码（不变量 20）。
     def _plugin_meta(self, g: Project, name: str) -> dict[str, Any]:
         meta = g.plugins.get(name)
         self._check(meta is not None, f"plugin {name}")
@@ -1838,7 +1838,7 @@ class Network:
 
     def _manifest(self, g: Project, name: str, active: bool = True) -> pluginfs.Manifest:
         """装进项目的那一版的清单（按文件修改时间缓存）。active：停用的插件当作不可用——页面、桥、记录、
-        Agent 工具、打法、档案推送、触发都经这里；只有管理（列出、升级、启停、触发设置）传 False。"""
+        Agent 工具、技能、档案推送、触发都经这里；只有管理（列出、升级、启停、触发设置）传 False。"""
         meta = self._plugin_meta(g, name)
         if active and meta.get("disabled"):
             raise NetworkError(f"插件「{meta.get('title', name)}」已停用")
@@ -1955,7 +1955,7 @@ class Network:
         return g
 
     def set_plugin_enabled(self, project_id: str, name: str, enabled: bool, actor: str | None = None) -> dict[str, Any]:
-        """主持人启用 / 停用整个插件。停用后页面、桥、记录读写、Agent 的记录工具、打法、档案推送里的插件一节、
+        """主持人启用 / 停用整个插件。停用后页面、桥、记录读写、Agent 的记录工具、技能、档案推送里的插件一节、
         所有触发都不可用（经 _manifest）；包、记录、触发的设置原样保留，重新启用就恢复。"""
         with self._lock:
             g = self.hosted_project(project_id, actor)
@@ -1967,7 +1967,7 @@ class Network:
                 self._archive_changed(g, "plugin.enable" if enabled else "plugin.disable", by_user=actor, plugin=name)
         if changed:
             self._archive_saved(g, f"主持人{'重新启用' if enabled else '停用'}了插件「{m.title}」"
-                                   + ("" if enabled else "：页面、记录工具、打法和触发暂停，记录与设置保留"))
+                                   + ("" if enabled else "：页面、记录工具、技能和触发暂停，记录与设置保留"))
         with self._lock:
             return next(p for p in self.project_plugins(g) if p["name"] == name)
 
@@ -2682,11 +2682,11 @@ class Network:
         return m
 
     # ================= 发布与订阅（docs/project-publishing.md，不变量 23） =================
-    # 项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本快照。方法（技能）可以给所有人，事实（档案文件，
+    # 项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本快照。技能包（一组技能）可以给所有人，交付件（档案文件，
     # 可带一个插件视图）只给点名的读者。订阅是人给自己的 Agent 勾上，只在这一轮输出能到达的人都看得到它时生效；
     # 运行用订阅者自己的资源与授权，发布方看不到谁订阅了、订阅者问了什么。读者只读，反馈只有读者自己写的文字。
     def can_see_release(self, r: Release, actor: str | None) -> bool:
-        """项目参与者总是看得到（含撤回的记录）；读者、以及公开的方法对所有登录用户，只看得到在发布中的。"""
+        """项目参与者总是看得到（含撤回的记录）；读者、以及公开的技能包对所有登录用户，只看得到在发布中的。"""
         if actor is None:
             return True
         g = self.store.projects.get(r.project_id)
@@ -2697,7 +2697,7 @@ class Network:
         return actor in r.readers or (r.public and r.kind == "method")
 
     def _release_audience(self, r: Release) -> set[str] | None:
-        """调用方持有锁。看得到这份发布物内容的人；None = 所有登录用户（公开的方法）。"""
+        """调用方持有锁。看得到这份发布物内容的人；None = 所有登录用户（公开的技能包）。"""
         if r.public and r.kind == "method":
             return None
         g = self.store.projects.get(r.project_id)
@@ -2719,7 +2719,7 @@ class Network:
         return releasefs.version_dir(self.store.release_dir(r.id), r.version)
 
     def _release_skill_sources(self, g: Project) -> dict[str, Path]:
-        """调用方持有锁。项目里能发布成方法的技能：项目技能，以及启用的插件的打法（重名时项目技能赢）。"""
+        """调用方持有锁。项目里能发布成技能包的技能：项目技能，以及启用的插件自带的技能（重名时项目技能赢）。"""
         out: dict[str, Path] = {}
         for name, meta in g.plugins.items():
             if meta.get("disabled"):
@@ -2734,14 +2734,14 @@ class Network:
 
     def _release_contents(self, g: Project, kind: str, skills: Any, files: Any,
                           view: Any) -> tuple[list[str], list[str], dict[str, str] | None]:
-        """调用方持有锁。校验一份发布物带的内容：方法只带技能，事实只带档案文件（可带一个插件视图）。"""
+        """调用方持有锁。校验一份发布物带的内容：技能包只带技能，交付件只带档案文件（可带一个插件视图）。"""
         skills = _dedup([str(x).strip() for x in _as_list(skills) if str(x).strip()])
         files = _dedup([_safe_filename(str(x)) for x in _as_list(files) if str(x).strip()])
         if len(skills) > RELEASE_ITEMS or len(files) > RELEASE_ITEMS:
             raise NetworkError(f"一份发布物最多带 {RELEASE_ITEMS} 项")
         if kind == "method":
             if files or view:
-                raise NetworkError("方法类发布物只带技能；文件与看板请发布成事实")
+                raise NetworkError("技能包只带技能；文件与看板请发布成交付件")
             if not skills:
                 raise NetworkError("选至少一个技能")
             have = self._release_skill_sources(g)
@@ -2750,7 +2750,7 @@ class Network:
                 raise NetworkError(f"项目里没有这些技能：{'、'.join(missing)}")
             return skills, [], None
         if skills:
-            raise NetworkError("事实类发布物只带档案文件；技能请发布成方法")
+            raise NetworkError("交付件只带档案文件；技能请发布成技能包")
         if not files:
             raise NetworkError("选至少一个档案文件")
         missing = [n for n in files if not (self.store.project_dir(g.id) / n).is_file()]
@@ -2819,7 +2819,7 @@ class Network:
     def create_release(self, project_id: str, name: str, kind: str, title: str, description: str = "",
                        skills: Any = None, files: Any = None, view: Any = None, readers: Any = None,
                        public: bool = False, follow: bool = False, actor: str | None = None) -> Release:
-        """主持人发布（不变量 23）：方法给读者或所有人，事实只给点名的读者。发布是档案变化，群聊里公开记录。"""
+        """主持人发布（不变量 23）：技能包给读者或所有人，交付件只给点名的读者。发布是档案变化，群聊里公开记录。"""
         if kind not in RELEASE_KINDS:
             raise NetworkError(f"kind 只能是 {'/'.join(RELEASE_KINDS)}")
         title = " ".join(str(title or "").split())[:80]
@@ -2912,7 +2912,7 @@ class Network:
         return r
 
     def _follow_releases(self, g: Project, fname: str) -> list[str]:
-        """调用方持有锁。档案里的文件更新了：开了跟随的事实发布物自动切新版本（主持人开的长期许可，
+        """调用方持有锁。档案里的文件更新了：开了跟随的交付件自动切新版本（主持人开的长期许可，
         范围只是这几个文件 + 这份读者名单）。返回要写进群聊的说明。"""
         out = []
         for r in self.store.releases.values():
@@ -3093,7 +3093,7 @@ class Network:
                 raise NetworkError("只能读文本文件") from e
         raise NetworkError(f"发布物里的页面只能读快照，没有 {op}")
 
-    # ---- 订阅在一轮里：方法进技能层，事实只读挂到 releases/，只在能到达的人都看得到时生效 ----
+    # ---- 订阅在一轮里：技能包进技能层，交付件只读挂到 releases/，只在能到达的人都看得到时生效 ----
     def _subscriptions_for(self, ctx: ExecContext, agent: AgentNode) -> list[tuple[Release, str]]:
         """调用方持有锁。这个 Agent 订阅的发布物与这一轮的状态：空字符串 = 生效，否则是没生效的原因。"""
         out: list[tuple[Release, str]] = []
@@ -3125,7 +3125,7 @@ class Network:
         return format_subscriptions(items)
 
     def _release_materials(self, ctx: ExecContext, agent: AgentNode) -> list[tuple[str, Path]]:
-        """调用方持有锁。这一轮要挂的事实发布物文件：releases/<名字>/<文件>。"""
+        """调用方持有锁。这一轮要挂的交付件文件：releases/<名字>/<文件>。"""
         out: list[tuple[str, Path]] = []
         for r, why in self._subscriptions_for(ctx, agent):
             if why or r.kind != "fact":
@@ -3135,7 +3135,7 @@ class Network:
         return out
 
     def _mount_releases(self, ctx: ExecContext, agent: AgentNode, workdir: Path) -> None:
-        """云侧：订阅的事实只读拷进工作目录 releases/（每轮刷新，运行后丢弃）。"""
+        """云侧：订阅的交付件只读拷进工作目录 releases/（每轮刷新，运行后丢弃）。"""
         discard(workdir / RELEASES)
         with self._lock:
             files = self._release_materials(ctx, agent)
@@ -4589,7 +4589,7 @@ class Network:
         return out
 
     def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
-        """端侧运行时每轮要收到的只读材料（base64）：项目档案文件、对话附件、订阅的事实（运行时当只读副本用）。
+        """端侧运行时每轮要收到的只读材料（base64）：项目档案文件、对话附件、订阅的交付件（运行时当只读副本用）。
         私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
         out: list[tuple[str, Path]] = []
         p = self.store.projects.get(ctx.project_id or "")
@@ -4599,7 +4599,7 @@ class Network:
         src = self.store.attachment_dir(ctx.conversation_id)
         out += [(attachment_rel(a), src / a["sha"]) for a in self._attachments_for(ctx) if (src / a["sha"]).is_file()]
         agent = self.store.agents.get(ctx.agent_id)
-        if agent is not None:  # 订阅的事实（不变量 23）：和云侧一样只在能到达的人都是读者时下发
+        if agent is not None:  # 订阅的交付件（不变量 23）：和云侧一样只在能到达的人都是读者时下发
             out += self._release_materials(ctx, agent)
         return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out]
 

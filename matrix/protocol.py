@@ -225,9 +225,9 @@ def format_subscriptions(items: list[dict]) -> tuple[str, str]:
         return "", ""
     key = hashlib.sha1(json.dumps(items, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
     lines = ["## 订阅的发布物",
-             "你的所有者订阅了别的项目发布出来的内容。它们是某个时间点的快照，只读；引用其中的事实时写明版本与快照时间。"]
+             "你的所有者订阅了别的项目发布出来的内容。它们是某个时间点的快照，只读；引用其中的数据时写明版本与快照时间。"]
     for it in items:
-        head = f"- {'方法' if it['kind'] == 'method' else '事实'}「{it['title']}」v{it['version']}"
+        head = f"- {'技能包' if it['kind'] == 'method' else '交付件'}「{it['title']}」v{it['version']}"
         if it["why"]:
             lines.append(f"{head}：这一轮没有挂上（{it['why']}）。不要凭记忆复述它的内容。")
         elif it["kind"] == "method":

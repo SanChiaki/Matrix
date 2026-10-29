@@ -1211,7 +1211,7 @@ function renderSkillsTab(box, d, st) {
       ${list.map((k) => `<tr class="${st.skill === k.name ? "selected" : ""}"><td class="name"><div class="cell"><span class="file-ico ref">${ICON.skill}</span>
         <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button></div></td>
         <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能包" : ""}。</td></tr>`}
+      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能（zip 或文件夹）" : ""}。</td></tr>`}
     </tbody></table></div>
     ${host ? '<div class="actions"><button type="button" class="ghost" id="ps-new">上传技能（zip）</button><button type="button" class="ghost" id="ps-new-dir">上传文件夹</button></div>' : ""}
     <div id="ps-detail"></div>`;
@@ -1451,7 +1451,7 @@ function renderPluginsTab(box, d, st) {
         ${s.error && !s.paused ? `<div class="error">上次失败：${esc(s.error)}</div>` : ""}</div>
       ${state}${host ? `<button type="button" class="ghost sm" data-trig="${esc(p.name)}:${esc(t.key)}" data-on="${s.enabled && !s.paused ? 0 : 1}">${s.enabled && !s.paused ? "停用" : s.paused ? "重新启用" : "启用"}</button>` : ""}</li>`;
   };
-  box.innerHTML = `<p class="muted tab-intro">插件给项目加上一个业务场景：自己的页面、记录、打法和触发。页面代码只在每个人的浏览器沙箱里跑，读写都经网络、按看的人的权限；
+  box.innerHTML = `<p class="muted tab-intro">插件给项目加上一个业务场景：自己的页面、记录、技能和触发。页面代码只在每个人的浏览器沙箱里跑，读写都经网络、按看的人的权限；
       触发只往群聊发一条 @ 成员的消息，代表启用它的人，之后照常由 Agent 自己做或委托。${d.shared ? "共享项目里插件的记录对所有参与方可见。" : ""}${host ? "" : "插件由主持人安装。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((p) => p.broken ? `<li class="plugin-card${p.enabled === false ? " off" : ""}"><b>${esc(p.title)}</b><p class="error">${esc(p.broken)}</p></li>` : `<li class="plugin-card${p.enabled ? "" : " off"}">
@@ -1462,7 +1462,7 @@ function renderPluginsTab(box, d, st) {
         <span class="grow"></span>
         ${p.update && host ? `<button type="button" class="sm" data-upgrade="${esc(p.name)}">升级到 ${esc(p.update)}</button>` : p.update ? `<span class="pill warn">有新版本 ${esc(p.update)}</span>` : ""}
         ${p.enabled ? (p.tabs || []).map((t) => `<button type="button" class="ghost sm" data-goto-tab="plugin:${esc(p.name)}:${esc(t.key)}">打开「${esc(t.label)}」</button>`).join("") : ""}
-        ${host ? `<label class="switch plugin-switch" title="${p.enabled ? "停用后页面、记录工具、打法和触发都暂停；记录与设置保留" : "重新启用，恢复页面、记录工具、打法和触发"}">
+        ${host ? `<label class="switch plugin-switch" title="${p.enabled ? "停用后页面、记录工具、技能和触发都暂停；记录与设置保留" : "重新启用，恢复页面、记录工具、技能和触发"}">
           <input type="checkbox" role="switch" data-enable="${esc(p.name)}" ${p.enabled ? "checked" : ""} aria-label="启用插件「${esc(p.title)}」">${p.enabled ? "已启用" : "已停用"}</label>` : ""}
         ${host ? `<button type="button" class="icon-btn bad" data-uninstall="${esc(p.name)}" title="卸载" aria-label="卸载 ${esc(p.title)}">${ICON.trash}</button>` : ""}</div>
       <dl class="plugin-facts">
@@ -1470,7 +1470,7 @@ function renderPluginsTab(box, d, st) {
         <dt>Agent 能做什么</dt><dd>${(p.agent_tools || []).length ? [p.agent_tools.includes("records.read") && "查记录", p.agent_tools.includes("records.write") && "建 / 改记录（Agent 改的不引发“记录变化”触发）"].filter(Boolean).join("、") : '<span class="muted">不开放记录工具</span>'}</dd>
         ${(p.tables || []).length ? `<dt>记录</dt><dd>${p.tables.map((t) => `${esc(t.title)} <span class="muted">${p.counts?.[t.key] ?? 0} 条</span>`).join(" · ")}</dd>` : ""}
       </dl>
-      ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、打法与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
+      ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、技能与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
       ${(p.triggers || []).length ? `<h3>触发</h3><ul class="trigs">${p.triggers.map((t) => trig(p, t)).join("")}</ul>` : ""}
     </li>`).join("") || `<li class="empty">还没有装插件${host ? "：从下面的目录安装，或上传插件包" : ""}。</li>`}</ul>
     ${host ? `<h3>部署方目录</h3><ul class="plugins catalog">${S.pluginCatalog === null ? '<li class="muted">正在读取…</li>' : catalog.map((p) => `<li class="plugin-card">
@@ -1497,7 +1497,7 @@ function renderPluginsTab(box, d, st) {
     done(() => withConfirm((c) => api(base, { method: "POST", body: { name, confirm: c } })), b.dataset.install ? "已安装：触发默认不开，看过后逐个启用" : "已升级");
   }));
   box.querySelectorAll("[data-enable]").forEach((b) => b.addEventListener("change", () => {
-    if (!b.checked && !confirm("停用这个插件？页面、Agent 的记录工具、打法和触发都会暂停，记录与设置保留。")) { b.checked = true; return; }
+    if (!b.checked && !confirm("停用这个插件？页面、Agent 的记录工具、技能和触发都会暂停，记录与设置保留。")) { b.checked = true; return; }
     done(() => api(`${base}/${encodeURIComponent(b.dataset.enable)}`, { method: "PUT", body: { enabled: b.checked } }),
       b.checked ? "已启用" : "已停用：记录与设置保留");
   }));
@@ -1692,7 +1692,7 @@ async function previewAsset(d, f) {
 
 // ---------- 发布与订阅（docs/project-publishing.md，不变量 23） ----------
 // 项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本。读者在“发布物”里看、让自己的 Agent 订阅、写反馈。
-const REL_KIND = { method: "方法", fact: "事实" };
+const REL_KIND = { method: "技能包", fact: "交付件" };
 const relKindPill = (r) => `<span class="pill rel-${esc(r.kind)}" title="${r.kind === "method" ? "一组技能：订阅后进 Agent 的技能层" : "一组档案文件的快照：订阅后只读挂给 Agent"}">${REL_KIND[r.kind] || esc(r.kind)}</span>`;
 const relWhen = (r) => r.snapshot_at ? `快照于 ${dateTime(r.snapshot_at)}` : r.published_at ? `发布于 ${dateTime(r.published_at)}` : "";
 const relFileUrl = (rid, name) => `/api/releases/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}`;
@@ -1712,7 +1712,7 @@ function renderReleasesView() {
         <div class="card-meta"><span class="muted">来自「${esc(r.project_name)}」· ${esc(r.host)} · ${esc(relWhen(r))}</span></div>
       </button>
       <div class="card-foot"><span class="muted">${r.mine.filter((x) => mineAgents.has(x)).length ? `${r.mine.map(aname).map(esc).join("、")} 已订阅` : r.inside ? "你的项目发出的" : "还没订阅"}</span></div>
-    </div></li>`).join("") || '<li class="empty">还没有给你的发布物。项目主持人把方法或看板发布给你之后会出现在这里。</li>';
+    </div></li>`).join("") || '<li class="empty">还没有给你的发布物。项目主持人把技能包或交付件发布给你之后会出现在这里。</li>';
     $("#release-list").querySelectorAll("[data-rel]").forEach((b) => b.addEventListener("click", () => { location.hash = `release-${b.dataset.rel}`; }));
   }).catch(() => {});
 }
@@ -1740,7 +1740,7 @@ async function renderReleasePage(force = false) {
     </dl>
     ${S.relNote ? `<p class="asset-note ${S.relNote.bad ? "bad" : ""}" role="status">${esc(S.relNote.text)}</p>` : ""}
     ${active ? `<section class="rel-sub" aria-labelledby="rel-sub-title"><h3 id="rel-sub-title">订阅</h3>
-      <p class="muted small">${r.kind === "method" ? "订阅后，这些技能进你的 Agent 的技能层（项目技能、插件打法之后）。" : "订阅后，这些文件只读挂到你的 Agent 的工作目录 releases/ 下。"}
+      <p class="muted small">${r.kind === "method" ? "订阅后，这些技能进你的 Agent 的技能层（项目技能、插件自带的技能之后）。" : "订阅后，这些文件只读挂到你的 Agent 的工作目录 releases/ 下。"}
         只在这一轮能看到 Agent 输出的人都看得到这份发布物时生效；运行用你自己的 Agent 和授权，发布方看不到你问了什么。</p>
       <div class="rel-agents">${myAgents.map((a) => `<label class="check"><input type="checkbox" data-sub="${esc(a.id)}" ${r.mine.includes(a.id) ? "checked" : ""}>${esc(a.name)}${a.id === S.me?.assistant_id ? ' <span class="muted">（助理）</span>' : ""}</label>`).join("") || '<span class="muted">你还没有 Agent。</span>'}</div>
     </section>` : ""}
@@ -1813,8 +1813,8 @@ function renderReleasesTab(box, d, st) {
   const views = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken)
     .flatMap((p) => (p.release_views || []).map((k) => ({ plugin: p.name, tab: k, label: `${p.title} · ${(p.tabs || []).find((t) => t.key === k)?.label || k}` })));
   const nf = st.relForm || { kind: "fact" };
-  box.innerHTML = `<p class="muted tab-intro">发布物是这个项目对外拿出的东西：按版本固定的快照。<b>方法</b>是一组技能，可以给点名的人或所有人；
-      <b>事实</b>是一组档案文件（可带一个插件看板），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
+  box.innerHTML = `<p class="muted tab-intro">发布物是这个项目对外拿出的东西：按版本固定的快照。<b>技能包</b>是一组技能，可以给点名的人或所有人；
+      <b>交付件</b>是一组档案文件（可带一个插件看板），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((r) => `<li class="plugin-card${r.status === "active" ? "" : " off"}">
       <div class="plugin-head">${relKindPill(r)}<div><b>${esc(r.title)}</b> <span class="muted">v${r.version} · <code>${esc(r.name)}</code></span>${r.status === "active" ? "" : ' <span class="pill bad">已撤回</span>'}
@@ -1837,7 +1837,7 @@ function renderReleasesTab(box, d, st) {
       <label>标题<input name="title" maxlength="80" required value="${esc(nf.title || "")}" placeholder="${nf.kind === "method" ? "交付数据查数口径" : "交付周报看板"}"></label>
       <label>名字（小写字母、数字、-；订阅者那边的目录名）<input name="name" maxlength="64" required pattern="[a-z0-9]+(-[a-z0-9]+)*" value="${esc(nf.name || "")}" placeholder="${nf.kind === "method" ? "delivery-query" : "weekly-board"}"></label>
       <label>说明<textarea name="description" rows="2" maxlength="2000">${esc(nf.description || "")}</textarea></label>
-      ${nf.kind === "method" ? `<fieldset><legend>技能（发布时去掉具体项目的事实，只留做法）</legend>${(d.release_skills || []).map((k) => `<label class="check"><input type="checkbox" name="skills" value="${esc(k)}">${esc(k)}</label>`).join("") || '<span class="muted">项目里还没有技能。</span>'}</fieldset>
+      ${nf.kind === "method" ? `<fieldset><legend>技能（发布时去掉具体项目的数据，只留做法）</legend>${(d.release_skills || []).map((k) => `<label class="check"><input type="checkbox" name="skills" value="${esc(k)}">${esc(k)}</label>`).join("") || '<span class="muted">项目里还没有技能。</span>'}</fieldset>
         <label class="check"><input type="checkbox" name="public">所有登录用户都看得到</label>`
       : `<fieldset><legend>档案文件</legend>${d.files.map((f) => `<label class="check"><input type="checkbox" name="files" value="${esc(f.name)}">${esc(f.name)}</label>`).join("") || '<span class="muted">档案里还没有文件。</span>'}</fieldset>
         ${views.length ? `<label>看板（可选）<select name="view"><option value="">不带</option>${views.map((v) => `<option value="${esc(v.plugin)}:${esc(v.tab)}">${esc(v.label)}</option>`).join("")}</select></label>` : ""}
@@ -3085,7 +3085,7 @@ function renderSkillsView() {
         <p class="card-desc">${esc(k.description)}</p>
         <div class="card-meta">${users(k.name).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没有 Agent 用它</span>'}
           ${k.files.length ? `<span class="muted">${k.files.length} 个附带文件</span>` : ""}</div>
-      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准技能包（含 SKILL.md 的 zip 或文件夹）。</li>';
+      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准格式的技能（zip 或文件夹，含 SKILL.md 的 zip 或文件夹）。</li>';
   $("#skill-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
     S.skillSel = b.dataset.name; renderSkillsView();
   }));
@@ -3111,7 +3111,7 @@ function skillCardHtml(x, note, canDelete) {
   return `<h2 class="panel-title">${esc(x.name)}</h2><p>${esc(x.description)}</p>
     ${note ? `<p class="muted">${note}</p>` : ""}
     ${x.files?.length ? `<p class="hint">${x.files.length} 个附带文件</p>` : ""}
-    <p class="hint">更新：重新上传同名的技能包。</p><p class="error" role="alert"></p>
+    <p class="hint">更新：重新上传同名的技能。</p><p class="error" role="alert"></p>
     ${canDelete ? '<div class="actions"><button type="button" class="danger" id="sk-del">删除</button></div>' : ""}`;
 }
 

@@ -1,4 +1,4 @@
-// 交付看板：渲染 Agent 生成的看板文件（JSON，格式见打法 delivery-dashboard）。
+// 交付看板：渲染 Agent 生成的看板文件（JSON，格式见技能 delivery-dashboard）。
 // 同一份代码两处用：项目里读“看板”表和项目档案；发布物里只读发布时的快照（context().mode === "release"）。
 // 跑在 Matrix 的沙箱里：不能联网，读写都经 window.matrix（桥），按看页面的人的权限。
 const $ = (s) => document.querySelector(s);

@@ -130,7 +130,7 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
                 else f"外部回调{f'，写进表 {t.table}' if t.table else ''}")
         lines.append(f"  触发 {t.key}（{TRIGGER_CN[t.type]}）：{when} → @{t.to} {t.text}")
     if skills:
-        lines.append("  打法：" + "、".join(skills))
+        lines.append("  技能：" + "、".join(skills))
     return lines
 
 

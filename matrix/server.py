@@ -187,7 +187,7 @@ class AgentPatch(BaseModel):
 
 
 class ReleaseIn(BaseModel):
-    """主持人发布（docs/project-publishing.md）：方法带技能，事实带档案文件（可带一个插件视图）。读者按邮箱。"""
+    """主持人发布（docs/project-publishing.md）：技能包带技能，交付件带档案文件（可带一个插件视图）。读者按邮箱。"""
     name: str = Field(..., min_length=1, max_length=64)
     kind: str = Field(..., pattern="^(method|fact)$")
     title: str = Field(..., min_length=1, max_length=80)
@@ -436,7 +436,7 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
     async for chunk in request.stream():
         buf += chunk
         if len(buf) > cap:
-            raise HTTPException(413, f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
+            raise HTTPException(413, f"上传的技能超过 {SKILL_LIMIT // 1_000_000} MB")
     from .skills import SkillError, unzip
     try:
         if "json" in request.headers.get("content-type", ""):
@@ -444,7 +444,7 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
             return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:500]]
         return unzip(bytes(buf))
     except (SkillError, ValueError, KeyError, TypeError, AttributeError) as e:
-        raise HTTPException(400, str(e) or "技能包格式不对") from e
+        raise HTTPException(400, str(e) or "上传的技能格式不对") from e
 
 
 async def plugin_package(request: Request) -> list[tuple[str, bytes]]:

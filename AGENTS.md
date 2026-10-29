@@ -28,8 +28,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - **用户任务（UserRequest）**：人交代的有交付目标的事，看板上只有它。
 - **项目档案**：说明（纲要、已定的事）、资料（文件、链接）、项目技能，归项目所有，按版本推送给成员。
   项目页另有**连接器面板**：这个项目用到了哪些外部服务、每个成员能不能用，项目从不持有谁的授权。
-- **插件**：项目装上的业务扩展（表、沙箱页面、打法、触发），只往群聊里 @ 成员，不硬编排流程。
-- **发布物**：项目对外拿出的东西，主持人发布、按版本固定。方法（技能）可以公开，事实（档案文件、看板）只给点名的读者；
+- **插件**：项目装上的业务扩展（表、沙箱页面、技能、触发），只往群聊里 @ 成员，不硬编排流程。
+- **发布物**：项目对外拿出的东西，主持人发布、按版本固定。技能包（一组技能）可以公开，交付件（档案文件、看板）只给点名的读者；
   读者给自己的 Agent 订阅，用自己的授权，发布方看不到对话。项目内容离开项目只经这里。
 
 ## 按需阅读
@@ -42,8 +42,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
-| 发布与订阅：发布物（方法 / 事实）、读者、版本与跟随档案、订阅生效条件、发布物里的插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
-| 项目插件（表、沙箱页面与桥、打法、触发） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
+| 发布与订阅：发布物（技能包 / 交付件）、读者、版本与跟随档案、订阅生效条件、发布物里的插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
+| 项目插件（表、沙箱页面与桥、技能、触发） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
@@ -84,7 +84,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
-| `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、打法、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
+| `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、技能、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
 | `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
@@ -141,7 +141,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 20. **插件代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
 21. **助理对话只替主人读与起草**：读到共享项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
 22. **信息只流向当时在场的人**：私有目录按来源场合挂载，用到别处资料的输出先给所有者确认，判断不用模型。
-23. **发布只经主持人，事实只流向读者**：项目内容离开项目只经发布物；订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效。
+23. **发布只经主持人，交付件只流向读者**：项目内容离开项目只经发布物；订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效。
 
 ### 二、工作方式
 

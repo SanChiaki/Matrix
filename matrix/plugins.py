@@ -5,7 +5,7 @@
     sales-pipeline/
       plugin.json          清单：标签、表、申请的能力、触发
       page/                页面代码（只在浏览器沙箱里跑，网络不执行）
-      skills/<名字>/       打法：标准技能包，装上后排在项目技能之后
+      skills/<名字>/       技能：标准格式的技能目录，装上后排在项目技能之后
 
 本模块只做文件与格式层面的事（解析、校验、安装、记录读写），不判断权限；权限与可见性在 engine。
 """
@@ -370,17 +370,17 @@ def check_package(files: dict[Path, bytes]) -> Manifest:
     for t in m.tabs:
         if Path(t.entry) not in files:
             raise PluginError(f"标签 {t.key} 的页面 {t.entry} 不在包里")
-    for rel, b in files.items():  # 打法：skills/<名字>/SKILL.md 要是合法的技能
+    for rel, b in files.items():  # 技能：skills/<名字>/SKILL.md 要是合法的技能
         if rel.parts[0] == SKILLS_DIR and len(rel.parts) == 3 and rel.name == skillfs.SKILL_FILE:
             name, desc, _ = skillfs.parse(b.decode("utf-8", errors="replace"))
             if name != rel.parts[1]:
-                raise PluginError(f"打法 {rel.parts[1]} 的 SKILL.md 里 name 要和目录名一致")
+                raise PluginError(f"技能 {rel.parts[1]} 的 SKILL.md 里 name 要和目录名一致")
             try:
                 skillfs.check_name(name)
             except skillfs.SkillError as e:
                 raise PluginError(str(e)) from e
             if not desc.strip():
-                raise PluginError(f"打法 {name} 的 SKILL.md 要有 description")
+                raise PluginError(f"技能 {name} 的 SKILL.md 要有 description")
     return m
 
 

@@ -1,5 +1,5 @@
 """交付看板示例（examples/delivery-dashboard，docs/project-publishing.md 第 13 节）：在发布与订阅之上搭起来的项目。
-用演示的交付数据服务（真的走远程 MCP）跑一遍：看板 Agent 用所有者授权的数据做看板、登记；主持人发布方法与看板；
+用演示的交付数据服务（真的走远程 MCP）跑一遍：看板 Agent 用所有者授权的数据做看板、登记；主持人发布技能包与看板交付件；
 读者的助理订阅后按快照回答；数据权限跟着人走。"""
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def test_delivery_dashboard_end_to_end(tmp_path: Path, data_service: str):
     fact = net.create_release(g.id, "huadong-weekly", "fact", "华东交付周报看板", files=["huadong-weekly.json"],
                               view={"plugin": "delivery-dashboard", "tab": "board"}, readers=["li@demo.local"],
                               follow=True, actor=zhang)
-    method = net.create_release(g.id, "dash-method", "method", "做交付看板的方法", skills=["delivery-dashboard"],
+    method = net.create_release(g.id, "dash-method", "method", "做交付看板的技能包", skills=["delivery-dashboard"],
                                 public=True, actor=zhang)
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)
@@ -88,5 +88,5 @@ def test_delivery_dashboard_end_to_end(tmp_path: Path, data_service: str):
     assert "华东交付周报看板」v1（快照于" in answer and "按期率" in answer
 
     net.send_message(chat.id, "@看板 Agent 刷新看板「华东交付周报」", actor=zhang, background=False)
-    assert fact.version == 2 and method.version == 1  # 跟随档案：看板文件更新，事实切新版本
+    assert fact.version == 2 and method.version == 1  # 跟随档案：看板文件更新，交付件切新版本
     assert net.release_bridge(fact.id, "context", {}, actor=li)["release"]["version"] == 2

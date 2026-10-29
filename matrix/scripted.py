@@ -60,7 +60,7 @@ def _home(call: ScriptCall) -> str:
 
 
 # ================= 交付看板（examples/delivery-dashboard，docs/project-publishing.md） =================
-# 项目里的“看板 Agent”有插件打法 delivery-dashboard：用所有者授权的交付数据连接器查数，生成看板文件，
+# 项目里的“看板 Agent”有插件自带的技能 delivery-dashboard：用所有者授权的交付数据连接器查数，生成看板文件，
 # publish_file 发布进档案，plugin_write 在“看板”表里登记。订阅了看板发布物的人问起来，助理按快照回答。
 DASH_PLUGIN = "delivery-dashboard"
 REGION_SLUG = {"华东": "huadong", "华南": "huanan", "华北": "huabei"}
@@ -72,7 +72,7 @@ def _asked(prompt: str) -> str:
 
 
 def dashboard_spec(summary: dict, title: str) -> dict:
-    """把 delivery_summary 的结果写成看板文件（格式见打法 delivery-dashboard）。"""
+    """把 delivery_summary 的结果写成看板文件（格式见技能 delivery-dashboard）。"""
     weekly = summary.get("weekly_on_time") or []
     prev = weekly[-2]["on_time_rate"] if len(weekly) >= 2 else None
     return {
@@ -133,7 +133,7 @@ def _make_dashboard(call: ScriptCall, region: str | None, title: str, rid: str |
     return (f"「{title}」已生成（`{fname}`，数据截至 {summary.get('as_of')}）：{summary.get('scope')} 在建 "
             f"{summary.get('active_projects')} 个，按期率 {summary.get('on_time_rate', 0) * 100:.1f}%，延期 "
             f"{summary.get('delayed_projects')} 个" + (f"，延期最多的是 {worst.get('name')}（{worst.get('delay_days')} 天）" if worst else "")
-            + "。在项目页“交付看板”标签里看；要给区域负责人看，请主持人在“发布”里发布成事实。")
+            + "。在项目页“交付看板”标签里看；要给区域负责人看，请主持人在“发布”里发布成交付件。")
 
 
 def _dashboard(call: ScriptCall) -> str | None:
@@ -144,7 +144,7 @@ def _dashboard(call: ScriptCall) -> str | None:
     if "标为待发布" in text:  # 记录触发：代表启用它的人 @ 过来
         m = re.search(r"「(.+?)」标为待发布", text)
         return (f"「{m.group(1) if m else '看板'}」核对过了：口径按 delivery-data-query，数字与交付数据一致。"
-                "请主持人在项目页“发布”里把看板文件发布成事实（带上“交付看板”视图），读者填区域负责人，开“跟随档案”。")
+                "请主持人在项目页“发布”里把看板文件发布成交付件（带上“交付看板”视图），读者填区域负责人，开“跟随档案”。")
     if "刷新看板" in text:  # 人点“请 … 刷新”，或定时触发叫它刷新“刷新”是每天的看板
         daily = "每天的看板" in text
         done = []
@@ -179,7 +179,7 @@ def _from_release(call: ScriptCall) -> str | None:
             return "订阅的看板这一轮没有挂上（这里有不在读者名单上的人），我不能在这里复述它的内容。"
         return None
     spec = json.loads(boards[0].read_text(encoding="utf-8"))
-    head = re.search(r"事实「(.+?)」(v\d+)，快照于 ([\d\- :]+)", call.prompt)
+    head = re.search(r"交付件「(.+?)」(v\d+)，快照于 ([\d\- :]+)", call.prompt)
     k = {x["label"]: x for x in spec.get("kpis", [])}
     rate = k.get("按期率", {}).get("value", 0)
     risk = spec.get("tables", [{}])[0].get("rows", [])[:3]

@@ -2,9 +2,9 @@
 
 一份发布物的每个版本固定成 `releases/<id>/v<N>/`：
 
-    skills/<名字>/...   方法：发布时那一版的技能（项目技能或插件打法）
-    files/<文件名>      事实：发布时那一版的档案文件
-    page/...            事实带插件视图时：发布时那一版的插件页面代码（人看过的代码才在读者浏览器里跑）
+    skills/<名字>/...   技能包：发布时那一版的技能（项目技能或插件自带的技能）
+    files/<文件名>      交付件：发布时那一版的档案文件
+    page/...            交付件带插件视图时：发布时那一版的插件页面代码（人看过的代码才在读者浏览器里跑）
     manifest.json       这个版本的说明：标题、内容清单、视图、发布时间
 
 快照先写进临时目录再改名，读者与订阅者看到的永远是一个完整的版本。这里只有文件操作，谁能发布、谁能看在 engine 里判断。
@@ -80,7 +80,7 @@ def prune(root: Path, current: int, keep: int = RELEASE_VERSIONS_KEPT) -> None:
 
 
 def listing(d: Path) -> list[dict[str, Any]]:
-    """一个版本里的文件（事实）：名字与大小。"""
+    """一个版本里的文件（交付件）：名字与大小。"""
     f = d / FILES_DIR
     return [{"name": p.name, "size": p.stat().st_size} for p in sorted(f.iterdir()) if p.is_file()] if f.is_dir() else []
 
