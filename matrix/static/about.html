@@ -500,12 +500,12 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-human"><div><div class="parts">
-          <div class="part"><h4>单页前端</h4><p>助理（和自己的助理对话）· 看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（说明、资料、技能、连接器面板）· 网络图 · 设备配对</p></div>
-          <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”</p></div>
+          <div class="part"><h4>单页前端</h4><p>助理（和自己的助理对话）· 看板（只列用户任务）· 群聊 / 项目会话 / 私聊 · 项目页（说明、资料、技能、连接器面板、发布、外部页面标签）· 发布物（别的项目发给你的技能包与交付件，订阅、反馈）· 网络图 · 设备配对</p></div>
+          <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”。同一页面也能在发布物里打开，那里只读发布时的快照</p></div>
           <div class="part"><h4>CLI</h4><p><code>matrix.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP；<code>matrix-plugin check</code> 在本地校验插件包；<code>matrix-dsh-check</code> 在升级云端 dsh 前后对真实 dsh 跑冒烟检查</p></div>
           <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt）、HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
           <div class="part"><h4>管理后台</h4><p><code>/admin</code> 给部署方指定的管理员看整个网络的用量：人数、轮次、token、失败原因，按天、按用户、按模型分组，只有计数、不含任何对话与项目内容；并配置云侧 Agent 能选的模型与模型供应商（协议、地址、密钥）</p></div>
-          <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准工作区外溢与沙箱升权 · 确认助理起草的消息 · 验收、退回、取消自己下发的用户任务 · 看、停、删自己的定时</p></div>
+          <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准工作区外溢与沙箱升权 · 确认助理起草的消息 · 验收、退回、取消自己下发的用户任务 · 看、停、删自己的定时 · 主持人发布、撤回发布物，读者给自己的 Agent 订阅</p></div>
         </div></div></div>
       </div>
 
@@ -528,13 +528,14 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>治理与审批</h4><p>网络不自动建 Agent，只接受提议、由人批准；工作区外溢由所有者逐次批准；每次越权都留痕</p></div>
             <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（说明、资料、技能）按版本推送给成员</p></div>
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经项目；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
-            <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
-            <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、打法（技能）与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
+            <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；按 MCP 工具标注会对外产生影响的写操作，每次先给授权人确认、参数照原样列出；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
+            <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、技能与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
+            <div class="part"><h4>发布与订阅</h4><p>项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本快照。技能包（一组技能）可以公开，交付件（档案文件，可带插件页面）只给点名的读者，可跟随档案自动切版本。订阅只在订阅者自己的 Agent 上、这一轮能看到输出的人都是读者时生效：技能包进技能层，交付件只读挂到 <code>releases/</code>；用订阅者自己的授权，发布方看不到对话。读者的反馈以事件回到项目群聊</p></div>
             <div class="part"><h4>助理对话与定时</h4><p>注册即有一个助理，和它的私聊在侧栏最上面：每轮推送按你的可见性过滤的跨项目总览，共享项目单列；往项目里说话只能起草、你确认才以你的名义发出；读到共享项目内容的那一轮不能调连接器。定时只属于你、只唤醒你自己的 Agent，默认工作日早报，没有新情况不打扰</p></div>
             <div class="part"><h4>用量台账</h4><p>每次调用运行时追加一行：谁的 Agent、在哪种场合、跑在哪、用的模型、成败、耗时与 token；不记提示词与回复，供管理后台统计</p></div>
             <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
           </div>
-          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/api/drafts</code><code>/api/held</code><code>/api/schedules</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code><code>/plugin-frame</code><code>/hooks</code></div>
+          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/api/drafts</code><code>/api/held</code><code>/api/schedules</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code><code>/plugin-frame</code><code>/api/releases</code><code>/release-frame</code><code>/hooks</code></div>
         </div></div>
       </div>
 
@@ -546,12 +547,13 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-store"><div><ul class="files">
-          <li><code>state.json</code>Agent · 项目 · 对话 · 任务 · 用户 · 设备 · 草稿 · 定时</li>
+          <li><code>state.json</code>Agent · 项目 · 对话 · 任务 · 用户 · 设备 · 草稿 · 定时 · 发布物</li>
           <li><code>conversations/&lt;id&gt;/</code>每个席位独立的工作目录</li>
           <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
           <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
           <li><code>flow/&lt;id&gt;.json</code>私有目录文件的来源标签，Agent 写不到</li>
           <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code>；<code>plugins/</code> 装好的插件包，<code>plugin-data/</code> 插件记录</li>
+          <li><code>releases/&lt;id&gt;/v&lt;N&gt;/</code>发布物按版本固定的快照：技能、文件、插件页面代码</li>
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
           <li><code>vault/</code>连接器凭证与模型供应商密钥，加密保存，只在代调用或那一轮运行时解开</li>
           <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
@@ -608,7 +610,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>22 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>23 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -627,6 +629,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">20</span><b>插件只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">21</span><b>助理只替主人读与起草</b><span>发进项目要主人确认；读到共享项目的那一轮不调连接器；定时只属于主人</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">22</span><b>信息只流向当时在场的人</b><span>私有目录按来源挂载；用到别处资料的输出先给所有者确认；判断不用模型</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">23</span><b>发布只经主持人</b><span>项目内容离开项目只经发布物；交付件只给读者；订阅只在能看到输出的人都是读者时生效</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>

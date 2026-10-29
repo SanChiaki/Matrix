@@ -9,10 +9,10 @@
 | --- | --- | --- |
 | **表** | 插件自己的数据，按你声明的字段校验，是项目档案的一部分 | 线索、候选人、选题 |
 | **页面** | 项目页上的标签页，你自己写 HTML / JS | 看板、表单、日历 |
-| **打法** | 给 Agent 的做法说明（技能），告诉它这类事怎么推进 | “新线索怎么判断质量” |
+| **技能** | 给 Agent 的做法说明（技能），告诉它这类事怎么推进 | “新线索怎么判断质量” |
 | **触发** | 某件事发生时，在项目群聊里 @ 一个成员 | 外部表单进来一条、每周一 9 点、阶段变成“报价” |
 
-插件**不编排流程**：触发只是把事情交给某个成员，之后由 Agent 按打法自己判断、自己做或委托别人。插件代码也**不在服务器上跑**：
+插件**不编排流程**：触发只是把事情交给某个成员，之后由 Agent 按技能自己判断、自己做或委托别人。插件代码也**不在服务器上跑**：
 页面只在每个看项目的人的浏览器沙箱里运行，读写都经 Matrix，按看页面的人自己的权限执行。
 
 ## 1. 五分钟上手
@@ -91,7 +91,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 <插件名>/
   plugin.json            清单（必须在根目录，或唯一的一层顶层文件夹里）
   page/                  页面用到的全部文件：HTML、JS、CSS、图片、字体
-  skills/<名字>/SKILL.md  打法，可带附带文件
+  skills/<名字>/SKILL.md  技能，可带附带文件
 ```
 
 - 浏览器**只能取到 `page/` 下的文件**。放在别处的 JS、CSS、图片，页面拿不到。
@@ -114,6 +114,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 | `page_permissions` | 否 | 页面要用的能力，见下 |
 | `agent_tools` | 否 | 开给 Agent 的记录工具：`records.read`、`records.write` |
 | `triggers` | 否 | 触发，见第 6 节 |
+| `release_views` | 否 | 能在**发布物**里打开的标签 key（必须在 `tabs` 里），见第 4 节“在发布物里” |
 | `connectors` | 否 | 插件用到的外部服务：连接器目录里的 id（如 `feishu`）或电脑上配好的服务名，最多 10 个，每个 ≤80。只是声明：装上并启用后出现在项目的连接器面板里，让成员看到要连什么；不授予任何访问权限 |
 
 表名、字段名、标签 key、触发 key 都是同一种写法：小写字母开头，小写字母、数字、下划线，≤40（注意和插件名不同，**用 `_` 不用 `-`**）。
@@ -272,11 +273,27 @@ const off = matrix.on((event, data) => {
 });
 ```
 
+### 在发布物里
+
+主持人可以把档案文件连同一个插件标签发布成**交付件**发布物给项目外的读者（[project-publishing.md](project-publishing.md)）。
+只有清单 `release_views` 里列出的标签能这样用。读者打开时页面代码是**发布时快照的那一版**，同样跑在沙箱里，桥只有：
+
+- `context()`：`mode` 是 `"release"`，`release` 里有标题、版本、`snapshot_at`；`tables` 为空。
+- `archive.read()`：这个版本快照里的文件清单（不是项目档案）；`archive.file(name)`：读其中一个文本文件。
+
+记录、成员、群聊、`chat.post` 都没有（调用会报错）。所以能在发布物里打开的页面，数据要从档案文件来：
+例如 `examples/delivery-dashboard` 的看板页面在项目里读“看板”表找文件，在发布物里直接列快照里的 `.json`。
+
+```js
+const ctx = await matrix.context();
+if (ctx.mode === "release") { /* 只读快照：archive.read / archive.file */ } else { /* 项目里：记录 + 档案 */ }
+```
+
 ### 跟随深浅色
 
 `context().theme` 是项目页当前的主题。示例的做法是 CSS 默认深色，`theme === "light"` 时给 `<html>` 加一个 `light` 类覆盖颜色变量。
 
-## 5. 打法
+## 5. 技能
 
 `skills/<名字>/SKILL.md` 和项目技能是同一种格式：
 
@@ -290,9 +307,9 @@ description: "新线索进来时怎么判断质量、下一步做什么"
 ```
 
 - `name` 必须和目录名一致，并且要有 `description`。
-- 插件装上后，打法对项目里的 Agent 生效，排在项目自己的技能之后（重名时项目技能优先）。
-- 触发的消息里可以点名打法，例如“新线索：{company}，按 sales-intake 跟进”。
-- 打法里引用工具时，Agent 看到的是 `plugin_records`（查）和 `plugin_write`（建 / 改）。参数里的 `where`、`fields` 是 JSON 字符串，
+- 插件装上后，技能对项目里的 Agent 生效，排在项目自己的技能之后（重名时项目技能优先）。
+- 触发的消息里可以点名技能，例如“新线索：{company}，按 sales-intake 跟进”。
+- 技能里引用工具时，Agent 看到的是 `plugin_records`（查）和 `plugin_write`（建 / 改）。参数里的 `where`、`fields` 是 JSON 字符串，
   如 `{"stage": "报价"}`。
 
 ## 6. 触发
@@ -377,7 +394,7 @@ uv run matrix-plugin check path/to/my-plugin
 uv run matrix --runtime scripted --data /tmp/plugin-dev
 ```
 
-`scripted` 运行时不需要模型，Agent 的回复是固定的演示内容，适合调页面、记录和触发。要看真实 Agent 怎么用你的打法和记录工具，
+`scripted` 运行时不需要模型，Agent 的回复是固定的演示内容，适合调页面、记录和触发。要看真实 Agent 怎么用你的技能和记录工具，
 去掉 `--runtime scripted`（需要 PATH 里有 `dsh`）。
 
 **改了之后怎么生效**：项目里装的是上传那一刻的拷贝。

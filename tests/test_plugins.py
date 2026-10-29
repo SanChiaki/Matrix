@@ -273,7 +273,7 @@ def test_chat_post_only_drafts_until_viewer_confirms(tmp_path: Path):
 # ================= Agent 这一侧 =================
 def test_agent_record_tools_and_no_trigger_loops(tmp_path: Path):
     """不变量 6、20：插件把记录工具开给 Agent 时才挂上；Agent 写记录留痕为 Agent，但不引发“记录变化”触发
-    （Agent 之间不能经插件互相唤醒）；人改成同样的值才触发。打法排在项目技能之后、档案推送里有表结构。"""
+    （Agent 之间不能经插件互相唤醒）；人改成同样的值才触发。技能排在项目技能之后、档案推送里有表结构。"""
     seen: dict = {}
 
     def handler(call: ScriptCall) -> str:
@@ -378,7 +378,7 @@ def test_schedule_fires_once_per_minute_and_pauses_after_failures(tmp_path: Path
 
 
 def test_disabled_plugin_is_inert_until_reenabled(tmp_path: Path):
-    """不变量 20：停用的插件对外一律不可用——页面令牌、桥、记录、Agent 的记录工具与提示、打法、档案推送、
+    """不变量 20：停用的插件对外一律不可用——页面令牌、桥、记录、Agent 的记录工具与提示、技能、档案推送、
     触发都停；包、记录与触发设置保留，只有主持人能启停，重新启用即恢复。"""
     seen: dict = {}
 

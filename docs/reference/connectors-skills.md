@@ -1,6 +1,7 @@
 # 连接器与技能
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。设计与取舍见 [docs/connectors-and-skills.md](../connectors-and-skills.md)。
+> 部署方怎么把已有系统接进来（包装层、工具标注、目录字段、嵌入要求、检查清单）见 [docs/connector-authoring.md](../connector-authoring.md)。
 > 代码：`engine.py`「连接器与技能」一节、`skills.py`、`connector_catalog.py`、`vault.py`、`mcp_client.py`、`mcp_connectors.py`。
 
 两个并列的用户概念：**连接器**是外部服务的接入，要授权，动的是授权人的状态，默认隔离；**技能**是一种做法
@@ -89,6 +90,35 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
   没有这个字段（旧服务端）时驱动不干预。能力报告里 `connector.use` 不是 `enforced` 的工具，Agent 的有效权限里就没有它。
 - 迁移：有连接器之前，电脑上的 Agent 一直能用本机工具里配的服务；`Store._load` 给没有 `connections` 字段的端侧 Agent 补上
   `connector.use`，只做一次。
+
+### 外部页面标签
+
+部署方在 `connectors.json` 里给连接器写 `"embed": true`（必须同时有 `domains`），就允许把这些域名下的页面嵌进项目页。
+主持人在项目页“资料”里对这样的链接点“设为标签”（`PUT /api/projects/<id>/refs/<ref>/tab`，`ResourceRef.tab`），
+项目页就多一个标签，里面是那个系统的页面（`project_detail.embed_tabs`；`embeddable` 列出资料里哪些链接能设）。
+
+- 按**地址**认：主持人指定链接用哪个连接器（`connector_id`）不能绕过域名白名单（`_embed_spec`）。部署方撤了 `embed`，
+  标签就不显示，设置保留。每个项目最多 5 个。设、取消都是档案变化（`ref.tab`），群聊里公开一条。
+- 嵌入用 iframe：`sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"`
+  （`allow-same-origin` 只让它用**它自己的**来源与登录，和 Matrix 不同源，读不到 Matrix），**不给** `allow-top-navigation`
+  （不能把项目页跳走），`referrerpolicy="no-referrer"`。Matrix 不给它桥、不读里面的内容；看的人用自己在那个系统的登录，
+  权限由那个系统管。
+- 前提是那个系统允许被 Matrix 的地址嵌入（`X-Frame-Options` / CSP `frame-ancestors`），否则标签里是空白，标签栏上有“新窗口打开”。
+  浏览器默认挡第三方 Cookie 时，要登录的系统在嵌入里可能拿不到登录态，也只能新窗口打开。
+
+### 写操作逐次确认（不变量 19）
+
+部署方目录里的连接器按 MCP 规范的工具标注（`annotations`）声明工具的性质。网络取工具列表时保留标注：
+不是只读（`readOnlyHint` 不是 `true`）、并且明确标了 `destructiveHint: true` 或 `openWorldHint: true` 的工具，
+**每次调用**前先停下，给连接的授权人一张确认卡（`Approval.kind = "connector_write"`）：写明哪个 Agent、在哪、要执行哪个工具、
+会产生什么影响，`args` 照原样列出网络实际要发出的参数（长字符串在卡上截断，发出的是完整参数）。授权人点“发出这一次”才调用，
+“不发”或超时（`Limits.connector_ask_timeout_s`）都回“没有同意”，不记违规；同意不延续到下一次调用。Agent 拿到的工具说明里
+标出“每次调用都要你的所有者先确认”。
+
+- 规范里没有标注时默认是“会改、会影响外部”。这里只认**明确的**标注，免得没标注的工具（大多数现有服务）每次都要确认；
+  部署方要确认的工具，在它的 MCP 服务里标上即可。
+- 规范要求不信任来源不明的服务给的标注：只对部署方目录里的连接器生效，自定义连接器（用户自己填的地址）不按标注放宽或收紧。
+- 电脑上的连接器由那台电脑上的 AI 工具直接调用，网络拦不到，不在此列。
 
 ### 共享项目里的授权：用到时先问（不变量 19）
 

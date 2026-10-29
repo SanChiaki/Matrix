@@ -18,6 +18,8 @@
   `secret` 的字段只进加密保管，任何接口都不回显。没有字段的连接器不需要授权（公开服务）。
 - `domains`：这个服务的链接所在的域名（含子域名）。项目资料里的链接据此认出要用哪个连接器，
   出现在项目的连接器面板里（docs/reference/connectors-skills.md）。可省略。
+- `embed`：部署方允许把这些域名下的页面嵌进项目页（外部页面标签）。默认不允许；要允许就得写 `domains`。
+  嵌进来的页面用看的人自己在那个系统的登录，Matrix 不给它任何东西（docs/reference/connectors-skills.md）。
 - `skills`：连接器自带的技能（docs/connectors-and-skills.md）。名字规则同技能。
 - 没有这个文件：不提供云端连接器。文件写坏了保留上一份能用的。
 - 这份文件里的地址由部署方负责；用户自定义的连接器另走 `mcp_client.public_only`，只连公网。
@@ -69,6 +71,7 @@ class ConnectorSpec:
     fields: tuple[AuthField, ...] = ()
     skills: tuple[CatalogSkill, ...] = field(default_factory=tuple)
     domains: tuple[str, ...] = ()            # 这个服务的链接所在的域名（含子域名）：项目资料里的链接据此认出要用它
+    embed: bool = False                      # 部署方允许把这些域名下的页面嵌进项目页（外部页面标签）
 
     def matches(self, url: str) -> bool:
         host = (urlsplit(url).hostname or "").lower() if url.lower().startswith(("https://", "http://")) else ""
@@ -85,6 +88,7 @@ class ConnectorSpec:
     def public(self) -> dict[str, Any]:
         """给人看的：不含地址（实现细节），只有名字、描述、要填什么、自带哪些技能。"""
         return {"id": self.id, "name": self.name, "description": self.description, "domains": list(self.domains),
+                "embed": self.embed,
                 "fields": [f.public() for f in self.fields],
                 "skills": [{"name": s.name, "description": s.description} for s in self.skills]}
 
@@ -123,10 +127,13 @@ def parse_catalog(data: Any) -> list[ConnectorSpec]:
         domains = c.get("domains") or []
         if not isinstance(domains, list) or not all(isinstance(d, str) and DOMAIN.match(d.strip().lower()) for d in domains):
             raise ValueError(f"connectors[{i}]（{cid}）.domains 要是域名列表，如 [\"feishu.cn\"]")
+        if c.get("embed") and not domains:
+            raise ValueError(f"connectors[{i}]（{cid}）允许嵌入（embed）就要写 domains：只嵌这些域名下的页面")
         out.append(ConnectorSpec(id=cid, name=str(c.get("name") or cid).strip(), url=url,
                                  description=str(c.get("description") or "").strip(),
                                  fields=tuple(fields_), skills=tuple(skills_),
-                                 domains=tuple(dict.fromkeys(d.strip().lower() for d in domains))))
+                                 domains=tuple(dict.fromkeys(d.strip().lower() for d in domains)),
+                                 embed=bool(c.get("embed"))))
     return out
 
 

@@ -5,8 +5,8 @@
 > 代码：`plugins.py`（清单、包、记录、cron、目录）、`engine.py`「项目插件」一节、`server.py` 的插件路由、
 > `static/plugin-sdk.js`（插件页面里的桥客户端）、`static/app.js` 的插件标签页。示例：`examples/plugins/sales-pipeline/`。
 
-插件让一个项目接上某种业务：**表**（项目档案的一部分）、**页面**（沙箱里的自定义代码）、**打法**（技能）、**触发**
-（外部回调 / 定时 / 记录变化 → 往群聊发一条 @ 消息）。不硬编排：流程靠打法和 Agent 的判断推进，网络只负责把事情叫醒、
+插件让一个项目接上某种业务：**表**（项目档案的一部分）、**页面**（沙箱里的自定义代码）、**技能**、**触发**
+（外部回调 / 定时 / 记录变化 → 往群聊发一条 @ 消息）。不硬编排：流程靠技能和 Agent 的判断推进，网络只负责把事情叫醒、
 把数据放在档案里、管住权限（不变量 20）。
 
 ## 插件包
@@ -16,7 +16,7 @@
 ```
 plugin.json            清单
 page/                  页面代码（HTML / JS / CSS / 图片），只有这里的文件会被浏览器取到
-skills/<名字>/SKILL.md  打法，和项目技能同一种格式
+skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 ```
 
 上限见 `models.PLUGIN_*`：包 ≤2 MB、≤300 个文件；每个项目 ≤10 个插件；每个插件 ≤5 个标签页、≤10 张表、≤20 个触发；
@@ -35,6 +35,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
 | `agent_tools` | 开给 Agent 的记录工具：`records.read` / `records.write`（`models.PLUGIN_AGENT_CAPS`） |
 | `triggers` | `[{key, type, table, cron, when, notify: {to, text}}]`，见“触发” |
 | `connectors` | 用到的外部服务（连接器 id 或服务名，≤10）：只是声明，启用时列进项目的连接器面板（`engine.connector_panel`） |
+| `release_views` | 能在交付件里打开的标签 key（要在 `tabs` 里）；那里页面是发布时的快照、桥只读快照（[releases.md](releases.md)） |
 
 ## 安装、升级、卸载
 
@@ -48,7 +49,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
   旧记录原样保留，不认识的字段在页面上不显示。已有的触发状态保留。
 - **启停**：主持人在插件卡片上用开关停用 / 启用整个插件（`PUT /api/projects/<id>/plugins/<name> {enabled}`，`Project.plugins[name].disabled`）。
   停用后插件对外一律不可用（都经 `Network._manifest`）：标签页消失、帧令牌作废、桥与记录读写拒绝、Agent 的记录工具与提示、
-  打法、档案推送里的插件一节都不带，外部回调 409、定时与记录触发不跑。包、记录、触发设置原样保留，升级不改变启停，重新启用即恢复。
+  技能、档案推送里的插件一节都不带，外部回调 409、定时与记录触发不跑。包、记录、触发设置原样保留，升级不改变启停，重新启用即恢复。
   启停是档案变化（`archive_rev` +1、`log.jsonl`、群聊说明）。
 - **卸载**：删包与触发，记录留在 `projects/<id>/plugin-data/<name>/`，重新装回来还在（没有自动清理）。
 - 触发默认不开，主持人逐个启用。
@@ -84,7 +85,7 @@ skills/<名字>/SKILL.md  打法，和项目技能同一种格式
 
 ## Agent 这一侧
 
-- **打法**：插件的 `skills/` 作为一层，排在项目技能之后、连接器自带与我的技能之前（重名时项目技能赢）。
+- **技能**：插件的 `skills/` 作为一层，排在项目技能之后、连接器自带与我的技能之前（重名时项目技能赢）。
 - **档案推送**：`format_archive` 里“### 插件”一节列出每个插件的表与字段、能用的工具。
 - **记录工具**：项目里有插件申请了 `agent_tools` 时，这个项目的席位与任务才挂上 `plugin_records`（查）/ `plugin_write`（建 / 改），
   按各插件自己申请的能力放行（`ExecContext.plugins`、`_agent_plugin`）。是档案类工具，不需要 `delegate`；

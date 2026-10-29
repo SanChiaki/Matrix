@@ -186,7 +186,7 @@ async function loadModels() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "projects", "board", "agents", "skills", "connectors", "devices"];
+  const PLAIN = ["network", "projects", "releases", "board", "agents", "skills", "connectors", "devices"];
   // 参照 Raft：#g-<项目> 打开项目的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   // #pair=<配对码>：连接器 setup 打开的批准页（docs/device-runtimes.md 第 2.5 节）
   const pair = hash.match(/^pair=([A-Za-z0-9-]{4,16})$/);
@@ -218,10 +218,12 @@ function route() {
   } else {
     // 切到普通视图时清掉选中的对话，否则 URL 与画面会不一致。
     // #project-<项目> 打开项目页（可收藏、刷新、前进后退）；#projects 是项目列表
-    const page = hash.match(/^project-(.+)$/);
+    const page = hash.match(/^project-(.+)$/), rel = hash.match(/^release-(.+)$/);
     S.convId = null; S.conv = null;
     S.projectSel = page ? page[1] : null; S.projectEdit = false;
-    show(page ? "projects" : PLAIN.includes(hash) ? hash : "network");
+    S.releaseSel = rel ? rel[1] : null;
+    if (!rel) S.releaseFrame = null;
+    show(page ? "projects" : rel ? "releases" : PLAIN.includes(hash) ? hash : "network");
   }
 }
 
@@ -233,7 +235,8 @@ function show(view) {
   $("#nav-more").setAttribute("aria-pressed", String(!!inMore));
   $("#more-cur").textContent = inMore ? inMore.textContent.trim() : "";
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
-  if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}` : `#${view}`);
+  if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}`
+    : view === "releases" && S.releaseSel ? `#release-${S.releaseSel}` : `#${view}`);
   if (view === "agents") loadModels();
   if (["agents", "skills", "connectors", "projects", "chats", "devices"].includes(view)) loadMine();
   render();
@@ -259,7 +262,8 @@ function render() {
   $("#todo-count").textContent = todo;
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
   ({ network: renderGraph, projects: renderProjectsView, board: loadBoard, agents: renderAgentsView,
-     chats: renderChats, devices: renderDevicesView, skills: renderSkillsView, connectors: renderConnectorsView })[S.view]();
+     chats: renderChats, devices: renderDevicesView, skills: renderSkillsView, connectors: renderConnectorsView,
+     releases: renderReleasesView })[S.view]();
 }
 
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
@@ -458,6 +462,11 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "plugin.violation") return;
+  if (ev.type === "release.updated") {  // 发布物变了（新版本、读者、反馈、撤回）：正在看的地方刷新
+    if (S.view === "releases") S.releaseSel === d.release_id ? renderReleasePage() : renderReleasesView();
+    if (S.view === "projects" && S.assets?.tab === "releases") renderProjectPage();
+    return;
+  }
   if (ev.type === "models.updated") { loadModels(); return; }  // 管理后台改了模型目录
   if (ev.type === "schedule.updated") { loadSchedules(); return; }
   if (ev.type === "draft.updated" && S.view === "board") loadBoard();
@@ -955,10 +964,13 @@ async function renderProjectPage(force = false) {
   const plugins = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken);  // 停用的插件不出标签页
   const ptab = st.tab.startsWith("plugin:") ? st.tab.split(":") : null;  // plugin:<插件>:<标签>
   if (ptab && !plugins.some((p) => p.name === ptab[1] && (p.tabs || []).some((t) => t.key === ptab[2]))) st.tab = "plugins";
+  const embeds = d.embed_tabs || [];  // 外部页面标签：资料里主持人设成标签、部署方允许嵌入的链接
+  if (st.tab.startsWith("embed:") && !embeds.some((x) => `embed:${x.ref_id}` === st.tab)) st.tab = "files";
   // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
-  const sig = JSON.stringify(st.tab.startsWith("plugin:")
-    ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions])]
-    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook, st.needKind, st.editNeed]);
+  const sig = JSON.stringify(st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
+    ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
+    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, st.hook, st.needKind, st.editNeed,
+       st.relForm, st.relEdit]);
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
@@ -968,18 +980,22 @@ async function renderProjectPage(force = false) {
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
       <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${tab("releases", "发布", (d.release_list || []).filter((r) => r.status === "active").length)}${
       plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
         data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
-        title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}</div>
+        title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}${
+      embeds.map((x) => `<button type="button" role="tab" class="embed-tab" id="pt-embed-${esc(x.ref_id)}" data-tab="embed:${esc(x.ref_id)}"
+        aria-selected="${st.tab === `embed:${x.ref_id}`}" aria-controls="pp-panel" title="外部页面：${esc(x.service)}">${ICON.link}${esc(x.label)}</button>`).join("")}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
   $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
     st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => page.querySelector(`[data-tab="${CSS.escape(st.tab)}"]`)?.focus());
   }));
   if (st.tab.startsWith("plugin:")) { renderPluginFrame($("#pp-panel", page), d, st); return; }
+  if (st.tab.startsWith("embed:")) { S.pluginFrame = null; renderEmbedTab($("#pp-panel", page), embeds.find((x) => `embed:${x.ref_id}` === st.tab)); return; }
   S.pluginFrame = null;
-  ({ brief: renderBriefTab, files: renderFilesTab, skills: renderSkillsTab, connectors: renderConnectorsTab, plugins: renderPluginsTab }[st.tab]
+  ({ brief: renderBriefTab, files: renderFilesTab, skills: renderSkillsTab, connectors: renderConnectorsTab, plugins: renderPluginsTab,
+     releases: renderReleasesTab }[st.tab]
     || renderBriefTab)($("#pp-panel", page), d, st);
 }
 
@@ -1152,7 +1168,8 @@ function renderLinks(box, d, st) {
     <div class="table-wrap"><table class="assets"><thead><tr><th>名称</th><th>位置</th><th>说明</th><th><span class="sr-only">操作</span></th></tr></thead><tbody>
       ${d.refs.map((x) => `<tr><td class="name"><div class="cell"><span class="file-ico ref">${ICON.link}</span><span>${esc(x.name)}</span></div></td><td class="loc">${loc(x)}${via(x)}</td>
         <td class="ref-note">${esc(x.note) || '<span class="muted">—</span>'}</td>
-        <td class="row-act"><button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
+        <td class="row-act">${host && d.embeddable?.[x.id] ? `<button type="button" class="ghost sm" data-tabref="${esc(x.id)}" data-on="${x.tab ? 0 : 1}"
+          title="${x.tab ? "从项目页上拿掉这个标签" : `把这个${esc(d.embeddable[x.id])}页面嵌进项目页`}">${x.tab ? "取消标签" : "设为标签"}</button>` : ""}<button type="button" class="icon-btn" data-copy="${esc(x.location)}" title="复制位置" aria-label="复制 ${esc(x.name)} 的位置">${ICON.copy}</button>${host
           ? `<button type="button" class="icon-btn bad" data-rmref="${esc(x.id)}" title="移除" aria-label="移除 ${esc(x.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("")
       || `<tr><td colspan="4" class="empty">还没有链接${host ? "，在下面添加" : "，由主持人添加"}。</td></tr>`}
     </tbody></table></div>
@@ -1171,6 +1188,11 @@ function renderLinks(box, d, st) {
     done(`/api/projects/${d.id}/refs`, { method: "POST", body: { name: $("#pr-name").value, location: $("#pr-loc").value, note: $("#pr-note").value } },
       `已添加 ${$("#pr-name").value}`);
   });
+  box.querySelectorAll("[data-tabref]").forEach((b) => b.addEventListener("click", () => {
+    const x = d.refs.find((r) => r.id === b.dataset.tabref), on = b.dataset.on === "1";
+    done(`/api/projects/${d.id}/refs/${b.dataset.tabref}/tab`, { method: "PUT", body: { enabled: on } },
+      on ? `「${x?.name}」已设为项目页标签` : `已取消标签「${x?.name}」`);
+  }));
   box.querySelectorAll("[data-rmref]").forEach((b) => b.addEventListener("click", () => {
     const x = d.refs.find((r) => r.id === b.dataset.rmref);
     if (confirm(`移除链接「${x?.name}」？`)) done(`/api/projects/${d.id}/refs/${b.dataset.rmref}`, { method: "DELETE" }, `已移除 ${x?.name}`);
@@ -1200,7 +1222,7 @@ function renderSkillsTab(box, d, st) {
       ${list.map((k) => `<tr class="${st.skill === k.name ? "selected" : ""}"><td class="name"><div class="cell"><span class="file-ico ref">${ICON.skill}</span>
         <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button></div></td>
         <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能包" : ""}。</td></tr>`}
+      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能（zip 或文件夹）" : ""}。</td></tr>`}
     </tbody></table></div>
     ${host ? '<div class="actions"><button type="button" class="ghost" id="ps-new">上传技能（zip）</button><button type="button" class="ghost" id="ps-new-dir">上传文件夹</button></div>' : ""}
     <div id="ps-detail"></div>`;
@@ -1440,7 +1462,7 @@ function renderPluginsTab(box, d, st) {
         ${s.error && !s.paused ? `<div class="error">上次失败：${esc(s.error)}</div>` : ""}</div>
       ${state}${host ? `<button type="button" class="ghost sm" data-trig="${esc(p.name)}:${esc(t.key)}" data-on="${s.enabled && !s.paused ? 0 : 1}">${s.enabled && !s.paused ? "停用" : s.paused ? "重新启用" : "启用"}</button>` : ""}</li>`;
   };
-  box.innerHTML = `<p class="muted tab-intro">插件给项目加上一个业务场景：自己的页面、记录、打法和触发。页面代码只在每个人的浏览器沙箱里跑，读写都经网络、按看的人的权限；
+  box.innerHTML = `<p class="muted tab-intro">插件给项目加上一个业务场景：自己的页面、记录、技能和触发。页面代码只在每个人的浏览器沙箱里跑，读写都经网络、按看的人的权限；
       触发只往群聊发一条 @ 成员的消息，代表启用它的人，之后照常由 Agent 自己做或委托。${d.shared ? "共享项目里插件的记录对所有参与方可见。" : ""}${host ? "" : "插件由主持人安装。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((p) => p.broken ? `<li class="plugin-card${p.enabled === false ? " off" : ""}"><b>${esc(p.title)}</b><p class="error">${esc(p.broken)}</p></li>` : `<li class="plugin-card${p.enabled ? "" : " off"}">
@@ -1451,7 +1473,7 @@ function renderPluginsTab(box, d, st) {
         <span class="grow"></span>
         ${p.update && host ? `<button type="button" class="sm" data-upgrade="${esc(p.name)}">升级到 ${esc(p.update)}</button>` : p.update ? `<span class="pill warn">有新版本 ${esc(p.update)}</span>` : ""}
         ${p.enabled ? (p.tabs || []).map((t) => `<button type="button" class="ghost sm" data-goto-tab="plugin:${esc(p.name)}:${esc(t.key)}">打开「${esc(t.label)}」</button>`).join("") : ""}
-        ${host ? `<label class="switch plugin-switch" title="${p.enabled ? "停用后页面、记录工具、打法和触发都暂停；记录与设置保留" : "重新启用，恢复页面、记录工具、打法和触发"}">
+        ${host ? `<label class="switch plugin-switch" title="${p.enabled ? "停用后页面、记录工具、技能和触发都暂停；记录与设置保留" : "重新启用，恢复页面、记录工具、技能和触发"}">
           <input type="checkbox" role="switch" data-enable="${esc(p.name)}" ${p.enabled ? "checked" : ""} aria-label="启用插件「${esc(p.title)}」">${p.enabled ? "已启用" : "已停用"}</label>` : ""}
         ${host ? `<button type="button" class="icon-btn bad" data-uninstall="${esc(p.name)}" title="卸载" aria-label="卸载 ${esc(p.title)}">${ICON.trash}</button>` : ""}</div>
       <dl class="plugin-facts">
@@ -1459,7 +1481,7 @@ function renderPluginsTab(box, d, st) {
         <dt>Agent 能做什么</dt><dd>${(p.agent_tools || []).length ? [p.agent_tools.includes("records.read") && "查记录", p.agent_tools.includes("records.write") && "建 / 改记录（Agent 改的不引发“记录变化”触发）"].filter(Boolean).join("、") : '<span class="muted">不开放记录工具</span>'}</dd>
         ${(p.tables || []).length ? `<dt>记录</dt><dd>${p.tables.map((t) => `${esc(t.title)} <span class="muted">${p.counts?.[t.key] ?? 0} 条</span>`).join(" · ")}</dd>` : ""}
       </dl>
-      ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、打法与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
+      ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、技能与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
       ${(p.triggers || []).length ? `<h3>触发</h3><ul class="trigs">${p.triggers.map((t) => trig(p, t)).join("")}</ul>` : ""}
     </li>`).join("") || `<li class="empty">还没有装插件${host ? "：从下面的目录安装，或上传插件包" : ""}。</li>`}</ul>
     ${host ? `<h3>部署方目录</h3><ul class="plugins catalog">${S.pluginCatalog === null ? '<li class="muted">正在读取…</li>' : catalog.map((p) => `<li class="plugin-card">
@@ -1486,7 +1508,7 @@ function renderPluginsTab(box, d, st) {
     done(() => withConfirm((c) => api(base, { method: "POST", body: { name, confirm: c } })), b.dataset.install ? "已安装：触发默认不开，看过后逐个启用" : "已升级");
   }));
   box.querySelectorAll("[data-enable]").forEach((b) => b.addEventListener("change", () => {
-    if (!b.checked && !confirm("停用这个插件？页面、Agent 的记录工具、打法和触发都会暂停，记录与设置保留。")) { b.checked = true; return; }
+    if (!b.checked && !confirm("停用这个插件？页面、Agent 的记录工具、技能和触发都会暂停，记录与设置保留。")) { b.checked = true; return; }
     done(() => api(`${base}/${encodeURIComponent(b.dataset.enable)}`, { method: "PUT", body: { enabled: b.checked } }),
       b.checked ? "已启用" : "已停用：记录与设置保留");
   }));
@@ -1538,6 +1560,20 @@ function pickPluginPackage(base, folder) {
 }
 
 // 插件标签：框上写明这是谁装的、哪一版、申请了什么，框里是插件自己的代码
+// 外部页面标签：直接嵌入部署方允许的系统页面。用看的人自己在那个系统的登录；Matrix 不给它任何东西（没有桥），
+// 它也不能把项目页跳走（不给 allow-top-navigation）。那个系统不允许被嵌入时浏览器会显示空白，留了“新窗口打开”
+function renderEmbedTab(box, x) {
+  if (!x) return;
+  box.innerHTML = `<div class="sandbox embed"><div class="sandbox-bar"><span class="lock">外部页面</span>
+      <span>${esc(x.service)} · <code>${esc(new URL(x.url).host)}</code> · 用你自己在那个系统的登录，Matrix 不读里面的内容</span>
+      <span class="grow"></span><a class="button ghost sm" href="${esc(x.url)}" target="_blank" rel="noopener noreferrer">新窗口打开</a></div></div>`;
+  const frame = Object.assign(document.createElement("iframe"), { title: `${x.service}：${x.label}`, src: x.url, className: "plugin-frame" });
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+  frame.setAttribute("allow", "");
+  $(".sandbox", box).append(frame);
+}
+
 async function renderPluginFrame(box, d, st) {
   const [, name, key] = st.tab.split(":");
   const p = (d.plugin_list || []).find((x) => x.name === name), t = p?.tabs.find((x) => x.key === key);
@@ -1655,10 +1691,10 @@ async function previewAsset(d, f) {
     dlg.addEventListener("click", (e) => { if (e.target === dlg || e.target.closest("[data-close]")) dlg.close(); });
     dlg.addEventListener("close", () => { if (dlg.dataset.blob) URL.revokeObjectURL(dlg.dataset.blob); dlg.dataset.blob = ""; dlg.dataset.name = ""; });
   }
-  const ext = fileExt(f.name), url = fileUrl(d.id, f.name);
+  const ext = fileExt(f.name), url = f.url || fileUrl(d.id, f.name);  // 发布物里的文件自带地址与说明
   dlg.dataset.name = f.name;
   dlg.innerHTML = `<div class="preview-card" aria-labelledby="pv-title"><header>${fileIcon(ext)}<div class="pv-title"><h2 id="pv-title">${esc(f.name)}</h2>
-      <span class="muted">${fmtSize(f.size)} · ${esc(assetWho(d)(f))} · ${dateTime(f.updated_at)}</span></div>
+      <span class="muted">${f.meta ? esc(f.meta) : `${fmtSize(f.size)} · ${esc(assetWho(d)(f))} · ${dateTime(f.updated_at)}`}</span></div>
       <a class="button ghost sm" href="${url}" download>${ICON.down}下载</a><button type="button" class="ghost sm" data-close>关闭</button></header>
     <div class="preview-body"><p class="muted">加载中…</p></div></div>`;
   if (!dlg.open) dlg.showModal();
@@ -1677,6 +1713,193 @@ async function previewAsset(d, f) {
     const text = await r.text();
     if (still()) body.innerHTML = previewHtml(ext, text);
   } catch (e) { if (still()) body.innerHTML = `<p class="error">${esc(e.message)}</p>`; }
+}
+
+// ---------- 发布与订阅（docs/project-publishing.md，不变量 23） ----------
+// 项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本。读者在“发布物”里看、让自己的 Agent 订阅、写反馈。
+const REL_KIND = { method: "技能包", fact: "交付件" };
+const relKindPill = (r) => `<span class="pill rel-${esc(r.kind)}" title="${r.kind === "method" ? "一组技能：订阅后进 Agent 的技能层" : "一组档案文件的快照：订阅后只读挂给 Agent"}">${REL_KIND[r.kind] || esc(r.kind)}</span>`;
+const relWhen = (r) => r.snapshot_at ? `快照于 ${dateTime(r.snapshot_at)}` : r.published_at ? `发布于 ${dateTime(r.published_at)}` : "";
+const relFileUrl = (rid, name) => `/api/releases/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}`;
+const splitEmails = (text) => String(text || "").split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean);
+
+function renderReleasesView() {
+  const index = $("#release-index"), page = $("#release-page");
+  index.hidden = !!S.releaseSel; page.hidden = !S.releaseSel;
+  if (S.releaseSel) { renderReleasePage(); return; }
+  api("/api/releases").then((list) => {
+    S.releases = list;
+    const mineAgents = new Set((S.snap?.agents || []).filter((a) => a.mine).map((a) => a.id));
+    $("#release-list").innerHTML = list.map((r) => `<li><div class="card">
+      <button type="button" class="card-main" data-rel="${esc(r.id)}" aria-label="打开 ${esc(r.title)}">
+        <div class="card-head">${relKindPill(r)}<span class="name">${esc(r.title)}</span><span class="pill">v${r.version}</span>${r.public ? '<span class="vis-tag shared">公开</span>' : ""}</div>
+        <p class="card-desc">${esc(r.description || "没有说明")}</p>
+        <div class="card-meta"><span class="muted">来自「${esc(r.project_name)}」· ${esc(r.host)} · ${esc(relWhen(r))}</span></div>
+      </button>
+      <div class="card-foot"><span class="muted">${r.mine.filter((x) => mineAgents.has(x)).length ? `${r.mine.map(aname).map(esc).join("、")} 已订阅` : r.inside ? "你的项目发出的" : "还没订阅"}</span></div>
+    </div></li>`).join("") || '<li class="empty">还没有给你的发布物。项目主持人把技能包或交付件发布给你之后会出现在这里。</li>';
+    $("#release-list").querySelectorAll("[data-rel]").forEach((b) => b.addEventListener("click", () => { location.hash = `release-${b.dataset.rel}`; }));
+  }).catch(() => {});
+}
+
+async function renderReleasePage(force = false) {
+  const page = $("#release-page"), rid = S.releaseSel;
+  if (!force && page.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
+  let r;
+  try { r = await api(`/api/releases/${encodeURIComponent(rid)}`); }
+  catch (e) { page.innerHTML = `<nav class="crumbs"><a href="#releases">发布物</a></nav><p class="empty">${esc(e.status === 404 ? "这份发布物不存在，或者已经撤回、你不在读者名单里了。" : e.message)}</p>`; return; }
+  if (S.releaseSel !== rid) return;
+  const sig = JSON.stringify([r, S.relNote]);
+  if (page.dataset.sig === sig && !force) return;
+  page.dataset.sig = sig;
+  const myAgents = (S.snap?.agents || []).filter((a) => a.mine);
+  const active = r.status === "active";
+  page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#releases">发布物</a><span aria-hidden="true">/</span><span class="here">${esc(r.title)}</span>
+      ${relKindPill(r)}<span class="pill">v${r.version}</span><span class="grow"></span>
+      ${r.inside && r.project_id ? `<a class="button ghost sm" href="#project-${esc(r.project_id)}">回到项目</a>` : ""}</nav>
+    <p class="page-desc">${esc(r.description || "")}</p>
+    <dl class="rel-facts">
+      <dt>来自</dt><dd>项目「${esc(r.project_name)}」· 主持人 ${esc(r.host)}</dd>
+      <dt>版本</dt><dd>v${r.version}${r.snapshot_at ? ` · ${esc(relWhen(r))}` : ""}${r.follow ? ' · <span class="pill ok">跟随档案自动更新</span>' : ""}${active ? "" : ' · <span class="pill bad">已撤回</span>'}</dd>
+      <dt>谁看得到</dt><dd>${esc(r.who)}</dd>
+    </dl>
+    ${S.relNote ? `<p class="asset-note ${S.relNote.bad ? "bad" : ""}" role="status">${esc(S.relNote.text)}</p>` : ""}
+    ${active ? `<section class="rel-sub" aria-labelledby="rel-sub-title"><h3 id="rel-sub-title">订阅</h3>
+      <p class="muted small">${r.kind === "method" ? "订阅后，这些技能进你的 Agent 的技能层（项目技能、插件自带的技能之后）。" : "订阅后，这些文件只读挂到你的 Agent 的工作目录 releases/ 下。"}
+        只在这一轮能看到 Agent 输出的人都看得到这份发布物时生效；运行用你自己的 Agent 和授权，发布方看不到你问了什么。</p>
+      <div class="rel-agents">${myAgents.map((a) => `<label class="check"><input type="checkbox" data-sub="${esc(a.id)}" ${r.mine.includes(a.id) ? "checked" : ""}>${esc(a.name)}${a.id === S.me?.assistant_id ? ' <span class="muted">（助理）</span>' : ""}</label>`).join("") || '<span class="muted">你还没有 Agent。</span>'}</div>
+    </section>` : ""}
+    ${r.view && active ? `<section class="rel-view" aria-label="插件页面"><div class="sandbox"><div class="sandbox-bar"><span class="lock">插件页面</span>
+      <span>${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)} · 发布时的代码在沙箱里运行，只读这个版本的快照</span></div><p class="muted plugin-loading">正在加载…</p></div></section>` : ""}
+    ${r.kind === "method" ? `<h3>技能 · ${r.skills.length}</h3><ul class="rel-skills">${r.skills.map((k) => `<li><span class="file-ico ref">${ICON.skill}</span><div><code>${esc(k.name)}</code><div class="muted">${esc(k.description)}</div></div></li>`).join("") || '<li class="muted">—</li>'}</ul>`
+      : `<h3>文件 · ${r.files.length}</h3><div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>大小</th><th></th></tr></thead><tbody>
+        ${r.files.map((f) => `<tr><td class="name"><div class="cell">${fileIcon(fileExt(f.name))}<button type="button" class="link" data-rfile="${esc(f.name)}">${esc(f.name)}</button></div></td>
+          <td class="muted">${fmtSize(f.size)}</td><td><a class="icon-btn" href="${relFileUrl(r.id, f.name)}" download title="下载">${ICON.down}</a></td></tr>`).join("") || '<tr><td colspan="3" class="empty">—</td></tr>'}
+        </tbody></table></div>`}
+    <h3>反馈</h3>
+    <p class="muted small">${r.inside ? "读者写的反馈会作为一条事件出现在项目群聊里，由你们决定要不要 @ 成员去做。" : "你写的反馈会以你的名义出现在发布方的项目群聊里；只有你自己写的文字会送过去。"}</p>
+    <ul class="rel-feedback">${r.feedback.map((x) => `<li><b>${esc(x.user_id === S.me?.id ? "你" : x.email)}</b> <span class="muted">${dateTime(x.at)}</span><div>${esc(x.text)}</div></li>`).join("") || '<li class="muted">还没有反馈。</li>'}</ul>
+    ${active ? `<form id="rel-fb" class="rel-fb"><label for="rel-fb-text" class="sr-only">反馈</label><textarea id="rel-fb-text" rows="2" maxlength="2000" placeholder="哪里不对、还缺什么…"></textarea><button type="submit">送出反馈</button></form>` : ""}`;
+  page.querySelectorAll("[data-sub]").forEach((c) => c.addEventListener("change", async () => {
+    try { await api(`/api/releases/${encodeURIComponent(r.id)}/subscribe`, { method: "POST", body: { agent_id: c.dataset.sub, on: c.checked } }); S.relNote = { text: c.checked ? `${aname(c.dataset.sub)} 已订阅` : `${aname(c.dataset.sub)} 已退订` }; }
+    catch (e) { S.relNote = { text: e.message, bad: true }; }
+    await reload(); renderReleasePage(true);
+  }));
+  page.querySelectorAll("[data-rfile]").forEach((b) => b.addEventListener("click", () => {
+    const f = r.files.find((x) => x.name === b.dataset.rfile);
+    previewAsset(null, { ...f, url: relFileUrl(r.id, f.name), meta: `${fmtSize(f.size)} · 「${r.title}」v${r.version}` });
+  }));
+  $("#rel-fb", page)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const text = $("#rel-fb-text", page).value.trim();
+    if (!text) return;
+    try { await api(`/api/releases/${encodeURIComponent(r.id)}/feedback`, { method: "POST", body: { text } }); S.relNote = { text: "反馈已送出" }; }
+    catch (err) { S.relNote = { text: err.message, bad: true }; }
+    renderReleasePage(true);
+  });
+  if (r.view && active) {
+    const box = $(".rel-view .sandbox", page);
+    let src;
+    try { src = (await api(`/api/releases/${encodeURIComponent(r.id)}/frame`, { method: "POST" })).src; }
+    catch (e) { $(".plugin-loading", box).textContent = e.message; return; }
+    if (S.releaseSel !== r.id || !box.isConnected) return;
+    const frame = Object.assign(document.createElement("iframe"), { title: `「${r.title}」的插件页面`, src, className: "plugin-frame" });
+    frame.setAttribute("sandbox", "allow-scripts allow-forms");  // 同插件页面：不透明来源，读不到父页面与登录 cookie
+    frame.setAttribute("referrerpolicy", "no-referrer");
+    $(".plugin-loading", box).replaceWith(frame);
+    S.releaseFrame = { el: frame, rid: r.id, title: r.title, version: r.version, files: r.files };
+  }
+}
+
+// 发布物里的插件页面：只转发只读的桥（服务器再按发布物收窄），ui.file 打开快照里的文件
+window.addEventListener("message", async (e) => {
+  const f = S.releaseFrame;
+  if (!f || !f.el.isConnected || e.source !== f.el.contentWindow) return;
+  const m = e.data || {};
+  if (m.matrix !== 1 || typeof m.op !== "string" || typeof m.id !== "string") return;
+  const args = m.args && typeof m.args === "object" ? m.args : {};
+  const reply = (ok, value) => f.el.contentWindow?.postMessage({ matrix: 1, id: m.id, ok, ...(ok ? { result: value } : { error: value }) }, "*");
+  try {
+    if (m.op === "ui.badge") return reply(true, { ok: true });
+    if (m.op === "ui.file") {
+      const x = f.files.find((y) => y.name === String(args.name || ""));
+      if (x) previewAsset(null, { ...x, url: relFileUrl(f.rid, x.name), meta: `${fmtSize(x.size)} · 「${f.title}」v${f.version}` });
+      return reply(true, { ok: true });
+    }
+    const result = (await api(`/api/releases/${encodeURIComponent(f.rid)}/bridge`, { method: "POST", body: { op: m.op, args } })).result;
+    if (m.op === "context") result.theme = document.documentElement.dataset.theme;
+    reply(true, result);
+  } catch (err) { reply(false, err.message || String(err)); }
+});
+
+// 项目页的“发布”标签：这个项目发出去的东西。主持人发布、切版本、改读者、撤回；参与者看得到发给了谁
+function renderReleasesTab(box, d, st) {
+  const host = d.is_host, list = d.release_list || [];
+  const views = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken)
+    .flatMap((p) => (p.release_views || []).map((k) => ({ plugin: p.name, tab: k, label: `${p.title} · ${(p.tabs || []).find((t) => t.key === k)?.label || k}` })));
+  const nf = st.relForm || { kind: "fact" };
+  box.innerHTML = `<p class="muted tab-intro">发布物是这个项目对外拿出的东西：按版本固定的快照。<b>技能包</b>是一组技能，可以给点名的人或所有人；
+      <b>交付件</b>是一组档案文件（可带一个插件页面，用来展示这些文件），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
+    ${assetNote(st)}
+    <ul class="plugins">${list.map((r) => `<li class="plugin-card${r.status === "active" ? "" : " off"}">
+      <div class="plugin-head">${relKindPill(r)}<div><b>${esc(r.title)}</b> <span class="muted">v${r.version} · <code>${esc(r.name)}</code></span>${r.status === "active" ? "" : ' <span class="pill bad">已撤回</span>'}
+          <div class="muted">${esc(r.description || "")}</div>
+          <div class="muted small">${esc(r.who)} · ${esc(relWhen(r))}${r.follow ? " · 跟随档案自动更新" : ""} · ${r.subscribers} 个 Agent 订阅</div></div>
+        <span class="grow"></span>
+        ${r.status === "active" ? `<a class="button ghost sm" href="#release-${esc(r.id)}">打开</a>` : ""}
+        ${host && r.status === "active" ? `<button type="button" class="ghost sm" data-rel-pub="${esc(r.id)}" title="按档案现在的样子切一个新版本">发布新版本</button>
+          <button type="button" class="ghost sm" data-rel-edit="${esc(r.id)}">读者</button>
+          <button type="button" class="icon-btn bad" data-rel-del="${esc(r.id)}" title="撤回" aria-label="撤回 ${esc(r.title)}">${ICON.trash}</button>` : ""}</div>
+      <dl class="plugin-facts"><dt>内容</dt><dd>${(r.kind === "method" ? r.skill_names : r.file_names || []).map((x) => `<code>${esc(x)}</code>`).join(" ")}${r.view ? ` · 插件页面：${esc(r.view.title === r.view.label ? r.view.title : `${r.view.title} · ${r.view.label}`)}` : ""}</dd>
+        ${(r.feedback || []).length ? `<dt>反馈</dt><dd><ul class="rel-feedback">${r.feedback.slice(-3).map((x) => `<li><b>${esc(x.email)}</b>：${esc(x.text)}</li>`).join("")}</ul></dd>` : ""}</dl>
+      ${host && st.relEdit === r.id ? `<form class="rel-form" data-rel-readers="${esc(r.id)}">
+        <label>读者（邮箱，逗号或换行分隔；项目参与者本来就看得到）<textarea name="readers" rows="2">${esc((r.readers || []).map((x) => x.email).join("\n"))}</textarea></label>
+        ${r.kind === "method" ? `<label class="check"><input type="checkbox" name="public" ${r.public ? "checked" : ""}>所有登录用户都看得到</label>` : `<label class="check"><input type="checkbox" name="follow" ${r.follow ? "checked" : ""}>跟随档案：这些文件更新时自动发布新版本</label>`}
+        <div class="actions"><button type="submit">保存</button><button type="button" class="ghost" data-rel-cancel>取消</button></div></form>` : ""}
+    </li>`).join("") || `<li class="empty">这个项目还没有发布过东西${host ? "。下面新建一份" : ""}。</li>`}</ul>
+    ${host ? `<h3>新发布物</h3><form id="rel-new" class="rel-form">
+      <div class="seg" role="radiogroup" aria-label="类型">${["fact", "method"].map((k) => `<label class="check"><input type="radio" name="kind" value="${k}" ${nf.kind === k ? "checked" : ""}>${REL_KIND[k]}</label>`).join("")}</div>
+      <label>标题<input name="title" maxlength="80" required value="${esc(nf.title || "")}" placeholder="${nf.kind === "method" ? "交付数据查数口径" : "交付周报看板"}"></label>
+      <label>名字（小写字母、数字、-；订阅者那边的目录名）<input name="name" maxlength="64" required pattern="[a-z0-9]+(-[a-z0-9]+)*" value="${esc(nf.name || "")}" placeholder="${nf.kind === "method" ? "delivery-query" : "weekly-board"}"></label>
+      <label>说明<textarea name="description" rows="2" maxlength="2000">${esc(nf.description || "")}</textarea></label>
+      ${nf.kind === "method" ? `<fieldset><legend>技能（发布时去掉具体项目的数据，只留做法）</legend>${(d.release_skills || []).map((k) => `<label class="check"><input type="checkbox" name="skills" value="${esc(k)}">${esc(k)}</label>`).join("") || '<span class="muted">项目里还没有技能。</span>'}</fieldset>
+        <label class="check"><input type="checkbox" name="public">所有登录用户都看得到</label>`
+      : `<fieldset><legend>档案文件</legend>${d.files.map((f) => `<label class="check"><input type="checkbox" name="files" value="${esc(f.name)}">${esc(f.name)}</label>`).join("") || '<span class="muted">档案里还没有文件。</span>'}</fieldset>
+        ${views.length ? `<label>插件页面（可选，读者打开时用它展示这些文件）<select name="view"><option value="">不带</option>${views.map((v) => `<option value="${esc(v.plugin)}:${esc(v.tab)}">${esc(v.label)}</option>`).join("")}</select></label>` : ""}
+        <label class="check"><input type="checkbox" name="follow" checked>跟随档案：这些文件更新时自动发布新版本</label>`}
+      <label>读者（邮箱，逗号或换行分隔）<textarea name="readers" rows="2" placeholder="lead@example.com"></textarea></label>
+      <div class="actions"><button type="submit">发布</button></div></form>` : ""}`;
+  const done = async (text, bad = false) => { st.note = text; st.bad = bad; await reload(); renderProjectPage(true); };
+  box.querySelectorAll("input[name=kind]").forEach((x) => x.addEventListener("change", () => { st.relForm = { kind: x.value }; renderProjectPage(true); }));
+  $("#rel-new", box)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target), kind = f.get("kind"), view = String(f.get("view") || "");
+    const body = { kind, name: f.get("name"), title: f.get("title"), description: f.get("description") || "",
+      readers: splitEmails(f.get("readers")), public: f.get("public") === "on", follow: f.get("follow") === "on" };
+    if (kind === "method") body.skills = f.getAll("skills"); else body.files = f.getAll("files");
+    if (view) body.view = { plugin: view.split(":")[0], tab: view.split(":")[1] };
+    try { await api(`/api/projects/${d.id}/releases`, { method: "POST", body }); st.relForm = null; await done(`已发布「${body.title}」`); }
+    catch (err) { st.relForm = { kind, title: body.title, name: body.name, description: body.description }; await done(err.message, true); }
+  });
+  box.querySelectorAll("[data-rel-pub]").forEach((b) => b.addEventListener("click", async () => {
+    try { const r = await api(`/api/projects/${d.id}/releases/${b.dataset.relPub}/publish`, { method: "POST" }); await done(`已发布 v${r.version}`); }
+    catch (err) { await done(err.message, true); }
+  }));
+  box.querySelectorAll("[data-rel-edit]").forEach((b) => b.addEventListener("click", () => { st.relEdit = st.relEdit === b.dataset.relEdit ? null : b.dataset.relEdit; renderProjectPage(true); }));
+  $("[data-rel-cancel]", box)?.addEventListener("click", () => { st.relEdit = null; renderProjectPage(true); });
+  $("[data-rel-readers]", box)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target), body = { readers: splitEmails(f.get("readers")) };
+    if (e.target.elements.public) body.public = f.get("public") === "on";
+    if (e.target.elements.follow) body.follow = f.get("follow") === "on";
+    try { await api(`/api/projects/${d.id}/releases/${e.target.dataset.relReaders}`, { method: "PATCH", body }); st.relEdit = null; await done("已保存"); }
+    catch (err) { await done(err.message, true); }
+  });
+  box.querySelectorAll("[data-rel-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("撤回这份发布物？读者与订阅者立即看不到、用不到。")) return;
+    try { await api(`/api/projects/${d.id}/releases/${b.dataset.relDel}`, { method: "DELETE" }); await done("已撤回"); }
+    catch (err) { await done(err.message, true); }
+  }));
 }
 
 // 共享项目的参与者：主持人邀请、撤回、移出
@@ -2271,7 +2494,23 @@ function renderThread() {
 // 助理起草、要以你的名义发进项目群聊的消息：你确认（可以改）才发出
 // 申请卡片：工作目录以外的操作（dsh 沙箱升权，只放行这一次调用），或共享项目里第一次用我的连接器（不变量 19：
 // 只这一轮 / 这个项目里都可以 / 不行；选“都可以”和在连接器面板里选的一样，之后可以在那里改回来）
+// 连接器的写操作（按 MCP 标注会对外产生影响）：每次一张卡，照原样列出网络要发出的参数，只放行这一次（不变量 19）
+function writeApprovalBody(ap, canDecide, board) {
+  const id = esc(ap.id);
+  const head = `<div class="who">${board ? avatar(aname(ap.agent_id), "sm") : ""}<b>${esc(aname(ap.agent_id))}</b>
+    要用你的连接器执行写操作 ${pill("pending")}${board ? `<span class="muted">${time(ap.created_at)}</span>` : ""}</div>
+    <p class="reason">${esc(ap.reason)}</p>
+    <div class="write-args"><span class="muted">工具</span> <code>${esc(ap.tool)}</code>
+      <pre class="code">${esc(JSON.stringify(ap.args || {}, null, 2))}</pre></div>`;
+  if (!canDecide) return `${head}<p class="hint">等这个 Agent 的所有者确认。</p>`;
+  const look = board ? `<a href="#${esc(ap.conversation_id)}" class="muted">查看对话</a>` : "";
+  return `${head}<div class="actions"><button type="button" data-ap="${id}" data-allow="1">发出这一次</button>
+      <button type="button" class="ghost" data-ap="${id}" data-allow="0">不发</button>${look}</div>
+    <p class="hint">参数是网络实际要发出的内容，不是 Agent 的转述；同意只放行这一次调用。</p>`;
+}
+
 function approvalBody(ap, canDecide, board = false) {
+  if (ap.kind === "connector_write") return writeApprovalBody(ap, canDecide, board);
   const conn = ap.kind === "connector", id = esc(ap.id);
   const head = `<div class="who">${board ? avatar(aname(ap.agent_id), "sm") : ""}<b>${esc(aname(ap.agent_id))}</b>
     ${conn ? "想用你的连接器" : "申请在工作目录以外操作"} ${pill("pending")}${board ? `<span class="muted">${time(ap.created_at)}</span>` : ""}</div>
@@ -2887,7 +3126,7 @@ function renderSkillsView() {
         <p class="card-desc">${esc(k.description)}</p>
         <div class="card-meta">${users(k.name).map((a) => `<span class="tag">${esc(a.name)}</span>`).join("") || '<span class="muted">还没有 Agent 用它</span>'}
           ${k.files.length ? `<span class="muted">${k.files.length} 个附带文件</span>` : ""}</div>
-      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准技能包（含 SKILL.md 的 zip 或文件夹）。</li>';
+      </button></div></li>`).join("") || '<li class="empty">还没有技能。上传一个标准格式的技能（zip 或文件夹，含 SKILL.md 的 zip 或文件夹）。</li>';
   $("#skill-list").querySelectorAll(".card-main").forEach((b) => b.addEventListener("click", () => {
     S.skillSel = b.dataset.name; renderSkillsView();
   }));
@@ -2913,7 +3152,7 @@ function skillCardHtml(x, note, canDelete) {
   return `<h2 class="panel-title">${esc(x.name)}</h2><p>${esc(x.description)}</p>
     ${note ? `<p class="muted">${note}</p>` : ""}
     ${x.files?.length ? `<p class="hint">${x.files.length} 个附带文件</p>` : ""}
-    <p class="hint">更新：重新上传同名的技能包。</p><p class="error" role="alert"></p>
+    <p class="hint">更新：重新上传同名的技能。</p><p class="error" role="alert"></p>
     ${canDelete ? '<div class="actions"><button type="button" class="danger" id="sk-del">删除</button></div>' : ""}`;
 }
 

@@ -377,7 +377,7 @@ def test_dm_has_no_network_tools(tmp_path: Path):
     conv = talk(net, lead, None, GOAL)
     assert conv.kind == "dm" and not rt.calls[0].can_delegate
     assert sorted(t.removeprefix("mcp__matrix_net__") for t in rt.calls[0].tool_names) == ["accept_request", "deliver_request", "open_request",
-                                                                                                "suggest_connector"]
+                                                                                                "reopen_request", "suggest_connector"]
     assert "不能委托" in conv.messages[-1].text and not tasks(net)
     assert conv.messages[0].mentions == [lead.id]
 

@@ -68,7 +68,7 @@ SKILLS_TOTAL = 16_000_000  # 每轮下发到端侧的技能合计上限
 SKILLS_PER_AGENT = 50
 
 
-# 项目插件（docs/project-plugins.md）：插件包 = plugin.json + page/（沙箱里跑的页面代码）+ skills/（打法）。
+# 项目插件（docs/project-plugins.md）：插件包 = plugin.json + page/（沙箱里跑的页面代码）+ skills/（技能）。
 PLUGIN_LIMIT = 2_000_000   # 一个插件包的总大小上限（字节）
 PLUGIN_FILES = 300         # 一个插件包最多多少个文件
 PLUGINS_PER_PROJECT = 10
@@ -90,6 +90,16 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
 }
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
+# 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
+RELEASES = "releases"      # 订阅的交付件在工作目录里的挂载名（只读副本，运行后丢弃）
+RELEASE_KINDS = {"method": "技能包", "fact": "交付件"}
+RELEASES_PER_PROJECT = 20
+RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
+RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
+RELEASE_VERSIONS_KEPT = 3  # 快照保留最近几个版本
+RELEASE_FEEDBACK = 200     # 一份发布物最多保留多少条反馈
+SUBSCRIPTIONS_PER_AGENT = 30
+
 
 def attachment_rel(a: dict[str, Any]) -> str:
     """附件在工作目录里的相对路径：attachments/<sha 前 8 位>/<原文件名>。文件名保留扩展名，前缀避免同名冲突。"""
@@ -97,9 +107,9 @@ def attachment_rel(a: dict[str, Any]) -> str:
 
 
 # 项目档案工具：项目成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
-ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "propose_brief", "propose_skill")
+ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "add_link", "propose_brief", "propose_skill")
 # 用户任务工具：席位（项目群聊、项目会话、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
-REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
+REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request", "reopen_request")
 # 读项目现状的工具：项目会话里的助理（读这个项目）与助理对话（读主人参与的任一项目）有，按主人的可见性过滤。
 SESSION_TOOLS = ("read_chat", "read_request")
 # 助理对话工具：只有助理对话（人和自己助理的私聊）里有：起草要以主人名义发进项目群聊的消息、主人的定时（不变量 21）。
@@ -111,8 +121,9 @@ ABILITY_TOOLS = ("suggest_connector",)
 # 私有目录工具：这一轮有没挂上的笔记时才有，读来自别的场合的笔记（不变量 22，matrix/flow.py）
 NOTE_TOOLS = ("open_note",)
 # 会让别人看到内容的网络工具：会话读过越界的来源时一律不放行（不变量 22）。群聊回复与任务交付另外拦下等所有者确认
-OUTBOUND_TOOLS = ("record_decision", "publish_file", "propose_brief", "propose_skill", "plugin_write", "delegate",
-                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request")
+OUTBOUND_TOOLS = ("record_decision", "publish_file", "add_link", "propose_brief", "propose_skill", "plugin_write", "delegate",
+                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request",
+                  "reopen_request")
 
 
 class TaskStatus(StrEnum):
@@ -153,6 +164,8 @@ class AgentNode:
     # 所有者勾给它的“我的连接器”（Connection id）与“我的技能”（技能名）。只能是同一所有者的
     connections: list[str] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
+    # 所有者给它勾的订阅：看得到的发布物（Release id）。技能包进技能层，交付件只读挂到 releases/（不变量 23）
+    subscriptions: list[str] = field(default_factory=list)
     created_by: str = "seed"             # seed | human | signup（注册时网络给的助理）| proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
     created_at: float = field(default_factory=time.time)
@@ -203,6 +216,7 @@ class ResourceRef:
     location: str
     note: str = ""
     connector_id: str = ""               # 主持人指定用哪个连接器打开（认不出域名时）；空 = 按域名认
+    tab: bool = False                    # 主持人把它设成了项目页上的一个标签（外部页面，只限部署方允许嵌入的域名）
 
 
 @dataclass
@@ -485,6 +499,7 @@ class UserRequest:
     finished_at: float | None = None
     reviewed_by: str | None = None       # 验收的人（网络认定）
     accepted_by_message_id: str | None = None  # 代验收依据；看板操作无消息
+    reopened_by_message_id: str | None = None  # 最近一次代退回的依据（reopen_request）；看板退回无消息
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -637,12 +652,44 @@ class Approval:
     note: str = ""
     # kind=connector：共享项目里第一次要用所有者的连接器（授权是 ask），先问所有者（不变量 19）。
     # tool 是连接器工具名，scope 是同意的范围：once（这一轮）| project（这个项目里以后都可以，写进 connector_grants）
-    kind: str = "sandbox"                # sandbox | connector
+    # kind=connector_write：部署方目录里的连接器、工具按 MCP 标注会对外产生影响（写、且 destructive 或 open world），
+    # 每次调用都先给连接的授权人确认（不变量 19）。args 是网络实际要发出的参数，确认卡上照原样显示
+    kind: str = "sandbox"                # sandbox | connector | connector_write
     project_id: str | None = None
     connection_id: str | None = None
     scope: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Release:
+    """项目发出去的一份发布物（docs/project-publishing.md，不变量 23）：只有主持人发布，按版本固定成快照
+    （releases/<id>/v<N>/）。技能包（method）是一组技能，可以给所有人；交付件（fact）是一组档案文件（可带一个插件视图），
+    只给点名的读者。订阅只在订阅者自己的 Agent 上生效，发布方看不到谁订阅了。"""
+
+    id: str
+    project_id: str
+    name: str                            # kebab-case，项目内唯一；也是订阅者工作目录里 releases/<name>/ 的名字
+    kind: str                            # method | fact
+    title: str
+    description: str = ""
+    skills: list[str] = field(default_factory=list)   # method：项目技能或插件自带的技能的名字
+    files: list[str] = field(default_factory=list)    # fact：档案文件名
+    view: dict[str, str] | None = None   # fact：{plugin, tab}，插件在清单 release_views 里声明过的标签
+    readers: list[str] = field(default_factory=list)  # 点名的读者（用户 id）；项目参与者总是看得到
+    public: bool = False                 # method：部署里所有登录用户都看得到
+    follow: bool = False                 # fact：跟随档案。列出的文件更新时网络自动切新版本（主持人开的长期许可）
+    version: int = 0
+    published_at: float | None = None
+    published_by: str | None = None      # 这个版本是谁发的（跟随档案切的版本记为开跟随的主持人）
+    status: str = "active"               # active | withdrawn
+    feedback: list[dict[str, Any]] = field(default_factory=list)  # 读者自己写的反馈：{id, user_id, text, at}
+    created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

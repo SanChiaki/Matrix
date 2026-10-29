@@ -5,7 +5,7 @@
     sales-pipeline/
       plugin.json          清单：标签、表、申请的能力、触发
       page/                页面代码（只在浏览器沙箱里跑，网络不执行）
-      skills/<名字>/       打法：标准技能包，装上后排在项目技能之后
+      skills/<名字>/       技能：标准格式的技能目录，装上后排在项目技能之后
 
 本模块只做文件与格式层面的事（解析、校验、安装、记录读写），不判断权限；权限与可见性在 engine。
 """
@@ -99,6 +99,8 @@ class Manifest:
     agent_tools: tuple[str, ...]
     triggers: tuple[Trigger, ...]
     connectors: tuple[str, ...] = ()     # 插件用到的外部服务（连接器目录 id 或服务名）：只是声明，列进项目的连接器面板
+    # 能在发布物里打开的标签（docs/project-publishing.md 第 7 节）：页面在那里只能读发布物的快照
+    release_views: tuple[str, ...] = ()
 
     def table(self, key: str) -> Table | None:
         return next((t for t in self.tables if t.key == key), None)
@@ -116,6 +118,7 @@ class Manifest:
             "page_permissions": [{"key": p, "label": PLUGIN_PAGE_CAPS[p]} for p in self.page_permissions],
             "agent_tools": list(self.agent_tools),
             "connectors": list(self.connectors),
+            "release_views": list(self.release_views),
             "triggers": [{"key": t.key, "type": t.type, "to": t.to, "text": t.text, "table": t.table, "cron": t.cron,
                           "when": ({"field": t.when_field, "equals": t.when_equals} if t.when_field else
                                    {"event": "create"} if t.on_create else None)} for t in self.triggers],
@@ -251,8 +254,14 @@ def parse_manifest(data: Any) -> Manifest:
     if not isinstance(conns, list) or len(conns) > PLUGIN_CONNECTORS:
         raise PluginError(f"connectors 必须是列表，最多 {PLUGIN_CONNECTORS} 个")
     connectors = tuple(dict.fromkeys(_s(c, f"connectors[{i}]", 80) for i, c in enumerate(conns)))
+    views = data.get("release_views") or []
+    if not isinstance(views, list):
+        raise PluginError("release_views 必须是列表")
+    for i, v in enumerate(views):
+        if not any(t.key == v for t in tabs):
+            raise PluginError(f"release_views[{i}] 不是清单里的标签：{v!r}")
     return Manifest(name, version, title, description, tuple(tabs), tuple(tables), perms, agent, tuple(triggers),
-                    connectors)
+                    connectors, tuple(dict.fromkeys(str(v) for v in views)))
 
 
 def _caps(v: Any, allowed: Any, what: str) -> tuple[str, ...]:
@@ -361,17 +370,17 @@ def check_package(files: dict[Path, bytes]) -> Manifest:
     for t in m.tabs:
         if Path(t.entry) not in files:
             raise PluginError(f"标签 {t.key} 的页面 {t.entry} 不在包里")
-    for rel, b in files.items():  # 打法：skills/<名字>/SKILL.md 要是合法的技能
+    for rel, b in files.items():  # 技能：skills/<名字>/SKILL.md 要是合法的技能
         if rel.parts[0] == SKILLS_DIR and len(rel.parts) == 3 and rel.name == skillfs.SKILL_FILE:
             name, desc, _ = skillfs.parse(b.decode("utf-8", errors="replace"))
             if name != rel.parts[1]:
-                raise PluginError(f"打法 {rel.parts[1]} 的 SKILL.md 里 name 要和目录名一致")
+                raise PluginError(f"技能 {rel.parts[1]} 的 SKILL.md 里 name 要和目录名一致")
             try:
                 skillfs.check_name(name)
             except skillfs.SkillError as e:
                 raise PluginError(str(e)) from e
             if not desc.strip():
-                raise PluginError(f"打法 {name} 的 SKILL.md 要有 description")
+                raise PluginError(f"技能 {name} 的 SKILL.md 要有 description")
     return m
 
 

@@ -161,6 +161,21 @@ TOOLS = [
         },
     },
     {
+        "name": "add_link",
+        "description": ("把一个链接（http/https）加进项目资料，比如你在外部系统里建好的看板、文档、工单。"
+                        "同一个地址再加就是更新名称与说明。项目里所有人都能看到、点开。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "给人看的名称，如“华东交付周报看板”"},
+                "url": {"type": "string", "description": "http 或 https 地址"},
+                "note": {"type": "string", "description": "可选：一句说明（是什么、给谁看、是不是草稿）"},
+            },
+            "required": ["name", "url"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_brief",
         "description": "建议修改项目纲要（目标、范围、成功标准、当前阶段）。写完整的新纲要；主持人采纳后才生效。",
         "inputSchema": {
@@ -351,6 +366,17 @@ TOOLS = [
     {
         "name": "accept_request",
         "description": "下发的人在本轮实际送达、@ 你的消息中明确表示通过后，代为验收你在当前对话已交付的任务。含糊、催促、继续修改不算，不得自行验收。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"request_id": {"type": "string", "description": "你已交付、待验收的用户任务 id"}},
+            "required": ["request_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reopen_request",
+        "description": ("下发的人在本轮实际送达、@ 你的消息中提出修改你在当前对话已交付（待验收）的任务时，把它退回进行中，"
+                        "改完再用 deliver_request 重新交付。修改意见由网络取那条消息原文。不要为修改另登记新任务。"),
         "inputSchema": {
             "type": "object",
             "properties": {"request_id": {"type": "string", "description": "你已交付、待验收的用户任务 id"}},

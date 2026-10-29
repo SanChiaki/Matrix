@@ -16,7 +16,8 @@ function inline(src) {
     return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>` : m;
   });
   // 裸链接：前面不能是字母数字或 href=" / > 之类，避免把已生成的 <a> 再包一层
-  s = s.replace(/(^|[^\w/"'=>])(https?:\/\/[^\s<)）]+?)(?=[。，；、]|&quot;|&#39;|[\s<)）]|$)/g, (_, pre, url) =>
+  // 中文标点（全角括号、引号、冒号等）不算进链接：“地址（说明）”里的“（”是正文
+  s = s.replace(/(^|[^\w/"'=>])(https?:\/\/[^\s<)）（「」【】《》，。；、：！？]+?)(?=[。，；、：！？（「」【】《》]|&quot;|&#39;|[\s<)）]|$)/g, (_, pre, url) =>
     `${pre}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")

@@ -22,5 +22,6 @@
 
 - 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。
 - 群聊被 @、项目会话与私聊里的消息都可以成为任务。是不是任务由接任务的 Agent 判断（提示词 `protocol._requests`），登记、交付、退回都写一条 `event` 进对话。
-- `open_request` / `deliver_request` / `accept_request` 只有席位（项目群聊、项目会话、私聊）有，不需要 `delegate`；委托任务里没有。
-- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部项目、私聊里是同一个人）。只有下发的人能验收、退回、取消；也可在本轮送达且 @ 接任务席位的消息里明确验收，由该席位用 `accept_request` 代办（记录消息依据，不开放退回或取消）。
+- `open_request` / `deliver_request` / `accept_request` / `reopen_request` 只有席位（项目群聊、项目会话、私聊）有，不需要 `delegate`；委托任务里没有。
+- 看得到任务的人：下发的人，以及接任务的 Agent 的所有者（内部项目、私聊里是同一个人）。只有下发的人能验收、退回、取消；也可在本轮送达且 @ 接任务席位的消息里明确验收，由该席位用 `accept_request` 代办（记录消息依据，不开放取消）。
+- 已交付、等验收时，下发的人在本轮送达且 @ 接任务席位的消息里提出修改：该席位用 `reopen_request` 退回进行中（同看板上的“退回”：`revisions` +1，修改意见取那条消息原文，记 `reopened_by_message_id`），改完用同一个任务重新交付，不另登记新任务。校验同代验收（本轮送达、下发人本人、@ 当前席位）；是不是修改要求由模型判断。等验收时直接再 `deliver_request` 会被拒，错误里指向 `reopen_request`。

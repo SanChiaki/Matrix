@@ -1,0 +1,45 @@
+{
+  "connectors": [
+    {
+      "id": "delivery-data",
+      "name": "交付数据",
+      "description": "项目交付数据系统：交付项目、进度、延期、验收（演示服务，令牌决定能看哪些区域）",
+      "url": "http://127.0.0.1:8790/mcp",
+      "auth": {
+        "fields": [
+          {
+            "key": "token",
+            "label": "交付数据令牌（演示：demo-huadong / demo-huanan / demo-all）",
+            "secret": true,
+            "header": "Authorization",
+            "template": "Bearer {value}"
+          }
+        ]
+      },
+      "skills": [
+        {
+          "name": "delivery-data-query",
+          "description": "交付数据的查数口径：按期率、延期、健康度、验收怎么算，用哪个工具查。查交付数据前先读。",
+          "body": "# 交付数据查数口径\n\n- **在建项目**：阶段不是“结项”的项目。\n- **按期率**：在建项目里预计完成不晚于计划完成的比例（`on_time_rate`，0–1）。\n- **延期项目**：预计完成晚于计划完成的在建项目；**平均延期**只在延期项目里平均。\n- **健康度**：延期 ≥14 天为红，5–13 天为黄，其余为绿。\n- **本周验收**：本周进入验收或结项、并已签收的项目数。\n- 数据范围由你的所有者的令牌决定（数据权限跟着人走）；没权限的区域工具会报错，不要绕过。\n\n## 用哪个工具\n\n- 看全局：`delivery_summary`（可选 `region`）。返回里已经有各阶段项目数、近 8 周按期率、延期风险项目。\n- 列项目：`list_projects`（可选 `region`、`stage`）。\n- 单个项目的里程碑：`project_detail`（`project_id`）。\n\n引用数字时写明 `as_of`（数据截至哪天）。"
+        }
+      ]
+    },
+    {
+      "id": "boards",
+      "name": "看板系统",
+      "description": "公司已有的看板系统（演示：公开，发布后任何人可见）。建草稿、改草稿、发布",
+      "url": "http://127.0.0.1:8792/mcp",
+      "domains": [
+        "board.localhost"
+      ],
+      "skills": [
+        {
+          "name": "dashboard-howto",
+          "description": "在看板系统里做看板：建草稿、给链接、等人说发布、发布前所有者确认、改草稿。做看板、发布看板时先读。",
+          "body": "# 在看板系统里做看板\n\n看板系统是公开的：**发布之后任何人打开链接都能看到**。工具以 `mcp__connectors__boards__` 开头。\n\n## 做法\n\n1. 数据从别的连接器来（比如交付数据的 `delivery_summary`），不要编数字；查不到、没权限就如实说。\n2. `create_dashboard` 建草稿：`title` 写清范围与周期，`spec` 是下面格式的 JSON 字符串。返回 `id`、`url`（发布后的公开地址）、`draft_url`（草稿预览）。\n3. 用网络工具 `add_link` 把 `url` 加进项目资料，`note` 写“草稿，预览：<draft_url>”。之后同一个看板只更新这条链接，不要再加新的。\n4. 回复里给出草稿预览，说明“要发布就告诉我；发布前会请我的所有者确认，发布后公开”。不要自己决定发布。\n5. 有人说发布：`publish_dashboard`。网络会先给你的所有者一张确认卡，所有者同意才会发出；没同意就停下、说明情况，不要换办法再发。\n   发布成功后用 `add_link` 更新那条链接，`note` 写“已发布 vN”。\n6. 要改：`update_dashboard` 只改草稿，已发布的版本不变；改完问要不要再发布。\n\n## spec 格式\n\n```json\n{\"scope\": \"华东\", \"as_of\": \"2026-10-29\",\n \"kpis\": [{\"label\": \"在建项目\", \"value\": 7, \"format\": \"int\"}, {\"label\": \"按期率\", \"value\": 0.57, \"format\": \"pct\"}],\n \"charts\": [{\"type\": \"bar\", \"title\": \"各阶段项目数\", \"format\": \"int\", \"bars\": [{\"label\": \"实施\", \"value\": 2}]},\n            {\"type\": \"line\", \"title\": \"近 8 周按期率\", \"format\": \"pct\", \"points\": [{\"x\": \"W44\", \"y\": 0.57}]}],\n \"tables\": [{\"title\": \"延期风险项目\", \"columns\": [{\"key\": \"name\", \"label\": \"项目\"}, {\"key\": \"delay_days\", \"label\": \"延期（天）\"}],\n             \"rows\": [{\"name\": \"…\", \"delay_days\": 15}]}],\n \"notes\": \"口径说明\"}\n```\n\n`format`：`int`、`pct`（0–1）、`days`。"
+        }
+      ],
+      "embed": true
+    }
+  ]
+}

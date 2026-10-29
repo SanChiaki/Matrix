@@ -122,7 +122,7 @@ def test_authorize_keeps_the_secret_out_of_state_events_and_api(tmp_path: Path, 
     a = net.create_agent("Helper", "助理", [], ["connector.use"], actor=alice)
     c = client(net, "alice@x.io")
     assert c.get("/api/connectors").json()[0] == {
-        "id": "docs", "name": "文档库", "description": "公司文档", "domains": ["docs.example.com"],
+        "id": "docs", "name": "文档库", "description": "公司文档", "domains": ["docs.example.com"], "embed": False,
         "fields": [{"key": "token", "label": "访问令牌", "secret": True}],
         "skills": [{"name": "doc-search", "description": "怎么查公司文档"}]}  # 不含地址
     r = c.post("/api/me/connections", json={"connector_id": "docs", "values": {"token": SECRET}})

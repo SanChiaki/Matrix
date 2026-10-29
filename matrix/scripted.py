@@ -10,9 +10,11 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 
-from .models import MCP_PREFIX
+from .models import MCP_PREFIX, RELEASES
 from .runtime import ScriptCall
 
 TARGETS = ("Market Research Agent", "Technical Analysis Agent", "Competitive Intelligence Agent")
@@ -57,7 +59,217 @@ def _home(call: ScriptCall) -> str:
     return "目前没有等你处理的事。"
 
 
+# ================= 交付看板（examples/delivery-dashboard，docs/project-publishing.md） =================
+# 项目里的“看板 Agent”有插件自带的技能 delivery-dashboard：用所有者授权的交付数据连接器查数，生成看板文件，
+# publish_file 发布进档案，plugin_write 在“看板”表里登记。订阅了看板发布物的人问起来，助理按快照回答。
+DASH_PLUGIN = "delivery-dashboard"
+REGION_SLUG = {"华东": "huadong", "华南": "huanan", "华北": "huabei"}
+
+
+def _asked(prompt: str) -> str:
+    asked = re.findall(r"\*\*用户[^*]*\*\*（@ 你）：(.+)", prompt)
+    return asked[-1].strip() if asked else ""
+
+
+def dashboard_spec(summary: dict, title: str) -> dict:
+    """把 delivery_summary 的结果写成看板文件（格式见技能 delivery-dashboard）。"""
+    weekly = summary.get("weekly_on_time") or []
+    prev = weekly[-2]["on_time_rate"] if len(weekly) >= 2 else None
+    return {
+        "title": title, "scope": summary.get("scope", ""), "as_of": summary.get("as_of", ""),
+        "generated_at": time.time(), "source": "交付数据 · delivery_summary",
+        "kpis": [
+            {"label": "在建项目", "value": summary.get("active_projects", 0), "format": "int"},
+            {"label": "按期率", "value": summary.get("on_time_rate", 0), "format": "pct",
+             **({"delta": round(summary.get("on_time_rate", 0) - prev, 3), "delta_label": "较上周", "good": "up"}
+                if prev is not None else {})},
+            {"label": "延期项目", "value": summary.get("delayed_projects", 0), "format": "int"},
+            {"label": "平均延期", "value": summary.get("avg_delay_days", 0), "format": "days"},
+            {"label": "本周验收", "value": summary.get("accepted_this_week", 0), "format": "int"},
+        ],
+        "charts": [
+            {"type": "line", "title": "近 8 周按期率", "format": "pct",
+             "points": [{"x": w["week"], "y": w["on_time_rate"]} for w in weekly]},
+            {"type": "bar", "title": "各阶段项目数", "format": "int",
+             "bars": [{"label": b["stage"], "value": b["count"]} for b in summary.get("by_stage") or []]},
+        ],
+        "tables": [{"title": "延期风险项目",
+                    "columns": [{"key": "name", "label": "项目"}, {"key": "stage", "label": "阶段"},
+                                {"key": "pm", "label": "项目经理"},
+                                {"key": "delay_days", "label": "延期（天）", "align": "right"},
+                                {"key": "forecast_end", "label": "预计完成"},
+                                {"key": "health", "label": "健康度", "kind": "health"}],
+                    "rows": summary.get("at_risk") or []}],
+        "notes": "按期率 = 在建项目里预计完成不晚于计划完成的比例；健康度：延期 ≥14 天红、5–13 天黄。",
+    }
+
+
+def _dash_records(call: ScriptCall) -> list[tuple[str, dict]]:
+    text = call.tool("plugin_records", plugin=DASH_PLUGIN, table="dashboards", limit=50)
+    return [(m.group(1), json.loads(m.group(2))) for m in re.finditer(r"^- (\S+?)：(\{.*\})$", text, re.M)]
+
+
+def _make_dashboard(call: ScriptCall, region: str | None, title: str, rid: str | None, refresh: str) -> str:
+    """查数 → 写文件 → 发布 → 登记。返回给人的一段结论；查不到时返回原因。"""
+    tool = "delivery-data__delivery_summary"
+    if tool not in call.connector_tools():
+        call.tool("suggest_connector", connector="交付数据", reason="做交付看板要查交付数据")
+        return "我还用不了交付数据：请我的所有者在“连接器”里授权「交付数据」并勾给我，再叫我一次。"
+    raw = call.connector(tool, **({"region": region} if region else {}))
+    try:
+        summary = json.loads(raw)
+    except ValueError:
+        return f"交付数据没查成：{raw}"
+    fname = f"{REGION_SLUG.get(region or '', 'all')}-weekly.json"
+    (call.cwd / fname).write_text(json.dumps(dashboard_spec(summary, title), ensure_ascii=False, indent=1), encoding="utf-8")
+    call.tool("publish_file", path=fname)
+    fields = {"title": title, "file": fname, "scope": summary.get("scope", ""), "owner_agent": call.agent_id}
+    if rid:
+        call.tool("plugin_write", plugin=DASH_PLUGIN, table="dashboards", record_id=rid, fields=json.dumps({"file": fname}))
+    else:
+        call.tool("plugin_write", plugin=DASH_PLUGIN, table="dashboards",
+                  fields=json.dumps({**fields, "status": "草稿", "refresh": refresh}, ensure_ascii=False))
+    worst = (summary.get("at_risk") or [{}])[0]
+    return (f"「{title}」已生成（`{fname}`，数据截至 {summary.get('as_of')}）：{summary.get('scope')} 在建 "
+            f"{summary.get('active_projects')} 个，按期率 {summary.get('on_time_rate', 0) * 100:.1f}%，延期 "
+            f"{summary.get('delayed_projects')} 个" + (f"，延期最多的是 {worst.get('name')}（{worst.get('delay_days')} 天）" if worst else "")
+            + "。在项目页“交付看板”标签里看；要给区域负责人看，请主持人在“发布”里发布成交付件。")
+
+
+def _dashboard(call: ScriptCall) -> str | None:
+    """项目里的看板 Agent：做看板、刷新、待发布时写说明。不是这些情形返回 None。"""
+    if "delivery-dashboard" not in call.skills or MCP_PREFIX + "plugin_write" not in call.tool_names:
+        return None
+    text = _asked(call.prompt)
+    if "标为待发布" in text:  # 记录触发：代表启用它的人 @ 过来
+        m = re.search(r"「(.+?)」标为待发布", text)
+        return (f"「{m.group(1) if m else '看板'}」核对过了：口径按 delivery-data-query，数字与交付数据一致。"
+                "请主持人在项目页“发布”里把看板文件发布成交付件（带上“交付看板”视图），读者填区域负责人，开“跟随档案”。")
+    if "刷新看板" in text:  # 人点“请 … 刷新”，或定时触发叫它刷新“刷新”是每天的看板
+        daily = "每天的看板" in text
+        done = []
+        for rid, f in _dash_records(call):
+            if (f.get("refresh") != "每天") if daily else (f.get("title", "") not in text and "全部" not in text):
+                continue
+            scope = str(f.get("scope", ""))
+            region = scope if scope in REGION_SLUG else None
+            done.append(_make_dashboard(call, region, f.get("title", "交付看板"), rid, f.get("refresh", "手动")))
+        return "\n\n".join(done) or "没有要刷新的看板。"
+    if text and "看板" in text:
+        region = next((r for r in REGION_SLUG if r in text), None)
+        title = f"{region or '全部区域'}交付周报"
+        r = call.tool("open_request", title=f"做「{title}」看板", expected_outcome="项目页里能看的看板，附结论")
+        req = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
+        reply = _make_dashboard(call, region, title, None, "每天" if "每天" in text else "手动")
+        if req and "已生成" in reply:
+            call.tool("deliver_request", request_id=req, summary=reply)
+        return reply
+    return None
+
+
+# ================= 接入已有的看板系统（examples/dashboard-system） =================
+# 看板系统经 MCP 包装层登记成连接器 boards：Agent 建草稿、把链接加进资料、有人说发布才发布（网络先给所有者确认）。
+BOARD = "boards__"
+
+
+def _board_system(call: ScriptCall) -> str | None:
+    text = _asked(call.prompt)
+    if not text or "看板" not in text or MCP_PREFIX + "add_link" not in call.tool_names:
+        return None
+    tools = call.connector_tools()
+    if BOARD + "create_dashboard" not in tools:
+        return None
+    region = next((r for r in REGION_SLUG if r in text), None)
+
+    def summary() -> dict | str:
+        if "delivery-data__delivery_summary" not in tools:
+            return "我还用不了交付数据：请我的所有者授权「交付数据」并勾给我。"
+        raw = call.connector("delivery-data__delivery_summary", **({"region": region} if region else {}))
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return f"交付数据没查成：{raw}"
+
+    def spec(data: dict) -> str:
+        sp = dashboard_spec(data, "")
+        return json.dumps({k: sp[k] for k in ("scope", "as_of", "kpis", "charts", "tables", "notes")}, ensure_ascii=False)
+
+    def boards() -> list[dict]:
+        try:
+            return json.loads(call.connector(BOARD + "list_dashboards"))
+        except ValueError:
+            return []
+
+    def pick() -> dict | None:
+        items = boards()
+        return next((b for b in reversed(items) if b["title"] in text), None) or (items[-1] if items else None)
+
+    if "发布" in text:
+        b = pick()
+        if b is None:
+            return "看板系统里还没有我建的看板。"
+        raw = call.connector(BOARD + "publish_dashboard", id=b["id"])
+        try:
+            done = json.loads(raw)
+        except ValueError:
+            return f"没有发布「{b['title']}」：{raw}"
+        call.tool("add_link", name=done["title"], url=done["url"], note=f"已发布 v{done['version']}（看板系统是公开的）")
+        return f"「{done['title']}」已发布 v{done['version']}：{done['url']}（公开，任何人都能打开）。项目资料里的链接已更新。"
+    if any(w in text for w in ("更新", "刷新", "改")):
+        b = pick()
+        if b is None:
+            return "看板系统里还没有我建的看板。"
+        data = summary()
+        if isinstance(data, str):
+            return data
+        d = json.loads(call.connector(BOARD + "update_dashboard", id=b["id"], spec=spec(data)))
+        return f"「{d['title']}」的草稿已更新（数据截至 {data.get('as_of')}），预览：{d['draft_url']}。已发布的版本没变，要发布就说一声。"
+    data = summary()
+    if isinstance(data, str):
+        return data
+    title = f"{region or '全部区域'}交付周报"
+    r = call.tool("open_request", title=f"在看板系统里做「{title}」", expected_outcome="看板草稿与链接")
+    req = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
+    d = json.loads(call.connector(BOARD + "create_dashboard", title=title, spec=spec(data)))
+    call.tool("add_link", name=d["title"], url=d["url"], note=f"草稿，预览：{d['draft_url']}")
+    reply = (f"「{title}」的草稿建好了（数据截至 {data.get('as_of')}：按期率 {data.get('on_time_rate', 0) * 100:.1f}%，"
+             f"延期 {data.get('delayed_projects')} 个），预览：{d['draft_url']}。链接已加进项目资料。"
+             "要发布就告诉我；看板系统是公开的，发布前会请我的所有者确认。")
+    if req:
+        call.tool("deliver_request", request_id=req, summary=reply)
+    return reply
+
+
+def _from_release(call: ScriptCall) -> str | None:
+    """订阅了看板发布物的人问交付情况：只按挂上的快照回答，写明版本与快照时间。没有挂上就说明。"""
+    text = _asked(call.prompt)
+    if not text or not re.search(r"看板|按期|延期|交付|准时|周报", text):
+        return None
+    root = call.cwd / RELEASES
+    boards = sorted(root.glob("*/*.json")) if root.is_dir() else []
+    if not boards:
+        if "这一轮没有挂上" in call.prompt:
+            return "订阅的看板这一轮没有挂上（这里有不在读者名单上的人），我不能在这里复述它的内容。"
+        return None
+    spec = json.loads(boards[0].read_text(encoding="utf-8"))
+    head = re.search(r"交付件「(.+?)」(v\d+)，快照于 ([\d\- :]+)", call.prompt)
+    k = {x["label"]: x for x in spec.get("kpis", [])}
+    rate = k.get("按期率", {}).get("value", 0)
+    risk = spec.get("tables", [{}])[0].get("rows", [])[:3]
+    return (f"按订阅的「{head.group(1) if head else spec.get('title')}」{head.group(2) if head else ''}"
+            f"（快照于 {head.group(3) if head else spec.get('as_of')}，数据截至 {spec.get('as_of')}）："
+            f"{spec.get('scope')} 在建 {k.get('在建项目', {}).get('value')} 个，按期率 {rate * 100:.1f}%，"
+            f"延期 {k.get('延期项目', {}).get('value')} 个，平均延期 {k.get('平均延期', {}).get('value')} 天。"
+            + ("风险最高的：" + "；".join(f"{r['name']}（延期 {r['delay_days']} 天，{r['pm']}）" for r in risk) + "。" if risk else ""))
+
+
 def scenario_handler(call: ScriptCall) -> str:
+    if (reply := _from_release(call)) is not None:
+        return reply
+    if (reply := _dashboard(call)) is not None:
+        return reply
+    if (reply := _board_system(call)) is not None:
+        return reply
     if MCP_PREFIX + "draft_message" in call.tool_names:
         return _home(call)
     if call.turn == 1 or call.session_id not in _SESSION:

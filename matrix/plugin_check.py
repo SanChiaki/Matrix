@@ -115,6 +115,9 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     lines = [f"✓ {m.name} {m.version}「{m.title}」 {len(files)} 个文件，{size / 1000:.1f} KB"]
     if m.tabs:
         lines.append("  标签页：" + "、".join(f"{t.label}（{t.entry}）" for t in m.tabs))
+    if m.release_views:  # 发布物里打开时只能读快照（docs/project-publishing.md 第 7 节）
+        lines.append("  能在发布物里打开：" + "、".join(t.label for t in m.tabs if t.key in m.release_views)
+                     + "（那里桥只有 context、archive.read、archive.file，读的是发布时的快照）")
     for t in m.tables:
         lines.append(f"  表 {t.key}「{t.title}」：" + "、".join(
             f"{f.label}{'*' if f.required else ''}（{f.type}）" for f in t.fields))
@@ -127,7 +130,7 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
                 else f"外部回调{f'，写进表 {t.table}' if t.table else ''}")
         lines.append(f"  触发 {t.key}（{TRIGGER_CN[t.type]}）：{when} → @{t.to} {t.text}")
     if skills:
-        lines.append("  打法：" + "、".join(skills))
+        lines.append("  技能：" + "、".join(skills))
     return lines
 
 

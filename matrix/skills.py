@@ -201,7 +201,7 @@ def unzip(data: bytes) -> list[tuple[str, bytes]]:
             continue
         total += m.file_size
         if total > SKILL_LIMIT or len(out) >= 500:
-            raise SkillError(f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
+            raise SkillError(f"上传的技能超过 {SKILL_LIMIT // 1_000_000} MB")
         out.append((m.filename, z.read(m)))
     return out
 
@@ -215,25 +215,25 @@ def install(root: Path, entries: list[tuple[str, bytes]]) -> SkillInfo:
     entries = [(p, b) for p, b in entries if not _junk(p)]
     tops = [p.split("/") for p, _ in entries if p.split("/")[-1] == SKILL_FILE]
     if not tops:
-        raise SkillError("技能包里没有 SKILL.md")
+        raise SkillError("上传的技能里没有 SKILL.md")
     prefix = min(tops, key=len)[:-1]
     if len(prefix) > 1:
-        raise SkillError("SKILL.md 要在技能包的根目录（或唯一的顶层文件夹）里")
+        raise SkillError("SKILL.md 要在上传内容的根目录（或唯一的顶层文件夹）里")
     cut = len(prefix)
     files: dict[Path, bytes] = {}
     for p, b in entries:
         parts = p.split("/")
         if parts[:cut] != prefix:
-            raise SkillError("技能包里只能有一个技能")
+            raise SkillError("一次只能上传一个技能")
         rel = safe_rel("/".join(parts[cut:]))
         if rel is None:
             raise SkillError(f"非法的文件名：{p!r}")
         files[rel] = b
     if sum(len(b) for b in files.values()) > SKILL_LIMIT:
-        raise SkillError(f"技能包超过 {SKILL_LIMIT // 1_000_000} MB")
+        raise SkillError(f"上传的技能超过 {SKILL_LIMIT // 1_000_000} MB")
     head = files.get(Path(SKILL_FILE))
     if head is None:
-        raise SkillError("技能包里没有 SKILL.md")
+        raise SkillError("上传的技能里没有 SKILL.md")
     try:
         text = head.decode("utf-8")
     except UnicodeDecodeError as e:

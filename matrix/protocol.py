@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, SKILLS, ABILITY_TOOLS,
+                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -128,6 +128,8 @@ TOOL_GUIDE: dict[str, str] = {
     "list_decisions": "查看项目档案里的全部决定（include_inactive 包含已取代 / 撤销的）。",
     "publish_file": ("把当前工作目录里的一个文件（或一个目录，打成 zip）发布进项目档案，所有成员此后在 `./project/` 读到"
                      "（只发布别人要用、已经定稿的交付物）。"),
+    "add_link": ("把外部的一个链接（http/https，如你在别的系统里建好的看板、文档）加进项目资料，所有人都能点开"
+                 "（name：名称，url：地址，note：一句说明）。同一个地址再加就是更新。"),
     "propose_brief": "建议修改项目纲要（写完整的新纲要和理由），主持人决定。",
     "propose_skill": ("把一个值得反复用的做法提议为项目技能（name：小写英文与连字符，description：什么时候用，"
                       "body：怎么做，reason：为什么值得沉淀），主持人批准后项目里的成员才能用。"),
@@ -152,6 +154,8 @@ TOOL_GUIDE: dict[str, str] = {
     "open_request": "人交代给你一件有交付目标的事时，先登记为任务（title、expected_outcome），它会出现在下发人的看板上。",
     "accept_request": "仅当下发的人在本轮实际送达、@ 你的消息中明确验收你已交付的任务时，按其指示验收（request_id）。不能自行验收、退回或取消。",
     "deliver_request": "任务做完后交付（request_id、summary：交付了什么、在哪里），由下发的人验收。",
+    "reopen_request": ("下发的人在本轮实际送达、@ 你的消息中提出修改你已交付、待验收的任务时，先把它退回进行中（request_id），"
+                       "改完用同一个 request_id 重新交付。"),
 }
 
 
@@ -218,6 +222,26 @@ def format_abilities(cloud: list[tuple[str, str]], device: list[str],
     return "\n".join(parts), key
 
 
+def format_subscriptions(items: list[dict]) -> tuple[str, str]:
+    """所有者给这个 Agent 订阅的发布物（docs/project-publishing.md，不变量 23）。返回 (说明, 指纹)；没有订阅时都为空。
+    items：{name, title, kind, version, why, snapshot_at, skills, files}，why 非空表示这一轮没生效。"""
+    if not items:
+        return "", ""
+    key = hashlib.sha1(json.dumps(items, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:16]
+    lines = ["## 订阅的发布物",
+             "你的所有者订阅了别的项目发布出来的内容。它们是某个时间点的快照，只读；引用其中的数据时写明版本与快照时间。"]
+    for it in items:
+        head = f"- {'技能包' if it['kind'] == 'method' else '交付件'}「{it['title']}」v{it['version']}"
+        if it["why"]:
+            lines.append(f"{head}：这一轮没有挂上（{it['why']}）。不要凭记忆复述它的内容。")
+        elif it["kind"] == "method":
+            lines.append(f"{head}：技能已并入 `./{SKILLS}/`（{'、'.join(it['skills'])}）。")
+        else:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(it["snapshot_at"])) if it.get("snapshot_at") else "未知时间"
+            lines.append(f"{head}，快照于 {when}：只读文件在 `./{RELEASES}/{it['name']}/`（{'、'.join(it['files'])}）。")
+    return "\n".join(lines), key
+
+
 def _requests() -> list[str]:
     return [
         "", "## 人交代的任务（看板）",
@@ -230,6 +254,8 @@ def _requests() -> list[str]:
         "只有明确说通过、可以了、就这样、验收才调用；含糊、催促、继续改都不算。没有明确授权不要调用，"
         "不要把验收消息登记成新任务；不确定对应哪个任务时先澄清。网络只校验来源、轮次与席位，语义由你判断。",
         "- 一条消息只登记一次。下发的人退回时，在原有工作上修改，然后用同一个 request_id 重新交付。",
+        "- 已交付、在等验收的任务，下发的人这一轮 @ 你提出修改（改内容、补东西、接着往下做同一件事）时，"
+        "先 reopen_request 退回进行中，改完用同一个 request_id 交付，不要另登记新任务；验收、催促、闲聊不算修改。",
     ]
 
 
