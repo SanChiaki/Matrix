@@ -5332,6 +5332,9 @@ class Network:
             r = self.store.requests.get(rid)
             if r is None or r.agent_id != ctx.agent_id or r.conversation_id != ctx.conversation_id:
                 return f"任务 {rid} 不存在，或不是你在这个对话里接下的", True
+            if r.status == "in_review":
+                return (f"任务 {rid} 已交付、在等验收。下发的人这一轮 @ 你提出修改的，先用 reopen_request 退回进行中，"
+                        "改完再用同一个 request_id 交付；不要另登记新任务"), True
             if r.status != "in_progress":
                 return f"任务 {rid} 当前是 {r.status}，只有进行中的任务可以交付", True
             if not summary:
@@ -5352,10 +5355,7 @@ class Network:
                 return f"任务 {rid} 不存在，或不是你在这个对话里接下的", True
             if r.status != "in_review":
                 return "只有已交付（待验收）的任务可以验收", True
-            conv = self.store.conversations.get(ctx.conversation_id)
-            sources = [m for m in conv.messages if m.id in ctx.addressed and m.role == "user"
-                       and m.user_id == r.requester_id and r.requester_id is not None
-                       and ctx.agent_id in m.mentions] if conv else []
+            sources = self._requester_messages(ctx, r)
             if not sources:
                 return "下发的人没有在这一轮消息里表示验收：需要本人这一轮实际送达、@ 你的消息", True
             running = [t for t in r.task_ids if (t2 := self.store.tasks.get(t)) and t2.status == TaskStatus.RUNNING]
@@ -5365,6 +5365,33 @@ class Network:
             self.store.save()
         self._request_event(r, f"{self._name(r.agent_id)} 按{self._who(r.requester_id)}的指示验收了「{r.title}」")
         return f"已按下发人的指示验收 {r.id}，任务已完成。", False
+
+    def _requester_messages(self, ctx: ExecContext, r: UserRequest) -> list[Message]:
+        """调用方持有锁。这一轮实际送达、@ 当前席位的下发人消息：代验收、代退回的依据。"""
+        conv = self.store.conversations.get(ctx.conversation_id)
+        return [m for m in conv.messages if m.id in ctx.addressed and m.role == "user"
+                and m.user_id == r.requester_id and r.requester_id is not None
+                and ctx.agent_id in m.mentions] if conv else []
+
+    def _tool_reopen_request(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        """下发的人在群聊里 @ 接任务的 Agent 要求修改已交付的任务：按他的话退回进行中，与看板上“退回”同一个状态，
+        修改意见取那条消息原文（网络认定，不用模型转述）。是不是修改要求由模型判断，网络只校验来源、轮次与席位。"""
+        rid = str(args.get("request_id", "")).strip()
+        with self._lock:
+            r = self.store.requests.get(rid)
+            if r is None or r.agent_id != ctx.agent_id or r.conversation_id != ctx.conversation_id:
+                return f"任务 {rid} 不存在，或不是你在这个对话里接下的", True
+            if r.status != "in_review":
+                return "只有已交付（待验收）的任务可以退回；进行中的直接接着做", True
+            sources = self._requester_messages(ctx, r)
+            if not sources:
+                return "下发的人没有在这一轮消息里要求修改：需要本人这一轮实际送达、@ 你的消息", True
+            src = sources[-1]
+            r.status, r.revisions, r.delivered_at = "in_progress", r.revisions + 1, None
+            r.feedback, r.reopened_by_message_id = src.text[:2000], src.id
+            self.store.save()
+        self._request_event(r, f"{self._name(r.agent_id)} 按{self._who(r.requester_id)}的修改要求把「{r.title}」退回进行中")
+        return f"已退回进行中 {r.id}（第 {r.revisions} 次修改）。改完用 deliver_request 重新交付（request_id: {r.id}）。", False
 
     def _complete_request(self, r: UserRequest, reviewer: str | None, message_id: str | None = None) -> None:
         """调用方持有锁。看板与对话代验收共用完成状态与审计字段。"""
@@ -5411,6 +5438,7 @@ class Network:
                 if not feedback:
                     raise NetworkError("退回时写明要改什么")
                 r.status, r.revisions, r.feedback, r.delivered_at = "in_progress", r.revisions + 1, feedback[:2000], None
+                r.reopened_by_message_id = None
                 seat = self._seat(self._conv(r.conversation_id), r.agent_id)
                 if seat.blocked:
                     self._unblock(seat)
@@ -6000,6 +6028,7 @@ TOOL_HANDLERS = {
     "open_request": Network._tool_open_request,
     "deliver_request": Network._tool_deliver_request,
     "accept_request": Network._tool_accept_request,
+    "reopen_request": Network._tool_reopen_request,
     "suggest_connector": Network._tool_suggest_connector,
     "plugin_records": Network._tool_plugin_records,
     "plugin_write": Network._tool_plugin_write,

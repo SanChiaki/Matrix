@@ -373,6 +373,17 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "reopen_request",
+        "description": ("下发的人在本轮实际送达、@ 你的消息中提出修改你在当前对话已交付（待验收）的任务时，把它退回进行中，"
+                        "改完再用 deliver_request 重新交付。修改意见由网络取那条消息原文。不要为修改另登记新任务。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"request_id": {"type": "string", "description": "你已交付、待验收的用户任务 id"}},
+            "required": ["request_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 

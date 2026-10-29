@@ -5,7 +5,7 @@
 - 纲要（字段名 `brief`）与仍然有效的决定作为背景推送给席位与委托任务（执行者是群成员，档案是项目的公开内容，不违反不变量 9）；只在档案版本变化时重新推送。
   提示词里不写“先读档案”之类的指令（参照 Raft RFC 070：宣布状态重建会让 Agent 先做整理仪式而不是处理工作；research: raft#rfc-070-session-recycle）。
 - 档案工具 `record_decision` / `list_decisions` / `publish_file` / `add_link` / `propose_brief` / `propose_skill` 项目成员都有，**不需要 `delegate`**；
-  用户任务工具 `open_request` / `deliver_request` / `accept_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`MATRIX_TOOLS`），网络端再按执行上下文检查一次。
+  用户任务工具 `open_request` / `deliver_request` / `accept_request` / `reopen_request` 席位都有；其余网络工具（协作工具）需要 `delegate`（`engine.network_tools_for`）。MCP 服务只列出这次能用的工具（`MATRIX_TOOLS`），网络端再按执行上下文检查一次。
 - `publish_file` 只能发布当前工作目录里的文件（不含 `project/` 与 `agent-home/`）；`project/` 是只读副本，运行里的改动丢弃。
 - `add_link` 把一个 http(s) 链接加进资料（如 Agent 在外部系统里建好的看板）：同一个地址再加是更新名称与说明，`log.jsonl` 记 `ref.add` / `ref.update` 与哪个 Agent，群聊里公开一条；域名对得上连接器目录的，连接器面板认出。人删链接仍只能主持人在项目页上做。
 - 资料里地址落在部署方允许嵌入（连接器目录 `embed`）的域名下的链接，主持人可以“设为标签”嵌进项目页（`ref.tab`，见 [connectors-skills.md](connectors-skills.md)“外部页面标签”）。

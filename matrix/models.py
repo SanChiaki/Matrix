@@ -109,7 +109,7 @@ def attachment_rel(a: dict[str, Any]) -> str:
 # 项目档案工具：项目成员都有，不需要 delegate。其余网络工具（协作工具）需要 delegate。
 ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "add_link", "propose_brief", "propose_skill")
 # 用户任务工具：席位（项目群聊、项目会话、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
-REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request")
+REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request", "reopen_request")
 # 读项目现状的工具：项目会话里的助理（读这个项目）与助理对话（读主人参与的任一项目）有，按主人的可见性过滤。
 SESSION_TOOLS = ("read_chat", "read_request")
 # 助理对话工具：只有助理对话（人和自己助理的私聊）里有：起草要以主人名义发进项目群聊的消息、主人的定时（不变量 21）。
@@ -122,7 +122,8 @@ ABILITY_TOOLS = ("suggest_connector",)
 NOTE_TOOLS = ("open_note",)
 # 会让别人看到内容的网络工具：会话读过越界的来源时一律不放行（不变量 22）。群聊回复与任务交付另外拦下等所有者确认
 OUTBOUND_TOOLS = ("record_decision", "publish_file", "add_link", "propose_brief", "propose_skill", "plugin_write", "delegate",
-                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request")
+                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request",
+                  "reopen_request")
 
 
 class TaskStatus(StrEnum):
@@ -498,6 +499,7 @@ class UserRequest:
     finished_at: float | None = None
     reviewed_by: str | None = None       # 验收的人（网络认定）
     accepted_by_message_id: str | None = None  # 代验收依据；看板操作无消息
+    reopened_by_message_id: str | None = None  # 最近一次代退回的依据（reopen_request）；看板退回无消息
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
