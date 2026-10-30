@@ -45,6 +45,7 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
+from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
 from .auth import Pairings
@@ -137,7 +138,8 @@ class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
-                 plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None):
+                 plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None,
+                 fetch: FetchConfig | None = None):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -150,6 +152,8 @@ class Network:
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
         self.connectors = connectors or ConnectorCatalog(self.store.root / "connectors.json")
         self.vault = Vault(self.store.root)
+        # 抓取白名单（部署方维护的 fetch.json，热加载）：有它时云侧 Agent 用 web_fetch.py 替代 dsh 自带的 web_fetch
+        self.fetch = fetch or FetchConfig(self.store.root / "fetch.json")
         # 管理后台（docs/reference/admin.md）：每次运行时调用记一行用量；管理员由部署方按邮箱指定
         self.usage = UsageLog(self.store.root)
         self.admins = {a.strip().lower() for a in (admins or []) if a.strip()}
@@ -4798,7 +4802,8 @@ class Network:
                                               approvals=approvals, materials=materials, home=home,
                                               harness=agent.harness, cancel=cancel, connectors=connectors,
                                               local_connectors=[c.connector_id for c in conns if c.where != "cloud"],
-                                              llm_provider=llm_provider, env=llm_env))
+                                              llm_provider=llm_provider, env=llm_env,
+                                              fetch=None if agent.device_runtime else self.fetch.policy()))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
