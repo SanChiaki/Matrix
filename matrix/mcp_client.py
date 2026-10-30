@@ -255,6 +255,21 @@ class RemoteMCP:
                 break
         return tools
 
+    def list_resources(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        cursor = None
+        for _ in range(20):
+            result = self._call("resources/list", {"cursor": cursor} if cursor else {}) or {}
+            out += [r for r in result.get("resources") or [] if isinstance(r, dict) and r.get("uri")]
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        return out
+
+    def read_resource(self, uri: str) -> str:
+        result = self._call("resources/read", {"uri": uri}) or {}
+        return "\n".join(str(c.get("text", "")) for c in result.get("contents") or [] if isinstance(c, dict))
+
     def call_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         result = self._call("tools/call", {"name": name, "arguments": args}) or {}
         parts = []

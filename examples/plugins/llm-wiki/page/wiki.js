@@ -44,7 +44,7 @@ function render(md, base) {
 }
 
 async function nav() {
-  const text = await call("wiki_list");
+  const text = await call("list");
   const [pages, raws] = text.split("## 原始资料");
   const items = (s) => [...s.matchAll(/^- (\S+?)(?:：(.*))?$/gm)].map((m) => ({ path: m[1], title: m[2] || m[1].split("/").pop() }));
   const link = (x) => `<a href="#" data-path="${esc(x.path)}" class="${x.path === current ? "on" : ""}">${esc(x.title)}</a>`;
@@ -56,9 +56,9 @@ async function nav() {
 async function open(path, version) {
   $("#err").textContent = "";
   current = path;
-  const text = await call("wiki_read", version ? { path, version } : { path });
+  const text = await call("read", version ? { path, version } : { path });
   const hist = path.startsWith("wiki/") && !path.endsWith("index.md") && !path.endsWith("log.md")
-    ? await call("wiki_history", { path }) : "";
+    ? await call("history", { path }) : "";
   const versions = [...hist.matchAll(/^- (\S+)/gm)].map((m) => m[1]);
   $("#doc").innerHTML = `<div class="path"><span>${esc(path)}${version ? `（旧版本 ${esc(version)}）` : ""}</span>`
     + (version ? `<button class="ghost" data-path="${esc(path)}">看最新版</button>` : "")
@@ -68,7 +68,7 @@ async function open(path, version) {
 }
 
 async function search(q) {
-  const text = await call("wiki_search", { query: q, scope: "all" });
+  const text = await call("search", { query: q, scope: "all" });
   const hits = [...text.matchAll(/^- (\S+)（(.*?)）\n((?:  > .*\n?)*)/gm)];
   $("#doc").innerHTML = `<h1>搜索：${esc(q)}</h1>` + (hits.length ? `<div class="hits">${hits.map((m) =>
     `<div class="hit"><a href="#" data-path="${esc(m[1])}">${esc(m[2])}</a><small>${esc(m[3].replace(/^  > /gm, ""))}</small></div>`).join("")}</div>`
@@ -76,7 +76,7 @@ async function search(q) {
 }
 
 async function lint() {
-  const text = await call("wiki_lint");
+  const text = await call("lint");
   const [head, ...rest] = text.split("\n");
   $("#doc").innerHTML = `<h1>体检结果</h1><p>${esc(head)}</p>`
     + (rest.length ? `<ul>${rest.map((l) => `<li class="bad">${inline(l.replace(/^- /, ""), "wiki/x.md")}</li>`).join("")}</ul>` : "")

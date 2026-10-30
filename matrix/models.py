@@ -121,8 +121,9 @@ SESSION_TOOLS = ("read_chat", "read_request")
 HOME_TOOLS = ("draft_message", "schedule", "list_schedules", "cancel_schedule")
 # 插件记录工具：项目里装了把它们开给 Agent 的插件时才有（档案类工具，不需要 delegate）
 PLUGIN_TOOLS = ("plugin_records", "plugin_write")
-# 插件服务工具：项目里装了带服务的插件时才有（docs/plugin-hooks.md）。工具走网络工具这条通道，三种 harness、云侧端侧都一样
-SERVICE_TOOLS = ("plugin_tools", "plugin_call")
+# 插件服务的工具按原名 <插件>__<工具> 出现在网络工具里（docs/plugin-hooks.md）：网络工具的 MCP 服务在 tools/list 时
+# 用这个保留名经同一条回调向网络取，三种 harness、云侧端侧都一样
+LIST_TOOLS = "__list_tools__"
 PLUGIN_MOUNT = "plugins"         # 插件 mount 挂点在工作目录里的挂载名（只读副本，运行后丢弃）
 PLUGIN_CONTEXT_TOTAL = 8000      # 全部插件的 context 挂点一轮最多往提示词里加多少字符
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）

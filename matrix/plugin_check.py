@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from . import plugins as pluginfs
+from .plugin_service import secret_env
 from .models import PLUGIN_PAGE_CAPS
 
 TEXT_SUFFIXES = (".html", ".htm", ".js", ".mjs", ".css")
@@ -105,6 +106,8 @@ def lint(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     # 插件服务：只能放进部署方目录；程序要在包里；挂点模板里的占位符
     if m.service is not None:
         out.append("带 service：只能放进部署方的插件目录（plugins.json），主持人上传会被拒绝")
+        if m.service.url:
+            out.append(f"远程服务：部署方要在 Matrix 和服务两边配同一个签名密钥（环境变量 {secret_env(m.name)}）")
         for a in m.service.args:
             if a.startswith("{plugin}/") and Path(a[len("{plugin}/"):]) not in files:
                 out.append(f"service.args 里的 {a} 不在包里")
@@ -141,10 +144,11 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     lines.append("  Agent 能做：" + ("、".join({"records.read": "查记录", "records.write": "建 / 改记录"}[c]
                                              for c in m.agent_tools) or "不开放记录工具"))
     if m.service is not None:
-        lines.append("  插件服务：" + " ".join([m.service.command, *m.service.args]) + "；开给 Agent 的工具："
-                     + "、".join(f"{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools))
-        hooks = ([f"挂载 {x.path} → plugins/{m.name}/{x.as_}/" for x in m.mounts]
-                 + [f"上下文「{x.label}」（{x.file or x.tool}，≤{x.budget} 字）" for x in m.contexts]
+        where = m.service.url or " ".join([m.service.command or "", *m.service.args])
+        lines.append(f"  插件服务（{'部署方的远程服务' if m.service.url else '网络托管'}）：{where}；开给 Agent 的工具："
+                     + "、".join(f"{m.name}__{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools))
+        hooks = ([f"挂载 {x.resources}… → plugins/{m.name}/{x.as_}/" for x in m.mounts]
+                 + [f"上下文「{x.label}」（{x.resource or x.tool}，≤{x.budget} 字）" for x in m.contexts]
                  + [f"{x.on} 之后 {'@' + (x.to or '') if x.to else '调 ' + (x.tool or '')}" for x in m.afters])
         if hooks:
             lines.append("  挂点：" + "；".join(hooks))

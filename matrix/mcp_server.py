@@ -17,6 +17,7 @@ TOKEN = os.environ.get("MATRIX_TOKEN", "")
 TIMEOUT = float(os.environ.get("MATRIX_TOOL_TIMEOUT", "1800"))
 ALLOWED = [n for n in os.environ.get("MATRIX_TOOLS", "").split(",") if n]  # 这次执行能用的工具；空 = 全部
 PROTO = "2025-06-18"
+LIST_TOOLS = "__list_tools__"  # 同 models.LIST_TOOLS（本文件只依赖标准库，不导入 matrix）
 # 回调的是本机网络（云侧服务或端侧连接器的本机桥）：不走系统 / 环境里配置的代理
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -220,31 +221,6 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
-    # ---- 插件服务：项目里装了带服务的插件时才有（docs/plugin-hooks.md，不变量 24） ----
-    {
-        "name": "plugin_tools",
-        "description": "列出项目插件服务开给你的工具：做什么、参数、只读还是写入。插件名见推送的项目档案。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"plugin": {"type": "string", "description": "插件名，如 llm-wiki"}},
-            "required": ["plugin"],
-            "additionalProperties": False,
-        },
-    },
-    {
-        "name": "plugin_call",
-        "description": "调用项目插件服务的一个工具（先用 plugin_tools 看有哪些）。写入类工具写进项目档案，项目里所有人都看得到。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "plugin": {"type": "string", "description": "插件名"},
-                "tool": {"type": "string", "description": "工具名，如 wiki_search"},
-                "arguments": {"type": "string", "description": "JSON 对象字符串：工具的参数，如 {\"query\": \"定价\"}"},
-            },
-            "required": ["plugin", "tool"],
-            "additionalProperties": False,
-        },
-    },
     {
         "name": "propose_skill",
         "description": ("把一个值得反复用的做法提议为项目技能。主持人批准后进项目档案，项目里的成员此后都能用；"
@@ -430,6 +406,19 @@ def call_network(name: str, args: dict) -> tuple[str, bool]:
         return f"无法连接网络：{e!r}", True
 
 
+def plugin_tools() -> list[dict]:
+    if not URL:
+        return []
+    text, is_error = call_network(LIST_TOOLS, {})
+    if is_error:
+        return []
+    try:
+        tools = json.loads(text)
+    except ValueError:
+        return []
+    return [t for t in tools if isinstance(t, dict) and t.get("name")] if isinstance(tools, list) else []
+
+
 def main() -> None:
     # MCP stdio 是 UTF-8、按换行分消息；Windows 上管道默认用区域编码（如 GBK），换行写成 CRLF
     sys.stdin.reconfigure(encoding="utf-8", errors="replace")
@@ -451,8 +440,10 @@ def main() -> None:
                 "serverInfo": {"name": "matrix", "version": "0.2.0"},
             }})
         elif method == "tools/list":
-            # 只列出这次执行能用的工具；网络端仍会按执行上下文再检查一次
-            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [t for t in TOOLS if not ALLOWED or t["name"] in ALLOWED]}})
+            # 只列出这次执行能用的工具；网络端仍会按执行上下文再检查一次。项目插件服务的工具（<插件>__<工具>）
+            # 不在静态表里：经同一条回调向网络取（LIST_TOOLS），网络按这一轮的项目与白名单给
+            send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [t for t in TOOLS if not ALLOWED or t["name"] in ALLOWED]
+                                                                   + plugin_tools()}})
         elif method == "tools/call":
             p = msg.get("params") or {}
             text, is_error = call_network(str(p.get("name")), p.get("arguments") or {})

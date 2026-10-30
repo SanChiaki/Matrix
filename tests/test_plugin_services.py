@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from matrix import plugins as pluginfs
-from matrix.engine import ExecContext, Network, NetworkError, network_tools_for
+from matrix.engine import ExecContext, Network, NetworkError
 from matrix.models import MCP_PREFIX
 from matrix.plugin_check import lint, load
 from matrix.plugin_service import ServiceError, ServiceHost, StdioClient, resolve_command, service_env
@@ -57,11 +57,16 @@ def service_data(net: Network, g) -> Path:
     ({"service": {"command": "python", "tools": {}}}, "service.tools"),
     ({"service": {"command": "python", "tools": {"x": "admin"}}}, "read 或 write"),
     ({"service": {"command": "python", "transport": "http", "tools": {"x": "read"}}}, "stdio"),
-    ({"hooks": {"context": [{"tool": "wiki_write", "label": "x"}]}}, "read 类"),
+    ({"hooks": {"context": [{"tool": "write", "label": "x"}]}}, "read 类"),
     ({"hooks": {"context": [{"tool": "nope", "label": "x"}]}}, "不在 service.tools"),
-    ({"hooks": {"context": [{"file": "a.md", "tool": "wiki_index", "label": "x"}]}}, "二选一"),
-    ({"hooks": {"context": [{"file": "../etc/passwd", "label": "x"}]}}, "相对路径"),
-    ({"hooks": {"context": [{"file": "a.md", "label": "x", "budget": 99999}]}}, "budget"),
+    ({"hooks": {"context": [{"resource": "wiki:///a.md", "tool": "index", "label": "x"}]}}, "二选一"),
+    ({"hooks": {"context": [{"resource": "../etc/passwd", "label": "x"}]}}, "资源 URI"),
+    ({"hooks": {"context": [{"resource": "wiki:///a.md", "label": "x", "budget": 99999}]}}, "budget"),
+    ({"hooks": {"mount": [{"resources": "wiki:///../", "as": "w"}]}}, "资源 URI"),
+    ({"service": {"command": "python", "url": "https://x.io/mcp", "tools": {"x": "read"}}}, "二选一"),
+    ({"service": {"url": "http://10.0.0.5/mcp", "tools": {"x": "read"}}}, "https"),
+    ({"service": {"command": "python", "tools": {"a.b": "read"}}}, "工具名无效"),
+    ({"name": "x" * 60}, "最长 64"),
     ({"hooks": {"after": [{"on": "message.added", "notify": {"to": "a", "text": "b"}}]}}, "request.accepted"),
     ({"hooks": {"route": []}}, "只能有"),
 ])
@@ -84,8 +89,8 @@ def test_example_wiki_package_is_valid():
     """示例插件过 matrix-plugin check：服务、挂点、三个技能、页面。"""
     files = load(WIKI)
     m = pluginfs.check_package(files)
-    assert m.service is not None and dict(m.service.tools)["wiki_write"] == "write"
-    assert [c.file for c in m.contexts] == ["wiki/index.md"] and m.mounts[0].as_ == "wiki"
+    assert m.service is not None and dict(m.service.tools)["write"] == "write"
+    assert [c.resource for c in m.contexts] == ["wiki:///wiki/index.md"] and m.mounts[0].as_ == "wiki"
     assert m.afters[0].on == "request.accepted" and m.afters[0].to == "{agent}"
     assert {p.parts[1] for p in files if p.parts[0] == "skills"} == {"wiki-ingest", "wiki-query", "wiki-lint"}
     assert not [w for w in lint(files, m) if "service" not in w]
@@ -155,20 +160,30 @@ def test_service_tools_only_in_project_runs(tmp_path: Path):
     net, rt, host, keeper, g, seen = setup(tmp_path, handler=lambda call: "ok")
     net.install_plugin(g.id, "llm-wiki", actor=host)
     net.send_message(net.project_chat(g.id, actor=host).id, "@知识管家 在吗", actor=host, background=False)
-    assert MCP_PREFIX + "plugin_call" in seen[-1]["tools"] and MCP_PREFIX + "plugin_tools" in seen[-1]["tools"]
+    assert MCP_PREFIX + "llm-wiki__search" in seen[-1]["tools"] and MCP_PREFIX + "llm-wiki__write" in seen[-1]["tools"]
     other = net.create_project("别的项目", "", [keeper.id], actor=host)
     net.send_message(net.project_chat(other.id, actor=host).id, "@知识管家 在吗", actor=host, background=False)
-    assert MCP_PREFIX + "plugin_call" not in seen[-1]["tools"] and seen[-1]["mounted"] is None
+    assert MCP_PREFIX + "llm-wiki__search" not in seen[-1]["tools"] and seen[-1]["mounted"] is None
     net.send_message(net.direct_chat(keeper.id, actor=host).id, "在吗", actor=host, background=False)
-    assert MCP_PREFIX + "plugin_call" not in seen[-1]["tools"]
-    assert "plugin_call" not in network_tools_for("seat", False, False, services=True)
+    assert MCP_PREFIX + "llm-wiki__search" not in seen[-1]["tools"]
 
 
 def _ctx(net: Network, agent, g, **kw) -> ExecContext:
     return ExecContext(kind="seat", id=f"{net.project_chat(g.id).id}/{agent.id}", agent_id=agent.id,
                        conversation_id=net.project_chat(g.id).id, project_id=g.id,
                        authority=kw.pop("authority", ["file.write"]), constraints=[], depth=0, chain=[agent.id],
-                       services=True, **kw)
+                       services=kw.pop("services", True), **kw)
+
+
+def call(net: Network, ctx: ExecContext, name: str, **args) -> tuple[str, bool]:
+    return net.handle_tool(_register(net, ctx), name, args)
+
+
+def _register(net: Network, ctx: ExecContext) -> str:
+    import secrets
+    token = secrets.token_urlsafe(8)
+    net._contexts[token] = ctx
+    return token
 
 
 def test_write_tools_need_file_write_and_pass_flow(tmp_path: Path):
@@ -179,30 +194,31 @@ def test_write_tools_need_file_write_and_pass_flow(tmp_path: Path):
     net.install_plugin(g.id, "llm-wiki", actor=host)
     net.invite(g.id, "guest@x.io", actor=host)
     net.respond_invitation(g.id, True, actor=guest)  # 有别人的项目
-    args = {"plugin": "llm-wiki", "tool": "wiki_add_source",
-            "arguments": json.dumps({"topic": "t", "slug": "s", "title": "T", "content": "c"})}
-    text, err = net._tool_plugin_call(_ctx(net, keeper, g, authority=[]), args)
+    args = {"topic": "t", "slug": "s", "title": "T", "content": "c"}
+    text, err = call(net, _ctx(net, keeper, g, authority=[]), "llm-wiki__add_source", **args)
     assert err and "file.write" in text
-    text, err = net._tool_plugin_call(_ctx(net, keeper, g, sources=["me"]), args)
+    text, err = call(net, _ctx(net, keeper, g, sources=["me"]), "llm-wiki__add_source", **args)
     assert err and "不放行" in text
-    text, err = net._tool_plugin_call(_ctx(net, keeper, g, sources=["me"]), {"plugin": "llm-wiki", "tool": "wiki_index"})
+    text, err = call(net, _ctx(net, keeper, g, sources=["me"]), "llm-wiki__index")
     assert not err and "项目 Wiki 目录" in text
-    text, err = net._tool_plugin_call(_ctx(net, keeper, g), {"plugin": "llm-wiki", "tool": "shutdown"})
+    text, err = call(net, _ctx(net, keeper, g), "llm-wiki__shutdown")
     assert err and "没有开出" in text
-    text, err = net._tool_plugin_call(_ctx(net, keeper, g), args)
+    text, err = call(net, _ctx(net, keeper, g, services=False), "llm-wiki__index")
+    assert err and "未知工具" in text  # 不在装了它的项目里的运行：没有这个工具
+    text, err = call(net, _ctx(net, keeper, g), "llm-wiki__add_source", **args)
     assert not err and "所有参与方都看得到" in text
     log = (net.store.project_dir(g.id).parent / "log.jsonl").read_text(encoding="utf-8")
-    assert '"plugin.service.call"' in log and '"wiki_add_source"' in log and '"content"' not in log  # 留痕不记参数
+    assert '"plugin.service.call"' in log and '"add_source"' in log and '"content"' not in log  # 留痕不记参数
 
 
 def test_page_bridge_reads_only(tmp_path: Path):
     """不变量 20、24：插件页面经桥只能调只读工具，写类工具一律拒绝。"""
     net, _, host, _, g, _ = setup(tmp_path, handler=lambda call: "ok")
     net.install_plugin(g.id, "llm-wiki", actor=host)
-    assert "项目 Wiki 目录" in net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "wiki_index"}, actor=host)
+    assert "项目 Wiki 目录" in net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "index"}, actor=host)
     with pytest.raises(NetworkError, match="只读"):
         net.plugin_bridge(g.id, "llm-wiki", "service.call",
-                          {"tool": "wiki_write", "arguments": {"path": "a/b", "content": "# x", "summary": "x"}}, actor=host)
+                          {"tool": "write", "arguments": {"path": "a/b", "content": "# x", "summary": "x"}}, actor=host)
 
 
 def test_disable_stops_service_and_hooks(tmp_path: Path):
@@ -216,20 +232,20 @@ def test_disable_stops_service_and_hooks(tmp_path: Path):
     net.set_plugin_enabled(g.id, "llm-wiki", False, actor=host)
     assert not net.services.running(g.id, "llm-wiki")
     net.send_message(chat.id, "@知识管家 还在吗", actor=host, background=False)
-    assert seen[-1]["mounted"] is None and MCP_PREFIX + "plugin_call" not in seen[-1]["tools"]
+    assert seen[-1]["mounted"] is None and MCP_PREFIX + "llm-wiki__search" not in seen[-1]["tools"]
     net.uninstall_plugin(g.id, "llm-wiki", actor=host)
     assert service_data(net, g).joinpath("wiki", "index.md").is_file()  # 卸载不删数据
 
 
 # ================= 示例：项目 Wiki 走一遍 =================
 def test_llm_wiki_end_to_end(tmp_path: Path):
-    """不变量 24：装上项目 Wiki → 收进资料（插件技能 + plugin_call 写进服务）→ 下一轮提示词带 wiki 目录（context）、
+    """不变量 24：装上项目 Wiki → 收进资料（插件技能 + 按原名调用的插件工具写进服务）→ 下一轮提示词带 wiki 目录（context）、
     工作目录有只读副本（mount）→ 提问带出处作答 → 验收后网络代验收的人 @ 它写回（after），写回的页面出现在 wiki 里。"""
     net, rt, host, keeper, g, seen = setup(tmp_path)
     for f in sorted(MATERIALS.glob("*.md")):
         net.publish_file(g.id, f.name, f.read_bytes(), actor=host)
     info = net.install_plugin(g.id, "llm-wiki", actor=host)
-    assert info["service"]["tools"] and info["hooks"]["context"][0]["file"] == "wiki/index.md"
+    assert info["service"]["tools"] and info["hooks"]["context"][0]["resource"] == "wiki:///wiki/index.md"
     chat = net.project_chat(g.id, actor=host)
 
     net.send_message(chat.id, "@知识管家 把项目资料收进 wiki", actor=host, background=False)
@@ -260,7 +276,7 @@ def test_llm_wiki_end_to_end(tmp_path: Path):
     assert pages and "8–12 美元" in pages[0].read_text(encoding="utf-8")
     log = (data / "wiki" / "log.md").read_text(encoding="utf-8")
     assert log.count("] ingest |") == 3
-    lint_report = net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "wiki_lint"}, actor=host)
+    lint_report = net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "lint"}, actor=host)
     assert "没有发现问题" in lint_report
 
 
@@ -288,22 +304,85 @@ def test_wiki_engine_lint_catches_ungrounded_numbers(tmp_path: Path):
     c = StdioClient(argv, tmp_path)
     c.start()
     try:
-        out, err = c.call("wiki_add_source", {"topic": "m", "slug": "r", "title": "R", "content": "增长 42% ，用户 1200 人"})
+        out, err = c.call("add_source", {"topic": "m", "slug": "r", "title": "R", "content": "增长 42% ，用户 1200 人"})
         assert not err and "raw/m/r.md" in out
-        out, err = c.call("wiki_add_source", {"topic": "m", "slug": "r", "title": "R", "content": "x"})
+        out, err = c.call("add_source", {"topic": "m", "slug": "r", "title": "R", "content": "x"})
         assert "raw/m/r-2.md" in out  # 原始资料不可变：同名另起一份
         page = "# R\n\n> 来源：x；原始资料：[R](../../raw/m/r.md)；更新：2026-10-30\n\n- 增长 42%\n- 用户 1300 人\n- [坏](../m/nope.md)\n"
-        assert not c.call("wiki_write", {"path": "m/r", "content": page, "summary": "R 的要点"})[1]
+        assert not c.call("write", {"path": "m/r", "content": page, "summary": "R 的要点"})[1]
         (tmp_path / "wiki" / "m" / "orphan.md").write_text("# 孤儿\n", encoding="utf-8")
-        report, _ = c.call("wiki_lint", {})
+        report, _ = c.call("lint", {})
         assert "1300" in report and "42%" not in report and "坏链接" in report and "孤儿页" in report
-        c.call("wiki_write", {"path": "m/r", "content": page.replace("1300", "1200"), "summary": "R 的要点"})
-        hist, _ = c.call("wiki_history", {"path": "wiki/m/r.md"})
-        old, _ = c.call("wiki_read", {"path": "wiki/m/r.md", "version": hist.split("- ")[1].strip()})
+        c.call("write", {"path": "m/r", "content": page.replace("1300", "1200"), "summary": "R 的要点"})
+        hist, _ = c.call("history", {"path": "wiki/m/r.md"})
+        old, _ = c.call("read", {"path": "wiki/m/r.md", "version": hist.split("- ")[1].strip()})
         assert "1300" in old
         with pytest.raises(ServiceError, match="unknown method"):
             c._request("nope/method", {}, 5)
-        assert c.call("wiki_read", {"path": "../../etc/passwd"})[1]
+        assert c.call("read", {"path": "../../etc/passwd"})[1]
     finally:
         c.stop()
     assert os.path.isdir(tmp_path / "history")
+
+
+# ================= 部署方的远程服务 =================
+def test_remote_service_partitions_by_signed_project_token(tmp_path: Path, monkeypatch):
+    """不变量 24：服务也可以是部署方运行的远程 MCP。网络每次调用带一个只对这个项目、这个插件有效的签名令牌，
+    服务按它切分数据：两个项目各写各的，伪造或缺少令牌一律 401；Matrix 这边没配密钥时这个插件的工具不出现。"""
+    import importlib.util
+    import shutil
+    import threading
+    spec = importlib.util.spec_from_file_location("wiki_engine", WIKI / "service" / "wiki_engine.py")
+    engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(engine)
+    server = engine.make_http_server(0, tmp_path / "remote", b"s3cret")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_address[1]}/mcp"
+    try:
+        pkg = tmp_path / "catalog" / "llm-wiki"
+        shutil.copytree(WIKI, pkg)
+        m = json.loads((pkg / "plugin.json").read_text(encoding="utf-8"))
+        m["service"] = {"url": url, "tools": m["service"]["tools"]}
+        (pkg / "plugin.json").write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+        shutil.rmtree(pkg / "service")
+        (tmp_path / "catalog" / "plugins.json").write_text('{"plugins": ["llm-wiki"]}', encoding="utf-8")
+        seen: list[dict] = []
+
+        def spy(call: ScriptCall) -> str:
+            seen.append({"tools": list(call.tool_names), "prompt": call.prompt})
+            return scenario_handler(call)
+        net = Network(ScriptedRuntime(spy), tmp_path / "data", seed=False,
+                      plugins=pluginfs.PluginCatalog(tmp_path / "catalog" / "plugins.json"))
+        host, = users(net, "host@x.io")
+        net.ensure_assistant(host)
+        keeper = net.create_agent("知识管家", "维护项目 Wiki", [], ["file.write"], actor=host)
+        a = net.create_project("甲", "", [keeper.id], actor=host)
+        b = net.create_project("乙", "", [keeper.id], actor=host)
+        for g in (a, b):
+            net.install_plugin(g.id, "llm-wiki", actor=host)
+
+        net.send_message(net.project_chat(a.id, actor=host).id, "@知识管家 在吗", actor=host, background=False)
+        assert MCP_PREFIX + "llm-wiki__search" not in seen[-1]["tools"]  # 部署方没配密钥：这个插件这一轮不可用
+
+        monkeypatch.setenv("MATRIX_PLUGIN_SECRET_LLM_WIKI", "s3cret")
+        net.services.stop(a.id, "llm-wiki")
+        for f in sorted(MATERIALS.glob("*.md")):
+            net.publish_file(a.id, f.name, f.read_bytes(), actor=host)
+        chat = net.project_chat(a.id, actor=host)
+        net.send_message(chat.id, "@知识管家 把项目资料收进 wiki", actor=host, background=False)
+        assert "已把 2 份资料编进 wiki" in next(x for x in reversed(chat.messages) if x.role == "agent").text
+        net.send_message(chat.id, "@知识管家 竞品的定价大概在什么区间？", actor=host, background=False)
+        assert "协同白板竞品定价调研" in seen[-1]["prompt"]  # context 挂点经远程服务的资源取到目录
+        assert (tmp_path / "remote" / a.id / "wiki" / "research" / "market-report.md").is_file()
+        assert not (tmp_path / "remote" / b.id / "wiki" / "research").exists()  # 乙项目的 wiki 里没有甲的东西
+
+        import urllib.error
+        import urllib.request
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "resources/list"}).encode()
+        for auth in ("", f"Bearer v1.{a.id}.9999999999.{'0' * 64}"):
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "Authorization": auth})
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5)
+            assert e.value.code == 401
+    finally:
+        server.shutdown()

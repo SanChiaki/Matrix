@@ -1,13 +1,17 @@
-"""插件服务：网络托管的 stdio MCP 进程（docs/plugin-hooks.md 第 4 节）。
+"""插件服务：标准 MCP 服务的客户端（docs/plugin-hooks.md 第 4 节，不变量 24）。
 
-只有部署方目录里的插件能带服务（不变量 24）。一个安装（项目 × 插件）一个进程，按需启动、空闲停掉；
-工作目录是这个安装的数据目录，环境里只有运行一个程序必需的变量，不带任何凭证与网络的密钥。
-网络是 MCP 客户端：列工具、调工具。工具调用的身份、权限、留痕都在 engine，服务看到的只是参数。
-只依赖标准库。
+只有部署方目录里的插件能带服务。两种来源：
+- 网络托管的 stdio 进程（`StdioClient`）：一个安装（项目 × 插件）一个进程，按需启动、空闲停掉；工作目录是这个安装的数据目录，
+  环境里只有运行一个程序必需的变量，不带任何凭证与网络的密钥。
+- 部署方运行的远程 MCP（`RemoteService`）：网络每次调用带一个只对这个项目、这个插件有效的签名令牌（`sign_token`），
+  服务按它切分数据；密钥由部署方放在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>` 里。
+网络是 MCP 客户端：列工具、调工具、列资源、读资源。工具调用的身份、权限、留痕都在 engine，服务看到的只是参数。
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import queue
@@ -25,6 +29,7 @@ START_TIMEOUT = 20.0      # 启动 + initialize 最多等多久
 IDLE_STOP = 15 * 60       # 空闲多久停掉进程
 START_FAILURES = 3        # 连续启动失败几次后暂停，等主持人重新启用
 RESULT_LIMIT = 60_000     # 工具结果最多回给 Agent 多少字符
+TOKEN_TTL = 600           # 远程服务的项目令牌有效秒数
 # 子进程只继承这些变量：找得到程序、能在 Windows 上起进程、文本按 UTF-8。名字带 KEY / TOKEN / SECRET 的一律不给
 _KEEP_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "LANG", "LC_ALL")
 
@@ -39,6 +44,18 @@ def service_env(data: Path) -> dict[str, str]:
     env.update(HOME=str(data), USERPROFILE=str(data), PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
                PYTHONDONTWRITEBYTECODE="1")
     return env
+
+
+def secret_env(plugin: str) -> str:
+    """远程插件服务的签名密钥放在哪个环境变量里（部署方配置，和服务那边约定同一个值）。"""
+    return "MATRIX_PLUGIN_SECRET_" + plugin.upper().replace("-", "_")
+
+
+def sign_token(secret: bytes, project: str, plugin: str, now: float | None = None) -> str:
+    """`v1.<项目 id>.<过期时间>.<签名>`：服务验签后按项目切分数据，不信任别的来源给的项目 id。"""
+    exp = int((time.time() if now is None else now) + TOKEN_TTL)
+    sig = hmac.new(secret, f"v1.{project}.{plugin}.{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"v1.{project}.{exp}.{sig}"
 
 
 def resolve_command(command: str, args: tuple[str, ...], pkg: Path, data: Path) -> list[str]:
@@ -136,10 +153,19 @@ class StdioClient:
             self.last_used = time.time()
             res = self._request("tools/call", {"name": name, "arguments": args}, timeout) or {}
         parts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
-        text = "\n".join(parts)
-        if len(text) > RESULT_LIMIT:
-            text = text[:RESULT_LIMIT] + f"\n…（结果太长，只回了前 {RESULT_LIMIT} 个字符）"
-        return text, bool(res.get("isError"))
+        return _clip("\n".join(parts)), bool(res.get("isError"))
+
+    def resources(self) -> list[dict[str, Any]]:
+        with self._lock:
+            self.last_used = time.time()
+            res = self._request("resources/list", {}, CALL_TIMEOUT) or {}
+        return [r for r in res.get("resources") or [] if isinstance(r, dict) and r.get("uri")]
+
+    def read_resource(self, uri: str) -> str:
+        with self._lock:
+            self.last_used = time.time()
+            res = self._request("resources/read", {"uri": uri}, CALL_TIMEOUT) or {}
+        return "\n".join(str(c.get("text", "")) for c in res.get("contents") or [] if isinstance(c, dict))
 
     def stop(self) -> None:
         p, self.proc = self.proc, None
@@ -154,19 +180,84 @@ class StdioClient:
             p.kill()
 
 
+def _clip(text: str) -> str:
+    if len(text) > RESULT_LIMIT:
+        return text[:RESULT_LIMIT] + f"\n…（结果太长，只回了前 {RESULT_LIMIT} 个字符）"
+    return text
+
+
+class RemoteService:
+    """部署方运行的远程插件服务：和 StdioClient 同样的接口。每次调用换一个新签的项目令牌。"""
+
+    def __init__(self, url: str, project: str, plugin: str, secret: bytes):
+        from .mcp_client import RemoteMCP  # 延迟导入：只有用到远程服务时才需要
+        self.project, self.plugin, self.secret = project, plugin, secret
+        self.mcp = RemoteMCP(url, timeout_s=CALL_TIMEOUT)
+        self.last_used = time.time()
+        self._tools: list[dict[str, Any]] | None = None
+
+    def _auth(self) -> None:
+        self.last_used = time.time()
+        self.mcp.headers["Authorization"] = "Bearer " + sign_token(self.secret, self.project, self.plugin)
+
+    def _wrap(self, fn: Any, *a: Any) -> Any:
+        from .mcp_client import MCPError
+        self._auth()
+        try:
+            return fn(*a)
+        except MCPError as e:
+            raise ServiceError(str(e)) from e
+
+    @property
+    def tools(self) -> list[dict[str, Any]]:
+        if self._tools is None:
+            self._tools = self._wrap(self.mcp.list_tools)
+        return self._tools
+
+    def alive(self) -> bool:
+        return True
+
+    def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT) -> tuple[str, bool]:
+        text, err = self._wrap(self.mcp.call_tool, name, args)
+        return _clip(text), err
+
+    def resources(self) -> list[dict[str, Any]]:
+        return self._wrap(self.mcp.list_resources)
+
+    def read_resource(self, uri: str) -> str:
+        return self._wrap(self.mcp.read_resource, uri)
+
+    def stop(self) -> None:
+        return None
+
+
 @dataclass
 class ServiceHost:
     """所有插件服务进程。key = (项目 id, 插件名)；版本换了（升级）就重启。"""
 
-    _procs: dict[tuple[str, str], tuple[str, StdioClient]] = field(default_factory=dict)
+    _procs: dict[tuple[str, str], tuple[str, Any]] = field(default_factory=dict)
     _failures: dict[tuple[str, str], int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def remote(self, project_id: str, plugin: str, version: str, url: str) -> RemoteService:
+        """部署方的远程服务：不起进程，只缓存客户端（会话、工具列表）。"""
+        key = (project_id, plugin)
+        secret = os.environ.get(secret_env(plugin), "").encode()
+        if not secret:
+            raise ServiceError(f"部署方没配签名密钥：环境变量 {secret_env(plugin)}")
+        with self._lock:
+            hit = self._procs.get(key)
+            if hit is not None and hit[0] == version and isinstance(hit[1], RemoteService) and hit[1].mcp.url == url:
+                return hit[1]
+            c = RemoteService(url, project_id, plugin, secret)
+            self._procs[key] = (version, c)
+            return c
 
     def client(self, project_id: str, plugin: str, version: str, argv: list[str], cwd: Path) -> StdioClient:
         key = (project_id, plugin)
         with self._lock:
             hit = self._procs.get(key)
-            if hit is not None and hit[0] == version and hit[1].alive():
+            if hit is not None and hit[0] == version and isinstance(hit[1], StdioClient) and hit[1].alive():
                 return hit[1]
             if hit is not None:
                 hit[1].stop()
@@ -185,9 +276,10 @@ class ServiceHost:
             return c
 
     def running(self, project_id: str, plugin: str) -> bool:
+        """有一个在跑的托管进程（远程服务不算）。"""
         with self._lock:
             hit = self._procs.get((project_id, plugin))
-            return hit is not None and hit[1].alive()
+            return hit is not None and isinstance(hit[1], StdioClient) and hit[1].alive()
 
     def stop(self, project_id: str, plugin: str) -> None:
         """停用、卸载、升级时调。也清掉失败计数：主持人重新启用就是“再试一次”。"""

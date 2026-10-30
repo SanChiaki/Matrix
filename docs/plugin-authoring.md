@@ -377,36 +377,47 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
 页面、表、触发碰不到 Agent 每一轮看到什么。要做记忆、Wiki、知识库这类东西，插件需要一个**服务**和几个**挂点**
 （设计见 [plugin-hooks.md](plugin-hooks.md)，完整示例 `examples/plugins/llm-wiki/`）。
 
-**服务**是一个标准的 stdio MCP 程序（按行收发 JSON-RPC：`initialize`、`tools/list`、`tools/call`），不需要 Matrix 专用的 SDK：
+**服务**是一个标准的 MCP 服务，不需要 Matrix 专用的 SDK。两种来源二选一：
 
 ```json
 "service": {
   "command": "python",
   "args": ["{plugin}/service/wiki_engine.py", "--root", "{data}"],
-  "tools": {"wiki_search": "read", "wiki_read": "read", "wiki_write": "write"}
+  "tools": {"search": "read", "read": "read", "write": "write"}
 }
 ```
 
-- 网络按项目启动一个进程，工作目录是这个项目的数据目录（`{data}`），第一次用到时启动、空闲 15 分钟停掉。
+```json
+"service": {
+  "url": "https://wiki.example.com/mcp",
+  "tools": {"search": "read", "read": "read", "write": "write"}
+}
+```
+
+- `command`：网络按项目启动一个 stdio 进程，工作目录是这个项目的数据目录（`{data}`），第一次用到时启动、空闲 15 分钟停掉。
+- `url`：部署方自己运行的远程服务（Streamable HTTP）。网络每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`，
+  签名是 HMAC-SHA256(密钥, `v1.<项目>.<插件名>.<过期>`)；服务要验签、检查过期，再按项目切分数据。密钥由部署方在两边配同一个值
+  （Matrix 这边是环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`，大写，`-` 换成 `_`）。示例引擎的 `check_token` 可以照抄。
 - 进程环境里没有任何凭证：要连外部服务请走连接器。服务**不要调模型**：要模型做的事写进技能，交给项目里的 Agent。
-- `tools` 是白名单和读写分级：只有列出来的工具给 Agent（经 `plugin_tools` / `plugin_call`）和页面（只有 `read` 类）；
-  `write` 类要 Agent 有写权限，且会被信息流检查拦下（读过私下对话的会话不能写进项目数据）。每次调用都记日志，但不记参数和结果。
+- `tools` 是白名单和读写分级：只有列出来的工具出现在 Agent 那里，名字是 `<插件名>__<工具名>`（合起来 ≤64 个字符），带服务自己的
+  schema 与说明；页面只能调 `read` 类。`write` 类要 Agent 有写权限，且会被信息流检查拦下（读过私下对话的会话不能写进项目数据）。
+  每次调用都记日志，但不记参数和结果。
 - 只能放进部署方的插件目录（`plugins.json`）：服务端执行的代码要部署方审核过。
 
-**挂点**（都要有 `service`，读的是它的数据目录）：
+**挂点**（都要有 `service`，读的是它的 MCP 资源）：
 
 ```json
 "hooks": {
-  "mount":   [{"path": "wiki", "as": "wiki"}],
-  "context": [{"file": "wiki/index.md", "budget": 3000, "label": "项目 Wiki 目录"}],
+  "mount":   [{"resources": "wiki:///wiki/", "as": "wiki"}],
+  "context": [{"resource": "wiki:///wiki/index.md", "budget": 3000, "label": "项目 Wiki 目录"}],
   "after":   [{"on": "request.accepted", "notify": {"to": "{agent}", "text": "「{title}」已验收，写回 wiki。交付说明：{summary}"}}]
 }
 ```
 
 | 挂点 | 效果 |
 | --- | --- |
-| `mount` | 数据目录里的子目录只读挂进 Agent 工作目录的 `plugins/<插件>/<as>/`，每轮刷新 |
-| `context` | 每轮往提示词里加一段，标明来自你的插件：`file`（一个数据文件，没变就不重推）或 `tool`（调一个 read 类工具，参数模板可用 `{latest}`、`{mission}`），截到 `budget`（≤4000） |
+| `mount` | URI 以 `resources` 开头的资源只读放进 Agent 工作目录的 `plugins/<插件>/<as>/`（去掉前缀就是相对路径），每轮刷新 |
+| `context` | 每轮往提示词里加一段，标明来自你的插件：`resource`（一个资源，没变就不重推）或 `tool`（调一个 read 类工具，参数模板可用 `{latest}`、`{mission}`），截到 `budget`（≤4000） |
 | `after` | 项目群聊里的用户任务被验收之后：`notify` 以验收的人的名义 @ 成员（`{agent}` 是接任务的 Agent），或 `tool` 由网络调一个工具 |
 
 这些挂点只对装了插件的项目里的运行生效，dsh、Claude Code、Codex 和云侧、端侧都一样。

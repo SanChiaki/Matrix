@@ -35,7 +35,8 @@ KEY = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 VERSION = re.compile(r"^\d+(\.\d+){0,3}([-+][0-9A-Za-z.-]+)?$")
 FIELD_TYPES = ("text", "longtext", "number", "date", "select", "bool", "agent", "file")
 TRIGGER_TYPES = ("webhook", "schedule", "record")
-TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+TOOL_SEP = "__"                        # 插件工具在 Agent 那里的名字：<插件名>__<工具名>（MCP 工具名只许字母、数字、_、-，≤64）
 TOOL_CLASSES = ("read", "write")
 HOOK_EVENTS = ("request.accepted",)   # after 挂点第一期只接验收过的用户任务
 SERVICE_TOOLS_MAX = 40
@@ -96,12 +97,15 @@ class Trigger:
 
 @dataclass(frozen=True)
 class Service:
-    """插件服务：网络托管的 stdio MCP 进程（不变量 24）。command 是 `python`（网络自己的解释器）或程序名；
-    args 里 `{plugin}` 换成装进项目的包目录，`{data}` 换成这个安装的数据目录。tools 是开给 Agent 的白名单与读写分级。"""
-    command: str
+    """插件服务：一个标准 MCP 服务（不变量 24），两种来源二选一：
+    - command：网络托管的 stdio 进程。`python` 是网络自己的解释器；args 里 `{plugin}` 换成装进项目的包目录，`{data}` 换成这个安装的数据目录。
+    - url：部署方自己运行的远程 MCP（Streamable HTTP）。网络每次调用带一个只对这个项目有效的签名令牌，服务按它切分数据。
+    tools 是开给 Agent 的白名单与读写分级。"""
+    command: str | None
     args: tuple[str, ...]
     tools: tuple[tuple[str, str], ...]   # (工具名, read | write)
     network: bool = False                # 清单声明要不要联网（第一期只是声明，由部署方审核）
+    url: str | None = None
 
     def tool_class(self, name: str) -> str | None:
         return next((c for n, c in self.tools if n == name), None)
@@ -109,16 +113,17 @@ class Service:
 
 @dataclass(frozen=True)
 class Mount:
-    path: str      # 数据目录里的子目录
-    as_: str       # 挂进工作目录 plugins/<插件>/<as_>/
+    """把服务的一组 MCP 资源只读放进工作目录：URI 以 resources 开头的，去掉这个前缀就是 plugins/<插件>/<as_>/ 下的路径。"""
+    resources: str  # 资源 URI 前缀，如 wiki:///wiki/
+    as_: str
 
 
 @dataclass(frozen=True)
 class ContextHook:
-    """每轮运行前往提示词里加一段，标明来源插件：file（数据目录里一个文件）或 tool（调一个 read 类工具）。"""
+    """每轮运行前往提示词里加一段，标明来源插件：resource（读服务的一个 MCP 资源）或 tool（调一个 read 类工具）。"""
     label: str
     budget: int
-    file: str | None = None
+    resource: str | None = None
     tool: str | None = None
     args: tuple[tuple[str, str], ...] = ()   # 参数模板：{latest}（这一轮 @ 它的那条消息）、{mission}（委托目标）
 
@@ -171,9 +176,10 @@ class Manifest:
             "connectors": list(self.connectors),
             "release_views": list(self.release_views),
             "service": ({"tools": [{"name": n, "class": c} for n, c in self.service.tools],
-                         "network": self.service.network} if self.service else None),
-            "hooks": {"mount": [{"path": m.path, "as": m.as_} for m in self.mounts],
-                      "context": [{"label": c.label, "file": c.file, "tool": c.tool, "budget": c.budget} for c in self.contexts],
+                         "network": self.service.network, "hosted": self.service.url is None} if self.service else None),
+            "hooks": {"mount": [{"resources": m.resources, "as": m.as_} for m in self.mounts],
+                      "context": [{"label": c.label, "resource": c.resource, "tool": c.tool, "budget": c.budget}
+                                  for c in self.contexts],
                       "after": [{"on": a.on, "to": a.to, "tool": a.tool} for a in self.afters]},
             "triggers": [{"key": t.key, "type": t.type, "to": t.to, "text": t.text, "table": t.table, "cron": t.cron,
                           "when": ({"field": t.when_field, "equals": t.when_equals} if t.when_field else
@@ -305,6 +311,8 @@ def parse_manifest(data: Any) -> Manifest:
                 when_equals = _s(when.get("equals"), f"触发 {key} 的 when.equals", 200)
         triggers.append(Trigger(key, ttype, to, text, table, cron, when_field, when_equals, on_create))
     service = _service(data.get("service"))
+    if service is not None and any(len(name) + len(TOOL_SEP) + len(n) > 64 for n, _ in service.tools):
+        raise PluginError(f"工具在 Agent 那里叫 {name}{TOOL_SEP}<工具名>，最长 64 个字符：缩短插件名或工具名")
     mounts, contexts, afters = _hooks(data.get("hooks"), service)
     if not tabs and not tables and not triggers and service is None:
         raise PluginError("插件至少要有一个标签、一张表、一个触发或一个服务")
@@ -329,26 +337,38 @@ def _service(v: Any) -> Service | None:
         return None
     if not isinstance(v, dict):
         raise PluginError("service 必须是对象")
-    command = str(v.get("command") or "").strip()
-    if not re.match(r"^[A-Za-z0-9_.{}/-]{1,200}$", command) or ".." in command:
+    command = str(v.get("command") or "").strip() or None
+    url = str(v.get("url") or "").strip() or None
+    if bool(command) == bool(url):
+        raise PluginError("service 要写 command（网络托管）或 url（部署方的远程 MCP），二选一")
+    if command and (not re.match(r"^[A-Za-z0-9_.{}/-]{1,200}$", command) or ".." in command):
         raise PluginError(f"service.command 无效：{command!r}（写 python，或部署机器上的程序名）")
+    if url and not re.match(r"^(https://[^\s/]+|http://(127\.0\.0\.1|localhost)(:\d+)?)(/\S*)?$", url):
+        raise PluginError(f"service.url 要是 https 地址（本机调试可以用 http://127.0.0.1）：{url!r}")
     args = v.get("args") or []
-    if not isinstance(args, list) or len(args) > 20:
-        raise PluginError("service.args 必须是列表，最多 20 项")
+    if not isinstance(args, list) or len(args) > 20 or (args and url):
+        raise PluginError("service.args 必须是列表，最多 20 项，只给 command 用")
     args_t = tuple(_s(a, f"service.args[{i}]", 500, required=False) for i, a in enumerate(args))
-    if (v.get("transport") or "stdio") != "stdio":
-        raise PluginError("service.transport 第一期只支持 stdio")
+    if (v.get("transport") or ("http" if url else "stdio")) != ("http" if url else "stdio"):
+        raise PluginError("service.transport：command 是 stdio，url 是 http")
     tools = v.get("tools") or {}
     if not isinstance(tools, dict) or not tools or len(tools) > SERVICE_TOOLS_MAX:
         raise PluginError(f"service.tools 是对象（工具名 → read / write），1–{SERVICE_TOOLS_MAX} 个")
     out = []
     for n, c in tools.items():
         if not TOOL_NAME.match(str(n)):
-            raise PluginError(f"service.tools 里的工具名无效：{n!r}")
+            raise PluginError(f"service.tools 里的工具名无效：{n!r}（字母开头，字母、数字、_、-）")
         if c not in TOOL_CLASSES:
             raise PluginError(f"工具 {n} 的分级要是 read 或 write")
         out.append((str(n), str(c)))
-    return Service(command, args_t, tuple(out), bool(v.get("network")))
+    return Service(command, args_t, tuple(out), bool(v.get("network")), url)
+
+
+def _uri(v: Any, what: str) -> str:
+    v = str(v or "").strip()
+    if not re.match(r"^[a-z][a-z0-9+.-]*:[^\s]{1,300}$", v) or ".." in v:
+        raise PluginError(f"{what} 要是 MCP 资源 URI，如 wiki:///wiki/index.md：{v!r}")
+    return v
 
 
 def _templates(v: Any, what: str) -> tuple[tuple[str, str], ...]:
@@ -370,7 +390,7 @@ def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[Co
         if not isinstance(items, list) or len(items) > HOOKS_MAX:
             raise PluginError(f"hooks.{k} 必须是列表，最多 {HOOKS_MAX} 个")
         if items and service is None and k != "after":
-            raise PluginError(f"hooks.{k} 读的是插件服务的数据：清单里要有 service")
+            raise PluginError(f"hooks.{k} 读的是插件服务的资源：清单里要有 service")
 
     def tool_ok(name: Any, what: str, need: str | None = None) -> str:
         name = str(name or "")
@@ -385,25 +405,18 @@ def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[Co
     for i, m in enumerate(lists["mount"]):
         if not isinstance(m, dict):
             raise PluginError(f"hooks.mount[{i}] 必须是对象")
-        p = safe_rel(str(m.get("path") or ""))
-        if p is None or any(x.startswith(".") for x in p.parts):
-            raise PluginError(f"hooks.mount[{i}].path 要是数据目录里的相对路径")
-        mounts.append(Mount(p.as_posix(), _key(m.get("as") or p.name, f"hooks.mount[{i}].as")))
+        prefix = _uri(m.get("resources"), f"hooks.mount[{i}].resources")
+        mounts.append(Mount(prefix, _key(m.get("as"), f"hooks.mount[{i}].as")))
     contexts = []
     for i, c in enumerate(lists["context"]):
-        if not isinstance(c, dict) or bool(c.get("file")) == bool(c.get("tool")):
-            raise PluginError(f"hooks.context[{i}] 要是对象，file 和 tool 二选一")
+        if not isinstance(c, dict) or bool(c.get("resource")) == bool(c.get("tool")):
+            raise PluginError(f"hooks.context[{i}] 要是对象，resource 和 tool 二选一")
         budget = int(c.get("budget") or 2000)
         if not 100 <= budget <= CONTEXT_BUDGET:
             raise PluginError(f"hooks.context[{i}].budget 在 100–{CONTEXT_BUDGET} 之间")
-        file = None
-        if c.get("file"):
-            p = safe_rel(str(c["file"]))
-            if p is None or any(x.startswith(".") for x in p.parts):
-                raise PluginError(f"hooks.context[{i}].file 要是数据目录里的相对路径")
-            file = p.as_posix()
+        resource = _uri(c["resource"], f"hooks.context[{i}].resource") if c.get("resource") else None
         tool = tool_ok(c["tool"], f"hooks.context[{i}]", "read") if c.get("tool") else None
-        contexts.append(ContextHook(_s(c.get("label"), f"hooks.context[{i}].label", 40), budget, file, tool,
+        contexts.append(ContextHook(_s(c.get("label"), f"hooks.context[{i}].label", 40), budget, resource, tool,
                                     _templates(c.get("args"), f"hooks.context[{i}].args")))
     afters = []
     for i, a in enumerate(lists["after"]):
