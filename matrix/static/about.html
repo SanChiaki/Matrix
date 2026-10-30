@@ -557,7 +557,7 @@ footer a { color: var(--text-2); }
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
           <li><code>vault/</code>连接器凭证与模型供应商密钥，加密保存，只在代调用或那一轮运行时解开</li>
           <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
-          <li><code>models.json</code> · <code>connectors.json</code> · <code>plugins.json</code>云侧预置模型、云端连接器与插件目录，改文件即生效</li>
+          <li><code>models.json</code> · <code>connectors.json</code> · <code>plugins.json</code> · <code>fetch.json</code>云侧预置模型、云端连接器、插件目录与抓取白名单，改文件即生效</li>
         </ul></div></div>
       </div>
 
@@ -575,6 +575,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>权限覆盖层</h4><p><code>--patch</code> 按有效权限禁用插件，沙箱只能写自己的工作目录，按 Agent 设模型与平台配的供应商（密钥只经那个进程的环境变量）；只读网络给的技能，不读服务机上的</p></div>
           <div class="part"><h4>网络工具</h4><p>stdio MCP 服务回调 <code>/internal/tools</code>，凭这一轮的执行上下文令牌</p></div>
           <div class="part"><h4>连接器桥</h4><p>外部服务的工具也回调网络（<code>/internal/connectors</code>），网络查这一轮能用哪些，带上凭证代为调用并记录</p></div>
+          <div class="part"><h4>白名单抓取</h4><p>部署方配了 <code>fetch.json</code> 时，替代 dsh 自带的 <code>web_fetch</code>：公网照抓，内网只抓白名单里的域名与网段，每一跳重定向都重新校验</p></div>
           <div class="part"><h4>审批应答</h4><p>沙箱升权申请转给 Agent 所有者决定，从不自动批准</p></div>
           <div class="part"><h4>私有目录</h4><p>每轮挂载进工作目录，写回时按文件三方合并，冲突另存副本</p></div>
         </div></div></div>

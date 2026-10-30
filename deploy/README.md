@@ -46,6 +46,27 @@ docker compose up -d --build
 协议、地址、密钥），不用进容器改 dsh：密钥加密存在 `matrix-data` 卷的 `vault/` 里，`models.json` 里只有协议和地址。
 保管密钥（`MATRIX_VAULT_KEY` 或数据卷里的 `vault.key`）丢了，就要在后台重新填一遍各供应商的密钥。
 
+## 内网抓取白名单（可选）
+
+dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒绝，也没有白名单可配。要让云侧 Agent 抓内网页面，
+在数据卷里放一份 `/data/fetch.json`；改这个文件即生效，不用重启。删掉文件回到 dsh 自带的 `web_fetch`。
+
+```json
+{
+  "allow": ["wiki.corp.example", "*.svc.internal", "10.20.0.0/16", "192.168.1.8"],
+  "public": true,
+  "replace_builtin": true
+}
+```
+
+- `allow`：能抓的内网目标。域名含子域名（`*.x` 与 `x` 一样），也可以写 IP 或网段。
+- `public`：也抓公网地址（默认是）。
+- `replace_builtin`：关掉 dsh 自带的 `web_fetch`（默认是），只留 Matrix 的 `mcp__matrix_web__fetch`，`web_search` 不受影响。
+  两个都在时模型常挑自带的那个，在内网地址上碰壁，所以默认关掉。
+
+只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，把 CA 加进容器的证书库（或设 `SSL_CERT_FILE`）。
+升级 dsh 后跑 `matrix-dsh-check`，`web-fetch` 一项确认自带的 `web_fetch` 仍然关得掉。
+
 ## 更新
 
 ```bash

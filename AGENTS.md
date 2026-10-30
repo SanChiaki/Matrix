@@ -68,12 +68,13 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
 | `matrix/releases.py` | 发布物的版本快照（`releases/<id>/v<N>/`：技能、文件、插件页面、`manifest.json`）的写入、清理与安全取文件；谁能发布、能看、订阅何时生效在 `engine.py`「发布与订阅」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
-| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
+| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载、配了抓取白名单时自带的 web_fetch 关得掉；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
 | `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
 | `matrix/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `MATRIX_CONNECTORS`），热加载；地址只来自这里 |
 | `matrix/vault.py` | 连接器凭证与模型供应商密钥的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |
 | `matrix/mcp_client.py` | 网络这一侧的远程 MCP 客户端（Streamable HTTP，JSON / SSE），代调用云端连接器 |
 | `matrix/mcp_connectors.py` | 运行时这一侧的 stdio 桥：把连接器工具转发到 `/internal/connectors/*`，只带执行上下文令牌 |
+| `matrix/web_fetch.py` | 带白名单的网页抓取（仅标准库的 stdio MCP，`mcp__matrix_web__fetch`）：部署方的 `fetch.json`（`--fetch` / `MATRIX_FETCH`，热加载）在时，云侧有 `web.research` 的 Agent 用它替代 dsh 自带的 `web_fetch`（覆盖层关掉自带的、保留 `web_search`）；公网照抓，内网只抓白名单里的域名与网段，连接固定在校验过的地址上，每一跳重定向重新校验 |
 | `matrix/model_catalog.py` | 云侧预置模型目录：部署方维护的 `models.json`（管理后台的“模型”页也编辑它，带版本整份保存）（默认 `<data>/models.json`，`--models` / `MATRIX_MODELS`），按修改时间热加载；启用后云侧 Agent 只能选目录里的模型，下架的改用默认（`Network.model_info` / `run_model`）；端侧不受约束；没有文件时照旧自由填写。也存平台配的模型供应商（协议、地址；密钥在 vault），用到时覆盖层只写那一个供应商（`llm_config` / `Network._llm_provider`） |
 | `matrix/workdir.py` | 工作目录里的“产物”口径：委托产物快照（`deliveries/`）、目录打包发布、人浏览工作目录 |
 | `matrix/homedir.py` | 私有目录的挂载与三方合并写回，云侧（engine）与端侧（connector）共用 |
@@ -88,7 +89,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、技能、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -105,6 +106,7 @@ uv run matrix --models models.json              # 云侧只允许 models.json �
 uv run matrix --connectors connectors.json      # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
 uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
 uv run matrix --admins you@example.com                             # 管理后台 /admin 给谁看（默认最早注册的人）
+uv run matrix --fetch fetch.json                                   # 抓取白名单：云侧 Agent 能抓哪些内网地址（默认 <data>/fetch.json，改文件即生效）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
 uv run python examples/delivery-dashboard/setup_demo.py              # 搭交付看板演示数据（.matrix-dashboard-demo，见该目录 README）
 uv run python examples/dashboard-system/setup_demo.py                # 搭“接入已有看板系统”演示数据（.matrix-board-demo，见该目录 README）
@@ -179,5 +181,6 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
 - `/internal/tools`、`/internal/approval`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准；覆盖层要一直关掉 dsh 的默认技能根。
-- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽。
+- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽；
+  能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
 - 已知风险：沙箱只管写、不管读。接入第二个运行时或任何多机部署之前，必须先做读隔离。

@@ -28,6 +28,7 @@ from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
+from .web_fetch import FetchConfig
 from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
@@ -1349,16 +1350,18 @@ class MatrixServer(uvicorn.Server):
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
-                  admins: str | None = None) -> Network:
+                  admins: str | None = None, fetch: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
-    admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。"""
+    admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
+    fetch：抓取白名单文件；None = `<data>/fetch.json`（没有这个文件就用 dsh 自带的 web_fetch）。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
     return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
                    models=ModelCatalog(Path(models).resolve()) if models else None,
                    connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None,
                    plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None,
-                   admins=(admins or "").split(","))
+                   admins=(admins or "").split(","),
+                   fetch=FetchConfig(Path(fetch).resolve()) if fetch else None)
 
 
 def main() -> None:
@@ -1375,6 +1378,8 @@ def main() -> None:
                    help="云端连接器目录（JSON，改了就生效）；默认 <data>/connectors.json，没有就不提供云端连接器")
     p.add_argument("--plugins", default=compat.env("PLUGINS"),
                    help="项目插件目录（JSON，改了就生效）；默认 <data>/plugins.json，没有就只能上传插件包")
+    p.add_argument("--fetch", default=compat.env("FETCH"),
+                   help="抓取白名单（JSON，改了就生效）；默认 <data>/fetch.json，没有就用 dsh 自带的 web_fetch（只抓公网）")
     p.add_argument("--admins", default=compat.env("ADMINS"),
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
@@ -1383,13 +1388,16 @@ def main() -> None:
     args.data = args.data or compat.data_dir()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
-                            connectors=args.connectors, plugins=args.plugins, admins=args.admins)
+                            connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     catalog = network.models
     if catalog.active:
         print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")
     if network.connectors.specs():
         print(f"云端连接器：{network.connectors.path}（{len(network.connectors.specs())} 个）")
+    if (policy := network.fetch.policy()) is not None:
+        print(f"抓取白名单：{network.fetch.path}（{'、'.join(policy.allow_entries()) or '空'}"
+              f"{'' if policy.public else '，不抓公网'}{'，替代自带的 web_fetch' if policy.replace_builtin else ''}）")
     if network.plugin_dir_catalog.items():
         print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
     network.start_scheduler()

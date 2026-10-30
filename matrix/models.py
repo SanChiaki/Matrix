@@ -19,7 +19,7 @@ def new_id(prefix: str) -> str:
 
 # 权限词表：权限属于 Agent 自身；委托只能在执行者自身权限内再收窄。
 AUTHORITIES: dict[str, str] = {
-    "web.research": "使用 web_search / web_fetch 查阅公开信息",
+    "web.research": "使用 web_search / web_fetch 查阅公开信息（部署方配了抓取白名单时，也能抓白名单里的内网地址）",
     "file.write": "在工作目录内创建或修改文件",
     "shell.exec": "执行 shell 命令",
     "delegate": "在所在项目内把子任务委托给其他成员",
@@ -49,6 +49,10 @@ MCP_PREFIX = f"mcp__{MCP_SERVER}__"
 # 云端连接器：网络代调用的那一组工具挂在另一个 MCP 服务下，工具名是 <连接器 id>__<工具名>（docs/connectors-and-skills.md）
 CONNECTOR_SERVER = "connectors"
 CONNECTOR_PREFIX = f"mcp__{CONNECTOR_SERVER}__"
+# 带白名单的网页抓取（matrix/web_fetch.py）：部署方配了 fetch.json 时替代 dsh 自带的 web_fetch
+FETCH_SERVER = "matrix_web"
+FETCH_TOOL = f"mcp__{FETCH_SERVER}__fetch"
+TOOL_AUTHORITY[FETCH_TOOL] = "web.research"
 # 共享项目里所有者对自己连接器的授权（Project.connector_grants）：没写的就是 ask
 GRANTS = {"ask": "每次问", "always": "这个项目里都可以", "deny": "不行"}
 

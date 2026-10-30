@@ -3,7 +3,8 @@
 `uv run pytest` 用的是脚本运行时，不会真的跑 dsh；Matrix 依赖 dsh 的这几处接口，换版本可能悄悄变：
 
 - 静态（不调模型）：版本；headless 的组合配置读得出来；覆盖层引用的插件都还在（dsh 对找不到的插件只在 stderr 警告、
-  照常运行，被禁用的插件改了名就会在没有权限时重新可用）；有没有新的工具插件要按权限管；带全部桥的覆盖层能加载。
+  照常运行，被禁用的插件改了名就会在没有权限时重新可用）；有没有新的工具插件要按权限管；带全部桥的覆盖层能加载；
+  配了抓取白名单时，自带的 web_fetch 关得掉、web_search 还在、白名单抓取服务装得上。
 - 平台配的模型供应商（不调真模型：本机起一个假的 OpenAI 兼容服务）：覆盖层里的供应商生效、密钥经环境变量带上，
   而 Agent 的命令看不到这个密钥（printenv、各进程的 /proc/*/environ、ps eww）。research: deepseek-harness#model-providers
 - 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批。
@@ -34,6 +35,7 @@ from typing import Any, Callable
 from .model_catalog import ModelPreset, Provider, llm_config
 from .runtime import (ALWAYS_DISABLED, AUTHORITY_PLUGINS, ApprovalBridge, ConnectorBridge, DshRuntime, RunRequest,
                       ToolBridge, argv, build_patch_yaml)
+from .web_fetch import FetchPolicy
 
 # 覆盖层按 id 配置的插件（不是 insert 进去的）：必须在 dsh 的组合配置里
 CONFIGURED = ["skill-filesystem", "agent-default-model"]
@@ -69,9 +71,13 @@ def plugin_ids(config: str) -> set[str]:
     return set(re.findall(r"^- id: (\S+)", config, re.M))
 
 
-def disabled_in(config: str, pid: str) -> bool:
+def block_of(config: str, pid: str) -> str:
     block = re.search(rf"^- id: {re.escape(pid)}\n((?:[ ].*\n?)*)", config, re.M)
-    return bool(block and re.search(r"^  disabled: true", block.group(1), re.M))
+    return block.group(1) if block else ""
+
+
+def disabled_in(config: str, pid: str) -> bool:
+    return bool(re.search(r"^  disabled: true", block_of(config, pid), re.M))
 
 
 # ================= 静态检查（不调模型） =================
@@ -127,7 +133,27 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
         problems.append("skill-filesystem 的 includeDefaultRoots: false 没生效（会读部署机器上的技能目录）")
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
                else "没有权限的覆盖层：网络工具、连接器桥、审批应答者都装上，按权限禁用的插件都关了")
+    fetch_check(rt, report, workdir)
     return not missing
+
+
+def fetch_check(rt: DshRuntime, report: Report, workdir: Path) -> None:
+    """配了抓取白名单（fetch.json）的覆盖层：自带的 web_fetch 关掉、web_search 还在，web_fetch.py 装上。
+    dsh 改了 tool-web 的配置字段（fetch / search）时这里变红：自带的 web_fetch 关不掉，模型会挑它、在内网地址上碰壁。"""
+    patch = workdir / "overlay-fetch.yml"
+    patch.write_text(build_patch_yaml(["web.research"], fetch=FetchPolicy(domains=("intranet.example",))),
+                     encoding="utf-8")
+    full = _run([rt.dsh_bin, rt.profile, "--patch", str(patch), "--dump-config"])
+    tool_web = block_of(full.stdout, "tool-web")
+    problems = [] if full.returncode == 0 else [f"退出码 {full.returncode}：{full.stderr.strip()[-300:]}"]
+    if "mcp-matrix_web" not in plugin_ids(full.stdout):
+        problems.append("没装上 mcp-matrix_web")
+    if not re.search(r"^\s+fetch: false", tool_web, re.M):
+        problems.append("tool-web 的 fetch: false 没生效（自带的 web_fetch 还在）")
+    if disabled_in(full.stdout, "tool-web") or re.search(r"^\s+search: false", tool_web, re.M):
+        problems.append("tool-web 被整个关掉了（web_search 也没了）")
+    report.add(FAIL if problems else OK, "web-fetch", "；".join(problems)[:400] if problems
+               else "抓取白名单：自带的 web_fetch 关掉、web_search 保留，白名单抓取服务装上")
 
 
 # ================= 平台配的模型供应商（假服务，不调真模型） =================

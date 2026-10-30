@@ -23,6 +23,6 @@
 | Release（发布物） | 项目对外拿出的东西：主持人发布，按版本固定成快照（`releases/<id>/v<N>/`）。`method` 带技能、可公开；`fact` 带档案文件（可带插件视图 `view`）、只给 `readers`；`follow` 是事实跟随档案自动切版本。`AgentNode.subscriptions` 是人给自己的 Agent 订阅的发布物，只在这一轮能看到输出的人都看得到时生效。见 [releases.md](releases.md)、不变量 23 |
 | 插件 | 项目装上的一个业务扩展：清单声明的表（记录在 `projects/<id>/plugin-data/`，是项目档案的一部分）、沙箱里的页面、技能、触发。元数据在 `Project.plugins[name]`（版本、来源、安装人、`disabled`、`data_rev`、各触发的启用人与状态），只有主持人装。触发发的群聊消息、插件页面确认后发的消息带 `Message.via`（插件名）。见 [plugins.md](plugins.md)、不变量 20 |
 
-权限词表：`web.research`、`file.write`、`shell.exec`、`delegate`、`connector.use`（这一轮能用勾给它的连接器）。新增权限的同步点见 AGENTS.md「工作方式」。
+权限词表：`web.research`（部署方配了抓取白名单 `fetch.json` 时，云侧用 `mcp__matrix_web__fetch` 替代 dsh 自带的 `web_fetch`，见 [security.md](security.md)）、`file.write`、`shell.exec`、`delegate`、`connector.use`（这一轮能用勾给它的连接器）。新增权限的同步点见 AGENTS.md「工作方式」。
 | Held（等确认的输出） | 用到别处资料、听众不全在来源场合里的群聊回复（`reply`）或委托交付（`delivery`）：`text`、`sources`、`audience`、`status`（pending / sent / granted / rewritten）。只有 Agent 的所有者看得到、能决定（`POST /api/held/<id>`），持久化，重启后保留（不变量 22） |
 | 来源标签 | `<data>/flow/<agent>.json`：私有目录里每个文件的 `venues` 与 `mixed`；`Seat` / `Task.session_sources` 是这个模型会话读过的来源场合（不变量 22，`matrix/flow.py`） |
