@@ -220,6 +220,31 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    # ---- 插件服务：项目里装了带服务的插件时才有（docs/plugin-hooks.md，不变量 24） ----
+    {
+        "name": "plugin_tools",
+        "description": "列出项目插件服务开给你的工具：做什么、参数、只读还是写入。插件名见推送的项目档案。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"plugin": {"type": "string", "description": "插件名，如 llm-wiki"}},
+            "required": ["plugin"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "plugin_call",
+        "description": "调用项目插件服务的一个工具（先用 plugin_tools 看有哪些）。写入类工具写进项目档案，项目里所有人都看得到。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "plugin": {"type": "string", "description": "插件名"},
+                "tool": {"type": "string", "description": "工具名，如 wiki_search"},
+                "arguments": {"type": "string", "description": "JSON 对象字符串：工具的参数，如 {\"query\": \"定价\"}"},
+            },
+            "required": ["plugin", "tool"],
+            "additionalProperties": False,
+        },
+    },
     {
         "name": "propose_skill",
         "description": ("把一个值得反复用的做法提议为项目技能。主持人批准后进项目档案，项目里的成员此后都能用；"

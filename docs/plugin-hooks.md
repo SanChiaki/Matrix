@@ -1,6 +1,7 @@
 # 插件挂点：让插件影响项目的上下文与协作（设计）
 
-> 状态：草案，未实现。现有插件（表、沙箱页面、技能、触发）见 [project-plugins.md](project-plugins.md) 与 [reference/plugins.md](reference/plugins.md)，
+> 状态：第一、二期已实现，带示例「项目 Wiki」（`examples/plugins/llm-wiki/`、`examples/llm-wiki/`）；实现与草案不同的地方见第 12 节。
+> 当前行为见 [reference/plugins.md](reference/plugins.md)“插件服务与挂点”，不变量 24 的全文见 [reference/invariants.md](reference/invariants.md)。现有插件（表、沙箱页面、技能、触发）见 [project-plugins.md](project-plugins.md) 与 [reference/plugins.md](reference/plugins.md)，
 > 不变量见 [reference/invariants.md](reference/invariants.md)。第一个验证场景是 LLM Wiki（第 9 节）。
 > 调研：research: deepseek-harness#plugin-model、research: llm-wiki#pattern、research: llm-wiki#adopt。
 
@@ -191,3 +192,14 @@ Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消�
 - 主持人上传带服务端代码的插件。
 - 插件改写或删掉网络组装的提示词其他部分（只能追加标明来源的一段），插件之间互相调用。
 - 跨项目共享的插件数据：要跨项目就经蓝图或发布物，数据不随蓝图走。
+
+## 12. 实现时改动的决定（2026-10-30）
+
+- **工具不按插件生成名字，统一成两个网络工具** `plugin_tools` / `plugin_call`（草案是 `plugin__<插件>__<工具>`）：`mcp_server.py` 的工具表保持静态，
+  三种 harness 不用为每个项目动态改工具列表；参数仍走 JSON 字符串（避开数组参数的问题）。白名单与读写分级照旧在网络这一侧检查。
+- **越界的写入直接拒绝，不挂起等确认**：和其他会让别人看到内容的网络工具一致（不变量 22 的现有做法），模型换个说法写进回复，由回复的拦截确认处理。
+- **`after.notify.to` 支持 `{agent}`**（接任务的 Agent），`hooks.settings` 没做：一个蓝图里装的插件不该写死成员名字，`{agent}` 已经够第一个场景用。
+- **刚装上时先拉起服务**：数据目录还空着时，挂点先启动服务让它初始化，第一轮就有目录可推。
+- **LLM Wiki 的引擎用自写的 Python 薄引擎**（第 9 节的退路）：只用标准库，三端 CI 都能跑，测试确定；工作流按 Astro-Han 的技能改写
+  （research: llm-wiki#astro-han）。换成 geronimo 的 Rust 引擎只需改清单里的 `service`，挂点与技能不变。
+- **页面的引用**：wiki 里 `wiki/…`、`raw/…` 开头的链接按数据根目录解析（Agent 在对话里引用页面就这么写，写回时原样带进页面）。

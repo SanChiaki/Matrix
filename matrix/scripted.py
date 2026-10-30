@@ -263,10 +263,99 @@ def _from_release(call: ScriptCall) -> str | None:
             + ("风险最高的：" + "；".join(f"{r['name']}（延期 {r['delay_days']} 天，{r['pm']}）" for r in risk) + "。" if risk else ""))
 
 
+# ================= 项目 Wiki（examples/plugins/llm-wiki，docs/plugin-hooks.md） =================
+# 项目里装了「项目 Wiki」插件：成员 Agent 有插件技能 wiki-*，经 plugin_call 调插件服务；每轮推来的提示词里有 wiki 目录（context 挂点），
+# 工作目录里有 wiki 的只读副本（mount 挂点）。人说“收进 wiki”就把项目文件编成页面；提问就查 wiki 带引用作答；
+# 用户任务验收后网络代验收的人 @ 它写回（after 挂点）。
+WIKI = "llm-wiki"
+
+
+def _wiki_call(call: ScriptCall, tool: str, **args: object) -> str:
+    return call.tool("plugin_call", plugin=WIKI, tool=tool, arguments=json.dumps(args, ensure_ascii=False))
+
+
+def _wiki_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", name.lower().rsplit(".", 1)[0]).strip("-")[:50] or "note"
+
+
+def _wiki_page(title: str, source: str, raw: str, lines: list[str], related: list[str] = ()) -> str:
+    body = [f"# {title}", "", f"> 来源：{source}；原始资料：[{title}](../../{raw})；更新：{time.strftime('%Y-%m-%d')}", ""]
+    body += lines + ([""] + ["## 相关", *related] if related else [])
+    return "\n".join(body)
+
+
+def _wiki(call: ScriptCall) -> str | None:
+    if "wiki-ingest" not in call.skills or MCP_PREFIX + "plugin_call" not in call.tool_names:
+        return None
+    text = _asked(call.prompt)
+    if not text:
+        return None
+    if "已验收" in text and "写回" in text:  # after 挂点：代验收的人 @ 过来
+        title = m.group(1) if (m := re.search(r"「(.+?)」已验收", text)) else "已验收的结论"
+        summary = m.group(1).strip() if (m := re.search(r"交付说明：(.+)$", text)) else ""
+        if not summary:
+            _wiki_call(call, "wiki_log", op="ingest", title=f"no material: {title}", detail="交付说明为空")
+            return f"「{title}」的交付没有可写回的结论，只记了一笔日志。"
+        slug = _wiki_slug(re.sub(r"[^a-z0-9]+", "-", title.lower())) if re.search(r"[a-z0-9]", title.lower()) else "answer"
+        r = _wiki_call(call, "wiki_add_source", topic="decisions", slug=f"{slug}-{int(time.time()) % 100000}",
+                       title=title, content=summary, source=f"「{title}」的交付，{time.strftime('%Y-%m-%d')} 验收")
+        raw = re.search(r"(raw/\S+?\.md)", r).group(1)
+        page = re.search(r"raw/decisions/(\S+?)\.md", r).group(1)
+        _wiki_call(call, "wiki_write", path=f"decisions/{page}", op="ingest", summary=f"已验收：{title}"[:100],
+                   content=_wiki_page(title, f"「{title}」的交付（已验收）", raw, [summary]))
+        return f"已把「{title}」验收过的结论写回 wiki：新页 `wiki/decisions/{page}.md`，目录和日志已更新。"
+    if "收进 wiki" in text or "编进 wiki" in text:
+        files = sorted(p for p in (call.cwd / "project").glob("*.md")) if (call.cwd / "project").is_dir() else []
+        named = [p for p in files if p.name in text]
+        files = named or files
+        if not files:
+            return "项目文件里没有可以收进 wiki 的 markdown 资料。"
+        r = call.tool("open_request", title="把项目资料编进 Wiki", expected_outcome="wiki 里能查到的页面")
+        req = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
+        done = []
+        for f in files:
+            content = f.read_text(encoding="utf-8")
+            title = next((ln[2:].strip() for ln in content.splitlines() if ln.startswith("# ")), f.stem)
+            slug = _wiki_slug(f.name)
+            raw = re.search(r"(raw/\S+?\.md)", _wiki_call(call, "wiki_add_source", topic="research", slug=slug,
+                                                            title=title, content=content, source=f"项目文件 {f.name}")).group(1)
+            facts = [ln for ln in content.splitlines() if ln.lstrip().startswith(("- ", "* "))][:8]
+            _wiki_call(call, "wiki_write", path=f"research/{slug}", op="ingest", summary=f"{title}的要点"[:100],
+                       content=_wiki_page(title, f"项目文件 {f.name}", raw, ["要点（原文摘录）：", "", *facts]))
+            done.append(f"`wiki/research/{slug}.md`（{title}）")
+        lint = _wiki_call(call, "wiki_lint")
+        reply = f"已把 {len(done)} 份资料编进 wiki：" + "、".join(done) + f"。体检：{lint.splitlines()[0]}" + \
+            ("没有发现问题。" if "没有发现问题" in lint else "有问题待看：\n" + "\n".join(lint.splitlines()[1:]))
+        if req:
+            call.tool("deliver_request", request_id=req, summary=reply)
+        return reply
+    if "？" in text or "?" in text:
+        has_index = "项目 Wiki 目录" in call.prompt  # context 挂点把目录推来了
+        q = re.sub(r"^@\S+\s*", "", text).strip("？? ")
+        terms = [t for t in ("定价", "价格", "访谈", "痛点", "竞品", "渠道") if t in q] or [q[:6]]
+        hits = _wiki_call(call, "wiki_search", query=terms[0])
+        paths = re.findall(r"^- (wiki/\S+?\.md)（(.+?)）", hits, re.M)
+        if not paths:
+            return f"wiki 里没有找到（搜过“{terms[0]}”）。" + ("" if has_index else "（这一轮也没有收到 wiki 目录）")
+        path, title = paths[0]
+        page = _wiki_call(call, "wiki_read", path=path)
+        facts = [ln for ln in page.splitlines() if ln.lstrip().startswith("- ") and any(t in ln for t in terms)] or \
+            [ln for ln in page.splitlines() if ln.lstrip().startswith("- ")][:3]
+        r = call.tool("open_request", title=q[:40], expected_outcome="带出处的回答")
+        req = m.group(1) if (m := re.search(r"(req-[0-9a-f]{8})", r)) else None
+        answer = "根据项目 Wiki：" + "；".join(f.strip("- ").strip() for f in facts[:3]) + f"。出处：[{title}]({path})"
+        if req:
+            call.tool("deliver_request", request_id=req, summary=answer)
+        return answer + ("" if has_index else "\n\n（注意：这一轮没有收到 wiki 目录。）")
+    return None
+
+
 def scenario_handler(call: ScriptCall) -> str:
     if (reply := _from_release(call)) is not None:
         return reply
     if (reply := _dashboard(call)) is not None:
+        return reply
+    if (reply := _wiki(call)) is not None:
         return reply
     if (reply := _board_system(call)) is not None:
         return reply

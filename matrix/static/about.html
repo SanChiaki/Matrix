@@ -530,6 +530,7 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经项目；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
             <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；按 MCP 工具标注会对外产生影响的写操作，每次先给授权人确认、参数照原样列出；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
             <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、技能与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
+            <div class="part"><h4>插件服务与挂点</h4><p>部署方目录里的插件可以带一个 MCP 服务，网络按项目托管一个进程（<code>plugin_service.py</code>，不拿凭证）。插件经网络层的挂点影响运行，和 harness 无关：工具走网络工具通道（<code>plugin_tools</code> / <code>plugin_call</code>，读写分级、写入过信息流），<code>mount</code> 把数据只读挂进 <code>plugins/</code>，<code>context</code> 往提示词里加标明来源的一段，<code>after</code> 在验收之后 @ 成员。示例「项目 Wiki」：记忆、Wiki、协作方式都可以是插件</p></div>
             <div class="part"><h4>发布与订阅</h4><p>项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本快照。技能包（一组技能）可以公开，交付件（档案文件，可带插件页面）只给点名的读者，可跟随档案自动切版本。订阅只在订阅者自己的 Agent 上、这一轮能看到输出的人都是读者时生效：技能包进技能层，交付件只读挂到 <code>releases/</code>；用订阅者自己的授权，发布方看不到对话。读者的反馈以事件回到项目群聊</p></div>
             <div class="part"><h4>助理对话与定时</h4><p>注册即有一个助理，和它的私聊在侧栏最上面：每轮推送按你的可见性过滤的跨项目总览，共享项目单列；往项目里说话只能起草、你确认才以你的名义发出；读到共享项目内容的那一轮不能调连接器。定时只属于你、只唤醒你自己的 Agent，默认工作日早报，没有新情况不打扰</p></div>
             <div class="part"><h4>用量台账</h4><p>每次调用运行时追加一行：谁的 Agent、在哪种场合、跑在哪、用的模型、成败、耗时与 token；不记提示词与回复，供管理后台统计</p></div>
@@ -552,7 +553,7 @@ footer a { color: var(--text-2); }
           <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
           <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
           <li><code>flow/&lt;id&gt;.json</code>私有目录文件的来源标签，Agent 写不到</li>
-          <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code>；<code>plugins/</code> 装好的插件包，<code>plugin-data/</code> 插件记录</li>
+          <li><code>projects/&lt;id&gt;/</code>档案文件、项目技能与变更日志 <code>log.jsonl</code>；<code>plugins/</code> 装好的插件包，<code>plugin-data/</code> 插件记录与插件服务的数据（<code>service/</code>）</li>
           <li><code>releases/&lt;id&gt;/v&lt;N&gt;/</code>发布物按版本固定的快照：技能、文件、插件页面代码</li>
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
           <li><code>vault/</code>连接器凭证与模型供应商密钥，加密保存，只在代调用或那一轮运行时解开</li>
@@ -611,7 +612,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>23 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>24 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -627,10 +628,11 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">17</span><b>项目档案只走网络</b><span>写入只经人的操作或档案工具，留变更日志</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；共享项目里用到时先问授权人</span><span class="test">✓ tested</span></div>
-      <div class="reveal"><span class="n">20</span><b>插件只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">20</span><b>插件页面只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">21</span><b>助理只替主人读与起草</b><span>发进项目要主人确认；读到共享项目的那一轮不调连接器；定时只属于主人</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">22</span><b>信息只流向当时在场的人</b><span>私有目录按来源挂载；用到别处资料的输出先给所有者确认；判断不用模型</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">23</span><b>发布只经主持人</b><span>项目内容离开项目只经发布物；交付件只给读者；订阅只在能看到输出的人都是读者时生效</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">24</span><b>插件服务只来自部署方目录</b><span>一个项目一个进程、不拿凭证；只经工具、只读挂载、标明来源的上下文、验收后的通知作用于本项目</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>

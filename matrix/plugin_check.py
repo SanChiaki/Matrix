@@ -27,11 +27,12 @@ SDK_CAPS = (
     (r"matrix\.chat\.read\b", "chat.read"),
     (r"matrix\.chat\.post\b", "chat.post"),
     (r"matrix\.requests\b", "requests.read"),
+    (r"matrix\.service\.call\b", "service.read"),
 )
 CALL_CAPS = {"records.list": "records.read", "records.create": "records.write", "records.update": "records.write",
              "records.delete": "records.write", "archive.read": "archive.read", "archive.file": "archive.read",
              "members.read": "members.read", "chat.read": "chat.read", "chat.post": "chat.post",
-             "requests.read": "requests.read"}
+             "requests.read": "requests.read", "service.call": "service.read"}
 EXTERNAL = re.compile(r"""(?:\b(?:src|href)\s*=\s*["']|url\(\s*["']?|\bimport\s*(?:[^"';]*?\bfrom\s*)?["']|\bimport\(\s*["'])"""
                       r"""((?:https?:)?//[^"')\s]+)""", re.I)
 NETWORK = re.compile(r"\b(fetch|XMLHttpRequest|WebSocket|EventSource|navigator\.sendBeacon)\s*\(|new\s+(XMLHttpRequest|WebSocket|EventSource)\b")
@@ -101,9 +102,24 @@ def lint(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
                 if table.field(n) is None:
                     out.append(f"触发 {t.key} 的消息里 {{{n}}} 不是表 {table.key} 的字段，会换成空")
 
+    # 插件服务：只能放进部署方目录；程序要在包里；挂点模板里的占位符
+    if m.service is not None:
+        out.append("带 service：只能放进部署方的插件目录（plugins.json），主持人上传会被拒绝")
+        for a in m.service.args:
+            if a.startswith("{plugin}/") and Path(a[len("{plugin}/"):]) not in files:
+                out.append(f"service.args 里的 {a} 不在包里")
+    for h in m.afters:
+        for n in PLACEHOLDER.findall(h.text or "") + [n for _, t in h.args for n in PLACEHOLDER.findall(t)]:
+            if n not in ("title", "summary", "agent"):
+                out.append(f"after 挂点的模板里 {{{n}}} 不认识，会换成空（可用 title、summary、agent）")
+    for h in m.contexts:
+        for n in (n for _, t in h.args for n in PLACEHOLDER.findall(t)):
+            if n not in ("latest", "mission"):
+                out.append(f"context 挂点「{h.label}」的参数里 {{{n}}} 不认识，会换成空（可用 latest、mission）")
+
     # 浏览器只取 page/ 下的文件
     stray = [rel.as_posix() for rel in files if rel.suffix.lower() in TEXT_SUFFIXES + (".png", ".svg", ".jpg")
-             and rel.parts[0] not in (pluginfs.PAGE_DIR, pluginfs.SKILLS_DIR)]
+             and rel.parts[0] not in (pluginfs.PAGE_DIR, pluginfs.SKILLS_DIR, "service")]
     if stray:
         out.append(f"{stray[0]}{' 等' if len(stray) > 1 else ''} 不在 page/ 下：页面取不到它")
     return out
@@ -124,6 +140,14 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     lines.append("  页面能做：" + ("、".join(PLUGIN_PAGE_CAPS[c] for c in m.page_permissions) or "不读写任何数据"))
     lines.append("  Agent 能做：" + ("、".join({"records.read": "查记录", "records.write": "建 / 改记录"}[c]
                                              for c in m.agent_tools) or "不开放记录工具"))
+    if m.service is not None:
+        lines.append("  插件服务：" + " ".join([m.service.command, *m.service.args]) + "；开给 Agent 的工具："
+                     + "、".join(f"{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools))
+        hooks = ([f"挂载 {x.path} → plugins/{m.name}/{x.as_}/" for x in m.mounts]
+                 + [f"上下文「{x.label}」（{x.file or x.tool}，≤{x.budget} 字）" for x in m.contexts]
+                 + [f"{x.on} 之后 {'@' + (x.to or '') if x.to else '调 ' + (x.tool or '')}" for x in m.afters])
+        if hooks:
+            lines.append("  挂点：" + "；".join(hooks))
     for t in m.triggers:
         when = (f"cron {t.cron}" if t.type == "schedule" else f"表 {t.table} 新增记录" if t.on_create
                 else f"表 {t.table} 的 {t.when_field} 变成「{t.when_equals}」" if t.type == "record"

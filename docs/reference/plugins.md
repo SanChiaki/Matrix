@@ -106,6 +106,30 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 目标成员不在项目里、启用的人已离开项目等失败计数，连续 3 次暂停（群聊里说明），主持人重新启用后清零。
 
+## 插件服务与挂点
+
+设计见 [plugin-hooks.md](../plugin-hooks.md)，不变量 24；示例 `examples/plugins/llm-wiki/`、演示 `examples/llm-wiki/`。
+
+- **清单**：`service`（`command`：`python` 是网络自己的解释器，或部署机器上的程序名；`args` 里 `{plugin}` 换成装进项目的包目录、
+  `{data}` 换成数据目录；`transport` 只有 `stdio`；`tools`：工具名 → `read` / `write`，只有这里列的开给 Agent 与页面；`network` 只是声明）；
+  `hooks`：`mount`（数据目录里的子目录 → 工作目录 `plugins/<插件>/<as>/`）、`context`（`file` 或 `tool` 二选一，`label`、`budget` ≤4000；
+  `tool` 只能是 read 类，`args` 模板可用 `{latest}`、`{mission}`）、`after`（`on` 第一期只有 `request.accepted`；`notify.to` 写成员名或 `{agent}`
+  ＝接任务的 Agent，`text` 可用 `{title}`、`{summary}`、`{agent}`；或 `tool` + `args`）。校验在 `plugins._service` / `_hooks`。
+- **安装**：带 `service` 的只能从部署方目录装（`_install_plugin`），上传的拒绝。升级、停用、卸载都停掉进程；数据在
+  `projects/<id>/plugin-data/<插件>/service/`，卸载不删。
+- **进程**（`plugin_service.py`）：`ServiceHost` 按 (项目, 插件) 一个 `StdioClient`，第一次用到时启动（`initialize` + `tools/list`），
+  版本换了重启；一次调用最多等 60 秒，串行；空闲 15 分钟由定时线程停掉；连续 3 次起不来就暂停，主持人停用再启用清零。
+  环境只有 `PATH`、`SYSTEMROOT` 等运行必需的变量，`HOME` 指向数据目录；stderr 只留最后 20 行给部署方排错。
+- **工具**：`plugin_tools`（列出白名单里的工具与参数）、`plugin_call`（`arguments` 是 JSON 对象字符串）。项目里有带服务的插件时挂上
+  （`ExecContext.services`），只在本项目的群聊席位、项目会话、委托里有。写类要 `file.write`；会话读过越界来源时按不变量 22 拒绝。
+  每次调用写一行 `plugin.service.call` 进项目 `log.jsonl`（工具、读写、成败、谁），不记参数与结果；写类成功后插件 `data_rev` 加一、
+  推 `plugin.records`，页面据此刷新。
+- **挂点在一轮里**（`Network._run`）：`context` 在工作台账之后加一段“项目插件提供的上下文”，文件类按指纹（`hooks_seen`）没变不重推，
+  工具类每轮调；全部插件合计 ≤8000 字符。`mount` 云侧拷进工作目录、运行后丢弃，端侧随 `run.request` 的材料下发。数据目录还空着时
+  （刚装上）先把服务拉起来让它初始化。`after` 在 `review_request` 与 `accept_request` 验收之后调用（`_after_accepted`），
+  只接项目群聊里的任务；`notify` 以验收的人的身份、`via` 插件标题发进群聊。失败写 `plugin.after.failed` 进日志。
+- **页面**：桥的 `service.call` 要申请 `service.read`，只能调 read 类工具；SDK 是 `matrix.service.call(tool, args)`。发布物里的页面没有服务。
+
 ## 接口
 
 | 方法 | 路径 | 谁 |
@@ -126,4 +150,6 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 ## 还没做
 
+- 插件服务：HTTP 传输、强制的进程隔离（无网络命名空间、只读挂载；第一期靠部署方审核）、`hooks.settings`（安装时让主持人填的设置）、
+  `route` 挂点（协作类插件，见 plugin-hooks.md 第 8 节）、更多 `after` 事件。
 - 回调请求的 HMAC 签名校验（目前令牌即授权）；`propose_plugin`（Agent 提议插件、主持人批准）；插件之间互读表。

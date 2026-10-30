@@ -28,7 +28,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 - **用户任务（UserRequest）**：人交代的有交付目标的事，看板上只有它。
 - **项目档案**：说明（纲要、已定的事）、资料（文件、链接）、项目技能，归项目所有，按版本推送给成员。
   项目页另有**连接器面板**：这个项目用到了哪些外部服务、每个成员能不能用，项目从不持有谁的授权。
-- **插件**：项目装上的业务扩展（表、沙箱页面、技能、触发），只往群聊里 @ 成员，不硬编排流程。
+- **插件**：项目装上的扩展（表、沙箱页面、技能、触发）；部署方目录里的插件还可以带一个**插件服务**（网络托管的 MCP 进程），
+  经挂点影响项目里的运行：工具、只读挂载、提示词里标明来源的一段、验收后的通知（如示例「项目 Wiki」）。只往群聊里 @ 成员，不硬编排流程。
 - **发布物**：项目对外拿出的东西，主持人发布、按版本固定。技能包（一组技能）可以公开，交付件（档案文件，可带插件页面）只给点名的读者；
   读者给自己的 Agent 订阅，用自己的授权，发布方看不到对话。项目内容离开项目只经这里。
 
@@ -43,7 +44,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | 发布与订阅：发布物（技能包 / 交付件）、读者、版本与跟随档案、订阅生效条件、发布物里的插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
-| 项目插件（表、沙箱页面与桥、技能、触发） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
+| 项目插件（表、沙箱页面与桥、技能、触发；插件服务与挂点） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)、[docs/plugin-hooks.md](docs/plugin-hooks.md)，示例 `examples/llm-wiki/`，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
@@ -65,6 +66,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
+| `matrix/plugin_service.py` | 插件服务（不变量 24）：网络托管的 stdio MCP 进程（`ServiceHost` 按项目 × 插件一个，按需启动、空闲停掉、版本换了重启、连续起不来暂停），最小环境（`service_env`），`resolve_command`；挂点与工具在 `engine.py`「插件服务」一节 |
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
 | `matrix/releases.py` | 发布物的版本快照（`releases/<id>/v<N>/`：技能、文件、插件页面、`manifest.json`）的写入、清理与安全取文件；谁能发布、能看、订阅何时生效在 `engine.py`「发布与订阅」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
@@ -86,10 +88,11 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
+| `examples/llm-wiki/` | 项目 Wiki 演示：两份演示资料（`materials/`）与 `setup_demo.py`（装插件、建知识管家、放资料），见该目录 README |
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
-| `examples/plugins/` | 示例插件（销售漏斗：表、看板页面、技能、三种触发）；`examples/plugins.json` 是对应的部署方目录 |
+| `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -110,6 +113,7 @@ uv run matrix --fetch fetch.json                                   # 抓取白�
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
 uv run python examples/delivery-dashboard/setup_demo.py              # 搭交付看板演示数据（.matrix-dashboard-demo，见该目录 README）
 uv run python examples/dashboard-system/setup_demo.py                # 搭“接入已有看板系统”演示数据（.matrix-board-demo，见该目录 README）
+uv run python examples/llm-wiki/setup_demo.py                        # 搭项目 Wiki 演示数据（.matrix-wiki-demo，见该目录 README）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
@@ -143,10 +147,11 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
 19. **连接器凭证只属于授权的人**：网络代调用，共享项目里用到时先问授权人；按 MCP 标注会对外产生影响的写操作每次先给授权人确认。
-20. **插件代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
+20. **插件页面代码只在浏览器沙箱里**：只经网络、以看的人的身份读写，以人名义的动作逐次确认。
 21. **助理对话只替主人读与起草**：读到共享项目内容的那一轮不能调用连接器；定时只属于主人，定时轮次不能登记用户任务。
 22. **信息只流向当时在场的人**：私有目录按来源场合挂载，用到别处资料的输出先给所有者确认，判断不用模型。
 23. **发布只经主持人，交付件只流向读者**：项目内容离开项目只经发布物；订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效。
+24. **插件服务只来自部署方目录，只经网络、按挂点作用**：一个安装一个进程，不拿凭证；工具、只读挂载、标明来源的上下文、验收后的通知，只在本项目里生效。
 
 ### 二、工作方式
 

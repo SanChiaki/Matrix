@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
+                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, SERVICE_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -141,6 +141,9 @@ TOOL_GUIDE: dict[str, str] = {
                        "如 {\"stage\": \"沟通\"}，limit 条数）。只有项目档案里列出的插件与表。"),
     "plugin_write": ("新增或修改项目插件里的一条记录（plugin、table，record_id：修改时填，fields：JSON 字符串，"
                      "只写清单里的字段，如 {\"stage\": \"报价\"}）。写进去项目里所有人都看得到。"),
+    "plugin_tools": ("列出项目插件服务开给你的工具（plugin：插件名）：每个工具做什么、参数、只读还是写入。第一次用某个插件的服务前先看一遍。"),
+    "plugin_call": ("调用项目插件服务的一个工具（plugin：插件名，tool：工具名，arguments：JSON 对象字符串，如 {\"query\": \"定价\"}）。"
+                    "写入类工具写进的是项目档案，项目里所有人都看得到。"),
     "open_note": ("读你私有目录里一篇没有挂上的笔记（path：私有目录说明里列出的文件名）。它写在别的场合："
                   "读过以后，你的回复要先给所有者确认才会发出。"),
     "read_request": "读项目里一个用户任务的详情（request_id）：原始要求、状态、交付说明、为它发起的委托与结果。",
@@ -159,12 +162,13 @@ TOOL_GUIDE: dict[str, str] = {
 }
 
 
-def _network_tools(project: Project, can_delegate: bool, plugins: bool = False) -> list[str]:
+def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, services: bool = False) -> list[str]:
     archive = [
         "", f"## 项目档案：「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
         f"- `./{PROJECT_FILES}/` 是项目档案文件的只读副本，改动不会保存。",
         *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in PLUGIN_TOOLS) if plugins else ()),
+        *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SERVICE_TOOLS) if services else ()),
     ]
     if project.shared:
         archive.append("- 这个项目里有别人：写进档案的内容、你在群聊里的回复，项目里的每个人（不同的人）都看得到。"
@@ -176,7 +180,8 @@ def _network_tools(project: Project, can_delegate: bool, plugins: bool = False) 
     return archive + [
         "", f"## 协作：你所在的项目「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()
-          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS + HOME_TOOLS + NOTE_TOOLS),
+          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS + SERVICE_TOOLS + HOME_TOOLS
+          + NOTE_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -323,6 +328,9 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
                     f"表 `{t.key}`（{t.title}）字段 " + "、".join(
                         f"{f.key}" + (f"[{'/'.join(f.options)}]" if f.options else f"（{f.type}）") for f in t.fields)
                     for t in m.tables)
+            if m.service is not None:
+                line += (f"。插件服务的工具用 plugin_tools / plugin_call 调用（plugin: {m.name}）"
+                         + "".join(f"；`./{PLUGIN_MOUNT}/{m.name}/{mt.as_}/` 是它的 {mt.path} 的只读副本" for mt in m.mounts))
             parts.append(line)
     if g.refs:
         parts += ["### 相关资源（只是引用，不代表你能访问）",
@@ -332,7 +340,7 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
 
 def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | None, can_delegate: bool,
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
-                      home: bool = True, joint: bool = False, plugins: bool = False,
+                      home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
                       home_frozen: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
@@ -381,7 +389,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
         authority_lines(agent.authority),
     ]
     if project is not None and conv.kind in ("project", "session"):
-        parts += _network_tools(project, can_delegate, plugins)
+        parts += _network_tools(project, can_delegate, plugins, services)
     if project is not None and conv.kind == "session":
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
@@ -531,7 +539,7 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, project: Project, can_delegate: bool,
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
-                      home: bool = True, plugins: bool = False, home_hidden: list[str] = (),
+                      home: bool = True, plugins: bool = False, home_hidden: list[str] = (), services: bool = False,
                       home_mixed: list[str] = (), home_frozen: bool = False) -> str:
     d = task.delegation
     parts = [
@@ -549,7 +557,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *([ "", archive] if archive else []),
         *(["", f"## 附件（委托方转交，只读副本，改动不会保存）", *format_attachments(task.attachments)]
           if task.attachments else []),
-        *_network_tools(project, can_delegate, plugins),
+        *_network_tools(project, can_delegate, plugins, services),
         *_abilities(),
         *_knowledge(knowledge),
         *_home(home_writable, home, home_hidden, home_mixed, home_frozen),

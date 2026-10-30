@@ -91,6 +91,7 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
     "chat.read": "读群聊里对所有参与者公开的消息",
     "chat.post": "以看页面的人的名义在群聊里发消息（每次确认）",
     "requests.read": "读看页面的人自己看得到的用户任务",
+    "service.read": "调插件服务的只读工具",
 }
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
@@ -120,6 +121,10 @@ SESSION_TOOLS = ("read_chat", "read_request")
 HOME_TOOLS = ("draft_message", "schedule", "list_schedules", "cancel_schedule")
 # 插件记录工具：项目里装了把它们开给 Agent 的插件时才有（档案类工具，不需要 delegate）
 PLUGIN_TOOLS = ("plugin_records", "plugin_write")
+# 插件服务工具：项目里装了带服务的插件时才有（docs/plugin-hooks.md）。工具走网络工具这条通道，三种 harness、云侧端侧都一样
+SERVICE_TOOLS = ("plugin_tools", "plugin_call")
+PLUGIN_MOUNT = "plugins"         # 插件 mount 挂点在工作目录里的挂载名（只读副本，运行后丢弃）
+PLUGIN_CONTEXT_TOTAL = 8000      # 全部插件的 context 挂点一轮最多往提示词里加多少字符
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
 # 私有目录工具：这一轮有没挂上的笔记时才有，读来自别的场合的笔记（不变量 22，matrix/flow.py）
@@ -345,6 +350,7 @@ class Seat:
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
     archive_seen: int = -1               # 已经送达过的项目档案版本（Project.archive_rev）
     abilities_seen: str = ""             # 已经送达过的“本轮可用的连接器 / 技能”说明的指纹，没变就不再送
+    hooks_seen: str = ""                 # 已经送达过的插件 context 挂点（文件类）的指纹，没变就不再送
     state_seen: str = ""                 # 项目会话 / 助理对话：已经送达过的项目现状（摘要的指纹），没变就不再送
     joint_seen: str = ""                 # 助理对话：已经送达过的共享项目总览的指纹（送了新的，这一轮就不能用连接器）
     # 这个模型会话读过的别处来源（场合，matrix/flow.py）：会话续接时一直有效，换新会话才清空（不变量 22）
@@ -438,6 +444,7 @@ class Task:
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
     archive_seen: int = -1               # 已经送达过的项目档案版本
     abilities_seen: str = ""             # 同 Seat.abilities_seen
+    hooks_seen: str = ""                 # 同 Seat.hooks_seen
     attachments: list[dict[str, Any]] = field(default_factory=list)  # 委托方显式转交的对话附件（同 Message.attachments）
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
