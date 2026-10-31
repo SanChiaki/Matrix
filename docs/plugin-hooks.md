@@ -19,7 +19,7 @@
 1. 插件放大成**项目能力的扩展单位**，记忆、Wiki、协作方式都能是插件；Matrix 本体只留最小原语与安全边界。
 2. 插件**跑在 Matrix 上，和 harness 解耦**：dsh、Claude Code、Codex，云侧和端侧，装了插件的项目里效果一样。
 3. 对外交付只有一种东西，叫**蓝图**（一个配好的项目：纲要、岗位与 Agent、技能、连接器槽位、装了哪些插件、人在哪里介入）；
-   插件是蓝图的部件。蓝图另写设计，本文只管插件。
+   插件是蓝图的部件。蓝图的设计见 [blueprints.md](blueprints.md)，本文只管插件。
 
 参照 dsh：插件 = 声明的挂点 + 一段代码（research: deepseek-harness#plugin-model）。
 不同的是 dsh 的挂点在 harness 进程里，能力绑死这个 harness；Matrix 的挂点定在**网络层**。网络本来就负责组装每一轮的提示词、
