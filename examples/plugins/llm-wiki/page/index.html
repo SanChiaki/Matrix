@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>项目 Wiki</title>
+<link rel="stylesheet" href="style.css">
+<script src="../_matrix/sdk.js"></script>
+</head>
+<body>
+<header class="top">
+  <input id="q" type="search" placeholder="搜索 wiki…" aria-label="搜索 wiki">
+  <div class="acts">
+    <button type="button" class="ghost" id="home">目录</button>
+    <button type="button" class="ghost" id="log">日志</button>
+    <button type="button" id="lint">体检</button>
+  </div>
+</header>
+<p class="err" id="err" role="alert"></p>
+<div class="layout">
+  <nav id="nav" aria-label="页面"></nav>
+  <main id="doc" class="doc"></main>
+</div>
+<script src="wiki.js"></script>
+</body>
+</html>

@@ -32,7 +32,8 @@ from typing import Any, Callable, Iterable
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
                      ATTACHMENTS_PER_MESSAGE, AUTHORITIES, BRIEF_LIMIT, CONNECTOR_PREFIX, DESCRIPTION_LIMIT, FILE_LIMIT,
-                     GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
+                     GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
+                     LIST_TOOLS,
                      PROJECT_FILES, RELEASE_FEEDBACK, RELEASE_ITEMS, RELEASE_KINDS, RELEASE_READERS, RELEASES,
                      RELEASES_PER_PROJECT, REQUEST_TOOLS, SESSION_TOOLS, SKILLS, SUBSCRIPTIONS_PER_AGENT,
                      SKILLS_PER_AGENT, SKILLS_TOTAL, TOOL_AUTHORITY, AgentNode, Approval, Connection, ConnectorNeed,
@@ -41,10 +42,11 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTAC
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
-                       format_note, format_proposal_notice, format_request_changes, format_rewrite,
+                       format_note, format_proposal_notice, format_request_changes, format_rewrite, format_route,
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
+from .plugin_service import ServiceError, ServiceHost, resolve_command
 from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
@@ -99,6 +101,8 @@ class ExecContext:
     allowed: set[str] = field(default_factory=set)
     denied: set[str] = field(default_factory=set)
     plugins: bool = False           # 项目里有把记录工具开给 Agent 的插件：挂上 plugin_records / plugin_write
+    services: bool = False          # 项目里有带服务的插件：它们的工具按 <插件>__<工具> 出现（不变量 24）
+    plugin_files: list[tuple[str, bytes]] = field(default_factory=list)  # mount 挂点这一轮要放进工作目录的文件
     # 信息流（不变量 22，matrix/flow.py）：这个会话读过的来源、这一轮没挂上的笔记、读到的笔记里有没有别人的输入、
     # 因为来源越界而去掉的能力
     sources: list[str] = field(default_factory=list)
@@ -165,6 +169,11 @@ class Network:
         self.plugin_dir_catalog = plugins or pluginfs.PluginCatalog(self.store.root / "plugins.json")
         self._manifests: dict[str, tuple[float, pluginfs.Manifest]] = {}
         self._drafts: dict[str, dict[str, Any]] = {}      # 插件页面要以人名义发的消息，等确认卡
+        self.services = ServiceHost()                     # 插件服务进程（不变量 24），一个安装一个
+        # route 挂点的接力（docs/plugin-hooks.md 第 8 节）：一条人发的消息开一串，带自动唤醒预算与已经出现过的成员；
+        # 席位记着自己这一轮属于哪一串，它的回复交给 route 时沿用。只在内存里：重启后旧接力不再自动唤醒（偏保守）
+        self._cascades: dict[str, dict[str, Any]] = {}
+        self._seat_cascade: dict[str, str] = {}
         self._hook_hits: dict[str, list[float]] = {}      # 外部回调限速
         self._frame_key = secrets.token_bytes(32)
         self.bus = EventBus()
@@ -2036,6 +2045,8 @@ class Network:
             m = pluginfs.check_package(files)
         except pluginfs.PluginError as e:
             raise NetworkError(str(e)) from e
+        if m.service is not None and source != "catalog":  # 不变量 24：服务端执行的代码只来自部署方目录
+            raise NetworkError("带插件服务（service）的插件只能从部署方的插件目录安装：服务端要执行的代码要部署方审核过")
         with self._lock:
             g = self.hosted_project(project_id, actor)
             old = g.plugins.get(m.name)
@@ -2051,6 +2062,7 @@ class Network:
                     raise NetworkError("升级会改变已有数据的结构：" + "；".join(changes)
                                        + "。旧数据仍保留在记录文件与日志里，确认后再升级")
             pluginfs.install(self.store.project_plugins_dir(g.id), files)
+            self.services.stop(g.id, m.name)  # 升级：旧版本的进程停掉，下次用到时按新版本启动
             states = (old or {}).get("triggers", {})
             g.plugins[m.name] = {
                 "version": m.version, "title": m.title, "source": source, "by_user": actor,
@@ -2072,6 +2084,7 @@ class Network:
         with self._lock:
             g = self.hosted_project(project_id, actor)
             meta = self._plugin_meta(g, name)
+            self.services.stop(g.id, name)
             shutil.rmtree(self.store.project_plugins_dir(g.id) / name, ignore_errors=True)
             del g.plugins[name]
             self._archive_changed(g, "plugin.uninstall", by_user=actor, plugin=name)
@@ -2088,6 +2101,7 @@ class Network:
             changed = bool(meta.get("disabled")) == enabled
             if changed:
                 meta["disabled"] = not enabled
+                self.services.stop(g.id, name)
                 self._archive_changed(g, "plugin.enable" if enabled else "plugin.disable", by_user=actor, plugin=name)
         if changed:
             self._archive_saved(g, f"主持人{'重新启用' if enabled else '停用'}了插件「{m.title}」"
@@ -2335,6 +2349,7 @@ class Network:
                 time.sleep(60 - time.time() % 60 + 1)
                 try:
                     self.run_schedules()
+                    self.services.reap()
                 except Exception as e:  # noqa: BLE001 —— 定时触发出错不能拖垮服务
                     print(f"[matrix] 定时触发出错：{e}", flush=True)
         threading.Thread(target=loop, name="matrix-schedules", daemon=True).start()
@@ -2441,6 +2456,15 @@ class Network:
                      "mentions": [self._name(x) for x in mentions], "joint": g.shared}
                 self._drafts[d["id"]] = d
                 return {k: d[k] for k in ("id", "text", "mentions", "title", "joint")}
+        if op == "service.call":  # 页面只能调插件服务的只读工具（不变量 20、24）
+            tool = str(args.get("tool", ""))
+            if m.service is None or m.service.tool_class(tool) != "read":
+                raise NetworkError(f"页面只能调插件服务开出的只读工具：{tool!r} 不是")
+            values = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+            text, err = self._service_call(g, name, m, tool, values, by_user=actor, via="page")
+            if err:
+                raise NetworkError(text)
+            return text
         if op.startswith("records."):
             table = str(args.get("table", ""))
             if op == "records.list":
@@ -2510,6 +2534,357 @@ class Network:
         rec = self.write_plugin_record(g.id, name, str(args.get("table", "")), values or {}, rid, agent_id=ctx.agent_id)
         return (f"已{'修改' if rid else '新增'}记录 {rec['id']}（插件「{m.title}」）。"
                 + ("项目里所有参与方都看得到。" if g.shared else "")), False
+
+    # ---- 插件服务（docs/plugin-hooks.md，不变量 24）：部署方目录里的插件可以带一个标准 MCP 服务，网络按项目托管一个 stdio 进程，
+    # 或者连部署方运行的远程服务（带项目令牌）。服务的工具按原名（<插件>__<工具>）出现在成员 Agent 的网络工具里，三种 harness、
+    # 云侧端侧一样；挂点由网络在运行前后完成：mount（服务的资源只读放进工作目录）、context（提示词里加标明来源的一段）、
+    # after（验收之后通知成员或调用工具）。服务不调模型、不拿凭证；身份、权限、留痕都在这里，服务看到的是参数和网络认定的调用者（_meta）。
+    def _service_plugins(self, g: Project | None) -> list[tuple[str, pluginfs.Manifest]]:
+        """调用方持有锁。项目里启用着的、带服务的插件。"""
+        out = []
+        for name in (g.plugins if g is not None else {}):
+            try:
+                m = self._manifest(g, name)
+            except NetworkError:
+                continue
+            if m.service is not None:
+                out.append((name, m))
+        return out
+
+    def _services_on(self, g: Project | None) -> bool:
+        """调用方持有锁。"""
+        return bool(self._service_plugins(g))
+
+    def _service_data(self, g: Project, name: str) -> Path:
+        """托管的服务进程的数据目录（也是它的工作目录）：项目档案的一部分，卸载不删。远程服务的数据在部署方那边。"""
+        d = self.store.plugin_data_dir(g.id, name) / "service"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _service_client(self, g: Project, name: str, m: pluginfs.Manifest) -> Any:
+        """调用方不持有锁（第一次用到时启动进程，要几秒）。"""
+        assert m.service is not None
+        try:
+            if m.service.url:
+                return self.services.remote(g.id, name, m.version, m.service.url)
+            data = self._service_data(g, name)
+            argv = resolve_command(m.service.command or "", m.service.args,
+                                   self.store.project_plugins_dir(g.id) / name, data)
+            return self.services.client(g.id, name, m.version, argv, data)
+        except ServiceError as e:
+            raise NetworkError(f"插件「{m.title}」的服务不可用：{e}") from e
+
+    def _service_call(self, g: Project, name: str, m: pluginfs.Manifest, tool: str, args: dict[str, Any],
+                      **by: Any) -> tuple[str, bool]:
+        """调一次服务工具（调用方不持有锁）。只能调清单白名单里的；每次调用记进项目日志（不记参数和结果），
+        写类调用成功后插件数据版本加一，页面据此刷新。"""
+        assert m.service is not None
+        cls = m.service.tool_class(tool)
+        if cls is None:
+            raise NetworkError(f"插件「{m.title}」没有开出工具 {tool!r}：可用的有 {'、'.join(n for n, _ in m.service.tools)}")
+        client = self._service_client(g, name, m)
+        agent = self.store.agents.get(by.get("by_agent") or "")
+        caller = ({"kind": "agent", "id": agent.id, "name": agent.name} if agent is not None else
+                  {"kind": "user", "email": self._email(by.get("by_user"))} if by.get("by_user") else {"kind": "network"})
+        try:  # 调用者由网络认定，经 MCP 的 _meta 交给服务：服务可以据此加锁、记账，不信模型自报
+            text, err = client.call(tool, args, meta={"matrix/caller": caller, "matrix/project": g.id})
+        except ServiceError as e:
+            raise NetworkError(f"插件「{m.title}」的服务出错：{e}") from e
+        with self._lock:
+            self._plugin_log(g, "plugin.service.call", plugin=name, tool=tool, cls=cls, ok=not err, **by)
+            if cls in ("write", "hook") and not err and name in g.plugins:  # 挂点调用也可能改服务的数据
+                g.plugins[name]["data_rev"] = g.plugins[name].get("data_rev", 0) + 1
+                self.store.save()
+        if cls in ("write", "hook") and not err:
+            self.bus.emit("plugin.records", project_id=g.id, plugin=name, table=None)
+        return text, err
+
+    def _service_read(self, g: Project, name: str, m: pluginfs.Manifest, op: str, uri: str = "") -> Any:
+        """挂点读服务的资源（调用方不持有锁）：op = list | read。"""
+        client = self._service_client(g, name, m)
+        try:
+            return client.resources() if op == "list" else client.read_resource(uri)
+        except ServiceError as e:
+            raise NetworkError(f"插件「{m.title}」的服务出错：{e}") from e
+
+    def plugin_tool_specs(self, ctx: ExecContext) -> list[dict[str, Any]]:
+        """这一轮能用的插件工具（调用方不持有锁）：服务自己的 schema 与说明，名字换成 <插件>__<工具>，只列清单白名单里的。
+        网络工具的 MCP 服务在 tools/list 时经同一条回调取（LIST_TOOLS），所以三种 harness、云侧端侧都一样。"""
+        if not ctx.services or ctx.home:
+            return []
+        with self._lock:
+            g = self.store.projects.get(ctx.project_id or "")
+            plugins = self._service_plugins(g)
+        out = []
+        for name, m in plugins:
+            assert m.service is not None
+            allowed = dict(m.service.tools)
+            try:
+                tools = self._service_client(g, name, m).tools
+            except (NetworkError, ServiceError):
+                continue  # 服务起不来：这一轮没有它的工具
+            for t in tools:
+                n = str(t.get("name", ""))
+                if allowed.get(n) not in ("read", "write"):
+                    continue  # 服务自己有、清单没开出来的，以及只给挂点用的（hook），不给 Agent
+                desc = f"[插件「{m.title}」{'只读' if allowed[n] == 'read' else '写入：项目里所有参与者都看得到'}] " \
+                       + str(t.get("description", ""))
+                out.append({"name": f"{name}{pluginfs.TOOL_SEP}{n}", "description": desc[:2000],
+                            "inputSchema": t.get("inputSchema") or {"type": "object", "properties": {}},
+                            "annotations": {"readOnlyHint": allowed[n] == "read"}})
+        return out
+
+    def _plugin_tool(self, ctx: ExecContext, name: str, args: dict[str, Any]) -> tuple[str, bool] | None:
+        """<插件>__<工具> 形式的调用（调用方不持有锁）。不是插件工具返回 None。写类要 file.write，
+        会让当时不在场的人看到的按不变量 22 拒绝。"""
+        plugin, sep, tool = name.partition(pluginfs.TOOL_SEP)
+        if not sep:
+            return None
+        with self._lock:
+            g = self.store.projects.get(ctx.project_id or "")
+            hit = next((m for n, m in self._service_plugins(g) if n == plugin), None) if ctx.services and not ctx.home else None
+        if g is None or hit is None:
+            return None
+        assert hit.service is not None
+        cls = hit.service.tool_class(tool)
+        if cls not in ("read", "write"):
+            return f"插件「{hit.title}」没有开出工具 {tool!r}", True
+        if cls == "write":
+            if "file.write" not in ctx.authority:
+                return f"{name} 会写入项目里的插件数据，你这一轮没有写权限（file.write）", True
+            agent = self.store.agents.get(ctx.agent_id)
+            with self._lock:  # 不变量 22：写进插件数据等于给全体参与者看
+                over = self._over(ctx, agent, self._reach(ctx, agent)) if agent is not None and ctx.sources else []
+                where = "、".join(self._venue_name(v) for v in over)
+            if over:
+                return FLOW_REFUSED.format(where=where, tool=name), True
+        text, err = self._service_call(g, plugin, hit, tool, args, by_agent=ctx.agent_id, context=ctx.id)
+        if cls == "write" and not err and g.shared:
+            text += "\n（写进了项目里的插件数据：项目里所有参与方都看得到。）"
+        return text, err
+
+    def _plugin_hook_text(self, ctx: ExecContext, holder: Seat | Task, mission: str = "") -> tuple[str, str]:
+        """运行前的 context 挂点（调用方不持有锁）。返回（要加进提示词的一段，资源类挂点的指纹）。资源类没变就不再送，
+        工具类每轮都调；全部插件合计不超过 PLUGIN_CONTEXT_TOTAL。只在本项目里的运行生效（不变量 24）。"""
+        with self._lock:
+            g = self.store.projects.get(ctx.project_id or "") if not ctx.home else None
+            plugins = [(n, m) for n, m in self._service_plugins(g) if m.contexts] if g is not None else []
+            conv = self.store.conversations.get(ctx.conversation_id)
+            latest = next((x.text for x in reversed(conv.messages) if x.id in ctx.addressed), "") if conv else ""
+        if g is None or not plugins:
+            return "", ""
+        stable, live, budget = [], [], PLUGIN_CONTEXT_TOTAL
+        for name, m in plugins:
+            for h in m.contexts:
+                if budget <= 0:
+                    break
+                cap = min(h.budget, budget)
+                if h.resource:
+                    try:
+                        body = self._service_read(g, name, m, "read", h.resource)
+                    except NetworkError:
+                        body = ""
+                    if not body.strip():
+                        continue
+                    bucket = stable
+                else:
+                    vals = {"latest": latest, "mission": mission}
+                    targs = {k: pluginfs.render_text(t, vals, 2000) for k, t in h.args}
+                    try:
+                        body, err = self._service_call(g, name, m, h.tool or "", targs, via="context", context=ctx.id)
+                    except NetworkError as e:
+                        body, err = str(e), True
+                    if err:
+                        body = f"（这次没取到：{_short(body, 200)}）"
+                    bucket = live
+                if len(body) > cap:
+                    body = body[:cap] + f"\n…（截断：只给前 {cap} 个字符，完整内容用插件工具读）"
+                budget -= len(body)
+                bucket.append(f"### {h.label}（来自插件「{m.title}」）\n\n{body.strip()}")
+        key = hashlib.sha1("\n".join(stable).encode()).hexdigest()[:16] if stable else ""
+        blocks = (stable if key != holder.hooks_seen else []) + live
+        if not blocks:
+            return "", key
+        return "## 项目插件提供的上下文\n\n" + "\n\n".join(blocks), key
+
+    def _plugin_files(self, ctx: ExecContext) -> list[tuple[str, bytes]]:
+        """mount 挂点要放进工作目录的文件（调用方不持有锁）：(相对工作目录的路径, 内容)。云侧拷进 plugins/，端侧随材料下发。"""
+        with self._lock:
+            g = self.store.projects.get(ctx.project_id or "") if not ctx.home else None
+            plugins = [(n, m) for n, m in self._service_plugins(g) if m.mounts] if g is not None else []
+        out: list[tuple[str, bytes]] = []
+        for name, m in plugins:
+            try:
+                listing = self._service_read(g, name, m, "list")
+            except NetworkError:
+                continue
+            for mt in m.mounts:
+                for r in listing:
+                    uri = str(r.get("uri", ""))
+                    rel = workdir.safe_rel(uri[len(mt.resources):]) if uri.startswith(mt.resources) else None
+                    if rel is None or len(out) >= 2000:
+                        continue
+                    try:
+                        data = self._service_read(g, name, m, "read", uri).encode("utf-8")
+                    except NetworkError:
+                        continue
+                    if len(data) <= 2_000_000:
+                        out.append((f"{PLUGIN_MOUNT}/{name}/{mt.as_}/{rel.as_posix()}", data))
+        return out
+
+    def _mount_plugins(self, files: list[tuple[str, bytes]], workdir: Path) -> None:
+        """mount 挂点（云侧）：只读副本，每轮刷新，运行后丢弃。"""
+        discard(workdir / PLUGIN_MOUNT)
+        for rel, data in files:
+            (workdir / rel).parent.mkdir(parents=True, exist_ok=True)
+            (workdir / rel).write_bytes(data)
+
+    # ---- route 挂点（docs/plugin-hooks.md 第 8 节，不变量 24）：项目群聊里有新消息时问插件“该交给谁”。插件只给建议
+    # （wake：叫来看一下；claim：认领接手），网络过闸门后执行，和人 @ 的唤醒走同一条路。四条规则：
+    # 1. 一条人发的消息开一串接力，带 ROUTE_BUDGET 次自动唤醒预算，这一串里 route 引出的唤醒都从里面扣；
+    # 2. 这一串里已经出现过的成员（人 @ 的、route 叫过的、正在回复的）不能再被 route 唤醒；
+    # 3. 只看项目群聊：项目会话、私聊、助理对话的消息从不送给 route；
+    # 4. 认领只针对人发的、没 @ 任何人的消息，每条只能认领一次；认领那一轮下发人是原作者，叫来看的那一轮不能登记任务。
+    def _route_plugins(self, conv: Conversation) -> list[tuple[str, pluginfs.Manifest]]:
+        """调用方持有锁。项目群聊所在项目里带 route 挂点的插件；别的对话一律没有（规则 3）。"""
+        if conv.kind != "project":
+            return []
+        g = self.store.projects.get(conv.project_id or "")
+        return [(n, m) for n, m in self._service_plugins(g) if m.routes]
+
+    def _new_cascade(self, cid: str, chain: set[str]) -> None:
+        """调用方持有锁。"""
+        self._cascades[cid] = {"budget": ROUTE_BUDGET, "chain": set(chain), "noted": False}
+        while len(self._cascades) > 2000:  # 只留最近的
+            self._cascades.pop(next(iter(self._cascades)))
+
+    def _route_submit(self, conv_id: str, msg_id: str, cascade: str) -> None:
+        """在后台问 route；登记进 _running，wait_quiet 会等它。"""
+        key = f"route:{msg_id}"
+        with self._lock:
+            self._running.add(key)
+        self._pool.submit(self._route_safe, conv_id, msg_id, cascade, key)
+
+    def _route_safe(self, conv_id: str, msg_id: str, cascade: str, key: str) -> None:
+        try:
+            self._route(conv_id, msg_id, cascade)
+        except Exception as e:  # noqa: BLE001 —— route 出错不能影响对话
+            print(f"[matrix] route 出错：{e!r}", file=sys.stderr)
+        finally:
+            with self._lock:
+                self._running.discard(key)
+
+    def _route(self, conv_id: str, msg_id: str, cascade: str) -> None:
+        import json
+        with self._lock:
+            conv = self.store.conversations.get(conv_id)
+            if conv is None or conv.kind != "project":  # 规则 3
+                return
+            g = self.store.projects.get(conv.project_id or "")
+            msg = next((x for x in conv.messages if x.id == msg_id), None)
+            plugins = self._route_plugins(conv)
+            if g is None or msg is None or not plugins or msg.role not in ("user", "agent") or msg.audience:
+                return
+            agents = {x: self.store.agents[x] for x in g.member_ids if x in self.store.agents}
+            names = {a.name: aid for aid, a in agents.items()}
+            members = [{"name": a.name, "description": a.description, "capabilities": list(a.capabilities),
+                        "busy": seat_id(conv.id, aid) in self._running,
+                        "assistant": self.assistant_of(a.owner_id) is a} for aid, a in agents.items()]
+            message = {"id": msg.id, "text": msg.text[:8000],
+                       "author_kind": "agent" if msg.role == "agent" else "user",
+                       "author": self._name(msg.agent_id) if msg.role == "agent" else self._email(msg.user_id),
+                       "mentions": [self._name(x) for x in msg.mentions]}
+            if msg.role == "agent":
+                self._cascades.get(cascade, {}).get("chain", set()).add(msg.agent_id)
+            state = self._cascades.get(cascade) or {"budget": 0, "chain": set()}
+            relay = {"budget": state["budget"], "involved": sorted(self._name(x) for x in state["chain"])}
+        for name, m in plugins:
+            r = m.routes[0]
+            try:
+                text, err = self._service_call(g, name, m, r.tool, {"message": message, "members": members,
+                                                                      "may": list(r.may), "relay": relay},
+                                               via="route", message=msg.id)
+                data = json.loads(text) if not err else None
+            except (NetworkError, ValueError) as e:
+                with self._lock:
+                    self._plugin_log(g, "plugin.route.failed", plugin=name, message=msg.id, error=str(e)[:300])
+                continue
+            if not isinstance(data, dict):
+                with self._lock:
+                    self._plugin_log(g, "plugin.route.failed", plugin=name, message=msg.id, error="服务没有返回 JSON 对象")
+                continue
+            claim = data.get("claim") if isinstance(data.get("claim"), dict) else None
+            wakes = [w for w in data.get("wake") or [] if isinstance(w, dict)][:10]
+            asks = ([("claim", claim)] if claim else []) + [("wake", w) for w in wakes]
+            done, refused, events, kicks, out_of_budget = [], [], [], [], False
+            with self._lock:
+                state = self._cascades.get(cascade)
+                for kind, sug in asks:
+                    who = str(sug.get("agent", "")).strip()
+                    reason = " ".join(str(sug.get("reason", "")).split())[:160]
+                    aid = names.get(who)
+                    why = (f"没申请 {kind}" if kind not in r.may else
+                           "不是项目成员" if aid is None else
+                           "这串接力已经结束" if state is None else
+                           "这一串里已经出现过（规则 2）" if aid in state["chain"] else
+                           "认领只针对人发的消息（规则 4）" if kind == "claim" and (msg.role != "user" or not msg.user_id) else
+                           "消息已经 @ 了成员，由他们处理" if kind == "claim" and msg.mentions else
+                           "已经有人认领" if kind == "claim" and msg.claimed_by else
+                           "上一轮失败、等人处理" if self._seat(conv, aid).blocked else
+                           "自动唤醒预算用完了（规则 1）" if state["budget"] <= 0 else None)
+                    if why is not None:
+                        refused.append({"kind": kind, "agent": who, "why": why})
+                        out_of_budget = out_of_budget or why.startswith("自动唤醒预算")
+                        continue
+                    state["budget"] -= 1
+                    state["chain"].add(aid)
+                    if kind == "claim":
+                        msg.claimed_by = aid
+                    self._seat(conv, aid).inbox.append({"kind": "route", "message_id": msg.id, "plugin": m.title,
+                                                        "reason": reason, "claim": kind == "claim", "cascade": cascade})
+                    done.append({"kind": kind, "agent": who})
+                    kicks.append(aid)
+                    events.append(f"插件「{m.title}」" + (f"把这条消息分派给 {who} 认领" if kind == "claim" else f"请 {who} 看一下")
+                                  + (f"：{reason}" if reason else ""))
+                if out_of_budget and state is not None and not state["noted"]:
+                    state["noted"] = True
+                    events.append(f"插件「{m.title}」这一串接力的自动唤醒（{ROUTE_BUDGET} 次）用完了：要继续请 @ 成员")
+                self._plugin_log(g, "plugin.route", plugin=name, message=msg.id, accepted=done, refused=refused)
+                self.store.save()
+            for text in events:
+                self._append(conv, Message(id=new_id("msg"), role="event", text=text))
+            for aid in kicks:
+                self._kick("seat", seat_id(conv.id, aid))
+
+    def _after_accepted(self, r: UserRequest) -> None:
+        """after 挂点：用户任务验收之后（调用方不持有锁）。只接项目群聊里的任务：项目会话、私聊里的只属于下发的人，
+        不能因为插件被带进群聊（不变量 22）。notify 代表验收的人发消息 @ 成员；tool 由网络调服务工具。"""
+        with self._lock:
+            conv = self.store.conversations.get(r.conversation_id)
+            g = self.store.projects.get(conv.project_id or "") if conv is not None and conv.kind == "project" else None
+            plugins = [(n, m) for n, m in self._service_plugins(g) if m.afters] if g is not None else []
+            names = {a.id: a.name for a in self.store.agents.values()}
+        if g is None or not plugins:
+            return
+        vals = {"title": r.title, "summary": r.summary or "", "agent": names.get(r.agent_id, "")}
+        for name, m in plugins:
+            for h in m.afters:
+                if h.on != "request.accepted":
+                    continue
+                try:
+                    if h.tool:
+                        self._service_call(g, name, m, h.tool, {k: pluginfs.render_text(t, vals, 4000) for k, t in h.args},
+                                           via="after", request=r.id)
+                        continue
+                    to = r.agent_id if h.to == "{agent}" else next(
+                        (x for x in g.member_ids if names.get(x) == h.to), None)
+                    if to is None or to not in g.member_ids or r.reviewed_by not in g.people:
+                        continue
+                    self.send_message(conv.id, f"@{names[to]} {pluginfs.render_text(h.text or '', vals, 1000)}",
+                                      mentions=[to], actor=r.reviewed_by, via=m.title)
+                except NetworkError as e:
+                    with self._lock:
+                        self._plugin_log(g, "plugin.after.failed", plugin=name, request=r.id, error=str(e)[:300])
 
     # ================= 助理与项目会话 =================
     # 每个人有一个助理（User.assistant_id：自己的一个 Agent，默认是第一个创建的，可以换）。人进项目时助理一定在里面；
@@ -3634,12 +4009,17 @@ class Network:
                 if seat.blocked:  # 上一轮失败后再次被 @：同一会话接着做，不让人重发原需求
                     self._unblock(seat)
                 seat.delegations = 0  # 委托次数按“一次被 @ 引出的工作”计
-                seat.inbox.append({"kind": "mention", "message_id": msg.id})
+                seat.inbox.append({"kind": "mention", "message_id": msg.id, "cascade": msg.id})
+            routed = conv.kind == "project" and self._route_plugins(conv) != []
+            if routed:  # 一条人发的消息开一串接力：预算满额，@ 到的成员已经在链上
+                self._new_cascade(msg.id, set(targets))
             conv.updated_at = time.time()
             self.store.save()
         self.bus.emit("message.added", conversation_id=conv.id, message=_msg(msg))
         for aid in targets:
             self._kick("seat", seat_id(conv.id, aid))
+        if routed:
+            self._route_submit(conv.id, msg.id, msg.id)
         if not background:
             self.wait_quiet()
         return msg
@@ -4020,7 +4400,7 @@ class Network:
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
                           project_id=project.id if project else None, authority=self._effective(agent, agent.authority)[0],
                           constraints=[], depth=0, chain=[agent.id], session=conv.kind == "session",
-                          plugins=self._plugin_tools_on(project), home=home)
+                          plugins=self._plugin_tools_on(project), services=self._services_on(project), home=home)
         with self._lock:
             upto = len(conv.messages)
             fresh = conv.messages[seat.seen:upto]  # 上次运行之后对话里的新消息：公开上下文
@@ -4028,6 +4408,14 @@ class Network:
                       if sid in k.visible_to and k.key not in seat.known and k.owner_task_id not in self._own_tasks(sid)]
             fresh = [m for m in fresh if not m.audience or agent.owner_id in m.audience]  # 只给别人看的不送
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
+            for it in items:  # 这一轮属于哪一串接力；route 分派给它认领的人的消息，算交代给它的（规则 4：下发人是原作者）
+                if it.get("cascade"):
+                    self._seat_cascade[sid] = it["cascade"]
+                if it["kind"] == "route" and it.get("claim"):
+                    src = next((x for x in conv.messages if x.id == it["message_id"]), None)
+                    if src is not None and src.role == "user" and src.user_id and src.claimed_by == agent.id \
+                            and src.id not in ctx.addressed:
+                        ctx.addressed.append(src.id)
             archive_rev = project.archive_rev if project else -1
             archive = self._archive_text(project) if project and seat.archive_seen != archive_rev else ""
             state = self._session_state(project, conv.owner_id) if project and conv.kind == "session" else ""
@@ -4046,6 +4434,8 @@ class Network:
         if home:
             notices = "\n\n".join(filter(None, [format_now(), notices, TAINT_NOTE if ctx.tainted else ""]))
         scheduled_only = bool(items) and all(it["kind"] == "schedule" for it in items) and not ctx.addressed
+        # 只因为插件 route“叫来看一下”而醒的一轮：不是自己的事可以只回“（略过）”，不发进群聊（被动投递的成员大多应该沉默）
+        route_only = bool(items) and all(it["kind"] == "route" and not it.get("claim") for it in items) and not ctx.addressed
         with self._lock:
             open_reqs = [r for r in self.store.requests.values() if r.conversation_id == conv.id
                          and r.agent_id == agent.id and r.status in ("in_progress", "in_review")]
@@ -4058,7 +4448,7 @@ class Network:
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
                                    home_writable="file.write" in ctx.authority, archive=archive,
-                                   home=mount_home, joint=joint, plugins=ctx.plugins, assistant_home=home,
+                                   home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent))
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
@@ -4074,6 +4464,8 @@ class Network:
             self._auto_accept(ctx)
             if scheduled_only and res.final_text.strip().rstrip("。.") == NOTHING_NEW:
                 return  # 定时到点、没有新情况：不打扰主人
+            if route_only and res.final_text.strip().strip("。.") == ROUTE_PASS:
+                return  # 被叫来看、不是自己的事：不发言，这一串接力也到此为止
             text = res.final_text.strip() or "（空回复）"
             with self._lock:
                 ctx.sources = list(seat.session_sources)
@@ -4085,9 +4477,12 @@ class Network:
                 self._append(conv, Message(id=new_id("msg"), role="event", agent_id=agent.id,
                                            text=f"{agent.name} 的回复要先给它的所有者确认", held_id=h.id))
                 return
-            self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id,
-                                       text=text, task_ids=ctx.created,
-                                       steps=steps, wake=wake, private_to=owner_only))
+            reply = Message(id=new_id("msg"), role="agent", agent_id=agent.id, text=text, task_ids=ctx.created,
+                            steps=steps, wake=wake, private_to=owner_only)
+            self._append(conv, reply)
+            cascade = self._seat_cascade.get(sid)
+            if conv.kind == "project" and cascade in self._cascades:  # 回复也交给 route，沿用这一串的预算与链
+                self._route_submit(conv.id, reply.id, cascade)
             return
         self._requeue(seat, items)
         with self._lock:
@@ -4142,7 +4537,7 @@ class Network:
         if task.dsh_session_id is None:  # 第一次运行（或在拿到会话之前就失败了）：发完整委托
             knowledge = self.visible_knowledge(ctx)
             task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
-                                            archive=archive, home=mount_home, plugins=ctx.plugins,
+                                            archive=archive, home=mount_home, plugins=ctx.plugins, services=ctx.services,
                                             home_hidden=hidden, home_mixed=mixed,
                                             home_frozen=self._others(ctx, agent))
             workdir = self._write_task_files(task, knowledge)
@@ -4194,7 +4589,8 @@ class Network:
         ctx = ExecContext(kind="task", id=task.id, agent_id=agent.id, conversation_id=task.conversation_id,
                           project_id=g.id, authority=list(task.granted_authority),
                           constraints=list(task.effective_constraints), depth=task.depth,
-                          chain=self._chain(task) + [agent.id], plugins=self._plugin_tools_on(g))
+                          chain=self._chain(task) + [agent.id], plugins=self._plugin_tools_on(g),
+                          services=self._services_on(g))
         if ctx.depth >= self.limits.max_depth and "delegate" in ctx.authority:
             ctx.authority.remove("delegate")  # 到达深度上限：不再挂载网络工具
         return ctx
@@ -4354,6 +4750,15 @@ class Network:
                 where = "、".join(self._venue_name(v) for v in it.get("sources", []))
                 blocks.append(format_rewrite(where))
                 wake.append("所有者要求不用别处的资料重写")
+            elif kind == "route":
+                conv = self.store.conversations.get(ctx.conversation_id)
+                src = next((x for x in conv.messages if x.id == it["message_id"]), None) if conv else None
+                if src is None:
+                    continue
+                who = (self._name(src.agent_id) if src.role == "agent" else
+                       self._email(src.user_id) if src.user_id else "有人")
+                blocks.append(format_route(it.get("plugin", ""), who, src.text, it.get("reason", ""), bool(it.get("claim"))))
+                wake.append(f"插件「{it.get('plugin', '')}」{'分派' if it.get('claim') else '请你看'}了一条消息")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
                 if p is None:
@@ -4369,6 +4774,11 @@ class Network:
         others, hidden = self._ledger_for(ctx)
         if others or hidden:  # 工作台账：同时在做的其他工作（联合项目里不列出别处的细节）
             prompt = f"{prompt}\n\n{format_ledger(others, hidden)}"
+        mission = tk.delegation.mission if ctx.kind == "task" and (tk := self.store.tasks.get(ctx.id)) else ""
+        hook_text, hooks_key = self._plugin_hook_text(ctx, holder, mission)
+        if hook_text:  # 插件的 context 挂点：标明来源的一段（不变量 24）
+            prompt = f"{prompt}\n\n{hook_text}"
+        ctx.plugin_files = self._plugin_files(ctx)  # 插件的 mount 挂点：在锁外向服务取，云侧拷进去、端侧随材料下发
         home: str | None = None   # 端侧：私有目录交给连接器挂载（rw / ro），None 表示不挂载
         before = None
         with self._lock:
@@ -4397,6 +4807,7 @@ class Network:
             self._mount_project_files(ctx, workdir)
             self._mount_attachments(ctx, workdir)
             self._mount_releases(ctx, agent, workdir)
+            self._mount_plugins(ctx.plugin_files, workdir)
             skillfs.mount(workdir / SKILLS, chosen)
             before = self._mount_home(agent, workdir, hide) if mount_home else None
         on_session = lambda sid: setattr(holder, "dsh_session_id", sid)  # noqa: E731
@@ -4418,12 +4829,14 @@ class Network:
                 res = res2
             if res.ok:
                 holder.abilities_seen = abilities_key
+                holder.hooks_seen = hooks_key or holder.hooks_seen
         finally:
             with self._lock:
                 self._stops.pop(ctx.id, None)
             discard(workdir / PROJECT_FILES)  # 只读副本：运行里的改动一律丢弃
             discard(workdir / ATTACHMENTS)
             discard(workdir / RELEASES)
+            discard(workdir / PLUGIN_MOUNT)
             if not agent.device_runtime:
                 discard(workdir / SKILLS)
             if before is not None:
@@ -4725,7 +5138,8 @@ class Network:
         agent = self.store.agents.get(ctx.agent_id)
         if agent is not None:  # 订阅的交付件（不变量 23）：和云侧一样只在能到达的人都是读者时下发
             out += self._release_materials(ctx, agent)
-        return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out]
+        return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out] + \
+            [{"path": rel, "data": base64.b64encode(data).decode()} for rel, data in ctx.plugin_files]  # 插件的 mount 挂点
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float | None, on_session: Any = None, home: str | None = None,
@@ -4841,9 +5255,16 @@ class Network:
         ctx = self._contexts.get(token)
         if ctx is None:
             return "执行上下文无效或已结束", True
+        if name == LIST_TOOLS:  # 网络工具的 MCP 服务在 tools/list 时来取这一轮的插件工具
+            import json
+            return json.dumps(self.plugin_tool_specs(ctx), ensure_ascii=False), False
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
-            return f"未知工具 {name}", True
+            try:
+                res = self._plugin_tool(ctx, name, args)
+            except NetworkError as e:
+                return str(e), True
+            return res if res is not None else (f"未知工具 {name}", True)
         if name not in ctx.tools:
             return (f"{name} 只能在对话里使用" if name in REQUEST_TOOLS else
                     f"{name} 只能在助理对话里使用" if name in HOME_TOOLS else
@@ -5369,6 +5790,7 @@ class Network:
             self._complete_request(r, r.requester_id, sources[-1].id)
             self.store.save()
         self._request_event(r, f"{self._name(r.agent_id)} 按{self._who(r.requester_id)}的指示验收了「{r.title}」")
+        self._after_accepted(r)
         return f"已按下发人的指示验收 {r.id}，任务已完成。", False
 
     def _requester_messages(self, ctx: ExecContext, r: UserRequest) -> list[Message]:
@@ -5451,6 +5873,8 @@ class Network:
             self.store.save()
         who = self._who(actor or r.requester_id)
         self._request_event(r, f"{who}验收了「{r.title}」" if accept else f"{who}退回了「{r.title}」：{_short(feedback, 80)}")
+        if accept:
+            self._after_accepted(r)
         if not accept:
             self._kick("seat", seat_id(r.conversation_id, r.agent_id))
         return r
@@ -6077,7 +6501,7 @@ BRIDGE_OPS: dict[str, str | None] = {
     "records.list": "records.read", "records.create": "records.write", "records.update": "records.write",
     "records.delete": "records.write", "archive.read": "archive.read", "archive.file": "archive.read",
     "members.read": "members.read", "chat.read": "chat.read", "chat.post": "chat.post",
-    "requests.read": "requests.read",
+    "requests.read": "requests.read", "service.call": "service.read",
 }
 APPROVAL_CN = {"allowed": "批准", "rejected": "拒绝", "cancelled": "作废", "pending": "待审批"}
 SESSION_MESSAGES = 20  # 项目会话推送的群聊最近消息条数
@@ -6085,6 +6509,7 @@ SESSION_REQUESTS = 15  # 项目会话推送的没结束的用户任务条数
 HOME_MESSAGES = 3      # 助理对话的总览里每个项目带的群聊最近消息条数
 HOME_REQUESTS = 5      # 助理对话的总览里每个项目带的没结束的用户任务条数
 NOTHING_NEW = "没有新情况"  # 定时到点时没有值得说的：助理只回这一句，网络就不往助理对话发
+ROUTE_PASS = "（略过）"  # 被插件 route 叫来看、不是自己的事：只回这一句，网络就不往群聊发
 ASSISTANT_DESCRIPTION = ("你的助理：帮你汇总各项目等你处理的事，按你的话定时提醒，"
                          "起草要发进项目群聊的消息（你确认后才发）；进项目时跟着你，帮你协调。")
 MORNING_BRIEF = (f"汇总我今天要处理的事：等我验收、审批、确认的，各项目里进行中的任务和新动态。"

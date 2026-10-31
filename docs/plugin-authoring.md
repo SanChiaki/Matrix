@@ -92,6 +92,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
   plugin.json            清单（必须在根目录，或唯一的一层顶层文件夹里）
   page/                  页面用到的全部文件：HTML、JS、CSS、图片、字体
   skills/<名字>/SKILL.md  技能，可带附带文件
+  service/…              可选：插件服务的程序（只有部署方目录里的插件能带，见第 7 节“插件服务与挂点”）
 ```
 
 - 浏览器**只能取到 `page/` 下的文件**。放在别处的 JS、CSS、图片，页面拿不到。
@@ -115,6 +116,8 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 | `agent_tools` | 否 | 开给 Agent 的记录工具：`records.read`、`records.write` |
 | `triggers` | 否 | 触发，见第 6 节 |
 | `release_views` | 否 | 能在**发布物**里打开的标签 key（必须在 `tabs` 里），见第 4 节“在发布物里” |
+| `service` | 否 | 插件服务：网络托管的 MCP 进程，见“插件服务与挂点”一节。**只有部署方目录里的插件能带**，上传的包带了会被拒绝 |
+| `hooks` | 否 | 挂点：`mount` / `context` / `after`，见“插件服务与挂点”一节 |
 | `connectors` | 否 | 插件用到的外部服务：连接器目录里的 id（如 `feishu`）或电脑上配好的服务名，最多 10 个，每个 ≤80。只是声明：装上并启用后出现在项目的连接器面板里，让成员看到要连什么；不授予任何访问权限 |
 
 表名、字段名、标签 key、触发 key 都是同一种写法：小写字母开头，小写字母、数字、下划线，≤40（注意和插件名不同，**用 `_` 不用 `-`**）。
@@ -168,6 +171,7 @@ uv run matrix --runtime scripted --data /tmp/plugin-dev
 | `chat.read` | `chat.read` | 读项目群聊里的公开消息 |
 | `chat.post` | `chat.post` | 以看页面的人的名义在群聊里发消息（每次确认） |
 | `requests.read` | `requests` | 读项目里的用户任务（按看的人能看到的） |
+| `service.read` | `service.call` | 调插件服务的只读工具（清单里标 `read` 的） |
 
 `context`、`ui.badge`、`ui.openFile` 不需要申请。
 
@@ -367,6 +371,76 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
 | `*/30 * * * *` | 每 30 分钟 |
 
 最小间隔 10 分钟（分钟这一段最多 6 个值）。定时触发没有记录，消息里的 `{字段}` 都会是空。
+
+## 6.5 插件服务与挂点
+
+页面、表、触发碰不到 Agent 每一轮看到什么。要做记忆、Wiki、知识库这类东西，插件需要一个**服务**和几个**挂点**
+（设计见 [plugin-hooks.md](plugin-hooks.md)，完整示例 `examples/plugins/llm-wiki/`）。
+
+**服务**是一个标准的 MCP 服务，不需要 Matrix 专用的 SDK。两种来源二选一：
+
+```json
+"service": {
+  "command": "python",
+  "args": ["{plugin}/service/wiki_engine.py", "--root", "{data}"],
+  "tools": {"search": "read", "read": "read", "write": "write"}
+}
+```
+
+```json
+"service": {
+  "url": "https://wiki.example.com/mcp",
+  "tools": {"search": "read", "read": "read", "write": "write"}
+}
+```
+
+- `command`：网络按项目启动一个 stdio 进程，工作目录是这个项目的数据目录（`{data}`），第一次用到时启动、空闲 15 分钟停掉。
+- `url`：部署方自己运行的远程服务（Streamable HTTP）。网络每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`，
+  签名是 HMAC-SHA256(密钥, `v1.<项目>.<插件名>.<过期>`)；服务要验签、检查过期，再按项目切分数据。密钥由部署方在两边配同一个值
+  （Matrix 这边是环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`，大写，`-` 换成 `_`）。示例引擎的 `check_token` 可以照抄。
+- 进程环境里没有任何凭证：要连外部服务请走连接器。服务**不要调模型**：要模型做的事写进技能，交给项目里的 Agent。
+- `tools` 是白名单和读写分级：只有列出来的工具出现在 Agent 那里，名字是 `<插件名>__<工具名>`（合起来 ≤64 个字符），带服务自己的
+  schema 与说明；页面只能调 `read` 类。`write` 类要 Agent 有写权限，且会被信息流检查拦下（读过私下对话的会话不能写进项目数据）。
+  每次调用都记日志，但不记参数和结果。
+- 只能放进部署方的插件目录（`plugins.json`）：服务端执行的代码要部署方审核过。
+
+**挂点**（都要有 `service`）：
+
+```json
+"hooks": {
+  "mount":   [{"resources": "wiki:///wiki/", "as": "wiki"}],
+  "context": [{"resource": "wiki:///wiki/index.md", "budget": 3000, "label": "项目 Wiki 目录"}],
+  "after":   [{"on": "request.accepted", "notify": {"to": "{agent}", "text": "「{title}」已验收，写回 wiki。交付说明：{summary}"}}]
+}
+```
+
+| 挂点 | 效果 |
+| --- | --- |
+| `mount` | URI 以 `resources` 开头的资源只读放进 Agent 工作目录的 `plugins/<插件>/<as>/`（去掉前缀就是相对路径），每轮刷新 |
+| `context` | 每轮往提示词里加一段，标明来自你的插件：`resource`（一个资源，没变就不重推）或 `tool`（调一个 read 类工具，参数模板可用 `{latest}`、`{mission}`），截到 `budget`（≤4000） |
+| `after` | 项目群聊里的用户任务被验收之后：`notify` 以验收的人的名义 @ 成员（`{agent}` 是接任务的 Agent），或 `tool` 由网络调一个工具 |
+
+**route 挂点**：让插件决定“这条消息该交给谁”，做 Raft、Multica 这类协作方式（完整示例 `examples/plugins/teammates`）：
+
+```json
+"service": {"command": "python", "args": ["{plugin}/service/team_engine.py"], "tools": {"route_suggest": "hook", "task_claim": "write"}},
+"hooks": {"route": [{"on": "message.posted", "tool": "route_suggest", "may": ["wake"]}]}
+```
+
+- 项目群聊里每条新消息（人的、Agent 的回复）网络都会调一次这个工具，参数是 `message`（`text`、`author`、`author_kind`：user / agent、
+  `mentions`）、`members`（`name`、`description`、`capabilities`、`busy`、`assistant`）、`may`、`relay`（这一串剩下的预算 `budget`、
+  已经在链上的成员 `involved`）。`author_kind` 由网络填，可以据此只认人发的指令。
+- 工具返回 JSON：`{"claim": {"agent": "成员名", "reason": "…"}, "wake": [{"agent": "成员名", "reason": "…"}]}`，都可以省略，别的键网络不看。
+  `claim` 是请他认领接手（他可以把这条消息登记成任务），`wake` 是请他看一下。
+- 你只给建议，网络决定执行哪些：一条人发的消息引出的接力最多自动唤醒 3 次；这一串里出现过的成员不会再被叫；只看项目群聊；
+  认领只对人发的、没 @ 人的消息，每条一次。被拒的建议和理由写进项目日志。`reason` 会公开显示在群聊里。
+- 被 `wake` 叫来看的成员不是自己的事可以只回“（略过）”，网络不发进群聊：在技能里教它这么做。
+- 工具分级写 `hook`：只给挂点调，Agent 和页面都看不到它。`may` 里只写你要用的种类，安装时公开给主持人。
+
+**调用者身份**：网络调你的工具时在 `params._meta["matrix/caller"]` 里带上调用者（`{"kind": "agent", "id", "name"}`、`{"kind": "user"}`
+或挂点调用时的 `{"kind": "network"}`），`_meta["matrix/project"]` 是项目 id。要加锁、记谁做的，用它，不要信参数里自报的名字。
+
+这些挂点只对装了插件的项目里的运行生效，dsh、Claude Code、Codex 和云侧、端侧都一样。
 
 ## 7. 调试
 

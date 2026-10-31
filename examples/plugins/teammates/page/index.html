@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>任务板</title>
+<link rel="stylesheet" href="style.css">
+<script src="../_matrix/sdk.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="kpis" id="kpis"></div>
+  <p class="hint">在群聊里说“建任务：…”开新任务，“#3 完成 / 关闭 / 重开 / 退回”改状态；成员自己认领。</p>
+</header>
+<p class="err" id="err" role="alert"></p>
+<main class="board" id="board" aria-label="任务板"></main>
+<script src="board.js"></script>
+</body>
+</html>

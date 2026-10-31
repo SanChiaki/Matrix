@@ -106,6 +106,50 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 目标成员不在项目里、启用的人已离开项目等失败计数，连续 3 次暂停（群聊里说明），主持人重新启用后清零。
 
+## 插件服务与挂点
+
+设计见 [plugin-hooks.md](../plugin-hooks.md)，不变量 24；示例 `examples/plugins/llm-wiki/`、演示 `examples/llm-wiki/`。
+
+- **清单**：`service`：`command`（网络托管：`python` 是网络自己的解释器，或部署机器上的程序名；`args` 里 `{plugin}` 换成装进项目的包目录、
+  `{data}` 换成数据目录）或 `url`（部署方运行的远程 MCP，https，本机调试可用 http://127.0.0.1），二选一；`tools`：工具名 → `read` / `write`，
+  只有这里列的开给 Agent 与页面，`<插件名>__<工具名>` 最长 64；`network` 只是声明。
+  `hooks`：`mount`（`resources`：一个 MCP 资源 URI 前缀 → 工作目录 `plugins/<插件>/<as>/`，去掉前缀是相对路径）、`context`（`resource` 或 `tool`
+  二选一，`label`、`budget` ≤4000；`tool` 只能是 read 类，`args` 模板可用 `{latest}`、`{mission}`）、`after`（`on` 第一期只有 `request.accepted`；
+  `notify.to` 写成员名或 `{agent}` ＝接任务的 Agent，`text` 可用 `{title}`、`{summary}`、`{agent}`；或 `tool` + `args`）。校验在 `plugins._service` / `_hooks`。
+- **安装**：带 `service` 的只能从部署方目录装（`_install_plugin`），上传的拒绝。升级、停用、卸载都停掉进程；托管进程的数据在
+  `projects/<id>/plugin-data/<插件>/service/`，卸载不删；远程服务的数据在部署方那边。
+- **托管进程**（`plugin_service.py`）：`ServiceHost` 按 (项目, 插件) 一个 `StdioClient`，第一次用到时启动（`initialize` + `tools/list`），
+  版本换了重启；一次调用最多等 60 秒，串行；空闲 15 分钟由定时线程停掉；连续 3 次起不来就暂停，主持人停用再启用清零。
+  环境只有 `PATH`、`SYSTEMROOT` 等运行必需的变量，`HOME` 指向数据目录；stderr 只留最后 20 行给部署方排错。服务退出随 Matrix 一起停。
+- **远程服务**：`RemoteService` 复用 `mcp_client.RemoteMCP`；每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`
+  （`sign_token`：HMAC-SHA256 签 `v1.<项目>.<插件>.<过期>`，10 分钟），密钥在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`（大写，`-` 换 `_`），
+  部署方在服务那边配同一个值。没配时这个插件的工具不出现、挂点为空、调用报“部署方没配签名密钥”。
+- **工具**：按原名 `<插件>__<工具>` 出现，带服务自己的 schema 与说明（说明前加“[插件「标题」只读 / 写入]”）。网络工具的 MCP 服务
+  （`mcp_server.py`）在 `tools/list` 时用保留名 `__list_tools__`（`models.LIST_TOOLS`）经同一条回调取（`Network.plugin_tool_specs`），
+  调用同样走 `/internal/tools`，`handle_tool` 认出 `<插件>__` 前缀后交给 `_plugin_tool`。只在装了它的项目里的群聊席位、项目会话、委托里有
+  （`ExecContext.services`）。写类要 `file.write`；会话读过越界来源时按不变量 22 拒绝。每次调用写一行 `plugin.service.call` 进项目 `log.jsonl`
+  （工具、读写、成败、谁），不记参数与结果；写类成功后插件 `data_rev` 加一、推 `plugin.records`，页面据此刷新。
+- **挂点在一轮里**（`Network._run`）：都在锁外向服务取。`context` 在工作台账之后加一段“项目插件提供的上下文”，资源类按指纹（`hooks_seen`）
+  没变不重推，工具类每轮调；全部插件合计 ≤8000 字符。`mount` 先 `resources/list`、再逐个 `resources/read`（最多 2000 个、单个 ≤2 MB），
+  结果放在 `ExecContext.plugin_files`：云侧写进工作目录、运行后丢弃，端侧随 `run.request` 的材料下发。`after` 在 `review_request` 与
+  `accept_request` 验收之后调用（`_after_accepted`），只接项目群聊里的任务；`notify` 以验收的人的身份、`via` 插件标题发进群聊。
+  失败写 `plugin.after.failed` 进日志。
+- **页面**：桥的 `service.call` 要申请 `service.read`，只能调 read 类工具；SDK 是 `matrix.service.call(tool, args)`。发布物里的页面没有服务。
+- **工具分级 `hook`**：只给挂点（`context`、`route`）调，不出现在 Agent 的工具里，页面也调不到。
+- **route 挂点**（设计见 [plugin-hooks.md](../plugin-hooks.md) 第 8 节）：`hooks.route` 最多一个，`on` 只有 `message.posted`，`tool` 是 read 或 hook 类，
+  `may` 取 `wake` / `claim`。项目群聊里人发的消息（`send_message`）和 Agent 的回复（`_seat_round` 末尾，被拦下等确认的不算）落进群聊后，
+  后台调 `_route`（登记进 `_running`，`wait_quiet` 会等它）。人发的消息开一串接力（`_cascades`：预算 `ROUTE_BUDGET`、链上的成员），
+  @ 到的成员与 route 唤醒的成员在收件箱项里带上接力 id，席位记在 `_seat_cascade`，它的回复沿用。闸门依次检查：申请了这个种类、
+  是项目成员、接力还在、不在链上、认领只对人发的没 @ 人且没被认领的消息、席位没卡住、预算还有。接受的：预算减一、进链、认领的写
+  `Message.claimed_by`，往席位收件箱放 `{"kind": "route", …}` 并唤醒，群聊里记一条事件；认领那一轮 `ctx.addressed` 带上这条消息，
+  `open_request` 的下发人是原作者。每次写一行 `plugin.route`（接受、拒绝与理由）进项目 `log.jsonl`；服务出错写 `plugin.route.failed`。
+  预算用完时群聊里说一次。接力只在内存里，重启后不再自动唤醒。
+  传给服务的还有 `relay`（剩余预算、链上的成员）与 `members[].assistant`。只因 route 的 `wake` 醒来的一轮（没有认领、没被 @），
+  回复正好是 `ROUTE_PASS`（“（略过）”）时不发进群聊（`_seat_round`）。
+- **调用者身份**：`_service_call` 给每次工具调用带 `_meta`：`matrix/caller`（Agent 调的是 `{"kind": "agent", "id", "name"}`，页面是
+  `{"kind": "user", "email"}`，挂点是 `{"kind": "network"}`）与 `matrix/project`。挂点（hook 类）调用成功后也算改了数据（`data_rev` 加一、
+  推 `plugin.records`）。
+
 ## 接口
 
 | 方法 | 路径 | 谁 |
@@ -126,4 +170,6 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 ## 还没做
 
+- 插件服务：HTTP 传输、强制的进程隔离（无网络命名空间、只读挂载；第一期靠部署方审核）、`hooks.settings`（安装时让主持人填的设置）、
+  `route` 挂点（协作类插件，见 plugin-hooks.md 第 8 节）、更多 `after` 事件。
 - 回调请求的 HMAC 签名校验（目前令牌即授权）；`propose_plugin`（Agent 提议插件、主持人批准）；插件之间互读表。

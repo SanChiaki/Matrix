@@ -1,0 +1,61 @@
+{
+  "name": "llm-wiki",
+  "version": "0.2.0",
+  "title": "项目 Wiki",
+  "description": "把项目资料编译成一份由 Agent 维护的 wiki：原始资料不可变，页面带出处，提问先查 wiki，验收过的结论写回",
+  "service": {
+    "command": "python",
+    "args": [
+      "{plugin}/service/wiki_engine.py",
+      "--root",
+      "{data}"
+    ],
+    "transport": "stdio",
+    "network": false,
+    "tools": {
+      "index": "read",
+      "list": "read",
+      "read": "read",
+      "search": "read",
+      "history": "read",
+      "lint": "read",
+      "add_source": "write",
+      "write": "write",
+      "log": "write"
+    }
+  },
+  "hooks": {
+    "mount": [
+      {
+        "resources": "wiki:///wiki/",
+        "as": "wiki"
+      }
+    ],
+    "context": [
+      {
+        "resource": "wiki:///wiki/index.md",
+        "budget": 3000,
+        "label": "项目 Wiki 目录"
+      }
+    ],
+    "after": [
+      {
+        "on": "request.accepted",
+        "notify": {
+          "to": "{agent}",
+          "text": "「{title}」已验收。请按技能 wiki-ingest 把经过验收的结论写回项目 Wiki（没有新东西就只记一笔日志），写完简短说一声改了哪几页。交付说明：{summary}"
+        }
+      }
+    ]
+  },
+  "page_permissions": [
+    "service.read"
+  ],
+  "tabs": [
+    {
+      "key": "wiki",
+      "label": "Wiki",
+      "entry": "page/index.html"
+    }
+  ]
+}

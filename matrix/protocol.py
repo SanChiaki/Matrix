@@ -12,7 +12,7 @@ import time
 from typing import Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
+                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Task, UserRequest, attachment_rel)
 
@@ -159,12 +159,14 @@ TOOL_GUIDE: dict[str, str] = {
 }
 
 
-def _network_tools(project: Project, can_delegate: bool, plugins: bool = False) -> list[str]:
+def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, services: bool = False) -> list[str]:
     archive = [
         "", f"## 项目档案：「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
         f"- `./{PROJECT_FILES}/` 是项目档案文件的只读副本，改动不会保存。",
         *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in PLUGIN_TOOLS) if plugins else ()),
+        *(("- 名字是 `<插件名>__<工具名>` 的工具来自项目插件的服务（如 `llm-wiki__search`），直接调用；"
+            "说明里标了只读还是写入，写入的内容项目里所有人都看得到。",) if services else ()),
     ]
     if project.shared:
         archive.append("- 这个项目里有别人：写进档案的内容、你在群聊里的回复，项目里的每个人（不同的人）都看得到。"
@@ -323,6 +325,9 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
                     f"表 `{t.key}`（{t.title}）字段 " + "、".join(
                         f"{f.key}" + (f"[{'/'.join(f.options)}]" if f.options else f"（{f.type}）") for f in t.fields)
                     for t in m.tables)
+            if m.service is not None:
+                line += (f"。插件服务的工具名以 `{m.name}__` 开头"
+                         + "".join(f"；`./{PLUGIN_MOUNT}/{m.name}/{mt.as_}/` 是它的资源（{mt.resources}…）的只读副本" for mt in m.mounts))
             parts.append(line)
     if g.refs:
         parts += ["### 相关资源（只是引用，不代表你能访问）",
@@ -332,7 +337,7 @@ def format_archive(g: Project, active: list[Decision], files: list[str], name: C
 
 def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | None, can_delegate: bool,
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
-                      home: bool = True, joint: bool = False, plugins: bool = False,
+                      home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
                       home_frozen: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
@@ -381,7 +386,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
         authority_lines(agent.authority),
     ]
     if project is not None and conv.kind in ("project", "session"):
-        parts += _network_tools(project, can_delegate, plugins)
+        parts += _network_tools(project, can_delegate, plugins, services)
     if project is not None and conv.kind == "session":
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
@@ -522,6 +527,19 @@ def format_transcript(messages: list[Message], me: str, name: Callable[[str | No
     return "\n\n".join(lines) if len(lines) > 1 else ""
 
 
+def format_route(plugin: str, who: str, text: str, reason: str, claim: bool) -> str:
+    """route 挂点叫醒一个成员时送达的说明：消息原文 + 插件给的理由。认领那一轮可以把它登记成任务，叫来看的不能。"""
+    quote = "\n".join(f"> {line}" for line in text[:2000].splitlines())
+    why = f"（理由：{reason}）" if reason else ""
+    if claim:
+        return (f"## 插件「{plugin}」把这条消息分派给你认领{why}\n{who} 在群聊里说：\n{quote}\n\n"
+                f"这条消息没有 @ 任何人。你接手的话按人交代给你的事处理：有交付目标就用 open_request 登记，下发人是 {who}。"
+                "不适合你就在群聊里说明，不要硬接。")
+    return (f"## 插件「{plugin}」请你看一下这条消息{why}\n{who} 在群聊里说：\n{quote}\n\n"
+            "它没有 @ 你：需要你接着做就在群聊里回应你这一环的结果；这条消息不能登记为你的任务。"
+            "不是你的事就只回“（略过）”四个字，网络不会把它发进群聊。")
+
+
 def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
     parts = ["## 网络通知：有成员把知识共享给了你"]
     for k in items:
@@ -531,7 +549,7 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, project: Project, can_delegate: bool,
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
-                      home: bool = True, plugins: bool = False, home_hidden: list[str] = (),
+                      home: bool = True, plugins: bool = False, home_hidden: list[str] = (), services: bool = False,
                       home_mixed: list[str] = (), home_frozen: bool = False) -> str:
     d = task.delegation
     parts = [
@@ -549,7 +567,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *([ "", archive] if archive else []),
         *(["", f"## 附件（委托方转交，只读副本，改动不会保存）", *format_attachments(task.attachments)]
           if task.attachments else []),
-        *_network_tools(project, can_delegate, plugins),
+        *_network_tools(project, can_delegate, plugins, services),
         *_abilities(),
         *_knowledge(knowledge),
         *_home(home_writable, home, home_hidden, home_mixed, home_frozen),

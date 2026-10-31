@@ -6,6 +6,7 @@
 //   await matrix.records.create("leads", { company: "…", stage: "线索" });
 //   await matrix.records.update("leads", id, { stage: "报价" });
 //   const { sent } = await matrix.chat.post("@销售助理 …");   // 父页面弹确认卡，人点“发送”才发
+//   const text = await matrix.service.call("wiki_search", { query: "定价" });   // 插件服务的只读工具（申请 service.read）
 //   matrix.on((event, data) => { if (event === "records.changed") reload(); });
 (function () {
   const pending = new Map();
@@ -43,6 +44,7 @@
     members: () => call("members.read"),
     chat: { read: (limit) => call("chat.read", { limit }), post: (text) => call("chat.post", { text }) },
     requests: () => call("requests.read"),
+    service: { call: (tool, args) => call("service.call", { tool, arguments: args || {} }) },
     ui: {
       badge: (text) => call("ui.badge", { text }),
       openFile: (name) => call("ui.file", { name }),

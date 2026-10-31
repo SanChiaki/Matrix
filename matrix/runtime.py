@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from .mcp_server import TOOLS as NETWORK_TOOLS
-from .models import AGENT_HOME, AUTHORITIES, CONNECTOR_PREFIX, CONNECTOR_SERVER, FETCH_SERVER, MCP_PREFIX, MCP_SERVER, SKILLS
+from .models import AGENT_HOME, AUTHORITIES, CONNECTOR_PREFIX, CONNECTOR_SERVER, FETCH_SERVER, LIST_TOOLS, MCP_PREFIX, MCP_SERVER, SKILLS
 from .web_fetch import DEADLINE_S, FetchPolicy
 
 EventSink = Callable[[dict[str, Any]], None]
@@ -542,6 +542,13 @@ class ScriptCall:
         self.stopped = req.cancel or threading.Event()  # 人终止了这一轮（脚本里可以等它）
         self.tool_names = [MCP_PREFIX + t["name"] for t in NETWORK_TOOLS
                            if req.tools.names is None or t["name"] in req.tools.names] if req.tools else []
+        if req.tools:  # 项目插件服务的工具：和 mcp_server 一样在“列工具”时向网络取
+            text, is_error = req.tools.handler(LIST_TOOLS, {})
+            try:
+                extra = json.loads(text) if not is_error else []
+            except ValueError:
+                extra = []
+            self.tool_names += [MCP_PREFIX + t["name"] for t in extra if isinstance(t, dict) and t.get("name")]
         self._req = req
         self.events: list[dict[str, Any]] = []
 

@@ -91,6 +91,7 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
     "chat.read": "读群聊里对所有参与者公开的消息",
     "chat.post": "以看页面的人的名义在群聊里发消息（每次确认）",
     "requests.read": "读看页面的人自己看得到的用户任务",
+    "service.read": "调插件服务的只读工具",
 }
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
@@ -120,6 +121,12 @@ SESSION_TOOLS = ("read_chat", "read_request")
 HOME_TOOLS = ("draft_message", "schedule", "list_schedules", "cancel_schedule")
 # 插件记录工具：项目里装了把它们开给 Agent 的插件时才有（档案类工具，不需要 delegate）
 PLUGIN_TOOLS = ("plugin_records", "plugin_write")
+# 插件服务的工具按原名 <插件>__<工具> 出现在网络工具里（docs/plugin-hooks.md）：网络工具的 MCP 服务在 tools/list 时
+# 用这个保留名经同一条回调向网络取，三种 harness、云侧端侧都一样
+LIST_TOOLS = "__list_tools__"
+PLUGIN_MOUNT = "plugins"         # 插件 mount 挂点在工作目录里的挂载名（只读副本，运行后丢弃）
+ROUTE_BUDGET = 3                 # 一条人发的消息引出的接力里，插件 route 最多自动唤醒几次（docs/plugin-hooks.md 第 8 节）
+PLUGIN_CONTEXT_TOTAL = 8000      # 全部插件的 context 挂点一轮最多往提示词里加多少字符
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
 # 私有目录工具：这一轮有没挂上的笔记时才有，读来自别的场合的笔记（不变量 22，matrix/flow.py）
@@ -324,6 +331,7 @@ class Message:
     via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）、哪个助理起草的
     draft_id: str | None = None          # event：助理对话里起草的一条消息（前端渲染成确认卡）
     held_id: str | None = None           # event：一条等所有者确认的输出（所有者看到确认卡，别人只看到“等确认”）
+    claimed_by: str | None = None        # user：被插件的 route 分派给哪个成员认领（Agent id），每条只能认领一次
     ts: float = field(default_factory=time.time)
 
 
@@ -345,6 +353,7 @@ class Seat:
     blocked: str | None = None           # 上一轮失败的原因；非空时收件箱暂停，等人“继续”或再 @ 它
     archive_seen: int = -1               # 已经送达过的项目档案版本（Project.archive_rev）
     abilities_seen: str = ""             # 已经送达过的“本轮可用的连接器 / 技能”说明的指纹，没变就不再送
+    hooks_seen: str = ""                 # 已经送达过的插件 context 挂点（文件类）的指纹，没变就不再送
     state_seen: str = ""                 # 项目会话 / 助理对话：已经送达过的项目现状（摘要的指纹），没变就不再送
     joint_seen: str = ""                 # 助理对话：已经送达过的共享项目总览的指纹（送了新的，这一轮就不能用连接器）
     # 这个模型会话读过的别处来源（场合，matrix/flow.py）：会话续接时一直有效，换新会话才清空（不变量 22）
@@ -438,6 +447,7 @@ class Task:
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
     archive_seen: int = -1               # 已经送达过的项目档案版本
     abilities_seen: str = ""             # 同 Seat.abilities_seen
+    hooks_seen: str = ""                 # 同 Seat.hooks_seen
     attachments: list[dict[str, Any]] = field(default_factory=list)  # 委托方显式转交的对话附件（同 Message.attachments）
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None

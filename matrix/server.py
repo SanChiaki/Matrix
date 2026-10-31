@@ -488,6 +488,7 @@ def create_app(network: Network) -> FastAPI:
         # 事件流阻塞在线程里等事件，uvicorn 取消不了线程：不主动唤醒，进程会卡在关闭阶段，
         # 浏览器那头的连接也一直不断，EventSource 就不会触发重连。
         network.bus.close()
+        network.services.stop_all()  # 插件服务进程随服务一起退出（不变量 24）
 
     app = FastAPI(title="Matrix", lifespan=lifespan)
     app.mount("/static", NoCacheStaticFiles(directory=STATIC), name="static")
