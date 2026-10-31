@@ -60,6 +60,19 @@ WIKI_SECRET=… uv run python examples/plugins/llm-wiki/service/wiki_engine.py -
 插件清单里把 `service` 换成 `{"url": "https://<你的地址>/mcp", "tools": {…}}`，Matrix 这边设同一个密钥
 `MATRIX_PLUGIN_SECRET_LLM_WIKI=…`。服务按 Matrix 签的项目令牌把数据分到 `/srv/wiki/<项目 id>/`，伪造或缺少令牌一律 401。
 
+## 插件作者自己运行，主持人填地址安装
+
+不经部署方目录（[docs/plugin-install.md](../../docs/plugin-install.md)）：
+
+```bash
+echo '{}' > secrets.json
+uv run python examples/plugins/llm-wiki/service/wiki_engine.py --http 8781 --root ./wiki-data --secrets secrets.json --package examples/plugins/llm-wiki
+```
+
+它在 `http://127.0.0.1:8781/matrix-plugin.zip` 给出插件包（服务地址指回自己）。本机试用时先在管理后台“插件”页把 `127.0.0.1` 加进允许的主机
+（http 和内网地址只对列出的主机放行；正式部署用 https 公网地址就不用加）。然后在项目的“插件”页“从地址安装”填这个地址：
+确认卡列出插件服务在哪个主机、会收到什么；确认后页面显示一次签名密钥和项目 id，写进 `secrets.json`（`{"<项目 id>": "<密钥>"}`，改了立即生效）。
+
 ## 换引擎
 
 插件服务只要是标准 MCP 就行。换成别的 LLM Wiki 引擎（例如 geronimo-iia/llm-wiki 的 Rust 程序），改 `plugin.json` 的

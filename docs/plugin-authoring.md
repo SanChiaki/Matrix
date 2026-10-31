@@ -395,14 +395,19 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
 ```
 
 - `command`：网络按项目启动一个 stdio 进程，工作目录是这个项目的数据目录（`{data}`），第一次用到时启动、空闲 15 分钟停掉。
-- `url`：部署方自己运行的远程服务（Streamable HTTP）。网络每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`，
-  签名是 HMAC-SHA256(密钥, `v1.<项目>.<插件名>.<过期>`)；服务要验签、检查过期，再按项目切分数据。密钥由部署方在两边配同一个值
-  （Matrix 这边是环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`，大写，`-` 换成 `_`）。示例引擎的 `check_token` 可以照抄。
+- `url`：远程服务（Streamable HTTP），部署方运行或你自己运行。网络每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`，
+  签名是 HMAC-SHA256(密钥, `v1.<项目>.<插件名>.<过期>`)；服务要验签、检查过期，再按项目切分数据。放进部署方目录时，密钥由部署方在两边配同一个值
+  （Matrix 这边是环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`，大写，`-` 换成 `_`）；主持人按地址自己装时，每个安装一把密钥，
+  装好后只显示一次，主持人连同项目 id 交给你，服务按令牌里的项目 id 找密钥再验签。示例引擎的 `check_token`、`secrets_file` 可以照抄。
 - 进程环境里没有任何凭证：要连外部服务请走连接器。服务**不要调模型**：要模型做的事写进技能，交给项目里的 Agent。
 - `tools` 是白名单和读写分级：只有列出来的工具出现在 Agent 那里，名字是 `<插件名>__<工具名>`（合起来 ≤64 个字符），带服务自己的
   schema 与说明；页面只能调 `read` 类。`write` 类要 Agent 有写权限，且会被信息流检查拦下（读过私下对话的会话不能写进项目数据）。
   每次调用都记日志，但不记参数和结果。
-- 只能放进部署方的插件目录（`plugins.json`）：服务端执行的代码要部署方审核过。
+- 谁能装、在哪里跑（[plugin-install.md](plugin-install.md)）：放进部署方目录的（`plugins.json`、管理后台、上架申请）部署方审核过，托管服务可以声明
+  `network: true`；主持人自己上传的托管服务只在沙箱里跑（不能联网、只能读写自己的数据目录，`command` 只能是 `python`），部署方没有沙箱时装不上；
+  远程服务可以给主持人一个地址（`.zip` 插件包或 `plugin.json`），服务必须和这个地址在同一个主机上，安装前主持人会看到你的服务会收到什么。
+- 依赖：写 `"requirements": "service/requirements.txt"`，一个每个包都带 `--hash` 的锁文件（`uv pip compile --generate-hashes`），要列全
+  （安装时 `--no-deps`、只装 wheel）。只用标准库最省事。
 
 **挂点**（都要有 `service`）：
 

@@ -239,6 +239,22 @@ TOOLS = [
     },
     # ---- 能力：缺连接器时提醒所有者（不授权、不安装）----
     {
+        "name": "propose_plugin",
+        "description": ("项目缺一个现成的业务场景（看板、知识库、任务板……）时，提议主持人给项目装一个插件："
+                        "部署方目录里的写 name，插件作者给的地址写 url（.zip 插件包或 plugin.json）。网络不会直接装："
+                        "主持人看过插件会拿到什么数据后批准，结果会作为通知送给你。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "部署方目录里的插件名（和 url 二选一）"},
+                "url": {"type": "string", "description": "插件地址（https，.zip 或 plugin.json）"},
+                "reason": {"type": "string", "description": "项目为什么需要它、装了拿来做什么"},
+            },
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "suggest_connector",
         "description": ("需要某个外部服务却没有对应的连接器时，提醒你的所有者去授权。只是提醒：不会授权、安装或开启任何东西，"
                         "这一轮继续用现有的能力。"),

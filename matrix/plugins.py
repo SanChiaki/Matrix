@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import skills as skillfs
 from .models import (PLUGIN_AGENT_CAPS, PLUGIN_FIELDS, PLUGIN_FILES, PLUGIN_LIMIT, PLUGIN_PAGE_CAPS, PLUGIN_RECORD_LIMIT,
@@ -106,8 +107,9 @@ class Service:
     command: str | None
     args: tuple[str, ...]
     tools: tuple[tuple[str, str], ...]   # (工具名, read | write)
-    network: bool = False                # 清单声明要不要联网（第一期只是声明，由部署方审核）
+    network: bool = False                # 要不要联网：只有部署方目录里的托管插件能联网（沙箱按它开网络）
     url: str | None = None
+    requirements: str | None = None      # 依赖锁文件（包里的路径，每行带 --hash）：安装时建一个独立的 Python 环境
 
     def tool_class(self, name: str) -> str | None:
         return next((c for n, c in self.tools if n == name), None)
@@ -188,7 +190,9 @@ class Manifest:
             "connectors": list(self.connectors),
             "release_views": list(self.release_views),
             "service": ({"tools": [{"name": n, "class": c} for n, c in self.service.tools],
-                         "network": self.service.network, "hosted": self.service.url is None} if self.service else None),
+                         "network": self.service.network, "hosted": self.service.url is None,
+                         "host": urlsplit(self.service.url).hostname if self.service.url else None,
+                         "requirements": self.service.requirements} if self.service else None),
             "hooks": {"mount": [{"resources": m.resources, "as": m.as_} for m in self.mounts],
                       "context": [{"label": c.label, "resource": c.resource, "tool": c.tool, "budget": c.budget}
                                   for c in self.contexts],
@@ -356,8 +360,8 @@ def _service(v: Any) -> Service | None:
         raise PluginError("service 要写 command（网络托管）或 url（部署方的远程 MCP），二选一")
     if command and (not re.match(r"^[A-Za-z0-9_.{}/-]{1,200}$", command) or ".." in command):
         raise PluginError(f"service.command 无效：{command!r}（写 python，或部署机器上的程序名）")
-    if url and not re.match(r"^(https://[^\s/]+|http://(127\.0\.0\.1|localhost)(:\d+)?)(/\S*)?$", url):
-        raise PluginError(f"service.url 要是 https 地址（本机调试可以用 http://127.0.0.1）：{url!r}")
+    if url and not re.match(r"^https?://[^\s/@]+(/\S*)?$", url):  # http 只在部署方白名单里放行（plugin_sources）
+        raise PluginError(f"service.url 要是 https 地址：{url!r}")
     args = v.get("args") or []
     if not isinstance(args, list) or len(args) > 20 or (args and url):
         raise PluginError("service.args 必须是列表，最多 20 项，只给 command 用")
@@ -374,7 +378,13 @@ def _service(v: Any) -> Service | None:
         if c not in TOOL_CLASSES:
             raise PluginError(f"工具 {n} 的分级要是 read、write 或 hook")
         out.append((str(n), str(c)))
-    return Service(command, args_t, tuple(out), bool(v.get("network")), url)
+    req = v.get("requirements")
+    if req is not None:
+        rel = safe_rel(str(req))
+        if url or rel is None or rel.suffix != ".txt":
+            raise PluginError("service.requirements 是包里的一个 .txt 锁文件（只给 command 用）")
+        req = rel.as_posix()
+    return Service(command, args_t, tuple(out), bool(v.get("network")), url, req)
 
 
 def _uri(v: Any, what: str) -> str:
@@ -567,6 +577,8 @@ def check_package(files: dict[Path, bytes]) -> Manifest:
         m = parse_manifest(json.loads(head.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise PluginError(f"{MANIFEST} 不是合法的 UTF-8 JSON：{e}") from e
+    if m.service is not None and m.service.requirements and Path(m.service.requirements) not in files:
+        raise PluginError(f"依赖锁文件 {m.service.requirements} 不在包里")
     for t in m.tabs:
         if Path(t.entry) not in files:
             raise PluginError(f"标签 {t.key} 的页面 {t.entry} 不在包里")
@@ -769,6 +781,8 @@ def cron_due(expr: str, t: time.struct_time) -> bool:
 class CatalogPlugin:
     dir: Path
     manifest: Manifest
+    origin: str = "file"                 # file：部署方的 plugins.json；managed：管理后台加的（plugin_sources）
+    info: dict[str, Any] = field(default_factory=dict)  # managed：来源、指纹、谁加的
 
 
 @dataclass

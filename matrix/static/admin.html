@@ -17,6 +17,7 @@
   <nav class="admin-tabs" aria-label="管理后台" hidden>
     <a href="#usage" data-tab="usage">使用情况</a>
     <a href="#models" data-tab="models">模型</a>
+    <a href="#plugins" data-tab="plugins">插件</a>
   </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
@@ -102,6 +103,60 @@
     </section>
   </div>
 
+  <div id="plugins" data-pane="plugins" hidden>
+    <div class="view-head">
+      <div><h1>插件</h1>
+        <p>部署方目录里有哪些插件，主持人能不能自己装插件、能装到什么程度，以及待审核的上架申请。</p></div>
+    </div>
+    <p class="error" id="pl-error" role="alert"></p>
+
+    <h3>主持人自己装</h3>
+    <form id="pl-policy" class="pl-policy">
+      <div class="field"><label for="plp-remote">远程服务插件（插件作者自己运行的服务）</label>
+        <select id="plp-remote" name="remote">
+          <option value="public">允许：公网主机，加上下面允许的内网主机</option>
+          <option value="listed">只允许下面列出的主机</option>
+          <option value="off">不允许</option>
+        </select></div>
+      <div class="field"><label for="plp-allow">允许的主机（一行一个：域名含子域名、IP 或网段；列出的也可以用 http、可以是内网）</label>
+        <textarea id="plp-allow" name="allow" rows="3" placeholder="plugins.corp.example&#10;10.20.0.0/16"></textarea></div>
+      <div class="field"><label for="plp-deny">禁止的主机（一行一个域名，含子域名；优先于允许）</label>
+        <textarea id="plp-deny" name="deny" rows="2"></textarea></div>
+      <label class="switch"><input type="checkbox" name="hosted_upload"> 允许主持人上传带托管服务的插件（只在沙箱里跑，不能联网）</label>
+      <label class="switch"><input type="checkbox" name="sandbox_catalog"> 部署方目录里的托管插件也放进沙箱（按清单决定能不能联网）</label>
+      <p class="muted m-hint" id="pl-sandbox"></p>
+      <div class="actions"><button type="submit" id="plp-save">保存</button></div>
+    </form>
+
+    <div class="m-section-head">
+      <div><h3>部署方目录</h3>
+        <p class="muted m-hint" id="pl-cat-hint">所有项目的主持人都能从这里安装。装进项目的是当时那一版的拷贝：这里更新后，主持人在插件卡上看到“升级”。</p></div>
+      <span class="row-actions"><button type="button" class="ghost" id="pl-git">从 git 仓库添加</button><button type="button" class="ghost" id="pl-zip">上传插件包</button></span>
+    </div>
+    <div class="table-wrap"><table id="t-plugin-catalog"></table></div>
+
+    <h3>上架申请</h3>
+    <p class="muted m-hint">任何人都可以把插件包交给你审核。看过文件和体检结果后批准，它就进部署方目录；拒绝时写下理由，提交的人看得到。</p>
+    <div class="table-wrap"><table id="t-plugin-subs"></table></div>
+  </div>
+
+  <dialog id="pl-git-dialog" class="m-dialog">
+    <form id="pl-git-form" method="dialog">
+      <h2>从 git 仓库添加插件</h2>
+      <div class="m-grid">
+        <div class="field wide"><label for="plg-url">仓库地址</label><input id="plg-url" name="url" required maxlength="2048" placeholder="https://github.com/org/repo.git"></div>
+        <div class="field"><label for="plg-ref">分支或标签</label><input id="plg-ref" name="ref" maxlength="200" placeholder="默认分支"></div>
+        <div class="field"><label for="plg-path">插件在仓库里的路径</label><input id="plg-path" name="path" maxlength="500" placeholder="如 plugins/wiki，留空是根目录"></div>
+      </div>
+      <p class="muted m-hint">只拉这一层（浅克隆），不拉子模块、不运行仓库里的任何东西；记下提交号与包的指纹。之后可以“重新拉取”。</p>
+      <p class="error" id="plg-error" role="alert"></p>
+      <div class="actions m-actions"><button type="button" class="ghost" id="plg-cancel">取消</button><button type="submit" id="plg-submit">添加</button></div>
+    </form>
+  </dialog>
+  <dialog id="pl-file-dialog" class="m-dialog pl-file">
+    <form method="dialog"><h2 id="plf-title"></h2><pre id="plf-body"></pre>
+      <div class="actions m-actions"><button type="submit">关闭</button></div></form>
+  </dialog>
   <dialog id="m-dialog" class="m-dialog">
     <form id="m-form" method="dialog">
       <h2 id="m-form-title">添加模型</h2>

@@ -2,7 +2,7 @@
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。给插件作者的指南见 [docs/plugin-authoring.md](../plugin-authoring.md)。设计与取舍见 [docs/project-plugins.md](../project-plugins.md)，原型见
 > [docs/prototypes/project-plugins.html](../prototypes/project-plugins.html)。
-> 代码：`plugins.py`（清单、包、记录、cron、目录）、`engine.py`「项目插件」一节、`server.py` 的插件路由、
+> 代码：`plugins.py`（清单、包、记录、cron、目录）、`plugin_sources.py`（安装策略、按地址取包、后台目录、上架申请）、`sandbox.py`、`engine.py`「项目插件」一节、`server.py` 的插件路由、
 > `static/plugin-sdk.js`（插件页面里的桥客户端）、`static/app.js` 的插件标签页。示例：`examples/plugins/sales-pipeline/`。
 
 插件让一个项目接上某种业务：**表**（项目档案的一部分）、**页面**（沙箱里的自定义代码）、**技能**、**触发**
@@ -39,19 +39,22 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 ## 安装、升级、卸载
 
-- 来源：部署方目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，默认 `<data>/plugins.json`，`{"plugins": ["相对目录", ...]}`，
-  按文件与清单的修改时间热加载），或主持人上传。**只有主持人**装、升级、卸载、启停触发（`hosted_project`）；
+- 来源（[plugin-install.md](../plugin-install.md)）：部署方目录（`plugins.json`：`--plugins` / `MATRIX_PLUGINS`，默认 `<data>/plugins.json`，
+  `{"plugins": ["相对目录", ...]}`，按文件与清单的修改时间热加载；加上管理后台加的 `<data>/plugin-catalog/`，`plugin_sources.CombinedCatalog`，
+  同名以文件为准），主持人上传，或主持人填地址（`.zip` 插件包或 `plugin.json`，`install_plugin_url`，之后可“检查更新”）。**只有主持人**装、升级、卸载、启停触发（`hosted_project`）；
   共享项目的参与者看得到装了什么、申请了哪些能力（`project_detail.plugin_list`）。
 - 装好的包在 `projects/<id>/plugins/<name>/`，元数据在 `Project.plugins[name]`
-  （`version, title, source, by_user, installed_at, data_rev, triggers: {key: {enabled, by_user, failures, paused, last_fired, error, hook_hash}}`）。
+  （`version, title, source（catalog | upload | url）, url, runs（remote | sandbox | host | null）, sha256, by_user, installed_at, data_rev,
+  triggers: {key: {enabled, by_user, failures, paused, last_fired, error, hook_hash}}`）。
   安装、升级、卸载、启停触发都是档案变化：`archive_rev` +1、写 `log.jsonl`、群聊里一条公开说明（写明“以看页面的人的名义”与申请的能力）。
-- **升级**：表结构变窄（删表、删字段、改类型、收窄选项）时要 `confirm`，否则返回将要发生的变化（`plugins.schema_changes`）；
-  旧记录原样保留，不认识的字段在页面上不显示。已有的触发状态保留。
+- **确认**：表结构变窄（删表、删字段、改类型、收窄选项，`plugins.schema_changes`），或者是主持人自己装的带服务的插件（数据去向，
+  `plugin_sources.disclosure`）时要 `confirm`，否则 `409 {detail, confirm: [一条条], digest}`（`engine.NeedsConfirm`）；确认时带回 `digest`，
+  包的指纹对不上就再问一次。旧记录原样保留，不认识的字段在页面上不显示。已有的触发状态保留。
 - **启停**：主持人在插件卡片上用开关停用 / 启用整个插件（`PUT /api/projects/<id>/plugins/<name> {enabled}`，`Project.plugins[name].disabled`）。
   停用后插件对外一律不可用（都经 `Network._manifest`）：标签页消失、帧令牌作废、桥与记录读写拒绝、Agent 的记录工具与提示、
   技能、档案推送里的插件一节都不带，外部回调 409、定时与记录触发不跑。包、记录、触发设置原样保留，升级不改变启停，重新启用即恢复。
   启停是档案变化（`archive_rev` +1、`log.jsonl`、群聊说明）。
-- **卸载**：删包与触发，记录留在 `projects/<id>/plugin-data/<name>/`，重新装回来还在（没有自动清理）。
+- **卸载**：删包、触发与这个安装的签名密钥，记录留在 `projects/<id>/plugin-data/<name>/`，重新装回来还在（没有自动清理）。
 - 触发默认不开，主持人逐个启用。
 
 ## 记录
@@ -91,6 +94,9 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
   按各插件自己申请的能力放行（`ExecContext.plugins`、`_agent_plugin`）。是档案类工具，不需要 `delegate`；
   结构化参数（`where`、`fields`）是 JSON 字符串（DeepSeek 下数组 / 对象参数容易写坏，见 AGENTS.md 工作方式第 5 条）。
 - Agent 写的记录留痕为 Agent，但**不引发记录触发**：Agent 之间不能经插件互相唤醒（不变量 6）。
+- **提议装插件**：档案类工具 `propose_plugin`（`name` 目录里的插件名或 `url` 插件地址，`reason`）。网络取包、按策略检查，生成
+  `Proposal(kind="plugin")`（带标题、版本、来源、确认卡条目、包的指纹），由主持人在群聊卡片上批准（`install_proposed_plugin`，
+  以主持人的身份装提议时那一份）或拒绝，结果作为通知送回提议的 Agent（`format_proposal_notice`）。算 `OUTBOUND_TOOLS`。
 
 ## 触发
 
@@ -110,20 +116,28 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 设计见 [plugin-hooks.md](../plugin-hooks.md)，不变量 24；示例 `examples/plugins/llm-wiki/`、演示 `examples/llm-wiki/`。
 
-- **清单**：`service`：`command`（网络托管：`python` 是网络自己的解释器，或部署机器上的程序名；`args` 里 `{plugin}` 换成装进项目的包目录、
-  `{data}` 换成数据目录）或 `url`（部署方运行的远程 MCP，https，本机调试可用 http://127.0.0.1），二选一；`tools`：工具名 → `read` / `write`，
-  只有这里列的开给 Agent 与页面，`<插件名>__<工具名>` 最长 64；`network` 只是声明。
+- **清单**：`service`：`command`（网络托管：`python` 是网络自己的解释器（有 `requirements` 时是按锁文件建的环境的），或部署机器上的程序名；
+  `args` 里 `{plugin}` 换成装进项目的包目录、`{data}` 换成数据目录）或 `url`（远程 MCP；http 只在部署方白名单里放行），二选一；
+  `tools`：工具名 → `read` / `write` / `hook`，只有这里列的开给 Agent 与页面，`<插件名>__<工具名>` 最长 64；`network`：托管服务要不要联网
+  （沙箱据此开网络，只有目录里的能是 true）；`requirements`：包里的依赖锁文件（每个包带 `--hash`）。
   `hooks`：`mount`（`resources`：一个 MCP 资源 URI 前缀 → 工作目录 `plugins/<插件>/<as>/`，去掉前缀是相对路径）、`context`（`resource` 或 `tool`
   二选一，`label`、`budget` ≤4000；`tool` 只能是 read 类，`args` 模板可用 `{latest}`、`{mission}`）、`after`（`on` 第一期只有 `request.accepted`；
   `notify.to` 写成员名或 `{agent}` ＝接任务的 Agent，`text` 可用 `{title}`、`{summary}`、`{agent}`；或 `tool` + `args`）。校验在 `plugins._service` / `_hooks`。
-- **安装**：带 `service` 的只能从部署方目录装（`_install_plugin`），上传的拒绝。升级、停用、卸载都停掉进程；托管进程的数据在
-  `projects/<id>/plugin-data/<插件>/service/`，卸载不删；远程服务的数据在部署方那边。
+- **安装**（[plugin-install.md](../plugin-install.md)）：`_plugin_runs` 定在哪里跑：目录里的远程服务 `remote`、托管的有沙箱且
+  `sandbox_catalog` 时 `sandbox` 否则 `host`；主持人自己装的远程服务要过 `plugin_sources.check_remote`（部署方策略），托管的只能 `sandbox`
+  （要有沙箱、`hosted_upload`、不联网、`command` 是 python）。运行时 `_service_client` 按安装来源再判一次（策略改了立即生效）。
+  有 `requirements` 时安装就建依赖环境（`plugin_service.build_env`）。升级、停用、卸载都停掉进程；托管进程的数据在
+  `projects/<id>/plugin-data/<插件>/service/`，卸载不删；远程服务的数据在服务那边。
+- **沙箱**（`sandbox.py`）：Linux bubblewrap，新命名空间（默认不共享网络），只读挂系统目录、解释器与依赖环境、插件包，读写挂数据目录，
+  空的 `/tmp`；`setrlimit` 限地址空间、打开文件、文件大小、CPU 时间。`available()` 第一次真跑一次探测；`MATRIX_PLUGIN_SANDBOX=off` 关掉。
 - **托管进程**（`plugin_service.py`）：`ServiceHost` 按 (项目, 插件) 一个 `StdioClient`，第一次用到时启动（`initialize` + `tools/list`），
   版本换了重启；一次调用最多等 60 秒，串行；空闲 15 分钟由定时线程停掉；连续 3 次起不来就暂停，主持人停用再启用清零。
   环境只有 `PATH`、`SYSTEMROOT` 等运行必需的变量，`HOME` 指向数据目录；stderr 只留最后 20 行给部署方排错。服务退出随 Matrix 一起停。
 - **远程服务**：`RemoteService` 复用 `mcp_client.RemoteMCP`；每次调用带 `Authorization: Bearer v1.<项目>.<过期>.<签名>`
-  （`sign_token`：HMAC-SHA256 签 `v1.<项目>.<插件>.<过期>`，10 分钟），密钥在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`（大写，`-` 换 `_`），
-  部署方在服务那边配同一个值。没配时这个插件的工具不出现、挂点为空、调用报“部署方没配签名密钥”。
+  （`sign_token`：HMAC-SHA256 签 `v1.<项目>.<插件>.<过期>`，10 分钟）。目录里的：密钥在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`（大写，`-` 换 `_`），
+  部署方在服务那边配同一个值，没配时这个插件的工具不出现、挂点为空、调用报“部署方没配签名密钥”。主持人自己装的：每个安装一把
+  （`ps_…`，保管库 `plugin-<项目>-<插件>`），安装或重置时只返回一次（`reset_plugin_secret`），卸载即删；第三方那里人调用时 `_meta.matrix/caller`
+  只带成员 id。
 - **工具**：按原名 `<插件>__<工具>` 出现，带服务自己的 schema 与说明（说明前加“[插件「标题」只读 / 写入]”）。网络工具的 MCP 服务
   （`mcp_server.py`）在 `tools/list` 时用保留名 `__list_tools__`（`models.LIST_TOOLS`）经同一条回调取（`Network.plugin_tool_specs`），
   调用同样走 `/internal/tools`，`handle_tool` 认出 `<插件>__` 前缀后交给 `_plugin_tool`。只在装了它的项目里的群聊席位、项目会话、委托里有
@@ -147,7 +161,7 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
   传给服务的还有 `relay`（剩余预算、链上的成员）与 `members[].assistant`。只因 route 的 `wake` 醒来的一轮（没有认领、没被 @），
   回复正好是 `ROUTE_PASS`（“（略过）”）时不发进群聊（`_seat_round`）。
 - **调用者身份**：`_service_call` 给每次工具调用带 `_meta`：`matrix/caller`（Agent 调的是 `{"kind": "agent", "id", "name"}`，页面是
-  `{"kind": "user", "email"}`，挂点是 `{"kind": "network"}`）与 `matrix/project`。挂点（hook 类）调用成功后也算改了数据（`data_rev` 加一、
+  `{"kind": "user", "email"}`（自己装的远程服务是 `{"kind": "user", "id"}`），挂点是 `{"kind": "network"}`）与 `matrix/project`。挂点（hook 类）调用成功后也算改了数据（`data_rev` 加一、
   推 `plugin.records`）。
 
 ## 接口
@@ -155,8 +169,17 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 | 方法 | 路径 | 谁 |
 | --- | --- | --- |
 | GET | `/api/plugins` | 登录用户：部署方目录 |
-| POST | `/api/projects/<id>/plugins` `{name, confirm}` | 主持人：从目录安装 / 升级 |
-| POST | `/api/projects/<id>/plugins/upload?confirm=1` | 主持人：zip 请求体，或 JSON `{files: [{path, data(base64)}]}` |
+| POST | `/api/projects/<id>/plugins` `{name, confirm, digest}` | 主持人：从目录安装 / 升级 |
+| POST | `/api/projects/<id>/plugins/upload?confirm=1&digest=` | 主持人：zip 请求体，或 JSON `{files: [{path, data(base64)}]}` |
+| POST | `/api/projects/<id>/plugins/url` `{url, confirm, digest}` | 主持人：按地址安装 |
+| POST | `/api/projects/<id>/plugins/<name>/refresh` `{confirm, digest}` | 主持人：按地址装的检查更新 |
+| POST | `/api/projects/<id>/plugins/<name>/secret` | 主持人：生成 / 重置自己装的远程插件的签名密钥（明文只这一次） |
+| POST | `/api/plugin-submissions?note=` | 登录用户：提交上架申请（请求体同上传） |
+| GET | `/api/plugin-submissions` | 登录用户：自己的申请 |
+| POST | `/api/proposals/<id>/install` `{note}` | 主持人：批准 Agent 装插件的提议 |
+| GET / PUT | `/api/admin/plugins`、`/api/admin/plugins/policy` | 管理员：插件页、安装策略 |
+| POST / DELETE | `/api/admin/plugins/catalog/git`、`…/upload`、`…/<name>/refresh`、`…/<name>` | 管理员：后台目录 |
+| GET / POST | `/api/admin/plugins/submissions/<id>/file?path=`、`/api/admin/plugins/submissions/<id>` `{approve, note}` | 管理员：审核上架申请 |
 | PUT | `/api/projects/<id>/plugins/<name>` `{enabled}` | 主持人：启用 / 停用整个插件 |
 | DELETE | `/api/projects/<id>/plugins/<name>` | 主持人：卸载 |
 | PUT | `/api/projects/<id>/plugins/<name>/triggers/<key>` `{enabled}` | 主持人 |
@@ -170,6 +193,6 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 
 ## 还没做
 
-- 插件服务：HTTP 传输、强制的进程隔离（无网络命名空间、只读挂载；第一期靠部署方审核）、`hooks.settings`（安装时让主持人填的设置）、
-  `route` 挂点（协作类插件，见 plugin-hooks.md 第 8 节）、更多 `after` 事件。
-- 回调请求的 HMAC 签名校验（目前令牌即授权）；`propose_plugin`（Agent 提议插件、主持人批准）；插件之间互读表。
+- 插件服务：`hooks.settings`（安装时让主持人填的设置）、更多 `after` 事件；macOS / Windows 的沙箱、cgroup 级上限、
+  托管插件按域名出网（见 plugin-install.md 第 9 节）。
+- 回调请求的 HMAC 签名校验（目前令牌即授权）；插件之间互读表。

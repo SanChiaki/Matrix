@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
-from .engine import HookRateLimited, Network, NetworkError
+from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
 from .model_catalog import CatalogConflict, ModelCatalog
@@ -60,6 +60,37 @@ def resume_seq(since: int, last_event_id: str | None, last_seq: int) -> int:
 class PluginInstallIn(BaseModel):
     name: str = Field(max_length=64)
     confirm: bool = False
+    digest: str | None = Field(None, max_length=64)
+
+
+class PluginUrlIn(BaseModel):
+    url: str = Field(max_length=2048)
+    confirm: bool = False
+    digest: str | None = Field(None, max_length=64)
+
+
+class PluginRefreshIn(BaseModel):
+    confirm: bool = False
+    digest: str | None = Field(None, max_length=64)
+
+
+class PluginPolicyIn(BaseModel):
+    remote: str = "public"
+    allow: list[str] = Field(default_factory=list, max_length=200)
+    deny: list[str] = Field(default_factory=list, max_length=200)
+    hosted_upload: bool = True
+    sandbox_catalog: bool = True
+
+
+class CatalogGitIn(BaseModel):
+    url: str = Field(max_length=2048)
+    ref: str = Field("", max_length=200)
+    path: str = Field("", max_length=500)
+
+
+class DecideIn(BaseModel):
+    approve: bool
+    note: str = Field("", max_length=500)
 
 
 class TriggerIn(BaseModel):
@@ -497,6 +528,8 @@ def create_app(network: Network) -> FastAPI:
     @app.exception_handler(NetworkError)
     async def _net_err(_: Request, e: NetworkError) -> JSONResponse:
         msg = str(e)
+        if isinstance(e, NeedsConfirm):  # 安装前要主持人确认的事：一条条给界面，确认时带回 digest
+            return JSONResponse({"detail": msg, "confirm": e.items, "digest": e.digest}, status_code=409)
         return JSONResponse({"detail": msg}, status_code=404 if msg.startswith("unknown ") else 409)
 
     @app.exception_handler(auth.AuthError)
@@ -857,13 +890,71 @@ def create_app(network: Network) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/plugins")
     def install_plugin(project_id: str, body: PluginInstallIn, user: Me) -> dict:
-        return network.install_plugin(project_id, body.name, body.confirm, actor=user.id)
+        return network.install_plugin(project_id, body.name, body.confirm, actor=user.id, digest=body.digest)
+
+    @app.post("/api/projects/{project_id}/plugins/url")
+    def install_plugin_url(project_id: str, body: PluginUrlIn, user: Me) -> dict:
+        return network.install_plugin_url(project_id, body.url, body.confirm, actor=user.id, digest=body.digest)
+
+    @app.post("/api/projects/{project_id}/plugins/{name}/refresh")
+    def refresh_plugin(project_id: str, name: str, body: PluginRefreshIn, user: Me) -> dict:
+        return network.refresh_plugin(project_id, name, body.confirm, actor=user.id, digest=body.digest)
+
+    @app.post("/api/projects/{project_id}/plugins/{name}/secret")
+    def reset_plugin_secret(project_id: str, name: str, user: Me) -> dict:
+        return {"secret": network.reset_plugin_secret(project_id, name, actor=user.id)}
+
+    # ---- 上架申请：任何人提交插件包，管理员审核后进部署方目录（docs/plugin-install.md） ----
+    @app.post("/api/plugin-submissions")
+    async def submit_plugin(request: Request, user: Me, note: str = Query("", max_length=500)) -> dict:
+        entries = await plugin_package(request)
+        return await run_in_threadpool(network.submit_plugin, entries, note, user.id)
+
+    @app.get("/api/plugin-submissions")
+    def my_plugin_submissions(user: Me) -> list[dict]:
+        return network.my_plugin_submissions(user.id)
+
+    @app.get("/api/admin/plugins")
+    def admin_plugins(user: Me) -> dict:
+        return network.admin_plugins(user.id)
+
+    @app.put("/api/admin/plugins/policy")
+    def admin_plugin_policy(body: PluginPolicyIn, user: Me) -> dict:
+        return network.admin_save_plugin_policy(user.id, body.model_dump())
+
+    @app.post("/api/admin/plugins/catalog/git")
+    def admin_catalog_git(body: CatalogGitIn, user: Me) -> dict:
+        return network.admin_catalog_git(user.id, body.url, body.ref, body.path)
+
+    @app.post("/api/admin/plugins/catalog/upload")
+    async def admin_catalog_upload(request: Request, user: Me) -> dict:
+        if not network.is_admin(user.id):
+            raise HTTPException(404, "unknown admin")
+        entries = await plugin_package(request)
+        return await run_in_threadpool(network.admin_catalog_upload, user.id, entries)
+
+    @app.post("/api/admin/plugins/catalog/{name}/refresh")
+    def admin_catalog_refresh(name: str, user: Me) -> dict:
+        return network.admin_catalog_refresh(user.id, name)
+
+    @app.delete("/api/admin/plugins/catalog/{name}")
+    def admin_catalog_remove(name: str, user: Me) -> dict:
+        return network.admin_catalog_remove(user.id, name)
+
+    @app.get("/api/admin/plugins/submissions/{sid}/file")
+    def admin_submission_file(sid: str, user: Me, path: str = Query(..., max_length=500)) -> dict:
+        return {"path": path, "text": network.admin_submission_file(user.id, sid, path)}
+
+    @app.post("/api/admin/plugins/submissions/{sid}")
+    def admin_decide_submission(sid: str, body: DecideIn, user: Me) -> dict:
+        return network.admin_decide_submission(user.id, sid, body.approve, body.note)
 
     @app.post("/api/projects/{project_id}/plugins/upload")
-    async def upload_plugin(project_id: str, request: Request, user: Me, confirm: bool = False) -> dict:
+    async def upload_plugin(project_id: str, request: Request, user: Me, confirm: bool = False,
+                            digest: str | None = Query(None, max_length=64)) -> dict:
         await run_in_threadpool(network.hosted_project, project_id, user.id)  # 先查权限，不收无权者的内容
         entries = await plugin_package(request)
-        return await run_in_threadpool(network.upload_plugin, project_id, entries, confirm, user.id)
+        return await run_in_threadpool(network.upload_plugin, project_id, entries, confirm, user.id, digest)
 
     @app.delete("/api/projects/{project_id}/plugins/{name}")
     def uninstall_plugin(project_id: str, name: str, user: Me) -> dict:
@@ -1171,6 +1262,10 @@ def create_app(network: Network) -> FastAPI:
     def approve(proposal_id: str, body: ProposalApprove, user: Me) -> dict:
         a = network.approve_proposal(proposal_id, **body.model_dump(), actor=user.id)
         return network.agent_view(a, user.id)
+
+    @app.post("/api/proposals/{proposal_id}/install")
+    def install_proposed(proposal_id: str, body: NoteIn, user: Me) -> dict:
+        return network.install_proposed_plugin(proposal_id, body.note, actor=user.id)
 
     @app.post("/api/proposals/{proposal_id}/reject")
     def reject(proposal_id: str, body: NoteIn, user: Me) -> dict:

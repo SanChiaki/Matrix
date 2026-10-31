@@ -1,10 +1,11 @@
 """插件服务：标准 MCP 服务的客户端（docs/plugin-hooks.md 第 4 节，不变量 24）。
 
-只有部署方目录里的插件能带服务。两种来源：
+两种来源（谁能装哪种见 docs/plugin-install.md）：
 - 网络托管的 stdio 进程（`StdioClient`）：一个安装（项目 × 插件）一个进程，按需启动、空闲停掉；工作目录是这个安装的数据目录，
-  环境里只有运行一个程序必需的变量，不带任何凭证与网络的密钥。
-- 部署方运行的远程 MCP（`RemoteService`）：网络每次调用带一个只对这个项目、这个插件有效的签名令牌（`sign_token`），
-  服务按它切分数据；密钥由部署方放在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>` 里。
+  环境里只有运行一个程序必需的变量，不带任何凭证与网络的密钥。主持人上传的一律进沙箱（matrix/sandbox.py）。
+  清单带依赖锁文件时，用的是按锁文件建的独立 Python 环境（`build_env`）。
+- 远程 MCP（`RemoteService`）：网络每次调用带一个只对这个项目、这个插件有效的签名令牌（`sign_token`），服务按它切分数据。
+  部署方目录里的，密钥由部署方放在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>` 里；主持人自己装的，每个安装一把，存在保管库。
 网络是 MCP 客户端：列工具、调工具、列资源、读资源。工具调用的身份、权限、留痕都在 engine，服务看到的是参数和网络认定的调用者（_meta）。
 """
 
@@ -15,6 +16,8 @@ import hmac
 import json
 import os
 import queue
+import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -58,13 +61,75 @@ def sign_token(secret: bytes, project: str, plugin: str, now: float | None = Non
     return f"v1.{project}.{exp}.{sig}"
 
 
-def resolve_command(command: str, args: tuple[str, ...], pkg: Path, data: Path) -> list[str]:
-    """清单里的 command / args → 命令行。`python` 是网络自己的解释器；`{plugin}` 是装进项目的包目录，
-    `{data}` 是数据目录。不经 shell。"""
+def resolve_command(command: str, args: tuple[str, ...], pkg: Path, data: Path, python: str | None = None) -> list[str]:
+    """清单里的 command / args → 命令行。`python` 是网络自己的解释器（有依赖环境时是那个环境的）；
+    `{plugin}` 是装进项目的包目录，`{data}` 是数据目录。不经 shell。"""
     def fill(s: str) -> str:
         return s.replace("{plugin}", str(pkg)).replace("{data}", str(data))
-    exe = sys.executable if command == "python" else fill(command)
+    exe = (python or sys.executable) if command == "python" else fill(command)
     return [exe, *(fill(a) for a in args)]
+
+
+# ================= 依赖环境 =================
+ENV_TIMEOUT = 600
+_REQ_LOCAL = re.compile(r"(^|\s)(-e|--editable|-f|--find-links|-c|--constraint|-r|--requirement)(\s|=|$)|file:|^\.{0,2}/")
+
+
+def venv_python(env: Path) -> Path:
+    return env / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+
+
+def check_requirements(text: str, trusted: bool) -> None:
+    """锁文件：每个包都要带 --hash（pip / uv 的哈希校验模式）。不是部署方审核过的，不许引用本机文件与别的需求文件。"""
+    lines = [ln.split("#", 1)[0].strip() for ln in text.replace("\\\n", " ").splitlines()]
+    pkgs = [ln for ln in lines if ln and not ln.startswith("-")]
+    if any("--hash=" not in ln for ln in pkgs):
+        raise ServiceError("依赖锁文件里每个包都要带 --hash（用 uv pip compile --generate-hashes 生成）")
+    if not trusted and any(_REQ_LOCAL.search(ln) for ln in lines if ln):
+        raise ServiceError("依赖锁文件不能引用本机文件、可编辑安装或别的需求文件")
+
+
+def build_env(req: bytes, root: Path, trusted: bool = False) -> Path:
+    """按锁文件建一个独立的 Python 环境，按内容（与解释器版本）缓存：同一份锁文件只建一次。
+    只装预编译的 wheel（--only-binary :all:）、不解析依赖（--no-deps，锁文件要列全），安装过程不执行包里的代码。"""
+    text = req.decode("utf-8", errors="replace")
+    check_requirements(text, trusted)
+    key = hashlib.sha256(req + sys.version.encode()).hexdigest()[:24]
+    env = root / key
+    if (env / ".ready").is_file():
+        return env
+    root.mkdir(parents=True, exist_ok=True)
+    tmp = root / f".build-{key}-{os.getpid()}-{threading.get_ident()}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    clean = {k: v for k, v in os.environ.items() if not any(s in k.upper() for s in ("KEY", "TOKEN", "SECRET", "PASSWORD"))}
+    reqfile = root / f".req-{key}.txt"
+    reqfile.write_bytes(req)
+    uv = shutil.which("uv")
+    try:
+        if uv:
+            steps = [[uv, "venv", "--quiet", "--python", sys.executable, str(tmp)],
+                     [uv, "pip", "install", "--quiet", "--python", str(venv_python(tmp)), "--require-hashes", "--no-deps",
+                      "--only-binary", ":all:", "-r", str(reqfile)]]
+        else:
+            steps = [[sys.executable, "-m", "venv", str(tmp)],
+                     [str(venv_python(tmp)), "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps",
+                      "--only-binary=:all:", "-r", str(reqfile)]]
+        for cmd in steps:
+            r = subprocess.run(cmd, env=clean, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=ENV_TIMEOUT)
+            if r.returncode != 0:
+                tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
+                raise ServiceError("装依赖失败：" + " / ".join(tail))
+        (tmp / ".ready").write_text("ok", encoding="utf-8")
+        if env.exists():  # 别的线程先建好了
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            tmp.rename(env)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise ServiceError(f"装依赖失败：{e}") from e
+    finally:
+        reqfile.unlink(missing_ok=True)
+        shutil.rmtree(tmp, ignore_errors=True)
+    return env
 
 
 @dataclass
@@ -73,6 +138,7 @@ class StdioClient:
 
     argv: list[str]
     cwd: Path
+    preexec: Any = None                  # 沙箱的资源上限（POSIX）
     proc: subprocess.Popen | None = None
     _lines: queue.Queue = field(default_factory=queue.Queue)
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -86,7 +152,7 @@ class StdioClient:
         try:
             self.proc = subprocess.Popen(self.argv, cwd=self.cwd, env=service_env(self.cwd), stdin=subprocess.PIPE,
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-                                         errors="replace", bufsize=1,
+                                         errors="replace", bufsize=1, preexec_fn=self.preexec,
                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as e:
             raise ServiceError(f"插件服务起不来：{e}") from e
@@ -244,21 +310,23 @@ class ServiceHost:
     _failures: dict[tuple[str, str], int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def remote(self, project_id: str, plugin: str, version: str, url: str) -> RemoteService:
-        """部署方的远程服务：不起进程，只缓存客户端（会话、工具列表）。"""
+    def remote(self, project_id: str, plugin: str, version: str, url: str, secret: bytes | None = None) -> RemoteService:
+        """远程服务：不起进程，只缓存客户端（会话、工具列表）。secret 为空时用部署方的环境变量（目录里的插件）。"""
         key = (project_id, plugin)
-        secret = os.environ.get(secret_env(plugin), "").encode()
+        secret = secret or os.environ.get(secret_env(plugin), "").encode()
         if not secret:
             raise ServiceError(f"部署方没配签名密钥：环境变量 {secret_env(plugin)}")
         with self._lock:
             hit = self._procs.get(key)
-            if hit is not None and hit[0] == version and isinstance(hit[1], RemoteService) and hit[1].mcp.url == url:
+            if (hit is not None and hit[0] == version and isinstance(hit[1], RemoteService) and hit[1].mcp.url == url
+                    and hit[1].secret == secret):
                 return hit[1]
             c = RemoteService(url, project_id, plugin, secret)
             self._procs[key] = (version, c)
             return c
 
-    def client(self, project_id: str, plugin: str, version: str, argv: list[str], cwd: Path) -> StdioClient:
+    def client(self, project_id: str, plugin: str, version: str, argv: list[str], cwd: Path,
+               preexec: Any = None) -> StdioClient:
         key = (project_id, plugin)
         with self._lock:
             hit = self._procs.get(key)
@@ -269,7 +337,7 @@ class ServiceHost:
                 self._procs.pop(key, None)
             if self._failures.get(key, 0) >= START_FAILURES:
                 raise ServiceError(f"插件服务连续 {START_FAILURES} 次没起来，已暂停：请主持人停用再启用插件")
-            c = StdioClient(argv, cwd)
+            c = StdioClient(argv, cwd, preexec)
             try:
                 c.start()
             except ServiceError:

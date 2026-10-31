@@ -319,6 +319,36 @@ def fetch(policy: FetchPolicy, url: str, resolver: Resolver = _resolve) -> str:
     raise FetchError(f"重定向超过 {MAX_REDIRECTS} 次")
 
 
+def fetch_bytes(policy: FetchPolicy, url: str, limit: int, accept: str = "*/*",
+                resolver: Resolver = _resolve) -> tuple[bytes, str, str]:
+    """按同样的校验取一个地址的原始字节（插件包、清单用）：返回（内容, 内容类型, 最后的地址）。
+    超过 limit 字节、非 2xx 都抛 FetchError。"""
+    deadline = time.monotonic() + DEADLINE_S
+    current = (url or "").strip()
+    for _hop in range(MAX_REDIRECTS + 1):
+        route = plan(policy, current, resolver)
+        timeout = max(1.0, min(TIMEOUT_S, deadline - time.monotonic()))
+        conn, path, extra = _connection(current, route, timeout)
+        try:
+            conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": accept,
+                                               "Accept-Encoding": "identity", **extra})
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308) and resp.getheader("Location"):
+                current = urljoin(current, resp.getheader("Location", ""))
+                continue
+            if not 200 <= resp.status < 300:
+                raise FetchError(f"{current} 返回 {resp.status}")
+            body = resp.read(limit + 1)
+        except (OSError, http.client.HTTPException) as e:
+            raise FetchError(f"取 {current} 失败：{e}") from e
+        finally:
+            conn.close()
+        if len(body) > limit:
+            raise FetchError(f"{current} 的内容超过 {limit // 1_000_000} MB")
+        return body, (resp.getheader("Content-Type", "") or "").split(";")[0].strip().lower(), current
+    raise FetchError(f"重定向超过 {MAX_REDIRECTS} 次")
+
+
 _META_CHARSET = re.compile(rb"""<meta[^>]+charset=["']?([A-Za-z0-9_\-]+)""", re.I)
 
 

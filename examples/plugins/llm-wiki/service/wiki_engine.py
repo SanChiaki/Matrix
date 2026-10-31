@@ -13,12 +13,16 @@
 MCP：工具（index / list / read / search / history / lint / add_source / write / log）与资源（`wiki:///<相对路径>`，
 如 `wiki:///wiki/index.md`，只列 wiki/ 与 raw/ 下的 markdown）。
 
-两种跑法：
+三种跑法：
 
     python wiki_engine.py --root <数据目录>                       stdio，一个进程一个 wiki（Matrix 托管）
     python wiki_engine.py --http 8780 --root <目录> --secret-env WIKI_SECRET
-                                                               Streamable HTTP（部署方自己运行），一个进程服务多个项目：
-                                                               按 Matrix 签的项目令牌切分到 <目录>/<项目 id>/
+                                                               Streamable HTTP（部署方自己运行，放进部署方目录），
+                                                               一个进程服务多个项目：按 Matrix 签的项目令牌切分到 <目录>/<项目 id>/
+    python wiki_engine.py --http 8780 --root <目录> --secrets secrets.json --package <插件目录>
+                                                               插件作者自己运行，主持人填地址安装（docs/plugin-install.md）：
+                                                               GET /matrix-plugin.zip 给出插件包（服务地址指回这里），
+                                                               每个项目一把密钥，写在 secrets.json（{"项目 id": "密钥"}，改了立即生效）
 """
 
 from __future__ import annotations
@@ -363,14 +367,21 @@ def serve_stdio(root: Path) -> None:
 
 
 # ---- HTTP：一个进程多个项目，按 Matrix 签的项目令牌切分 ----
-def check_token(header: str, secret: bytes, plugin: str = "llm-wiki", now: float | None = None) -> str:
-    """`Bearer v1.<项目 id>.<过期时间>.<签名>`，签名 = HMAC-SHA256(secret, "v1.<项目>.<插件>.<过期>")。返回项目 id。"""
+Secret = bytes | Callable[[str], bytes | None]
+
+
+def check_token(header: str, secret: Secret, plugin: str = "llm-wiki", now: float | None = None) -> str:
+    """`Bearer v1.<项目 id>.<过期时间>.<签名>`，签名 = HMAC-SHA256(secret, "v1.<项目>.<插件>.<过期>")。返回项目 id。
+    secret 可以是一把（部署方配的，所有项目共用），也可以按项目取（主持人自己装的，每个安装一把）。"""
     token = header.removeprefix("Bearer ").strip()
     parts = token.split(".")
     if len(parts) != 4 or parts[0] != "v1" or not re.match(r"^[A-Za-z0-9_-]{1,64}$", parts[1]):
         raise PermissionError("令牌格式不对")
     _, project, exp, sig = parts
-    good = hmac.new(secret, f"v1.{project}.{plugin}.{exp}".encode(), hashlib.sha256).hexdigest()
+    key = secret(project) if callable(secret) else secret
+    if not key:
+        raise PermissionError("这个项目没有配密钥")
+    good = hmac.new(key, f"v1.{project}.{plugin}.{exp}".encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig, good):
         raise PermissionError("签名不对")
     if not exp.isdigit() or int(exp) < (time.time() if now is None else now):
@@ -378,9 +389,49 @@ def check_token(header: str, secret: bytes, plugin: str = "llm-wiki", now: float
     return project
 
 
-def make_http_server(port: int, root: Path, secret: bytes | None) -> ThreadingHTTPServer:
-    """secret 为 None 时不校验令牌（只用于本机调试），项目 id 取 X-Matrix-Project。"""
+def secrets_file(path: Path) -> Callable[[str], bytes | None]:
+    """{"项目 id": "密钥"}：每次请求都重读（文件小），主持人配好就生效。"""
+    def get(project: str) -> bytes | None:
+        try:
+            v = json.loads(path.read_text(encoding="utf-8")).get(project)
+        except (OSError, ValueError, AttributeError):
+            return None
+        return v.encode() if isinstance(v, str) and v else None
+    return get
+
+
+def package_zip(pkg: Path, url: str) -> bytes:
+    """把插件目录打成给 Matrix 安装的包：服务换成指回这里的远程地址，不带服务代码。"""
+    import io
+    import zipfile
+    m = json.loads((pkg / "plugin.json").read_text(encoding="utf-8"))
+    m["service"] = {"url": url, "tools": m["service"]["tools"]}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("plugin.json", json.dumps(m, ensure_ascii=False, indent=2))
+        for f in sorted(pkg.rglob("*")):
+            rel = f.relative_to(pkg)
+            if f.is_file() and rel.parts[0] not in ("service", "plugin.json") and not any(
+                    x.startswith(".") or x == "__pycache__" for x in rel.parts):
+                z.write(f, rel.as_posix())
+    return buf.getvalue()
+
+
+def make_http_server(port: int, root: Path, secret: Secret | None, package: Path | None = None) -> ThreadingHTTPServer:
+    """secret 为 None 时不校验令牌（只用于本机调试），项目 id 取 X-Matrix-Project。
+    package：给出插件包（GET /matrix-plugin.zip），主持人在 Matrix 里填这个地址安装。"""
     class H(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            if package is None or self.path.split("?")[0] != "/matrix-plugin.zip":
+                return self._send(404, {"error": "not found"})
+            scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+            raw = package_zip(package, f"{scheme}://{self.headers.get('Host') or '127.0.0.1'}/mcp")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def do_POST(self) -> None:  # noqa: N802
             try:
                 project = (check_token(self.headers.get("Authorization", ""), secret) if secret is not None
@@ -421,12 +472,17 @@ def main() -> None:
     root = Path(opt("--root", "."))
     if "--http" not in args:
         return serve_stdio(root)
-    env = opt("--secret-env")
-    secret = os.environ.get(env, "").encode() if env else b""
+    env, table = opt("--secret-env"), opt("--secrets")
+    secret: Secret | None = os.environ.get(env, "").encode() if env else None
+    if table:
+        secret = secrets_file(Path(table))
     if not secret and "--insecure" not in args:
-        sys.exit("HTTP 模式要用 --secret-env 指定签名密钥的环境变量（本机调试可以加 --insecure）")
-    server = make_http_server(int(opt("--http")), root, secret or None)
+        sys.exit("HTTP 模式要用 --secret-env（一把密钥）或 --secrets（每个项目一把）指定签名密钥（本机调试可以加 --insecure）")
+    package = Path(opt("--package")) if opt("--package") else None
+    server = make_http_server(int(opt("--http")), root, secret or None, package)
     print(f"llm-wiki MCP on http://127.0.0.1:{server.server_address[1]}/mcp", flush=True)
+    if package:
+        print(f"插件地址（在 Matrix 项目的插件页填）：http://127.0.0.1:{server.server_address[1]}/matrix-plugin.zip", flush=True)
     server.serve_forever()
 
 
