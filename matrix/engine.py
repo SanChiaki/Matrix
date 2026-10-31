@@ -6558,6 +6558,7 @@ class Network:
                     row["runs"] = runs
                     row["disclosure"] = sources.disclosure(m, runs)
                 row.update(title=m.title, description=m.description,
+                           write_tools=[n for n, c in (m.service.tools if m.service else ()) if c == "write"],
                            webhooks=[m.trigger_label(t) for t in m.triggers if t.type == "webhook"],
                            triggers=[{"key": t.key, "label": m.trigger_label(t), "type": t.type} for t in m.triggers])
             except (NetworkError, pluginfs.PluginError) as e:
@@ -6859,6 +6860,12 @@ class Network:
             items.append(f"装插件「{p['title']}」{p['version'] or ''}（{'部署方目录' if p['source'] == 'catalog' else '蓝图里打包的'}）")
             items += [f"　{x}" for x in p.get("disclosure") or []]
             items += [f"　插件「{p['title']}」有外部回调「{w}」：建好后在插件页启用、生成回调地址，配到外部系统" for w in p["webhooks"]]
+        writers = [p["title"] for p in rows if p.get("write_tools")]
+        if writers:  # 插件的写类工具要 file.write（不变量 24）：缺的岗位认领、交棒都做不了，先说清楚
+            for r, choice in plan:
+                auth = choice.get("authority")
+                if auth is not None and "file.write" not in auth:
+                    items.append(f"注意：岗位「{r.name}」没有 file.write，用不了插件「{'、'.join(writers)}」的写工具（建任务、认领、交棒）")
         for c in bp.connectors:
             if c.slot not in slot_list:
                 continue

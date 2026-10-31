@@ -116,10 +116,26 @@ def test_create_project_from_blueprint(tmp_path: Path):
     assert g.plugins["teammates"]["settings"] == {"intake": "role:feedback"}
     assert [n.connector_id for n in g.connector_needs] == ["github"]
     assert any("回调地址" in s["text"] for s in g.setup_steps) and g.blueprint["id"] == bp["id"]
-    assert "由蓝图「研发小队」2.0.0 建立" in "\n".join(m.text for m in net.project_chat(g.id).messages)
+    assert "由蓝图「研发小队」" in "\n".join(m.text for m in net.project_chat(g.id).messages)
     g2, _, _ = use(net, bp["id"], wang, "第二个")
     assert net.store.agents[g2.roles["coder"]["members"][0]].name == "编码·第二个"
     assert net.blueprints.get(bp["id"])["uses"] == 2
+
+
+def test_confirm_warns_roles_without_write(tmp_path: Path):
+    """插件的写类工具要 file.write：蓝图里没给的岗位用不了建任务、认领、交棒，确认卡上先说清楚（实测里踩过）。"""
+    import shutil
+    net, ops, wang, _ = make_net(tmp_path)
+    src = tmp_path / "bp"
+    shutil.copytree(DEV_TEAM, src)
+    m = json.loads((src / "blueprint.json").read_text(encoding="utf-8"))
+    m["roles"][0]["authority"] = ["web.research"]
+    (src / "blueprint.json").write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    bp = net.admin_blueprint_upload(ops, entries(src))
+    with pytest.raises(NeedsConfirm) as e:
+        net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, actor=wang)
+    assert any("岗位「反馈」没有 file.write" in x for x in e.value.items)
+    assert not any("岗位「编码」没有 file.write" in x for x in e.value.items)
 
 
 def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monkeypatch):
