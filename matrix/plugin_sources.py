@@ -295,12 +295,12 @@ def git_package(url: str, ref: str = "", path: str = "") -> tuple[dict[Path, byt
         cmd = ["git", "-c", "core.symlinks=false", "clone", "--depth", "1", "--no-recurse-submodules"]
         cmd += ["--branch", ref] if ref else []
         try:
-            r = subprocess.run([*cmd, "--", url, str(dest)], env=env, capture_output=True, text=True,
+            r = subprocess.run([*cmd, "--", url, str(dest)], env=env, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                timeout=GIT_TIMEOUT)
             if r.returncode != 0:
                 raise SourceError(f"拉取仓库失败：{(r.stderr or r.stdout).strip().splitlines()[-1:] or r.returncode}")
             commit = subprocess.run(["git", "-C", str(dest), "rev-parse", "HEAD"], env=env, capture_output=True,
-                                    text=True, timeout=30).stdout.strip()
+                                    text=True, encoding="utf-8", errors="replace", timeout=30).stdout.strip()
         except (OSError, subprocess.TimeoutExpired) as e:
             raise SourceError(f"拉取仓库失败：{e}") from e
         src = dest / sub

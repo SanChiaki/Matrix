@@ -115,7 +115,7 @@ def build_env(req: bytes, root: Path, trusted: bool = False) -> Path:
                      [str(venv_python(tmp)), "-m", "pip", "install", "--quiet", "--require-hashes", "--no-deps",
                       "--only-binary=:all:", "-r", str(reqfile)]]
         for cmd in steps:
-            r = subprocess.run(cmd, env=clean, capture_output=True, text=True, timeout=ENV_TIMEOUT)
+            r = subprocess.run(cmd, env=clean, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=ENV_TIMEOUT)
             if r.returncode != 0:
                 tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
                 raise ServiceError("装依赖失败：" + " / ".join(tail))

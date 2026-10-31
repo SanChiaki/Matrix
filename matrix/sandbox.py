@@ -130,7 +130,7 @@ def available() -> tuple[bool, str]:
         with tempfile.TemporaryDirectory(prefix="matrix-sandbox-probe-") as tmp:
             try:
                 r = subprocess.run(wrap([sys.executable, "-c", "print('ok')"], ro=python_dirs(), rw=[Path(tmp)]),
-                                   capture_output=True, text=True, timeout=30)
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
                 ok = r.returncode == 0 and r.stdout.strip() == "ok"
                 why = "" if ok else (r.stderr.strip().splitlines() or [f"退出码 {r.returncode}"])[-1]
             except (OSError, subprocess.TimeoutExpired) as e:
