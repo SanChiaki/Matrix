@@ -57,38 +57,45 @@ plugins/<名字>/...       打包进来的插件包（可选；也可以只引�
 
 `blueprint.json`：
 
+例：`examples/blueprints/dev-team/blueprint.json`（研发小队）
+
 ```json
 {
-  "name": "dev-pipeline",
-  "version": "1.0.0",
-  "title": "研发流程",
-  "description": "issue / PR 触发，五个岗位接力：反馈 → 方案 → 编码 → 审查 → 部署；人只在验收和高风险节点介入",
+  "name": "dev-team",
+  "version": "2.0.0",
+  "title": "研发小队",
+  "description": "反馈、方案、编码、审查、部署五个岗位按 Raft 的方式协作：外部问题经回调交给反馈，任务放在任务板上先认领再动手，人只在验收、合并与上线时介入",
   "params": [
-    {"key": "repo", "label": "GitHub 仓库", "example": "org/app", "required": true},
-    {"key": "team", "label": "团队名", "required": false}
+    {"key": "product", "label": "产品名", "example": "协同白板", "required": true},
+    {"key": "repo", "label": "代码仓库", "example": "org/whiteboard", "required": false}
   ],
   "roles": [
-    {"key": "triage", "name": "反馈分析", "description": "把 issue 理成需求：复现、影响面、优先级",
-     "capabilities": ["需求分析"], "authority": ["web.research"], "model": "balanced"},
-    {"key": "design", "name": "方案", "description": "...", "authority": ["file.write"]},
-    {"key": "coder", "name": "编码", "description": "...", "authority": ["file.write", "shell.exec", "connector.use"]},
-    {"key": "reviewer", "name": "审查", "description": "...", "authority": ["connector.use"]},
-    {"key": "deployer", "name": "部署", "description": "...", "authority": ["shell.exec", "connector.use"]}
+    {"key": "feedback", "name": "反馈", "description": "接外部来的问题与需求（issue）：复现、理清要什么、判断影响和优先级，在任务板上建任务",
+     "capabilities": ["问题复现", "需求分析", "优先级"], "authority": ["web.research"]},
+    {"key": "design", "name": "方案", "description": "给任务出技术方案：改哪些模块、接口怎么变、风险与回滚，写成方案文件交待验收",
+     "capabilities": ["技术方案", "接口设计"], "authority": ["file.write"]},
+    {"key": "coder", "name": "编码", "description": "按验收过的方案写代码与测试，交待改了什么、怎么验证",
+     "capabilities": ["写代码", "单元测试"], "authority": ["file.write", "shell.exec", "connector.use"]},
+    {"key": "reviewer", "name": "审查", "description": "审查代码是否符合方案、有没有风险、测试够不够；不通过就写明原因退回",
+     "capabilities": ["代码审查", "测试覆盖"], "authority": ["file.write", "connector.use"]},
+    {"key": "deployer", "name": "部署", "description": "人说可以上线以后，按上线清单发布并回报结果；出问题先回滚",
+     "capabilities": ["发布上线", "回滚"], "authority": ["shell.exec", "connector.use"]}
   ],
   "connectors": [
-    {"slot": "github", "connector": "github", "access": "write", "roles": ["coder", "reviewer", "deployer"],
+    {"slot": "code", "connector": "github", "access": "write", "roles": ["coder", "reviewer", "deployer"],
      "purpose": "读 issue、开分支与 PR、评审、合并"}
   ],
   "plugins": [
-    {"name": "dev-relay", "version": "1.0.0", "source": "bundled",
-     "settings": {"intake": "{role:triage}", "repo": "{param:repo}"}}
+    {"name": "teammates", "version": "0.2.0", "source": "catalog", "settings": {"intake": "{role:feedback}"}}
   ],
   "checkpoints": [
-    {"at": "方案", "kind": "accept", "role": "design", "who": "requester", "note": "方案由提出需求的人验收后才进入编码"},
-    {"at": "合并", "kind": "human_step", "plugin": "dev-relay", "note": "PR 合并前由人在群聊里说“#N 通过”"},
-    {"at": "部署", "kind": "approve", "role": "deployer", "grant": "connector.use", "note": "部署岗位每次用 GitHub 都问它的所有者"}
+    {"at": "外部问题", "kind": "notify", "plugin": "teammates", "note": "外部回调代表启用它的人 @ 反馈"},
+    {"at": "方案", "kind": "human_step", "plugin": "teammates", "note": "方案交到待验收后，人说“#N 完成”才算定稿，编码才开工"},
+    {"at": "合并", "kind": "human_step", "plugin": "teammates", "note": "审查通过的改动，人说“#N 完成”才合并"},
+    {"at": "上线", "kind": "approve", "role": "deployer", "note": "部署岗位的上线操作要人明确说可以，部署执行命令前问它的所有者"},
+    {"at": "交付验收", "kind": "accept", "note": "人交代的用户任务由下发的人验收"}
   ],
-  "files": ["files/开发规范.md"]
+  "files": ["files/研发流程.md"]
 }
 ```
 
@@ -218,14 +225,16 @@ issue / PR 事件带进来、`after` 在验收后交给下一棒）；人介入�
 
 ## 12. 两个验证用的蓝图
 
-**研发流程**（第一期的端到端验证）：第 3 节的清单。要一个新插件「研发接力」（`examples/plugins/dev-relay/`，在「队友协作」的基础上）：
+**研发流程**（第一期的端到端验证）：「研发小队」（`examples/blueprints/dev-team`，第 3 节的清单）。五个岗位（反馈、方案、编码、审查、部署），
+协作方式用现有的插件「队友协作（Raft 式）」，不另写插件：
 
-- webhook 触发：issue 开了 → @ `{setting:intake}`（反馈分析）；PR 开了 → @ 审查岗位；
-- `route`：按任务所处阶段建议下一棒（反馈分析 → 方案 → 编码 → 审查 → 部署），每条人发的消息 3 次预算照旧；
-- `after`：用户任务验收后，代表验收的人 @ 下一阶段的岗位；
-- 只有人能做的一步：“#N 通过”（合并前），“#N 上线”（部署后确认）。
+- 外部回调（issue）→ @ 设置“谁接外部来的新需求”选的岗位（反馈）；
+- 人发的消息被动投递给每个成员（`route`，每条 3 次预算），成员按技能 `dev-conventions` 判断是不是自己阶段的活，不是就“（略过）”；
+- 阶段之间靠任务板交棒：做完交到待验收，给下一阶段建任务并 @ 下一阶段的岗位；
+- 只有人能做的一步：方案定稿、合并、上线时说“#N 完成”。
 
-GitHub 连接器先用演示服务代替（同 `examples/delivery-dashboard/delivery_data_mcp.py` 的做法），等 #60 的出口代理做好换成 skill + API。
+（曾设想过一个按阶段推进的「研发接力」插件，和之前被否掉的“接力”示例是同一个思路，已删掉：2026-10-31。）
+GitHub 连接器先只是槽位，等 #60 的出口代理做好换成 skill + API。
 
 **看板**：从 `examples/delivery-dashboard` 改出来。岗位“看板设计师”；槽位“交付数据（读）”；插件「交付看板」（页面、表、定时刷新）；
 技能“做看板”与连接器自带的查数口径；参数“指标口径说明”“区域”。验证“装进已有项目、只勾部分部件”与原技能包的迁移。
@@ -238,7 +247,7 @@ GitHub 连接器先用演示服务代替（同 `examples/delivery-dashboard/deli
 2. 蓝图的格式、发布（从项目生成、可移植检查、版本快照）、读者与公开、部署方目录（管理后台“蓝图”页）。
 3. 用蓝图建项目（总确认卡、填空、整体回滚、剩下的手工步骤清单）。
 4. 用蓝图时勾选部件、装进已有项目；技能包迁移成蓝图；交付件改叫对外页面，“发布物”入口去掉。
-5. 示例：研发流程蓝图与「研发接力」插件（脚本运行时跑通，再用 dsh 实测），看板蓝图。
+5. 示例：研发小队蓝图（五个岗位 +「队友协作」，脚本运行时跑通，再用 dsh 实测），看板蓝图。
 
 **第二期**：导出文件、跨部署导入（打包的插件走 plugin-install.md）；岗位由人担任；升级的逐项合并；`propose_blueprint`。
 
@@ -284,7 +293,7 @@ GitHub 连接器先用演示服务代替（同 `examples/delivery-dashboard/deli
 - **checkpoints 只展示**：`approve` 还没落到授权设置上（连接器授权 `ask` 只在共享项目里有意义，要先理清楚单人项目的语义）。
 - 第二轮（同日）：用蓝图时勾选部件、装进已有项目；技能包迁移成蓝图并停止发布；交付件改叫对外页面，入口并进“项目”。
 - 目录只支持上传，没有 git 与上架申请；没有导出下载；没有升级提示。
-- 第 12 节的「研发接力」插件没写，第一版用「队友协作」加岗位设置验证；脚本运行时跑通，真实模型还没实测。
+- 研发流程用「研发小队」（五个岗位）+「队友协作」验证，不另写插件（第 12 节）。
 
 ## 17. 对外页面（原来的交付件）
 

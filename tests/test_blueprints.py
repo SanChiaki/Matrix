@@ -40,9 +40,9 @@ def use(net: Network, bid: str, actor: str, name: str = "白板研发", params: 
 # ================= 格式 =================
 def test_example_blueprint_is_valid():
     bp = bps.check_package(bps.dir_files(DEV_TEAM))
-    assert [r.key for r in bp.roles] == ["triage", "dev", "qa"]
-    assert bp.plugins[0].name == "teammates" and dict(bp.plugins[0].settings) == {"intake": "{role:triage}"}
-    assert {c.kind for c in bp.checkpoints} == {"accept", "human_step", "notify"}
+    assert [r.key for r in bp.roles] == ["feedback", "design", "coder", "reviewer", "deployer"]
+    assert bp.plugins[0].name == "teammates" and dict(bp.plugins[0].settings) == {"intake": "{role:feedback}"}
+    assert {c.kind for c in bp.checkpoints} == {"accept", "approve", "human_step", "notify"}
 
 
 @pytest.mark.parametrize("change, why", [
@@ -106,19 +106,19 @@ def test_create_project_from_blueprint(tmp_path: Path):
         net.create_project_from_blueprint(bp["id"], "x", {}, actor=wang)
     g, items, _ = use(net, bp["id"], wang, params={"product": "协同白板"})
     told = "\n".join(items)
-    assert "新建 Agent「需求分析」" in told and "file.write、shell.exec、connector.use" in told
-    assert "装插件「队友协作（Raft 式）」" in told and "外部回调" in told and "人在这里介入 · 任务完成" in told
+    assert "新建 Agent「反馈」" in told and "file.write、shell.exec、connector.use" in told
+    assert "装插件「队友协作（Raft 式）」" in told and "外部回调" in told and "人在这里介入 · 合并" in told
     agents = {k: net.store.agents[r["members"][0]] for k, r in g.roles.items()}
-    assert {a.owner_id for a in agents.values()} == {wang} and agents["dev"].authority == ["file.write", "shell.exec", "connector.use"]
-    assert "# 协同白板 研发" in g.brief and "@需求分析" in g.brief and "〔代码仓库〕" in g.brief  # 没填的可选参数留标记
+    assert {a.owner_id for a in agents.values()} == {wang} and agents["coder"].authority == ["file.write", "shell.exec", "connector.use"]
+    assert "# 协同白板 研发" in g.brief and "@反馈" in g.brief and "〔代码仓库〕" in g.brief  # 没填的可选参数留标记
     assert "{role:" not in (net.store.project_skills_dir(g.id) / "dev-conventions" / "SKILL.md").read_text(encoding="utf-8")
-    assert "开发约定（协同白板）" in (net.store.project_dir(g.id) / "开发约定.md").read_text(encoding="utf-8")
-    assert g.plugins["teammates"]["settings"] == {"intake": "role:triage"}
+    assert "协同白板 研发流程" in (net.store.project_dir(g.id) / "研发流程.md").read_text(encoding="utf-8")
+    assert g.plugins["teammates"]["settings"] == {"intake": "role:feedback"}
     assert [n.connector_id for n in g.connector_needs] == ["github"]
     assert any("回调地址" in s["text"] for s in g.setup_steps) and g.blueprint["id"] == bp["id"]
-    assert "由蓝图「研发小队」1.0.0 建立" in "\n".join(m.text for m in net.project_chat(g.id).messages)
+    assert "由蓝图「研发小队」2.0.0 建立" in "\n".join(m.text for m in net.project_chat(g.id).messages)
     g2, _, _ = use(net, bp["id"], wang, "第二个")
-    assert net.store.agents[g2.roles["dev"]["members"][0]].name == "开发·第二个"
+    assert net.store.agents[g2.roles["coder"]["members"][0]].name == "编码·第二个"
     assert net.blueprints.get(bp["id"])["uses"] == 2
 
 
@@ -129,9 +129,9 @@ def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monke
     mine = net.create_agent("老开发", "写代码", [], ["file.write"], actor=wang)
     theirs = net.create_agent("别人的", "x", [], [], actor=li)
     with pytest.raises(NetworkError, match="只能选你自己的 Agent 或项目里的成员"):
-        net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, {"dev": {"agent": theirs.id}}, actor=wang)
-    g, items, _ = use(net, bp["id"], wang, roles={"dev": {"agent": mine.id}})
-    assert "岗位「开发」由「老开发」担任" in items and g.roles["dev"]["members"] == [mine.id]
+        net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, {"coder": {"agent": theirs.id}}, actor=wang)
+    g, items, _ = use(net, bp["id"], wang, roles={"coder": {"agent": mine.id}})
+    assert "岗位「编码」由「老开发」担任" in items and g.roles["coder"]["members"] == [mine.id]
     before_projects, before_agents = set(net.store.projects), set(net.store.agents)
 
     def boom(*a, **k):
@@ -163,13 +163,13 @@ def test_pick_parts_into_existing_project(tmp_path: Path):
                                                    "skills": ["dev-conventions"]})
     assert out["project"]["id"] == g.id and set(net.store.agents) == agents_before and g.brief == "原来的纲要"
     skill = (net.store.project_skills_dir(g.id) / "dev-conventions" / "SKILL.md").read_text(encoding="utf-8")
-    assert "问 @需求分析" in skill and g.blueprint is None and not g.plugins
-    net.set_project_roles(g.id, {"qa": {"name": "测试", "members": [a.id]}}, actor=wang)
+    assert "问 @反馈" in skill and g.blueprint is None and not g.plugins
+    net.set_project_roles(g.id, {"reviewer": {"name": "审查", "members": [a.id]}}, actor=wang)
     with pytest.raises(NeedsConfirm) as e:
-        net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, parts={"roles": ["qa"], "brief": True},
+        net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, parts={"roles": ["reviewer"], "brief": True},
                                           project_id=g.id, actor=wang)
     told = "\n".join(e.value.items)
-    assert "岗位「测试」沿用项目里已有的（老测试）" in told and "纲要：会换成蓝图里的纲要" in told and "覆盖项目里的同名技能" in told
+    assert "岗位「审查」沿用项目里已有的（老测试）" in told and "纲要：会换成蓝图里的纲要" in told and "覆盖项目里的同名技能" in told
 
 
 # ================= 从项目发布 =================

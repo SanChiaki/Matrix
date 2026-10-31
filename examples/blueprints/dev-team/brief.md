@@ -1,8 +1,6 @@
 # {param:product} 研发
 
-目标：按任务板推进「{param:product}」的需求，代码在 {param:repo}。
+按任务板推进「{param:product}」的问题与需求，代码在 {param:repo}。
 
-- 新需求先交给 @{role:triage}，拆成任务再开工。
-- @{role:dev} 写代码，@{role:qa} 写用例、做回归；都先认领再动手。
-- 任务做完进“待验收”，由人说“#N 完成”。
-- 约定见 project/开发约定.md。
+流程：反馈 → 方案 → 编码 → 审查 → 部署，各阶段由 @{role:feedback}、@{role:design}、@{role:coder}、@{role:reviewer}、@{role:deployer} 负责，
+每个阶段先认领再动手，做完交到待验收；人只在方案定稿、合并、上线时说“#N 完成”。细节见 project/研发流程.md。

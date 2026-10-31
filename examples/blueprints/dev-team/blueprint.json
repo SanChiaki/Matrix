@@ -1,31 +1,37 @@
 {
   "name": "dev-team",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "title": "研发小队",
-  "description": "需求分析、开发、测试三个岗位按 Raft 的方式协作：外部需求经回调交给需求分析，任务放在任务板上先认领再动手，人只验收和说“完成”",
+  "description": "反馈、方案、编码、审查、部署五个岗位按 Raft 的方式协作：外部问题经回调交给反馈，任务放在任务板上先认领再动手，人只在验收、合并与上线时介入",
   "params": [
     {"key": "product", "label": "产品名", "example": "协同白板", "required": true},
     {"key": "repo", "label": "代码仓库", "example": "org/whiteboard", "required": false}
   ],
   "roles": [
-    {"key": "triage", "name": "需求分析", "description": "接外部来的需求：理清楚要什么、影响哪些模块、拆成任务放上任务板",
-     "capabilities": ["需求分析", "拆任务"], "authority": ["web.research"]},
-    {"key": "dev", "name": "开发", "description": "认领开发任务，写代码与说明，做完交待验收",
-     "capabilities": ["前端", "后端", "接口"], "authority": ["file.write", "shell.exec", "connector.use"]},
-    {"key": "qa", "name": "测试", "description": "认领测试任务：写用例、回归、报缺陷",
-     "capabilities": ["测试用例", "回归测试"], "authority": ["file.write", "connector.use"]}
+    {"key": "feedback", "name": "反馈", "description": "接外部来的问题与需求（issue）：复现、理清要什么、判断影响和优先级，在任务板上建任务",
+     "capabilities": ["问题复现", "需求分析", "优先级"], "authority": ["web.research"]},
+    {"key": "design", "name": "方案", "description": "给任务出技术方案：改哪些模块、接口怎么变、风险与回滚，写成方案文件交待验收",
+     "capabilities": ["技术方案", "接口设计"], "authority": ["file.write"]},
+    {"key": "coder", "name": "编码", "description": "按验收过的方案写代码与测试，交待改了什么、怎么验证",
+     "capabilities": ["写代码", "单元测试"], "authority": ["file.write", "shell.exec", "connector.use"]},
+    {"key": "reviewer", "name": "审查", "description": "审查代码是否符合方案、有没有风险、测试够不够；不通过就写明原因退回",
+     "capabilities": ["代码审查", "测试覆盖"], "authority": ["file.write", "connector.use"]},
+    {"key": "deployer", "name": "部署", "description": "人说可以上线以后，按上线清单发布并回报结果；出问题先回滚",
+     "capabilities": ["发布上线", "回滚"], "authority": ["shell.exec", "connector.use"]}
   ],
   "connectors": [
-    {"slot": "code", "connector": "github", "access": "write", "roles": ["dev", "qa"],
-     "purpose": "读 issue、开分支与 PR、评审"}
+    {"slot": "code", "connector": "github", "access": "write", "roles": ["coder", "reviewer", "deployer"],
+     "purpose": "读 issue、开分支与 PR、评审、合并"}
   ],
   "plugins": [
-    {"name": "teammates", "version": "0.2.0", "source": "catalog", "settings": {"intake": "{role:triage}"}}
+    {"name": "teammates", "version": "0.2.0", "source": "catalog", "settings": {"intake": "{role:feedback}"}}
   ],
   "checkpoints": [
-    {"at": "任务完成", "kind": "human_step", "plugin": "teammates", "note": "任务做完进“待验收”，只有人在群聊里说“#N 完成”才算完成"},
-    {"at": "交付验收", "kind": "accept", "role": "dev", "note": "人交代的用户任务由下发的人验收"},
-    {"at": "外部需求", "kind": "notify", "plugin": "teammates", "note": "外部回调代表启用它的人 @ 需求分析"}
+    {"at": "外部问题", "kind": "notify", "plugin": "teammates", "note": "外部回调代表启用它的人 @ 反馈"},
+    {"at": "方案", "kind": "human_step", "plugin": "teammates", "note": "方案交到待验收后，人说“#N 完成”才算定稿，编码才开工"},
+    {"at": "合并", "kind": "human_step", "plugin": "teammates", "note": "审查通过的改动，人说“#N 完成”才合并"},
+    {"at": "上线", "kind": "approve", "role": "deployer", "note": "部署岗位的上线操作要人明确说可以，部署执行命令前问它的所有者"},
+    {"at": "交付验收", "kind": "accept", "note": "人交代的用户任务由下发的人验收"}
   ],
-  "files": ["files/开发约定.md"]
+  "files": ["files/研发流程.md"]
 }

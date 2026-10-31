@@ -2,9 +2,9 @@
 
 设计见 [docs/blueprints.md](../../docs/blueprints.md)。
 
-- `dev-team/`：研发小队。三个岗位（需求分析、开发、测试），装「队友协作」并把“谁接外部来的新需求”设成岗位“需求分析”，
-  GitHub 连接器槽位，纲要、开发约定、技能里用 `{param:product}`、`{role:…}` 占位。
-- `setup_demo.py`：部署方把它放进目录，王经理用它建项目「白板研发」，外部回调来一个需求时插件按岗位 @ 需求分析。
+- `dev-team/`：研发小队。五个岗位（反馈、方案、编码、审查、部署）按 Raft 的方式协作：装「队友协作」并把“谁接外部来的新需求”
+  设成岗位“反馈”，GitHub 连接器槽位，纲要、研发流程、技能里用 `{param:product}`、`{role:…}` 占位；人只在方案定稿、合并、上线时说“#N 完成”。
+- `setup_demo.py`：部署方把它放进目录，王经理用它建项目「白板研发」，外部回调来一个问题时插件按岗位 @ 反馈。
 
 ```bash
 uv run python examples/blueprints/setup_demo.py
