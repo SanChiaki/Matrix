@@ -7,6 +7,9 @@
 
 ## 1. 接入方式只有一种：远程 MCP
 
+> 2026-10-31 设计已改：skill + API、skill + CLI 也会是正式的连接器接入方式，云侧经出口代理注入凭证
+> （[connectors-and-skills.md](connectors-and-skills.md) 第 11 节）。还没实现，现在仍按本节接 MCP。
+
 Matrix 的云端连接器只认 **MCP（Streamable HTTP）**，不直接接 HTTP API，也不在技能里写地址。已有系统是 HTTP API 的，
 在它旁边放一层**包装层**，把要给 Agent 用的几个操作包成 MCP 工具：
 
@@ -193,7 +196,8 @@ uv run python examples/dashboard-system/setup_demo.py --fresh
 
 ## 8. 不支持的
 
-- 直接登记 HTTP API、OpenAPI 描述：要先包成 MCP。
+- 直接登记 HTTP API、OpenAPI 描述：要先包成 MCP。（设计已改为支持 skill + API，见 connectors-and-skills.md 第 11 节，未实现）
 - 命令行工具、本地 stdio MCP 作为云端连接器：它们要在运行时机器上跑、凭证在本地，只能在用户自己的电脑上用。
+  （设计已改为云侧也支持 skill + CLI，凭证经出口代理注入，未实现）
 - OAuth 授权：还没做，目前只有表单字段（个人访问令牌一类）。
 - 让嵌入的页面和 Matrix 通信（拿项目信息、跳转项目页）：不给。要和项目数据交互的页面，写成项目插件（[plugin-authoring.md](plugin-authoring.md)）。
