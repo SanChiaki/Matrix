@@ -187,7 +187,7 @@ async function loadModels() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "projects", "releases", "board", "agents", "skills", "connectors", "devices"];
+  const PLAIN = ["network", "projects", "blueprints", "releases", "board", "agents", "skills", "connectors", "devices"];
   // 参照 Raft：#g-<项目> 打开项目的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   // #pair=<配对码>：连接器 setup 打开的批准页（docs/device-runtimes.md 第 2.5 节）
   const pair = hash.match(/^pair=([A-Za-z0-9-]{4,16})$/);
@@ -219,25 +219,29 @@ function route() {
   } else {
     // 切到普通视图时清掉选中的对话，否则 URL 与画面会不一致。
     // #project-<项目> 打开项目页（可收藏、刷新、前进后退）；#projects 是项目列表
-    const page = hash.match(/^project-(.+)$/), rel = hash.match(/^release-(.+)$/);
+    const page = hash.match(/^project-(.+)$/), rel = hash.match(/^release-(.+)$/), bp = hash.match(/^blueprint-(.+)$/);
     S.convId = null; S.conv = null;
     S.projectSel = page ? page[1] : null; S.projectEdit = false;
     S.releaseSel = rel ? rel[1] : null;
+    S.blueprintSel = bp ? bp[1] : null;
     if (!rel) S.releaseFrame = null;
-    show(page ? "projects" : rel ? "releases" : PLAIN.includes(hash) ? hash : "network");
+    show(page ? "projects" : rel ? "releases" : bp ? "blueprints" : hash === "releases" ? "projects"
+      : PLAIN.includes(hash) ? hash : "network");
   }
 }
 
 function show(view) {
   S.view = view;
   // 对话不是导航 tab：群聊与私聊常驻左栏，点哪个开哪个。
-  document.querySelectorAll(".tab[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === view)));
+  const navView = view === "releases" ? "projects" : view;  // 对外页面从“项目”里进，没有自己的入口
+  document.querySelectorAll(".tab[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === navView)));
   const inMore = $(`#more-menu [data-view="${view}"]`);  // 当前视图收在“更多”里：“更多”也亮起，并写出是哪一个
   $("#nav-more").setAttribute("aria-pressed", String(!!inMore));
   $("#more-cur").textContent = inMore ? inMore.textContent.trim() : "";
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
   if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}`
-    : view === "releases" && S.releaseSel ? `#release-${S.releaseSel}` : `#${view}`);
+    : view === "releases" && S.releaseSel ? `#release-${S.releaseSel}`
+    : view === "blueprints" && S.blueprintSel ? `#blueprint-${S.blueprintSel}` : `#${view}`);
   if (view === "agents") loadModels();
   if (["agents", "skills", "connectors", "projects", "chats", "devices"].includes(view)) loadMine();
   render();
@@ -264,7 +268,7 @@ function render() {
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
   ({ network: renderGraph, projects: renderProjectsView, board: loadBoard, agents: renderAgentsView,
      chats: renderChats, devices: renderDevicesView, skills: renderSkillsView, connectors: renderConnectorsView,
-     releases: renderReleasesView })[S.view]();
+     releases: renderReleasesView, blueprints: renderBlueprintsView })[S.view]();
 }
 
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
@@ -463,6 +467,10 @@ function onEvent(ev) {
     return;
   }
   if (ev.type === "plugin.violation") return;
+  if (ev.type === "blueprint.updated") {
+    if (S.view === "blueprints") S.blueprintSel ? renderBlueprintPage(true) : renderBlueprintsView();
+    return;
+  }
   if (ev.type === "plugin.catalog" || ev.type === "plugin.submission") {  // 部署方目录 / 我的上架申请变了：插件管理页重新取
     if (ev.type === "plugin.catalog") S.pluginCatalog = undefined; else S.pluginSubs = undefined;
     if (S.view === "projects" && S.assets?.tab === "plugins") renderProjectPage();
@@ -872,6 +880,7 @@ function renderProjects() {
     </div></li>`).join("") || '<li class="empty">还没有项目。</li>';
   $("#project-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { location.hash = `project-${b.dataset.id}`; }));
+  renderPagesForMe();
 }
 
 function renderProjectEditor(isNew = false) {
@@ -975,7 +984,7 @@ async function renderProjectPage(force = false) {
   // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
   const sig = JSON.stringify(st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
     ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
-    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.needKind, st.editNeed,
+    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.rolesEdit, st.bpDraft, g.roles, g.setup_steps, g.blueprint, st.needKind, st.editNeed,
        st.relForm, st.relEdit]);
   if (page.dataset.sig === sig) return;
   page.dataset.sig = sig;
@@ -986,7 +995,7 @@ async function renderProjectPage(force = false) {
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
       <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${tab("releases", "发布", (d.release_list || []).filter((r) => r.status === "active").length)}${
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${tab("releases", "对外", (d.release_list || []).filter((r) => r.status === "active").length)}${
       plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
         data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
         title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}${
@@ -1017,7 +1026,7 @@ function renderBriefTab(box, d, st) {
   const decision = (x) => `<li class="${x.status}"><div>${esc(x.text)}${x.reason ? `<span class="muted"> —— ${esc(x.reason)}</span>` : ""}</div>
     <div class="meta">${esc(who(x))} · ${time(x.created_at)}${x.supersedes ? " · 取代了一条旧的" : ""}
       ${x.status === "active" ? `<button type="button" class="link" data-revoke="${esc(x.id)}">撤销</button>` : ` · ${x.status === "revoked" ? "已撤销" : "已被取代"}`}</div></li>`;
-  box.innerHTML = `<p class="muted tab-intro">这件事是什么、已经定了什么。每一轮都会推送给所有成员${d.shared ? "；共享项目里所有参与者都看得到" : ""}。</p>
+  box.innerHTML = `${blueprintBanner(d, host)}<p class="muted tab-intro">这件事是什么、已经定了什么。每一轮都会推送给所有成员${d.shared ? "；共享项目里所有参与者都看得到" : ""}。</p>
     ${assetNote(st)}
     <div class="brief-grid">
     <section class="archive-sec" aria-labelledby="pb-brief"><h3 id="pb-brief">纲要</h3>
@@ -1044,7 +1053,8 @@ function renderBriefTab(box, d, st) {
         <select id="dec-sup"><option value="">不取代旧的</option>${active.map((x) => `<option value="${esc(x.id)}">取代：${esc(x.text.slice(0, 40))}</option>`).join("")}</select>
         <button type="submit">记下</button></form>
       ${inactive.length ? `<details><summary>已取代 / 撤销 · ${inactive.length}</summary><ul class="decisions">${inactive.map(decision).join("")}</ul></details>` : ""}
-    </section></div>`;
+    </section></div>${rolesSection(d, host, st)}`;
+  bindBlueprintBits(box, d, st);
   const call = async (path, opts, msg = "") => {
     try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
     document.activeElement?.blur();
@@ -1468,7 +1478,7 @@ function renderPluginsTab(box, d, st) {
          <span class="muted">只显示这一次：现在复制，配到外部系统里。</span></div>`
       : `<div class="muted">${s.has_hook ? "回调地址已生成（不再显示）" : "还没有回调地址"}${host ? ` · <button type="button" class="link" data-hook="${esc(p.name)}:${esc(t.key)}">${s.has_hook ? "重置地址" : "生成地址"}</button>` : ""}</div>`) : "";
     return `<li class="trig"><span class="pill">${TRIGGER_CN[t.type]}</span>
-      <div class="trig-main">${esc(triggerWhen(t, p))} → <b>@${esc(t.to)}</b>“${esc(t.text)}”${hook}
+      <div class="trig-main">${esc(triggerWhen(t, p))} → <b>${esc(triggerWho(t, p, d))}</b>“${esc(t.text)}”${hook}
         ${s.error && !s.paused ? `<div class="error">上次失败：${esc(s.error)}</div>` : ""}</div>
       ${state}${host ? `<button type="button" class="ghost sm" data-trig="${esc(p.name)}:${esc(t.key)}" data-on="${s.enabled && !s.paused ? 0 : 1}">${s.enabled && !s.paused ? "停用" : s.paused ? "重新启用" : "启用"}</button>` : ""}</li>`;
   };
@@ -1495,6 +1505,7 @@ function renderPluginsTab(box, d, st) {
         ${(p.tables || []).length ? `<dt>记录</dt><dd>${p.tables.map((t) => `${esc(t.title)} <span class="muted">${p.counts?.[t.key] ?? 0} 条</span>`).join(" · ")}</dd>` : ""}
       </dl>
       ${p.enabled ? "" : '<p class="muted small">插件停用中：页面、Agent 的记录工具、技能与触发都不可用，记录和下面的设置保留，重新启用即恢复。</p>'}
+      ${(p.settings || []).length ? pluginSettingsForm(p, d, host) : ""}
       ${(p.triggers || []).length ? `<h3>触发</h3><ul class="trigs">${p.triggers.map((t) => trig(p, t)).join("")}</ul>` : ""}
     </li>`).join("") || `<li class="empty">还没有装插件${host ? "：从下面的目录安装，或上传插件包" : ""}。</li>`}</ul>
     ${host ? `<h3>部署方目录</h3><ul class="plugins catalog">${S.pluginCatalog === null ? '<li class="muted">正在读取…</li>' : catalog.map((p) => `<li class="plugin-card">
@@ -1537,6 +1548,11 @@ function renderPluginsTab(box, d, st) {
     try { st.secret = { name: b.dataset.secret, value: (await api(`${base}/${encodeURIComponent(b.dataset.secret)}/secret`, { method: "POST" })).secret }; st.note = ""; }
     catch (e) { st.note = e.message; st.bad = true; }
     await reload(); renderProjectPage(true);
+  }));
+  box.querySelectorAll("form[data-settings]").forEach((f) => f.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const values = Object.fromEntries([...f.querySelectorAll("[name]")].map((x) => [x.name, x.value]));
+    done(() => api(`${base}/${encodeURIComponent(f.dataset.settings)}/settings`, { method: "PUT", body: { values } }), "设置已保存");
   }));
   box.querySelectorAll("[data-copy-secret]").forEach((b) => b.addEventListener("click", () => navigator.clipboard.writeText(b.dataset.copySecret).catch(() => prompt("复制：", b.dataset.copySecret))));
   $("#pl-url-form", box)?.addEventListener("submit", (e) => {
@@ -1582,6 +1598,31 @@ function renderPluginsTab(box, d, st) {
   $("#pl-up-dir", box)?.addEventListener("click", () => up(true));
 }
 
+// 插件设置（docs/blueprints.md 第 9 节）：role 类选项目里的岗位，member 类选成员
+function triggerWho(t, p, d) {
+  const m = /^\{setting:([a-z][a-z0-9_]*)\}$/.exec(t.to || "");
+  if (!m) return `@${t.to}`;
+  const st = (p.settings || []).find((x) => x.key === m[1]), v = p.setting_values?.[m[1]];
+  const g = proj(d.id);
+  if (typeof v === "string" && v.startsWith("role:")) return `@岗位「${g?.roles?.[v.slice(5)]?.name || v.slice(5)}」`;
+  if (v) return `@${aname(v)}`;
+  return `@「${st?.label || m[1]}」（还没设置）`;
+}
+function pluginSettingsForm(p, d, host) {
+  const g = proj(d.id), roles = Object.entries(g?.roles || {}), vals = p.setting_values || {};
+  const field = (st) => {
+    const v = vals[st.key] || "", id = `ps-${esc(p.name)}-${esc(st.key)}`;
+    const opts = st.type === "role" ? [["", "（不选）"], ...roles.map(([k, r]) => [`role:${k}`, r.name])]
+      : st.type === "member" ? [["", "（不选）"], ...(g?.member_ids || []).map((x) => [x, aname(x)])]
+      : st.type === "select" ? [["", "（不选）"], ...st.options.map((o) => [o, o])] : null;
+    const input = opts ? `<select id="${id}" name="${esc(st.key)}" ${host ? "" : "disabled"}>${opts.map(([k, l]) => `<option value="${esc(k)}" ${k === v ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`
+      : `<input id="${id}" name="${esc(st.key)}" value="${esc(v)}" maxlength="200" ${host ? "" : "disabled"}>`;
+    return `<div class="field"><label for="${id}">${esc(st.label)}${st.type === "role" && !roles.length ? '<span class="muted small">（项目还没有岗位：在“说明”里加）</span>' : ""}</label>${input}</div>`;
+  };
+  return `<h3>设置</h3><form class="plugin-settings" data-settings="${esc(p.name)}">${p.settings.map(field).join("")}
+    ${host ? '<div class="actions"><button type="submit" class="ghost sm">保存设置</button></div>' : ""}</form>`;
+}
+
 const hostOf = (u) => { try { return new URL(u).host; } catch { return u || ""; } };
 const RUNS = { remote: "远程服务", sandbox: "本部署的沙箱", host: "本部署（部署方目录，审核过）" };
 function runsText(p) {
@@ -1598,23 +1639,23 @@ function secretBox(p, d, st, host) {
 
 // 安装 / 升级前要主持人确认的事（数据结构的变化、插件服务在哪里跑、会拿到项目里的什么）：一条条列出来，
 // 确认后带回包的指纹再发一次；包在这期间变了会再问一次（docs/plugin-install.md）
-async function withPluginConfirm(send) {
+async function withPluginConfirm(send, ok = "确认安装") {
   try { return await send(false, null); } catch (e) {
     if (e.status !== 409 || !e.confirm) throw e;
-    if (!(await confirmItems(e.message.split("：")[0], e.confirm))) return null;
+    if (!(await confirmItems(e.message.split("：")[0], e.confirm, ok))) return null;
     return send(true, e.digest);
   }
 }
 
-function confirmItems(title, items) {
+function confirmItems(title, items, ok = "确认安装") {
   return new Promise((resolve) => {
     let dlg = $("#install-confirm");
     if (!dlg) { dlg = Object.assign(document.createElement("dialog"), { id: "install-confirm", className: "preview confirm-card" }); document.body.append(dlg); }
     dlg.innerHTML = `<form method="dialog" class="preview-card" aria-labelledby="ic-title">
       <h2 id="ic-title">${esc(title)}</h2>
       <ul class="confirm-items">${items.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>
-      <p class="muted small">安装会记进项目群聊，项目里的人都看得到。</p>
-      <div class="actions"><button type="submit" class="ghost" value="no">取消</button><button type="submit" value="ok">确认安装</button></div></form>`;
+      <p class="muted small">会记进项目群聊，项目里的人都看得到。</p>
+      <div class="actions"><button type="submit" class="ghost" value="no">取消</button><button type="submit" value="ok">${esc(ok)}</button></div></form>`;
     dlg.returnValue = "";
     dlg.addEventListener("close", () => resolve(dlg.returnValue === "ok"), { once: true });
     dlg.showModal();
@@ -1801,12 +1842,254 @@ async function previewAsset(d, f) {
 }
 
 // ---------- 发布与订阅（docs/project-publishing.md，不变量 23） ----------
-// 项目的内容离开项目只经发布物：主持人选内容、定读者、固定成版本。读者在“发布物”里看、让自己的 Agent 订阅、写反馈。
-const REL_KIND = { method: "技能包", fact: "交付件" };
-const relKindPill = (r) => `<span class="pill rel-${esc(r.kind)}" title="${r.kind === "method" ? "一组技能：订阅后进 Agent 的技能层" : "一组档案文件的快照：订阅后只读挂给 Agent"}">${REL_KIND[r.kind] || esc(r.kind)}</span>`;
+// 项目的内容离开项目只经发布物（界面上叫“对外页面”）：主持人选文件、定读者、固定成版本。读者在“项目”的“给你看的页面”里看、让自己的 Agent 订阅、写反馈。做法给别人用走蓝图。
+const REL_KIND = { method: "技能包（旧）", fact: "对外页面" };
+const relKindPill = (r) => `<span class="pill rel-${esc(r.kind)}" title="${r.kind === "method" ? "旧的技能包，已经并进蓝图" : "一组档案文件的快照：订阅后只读挂给 Agent"}">${REL_KIND[r.kind] || esc(r.kind)}</span>`;
 const relWhen = (r) => r.snapshot_at ? `快照于 ${dateTime(r.snapshot_at)}` : r.published_at ? `发布于 ${dateTime(r.published_at)}` : "";
 const relFileUrl = (rid, name) => `/api/releases/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}`;
 const splitEmails = (text) => String(text || "").split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean);
+
+// ---------- 蓝图（docs/blueprints.md）：别人跑通的项目的配方；用它建项目，建出来是一份拷贝 ----------
+const CHECK_KIND = { accept: "人验收", approve: "人审批", human_step: "只有人能做的一步", notify: "代表人发消息" };
+const ACCESS_CN = { read: "读", write: "读写", use: "使用" };
+
+function renderBlueprintsView() {
+  const index = $("#blueprint-index"), page = $("#blueprint-page");
+  index.hidden = !!S.blueprintSel; page.hidden = !S.blueprintSel;
+  if (S.blueprintSel) { renderBlueprintPage(); return; }
+  api("/api/blueprints").then((list) => {
+    $("#blueprint-list").innerHTML = list.map((b) => `<li><div class="card">
+      <button type="button" class="card-main" data-bp="${esc(b.id)}" aria-label="打开 ${esc(b.title)}">
+        <div class="card-head"><span class="pill plugin">蓝图</span><span class="name">${esc(b.title)}</span><span class="pill">${esc(b.version)}</span>
+          ${b.source === "catalog" ? '<span class="vis-tag">部署方目录</span>' : b.public ? '<span class="vis-tag shared">公开</span>' : ""}${b.status === "active" ? "" : '<span class="pill bad">已撤回</span>'}</div>
+        <p class="card-desc">${esc(b.description || "没有说明")}</p>
+        <div class="card-meta"><span class="muted">岗位：${esc(b.roles.join("、") || "无")}${b.plugins.length ? ` · 插件 ${b.plugins.length} 个` : ""}</span></div>
+      </button>
+      <div class="card-foot"><span class="muted">${b.project ? `来自你的项目「${esc(b.project.name)}」` : esc(b.published_by || "")} · 用过 ${b.uses || 0} 次</span></div>
+    </div></li>`).join("") || '<li class="empty">还没有蓝图。项目主持人在项目的“发布”里把跑通的项目发布成蓝图，或者部署方在管理后台放进目录。</li>';
+    $("#blueprint-list").querySelectorAll("[data-bp]").forEach((x) => x.addEventListener("click", () => { location.hash = `blueprint-${x.dataset.bp}`; }));
+  }).catch(() => {});
+}
+
+async function renderBlueprintPage(force = false) {
+  const page = $("#blueprint-page"), bid = S.blueprintSel;
+  if (!force && page.contains(document.activeElement) && document.activeElement.matches("input, textarea, select")) return;
+  let b;
+  try { b = await api(`/api/blueprints/${encodeURIComponent(bid)}`); }
+  catch (e) { page.innerHTML = `<nav class="crumbs"><a href="#blueprints">蓝图</a></nav><p class="empty">${esc(e.status === 404 ? "这个蓝图不存在，或者你看不到它。" : e.message)}</p>`; return; }
+  if (S.blueprintSel !== bid) return;
+  const sig = JSON.stringify([b, S.bpNote]);
+  if (page.dataset.sig === sig && !force) return;
+  page.dataset.sig = sig;
+  const m = b.manifest, mine = (S.snap?.agents || []).filter((a) => a.mine);
+  const target = proj(S.bpTarget?.[bid] || "");
+  const pool = [...mine, ...(target ? target.member_ids.filter((x) => !mine.some((a) => a.id === x)).map((x) => ({ id: x, name: aname(x) })) : [])];
+  const roleRow = (r) => `<tr><td><label class="check"><input type="checkbox" name="part-roles" value="${esc(r.key)}" checked><b>${esc(r.name)}</b></label><div class="muted small">${esc(r.description || "")}</div></td>
+    <td>${(r.authority || []).map((x) => `<code>${esc(x)}</code>`).join(" ") || '<span class="muted">无</span>'}</td>
+    <td><select name="role-${esc(r.key)}" data-role="${esc(r.key)}">${target?.roles?.[r.key] ? '<option value="keep">沿用项目里已有的</option>' : ""}<option value="">新建 Agent</option>${pool.map((a) => `<option value="${esc(a.id)}">用「${esc(a.name)}」</option>`).join("")}</select>
+      <input name="rname-${esc(r.key)}" value="${esc(r.name)}" maxlength="40" aria-label="新 Agent 的名字"></td></tr>`;
+  const active = b.status === "active";
+  page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#blueprints">蓝图</a><span aria-hidden="true">/</span><span class="here">${esc(b.title)}</span>
+      <span class="pill">${esc(b.version)}</span>${active ? "" : '<span class="pill bad">已撤回</span>'}<span class="grow"></span>
+      ${b.project ? `<a class="button ghost sm" href="#project-${esc(b.project.id)}">来源项目</a>` : ""}
+      ${b.can_manage && active ? '<button type="button" class="ghost sm" id="bp-withdraw">撤回</button>' : ""}</nav>
+    <p class="page-desc">${esc(b.description)}</p>
+    <div class="bp-grid">
+      <div>
+        ${b.readme ? `<div class="md bp-readme">${renderMarkdown(b.readme)}</div>` : ""}
+        <h3>人在哪里介入</h3>
+        <ul class="bp-checks">${(m.checkpoints || []).map((c) => `<li><span class="pill">${esc(CHECK_KIND[c.kind] || c.kind)}</span><b>${esc(c.at)}</b> <span class="muted">${esc(c.note || "")}</span></li>`).join("") || '<li class="muted">没有写。</li>'}</ul>
+        <h3>部件</h3>
+        <dl class="plugin-facts bp-facts">
+          <dt>插件</dt><dd>${b.plugin_rows.map((p) => `<span class="pill plugin">${esc(p.title || p.name)}</span><span class="muted small">${p.source === "catalog" ? "部署方目录" : "打包在蓝图里"}${p.problem ? ` · <span class="error">${esc(p.problem)}</span>` : ""}</span>`).join(" ") || '<span class="muted">无</span>'}</dd>
+          <dt>技能</dt><dd>${b.skills.map((x) => `<code title="${esc(x.description)}">${esc(x.name)}</code>`).join(" ") || '<span class="muted">无</span>'}</dd>
+          <dt>连接器</dt><dd>${(m.connectors || []).map((c) => `<span><code>${esc(c.connector)}</code> ${ACCESS_CN[c.access] || ""}${c.purpose ? `：${esc(c.purpose)}` : ""}</span>`).join("；") || '<span class="muted">无</span>'}</dd>
+          <dt>模板文件</dt><dd>${(m.files || []).map((x) => `<code>${esc(x.replace(/^files\//, ""))}</code>`).join(" ") || '<span class="muted">无</span>'}</dd>
+          ${b.brief ? `<dt>纲要</dt><dd><details><summary>看纲要模板</summary><div class="md">${renderMarkdown(b.brief)}</div></details></dd>` : ""}
+        </dl>
+      </div>
+      <form id="bp-use" class="bp-use" ${active ? "" : "hidden"}>
+        <h3>用这个蓝图</h3>
+        <div class="field"><label for="bp-target">装到</label><select id="bp-target" name="target"><option value="">新建一个项目</option>
+          ${(S.snap?.projects || []).filter(isHost).map((g) => `<option value="${esc(g.id)}" ${target?.id === g.id ? "selected" : ""}>已有项目「${esc(g.name)}」</option>`).join("")}</select></div>
+        <div class="field" ${target ? "hidden" : ""}><label for="bp-name">项目名</label><input id="bp-name" name="name" maxlength="60" value="${esc(b.title)}"></div>
+        ${(m.params || []).map((p) => `<div class="field"><label for="bpp-${esc(p.key)}">${esc(p.label)}${p.required ? " *" : ""}</label>
+          <input id="bpp-${esc(p.key)}" name="param-${esc(p.key)}" maxlength="500" placeholder="${esc(p.example || "")}" ${p.required ? "required" : ""}></div>`).join("")}
+        <fieldset class="checks bp-parts"><legend>要哪些（默认全要）</legend>
+          ${b.brief ? `<label class="check"><input type="checkbox" name="part-brief" ${target?.brief ? "" : "checked"}>纲要${target?.brief ? "（会替换现有的）" : ""}</label>` : ""}
+          ${b.skills.map((x) => `<label class="check"><input type="checkbox" name="part-skills" value="${esc(x.name)}" checked>技能 ${esc(x.name)}</label>`).join("")}
+          ${b.plugin_rows.map((p) => `<label class="check"><input type="checkbox" name="part-plugins" value="${esc(p.name)}" checked>插件 ${esc(p.title || p.name)}</label>`).join("")}
+          ${(m.files || []).map((x) => `<label class="check"><input type="checkbox" name="part-files" value="${esc(x)}" checked>文件 ${esc(x.replace(/^files\//, ""))}</label>`).join("")}
+          ${(m.connectors || []).map((c) => `<label class="check"><input type="checkbox" name="part-connectors" value="${esc(c.slot)}" checked>连接器 ${esc(c.connector)}</label>`).join("")}
+        </fieldset>
+        <h4>岗位由谁担任</h4>
+        <div class="table-wrap"><table class="bp-roles"><thead><tr><th>岗位</th><th>建议权限</th><th>谁来</th></tr></thead><tbody>${m.roles.map(roleRow).join("")}</tbody></table></div>
+        <p class="muted small">新建的 Agent 归你、用你的模型；下一步会列出要装的插件、要连的系统和人在哪里介入，确认后一次建好。</p>
+        <p class="error" role="alert">${esc(b.problems.join("；"))}</p>
+        <div class="actions"><button type="submit" ${b.problems.length ? "disabled" : ""}>下一步</button></div>
+      </form>
+    </div>`;
+  $("#bp-withdraw", page)?.addEventListener("click", async () => {
+    if (!confirm("撤回后不能再用它建项目；已经建的项目不受影响。确定？")) return;
+    try { await api(`/api/blueprints/${encodeURIComponent(bid)}/withdraw`, { method: "POST" }); renderBlueprintPage(true); } catch (e) { alert(e.message); }
+  });
+  const f = $("#bp-use", page);
+  f.querySelectorAll("select[data-role]").forEach((sel) => {
+    const sync = () => { f[`rname-${sel.dataset.role}`].hidden = !!sel.value; };
+    sel.addEventListener("change", sync); sync();
+  });
+  f.target.addEventListener("change", () => { (S.bpTarget ||= {})[bid] = f.target.value; renderBlueprintPage(true); });
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const params = Object.fromEntries((m.params || []).map((p) => [p.key, f[`param-${p.key}`].value.trim()]).filter(([, v]) => v));
+    const roles = Object.fromEntries(m.roles.map((r) => {
+      const v = f[`role-${r.key}`].value;
+      return [r.key, v === "keep" ? {} : v ? { agent: v } : { name: f[`rname-${r.key}`].value.trim() || r.name }];
+    }));
+    const all = (n) => [...f.querySelectorAll(`[name="part-${n}"]:checked`)].map((x) => x.value);
+    const parts = { brief: !!f["part-brief"]?.checked, roles: all("roles"), skills: all("skills"), plugins: all("plugins"),
+      files: all("files"), connectors: all("connectors") };
+    try {
+      const out = await withPluginConfirm((c, digest) => api(`/api/blueprints/${encodeURIComponent(bid)}/projects`,
+        { method: "POST", body: { name: f.name.value.trim(), params, roles, parts, project_id: f.target.value || null, confirm: c, digest },
+          timeoutMs: 120000 }), f.target.value ? "确认装进项目" : "确认建项目");
+      if (!out) return;
+      for (const x of out.secrets || []) prompt(`插件「${x.plugin}」的签名密钥（只显示这一次）：连同项目 id ${out.project.id} 配到插件服务上`, x.secret);
+      await reload();
+      location.hash = `project-${out.project.id}`;
+    } catch (err) { $(".error", f).textContent = err.message; }
+  });
+}
+
+// 项目页“说明”顶部：由蓝图建的项目的来源、剩下的手工步骤、人在哪里介入；岗位
+function blueprintBanner(d, host) {
+  const g = proj(d.id);
+  if (!g?.blueprint) return "";
+  const b = g.blueprint, steps = g.setup_steps || [], left = steps.filter((x) => !x.done).length;
+  return `<section class="bp-banner" aria-label="蓝图">
+    <div><span class="pill plugin">蓝图</span> 由蓝图 <a href="#blueprint-${esc(b.id)}">「${esc(b.title)}」</a> ${esc(b.version)} 建立
+      ${steps.length ? `<span class="muted"> · 还剩 ${left} 步手工设置</span>` : ""}</div>
+    ${steps.length ? `<ul class="bp-steps">${steps.map((x) => `<li><label class="check"><input type="checkbox" data-step="${esc(x.id)}" ${x.done ? "checked" : ""} ${host ? "" : "disabled"}>
+      <span class="${x.done ? "done" : ""}">${esc(x.text)}</span></label></li>`).join("")}</ul>` : ""}
+    ${(b.checkpoints || []).length ? `<div class="muted small">人在这里介入：${b.checkpoints.map((c) => `${esc(c.at)}（${esc(c.label)}）`).join("、")}</div>` : ""}
+  </section>`;
+}
+
+function rolesSection(d, host, st) {
+  const g = proj(d.id), roles = Object.entries(g?.roles || {}), members = (g?.member_ids || []);
+  const editing = host && st.rolesEdit;
+  if (!editing) {
+    return `<section class="archive-sec" aria-labelledby="pb-roles"><h3 id="pb-roles">岗位</h3>
+      <p class="muted small">插件和触发按岗位找人，成员改名、换人都不用改插件；发布成蓝图时岗位就是别人要分配的位置。</p>
+      <ul class="bp-role-list">${roles.map(([k, r]) => `<li><b>${esc(r.name)}</b> <code>${esc(k)}</code> → ${r.members.map((x) => esc(aname(x))).join("、") || '<span class="muted">没人</span>'}
+        ${r.description ? `<div class="muted small">${esc(r.description)}</div>` : ""}</li>`).join("") || '<li class="muted">还没有岗位。</li>'}</ul>
+      ${host ? '<button type="button" class="ghost sm" id="roles-edit">编辑岗位</button>' : ""}</section>`;
+  }
+  const rows = [...roles, ["", { name: "", description: "", members: [] }]];
+  return `<section class="archive-sec"><h3>岗位</h3><form id="roles-form" class="roles-form">
+    ${rows.map(([k, r], i) => `<fieldset class="role-row"><legend class="sr-only">岗位 ${i + 1}</legend>
+      <input name="key" value="${esc(k)}" placeholder="标识，如 dev" pattern="[a-z][a-z0-9_]{0,39}" aria-label="标识">
+      <input name="name" value="${esc(r.name)}" placeholder="名称，如 开发" maxlength="40" aria-label="名称">
+      <input name="description" value="${esc(r.description || "")}" placeholder="职责" maxlength="500" aria-label="职责">
+      <span class="role-members">${members.map((x) => `<label class="check"><input type="checkbox" name="m" value="${esc(x)}" ${r.members.includes(x) ? "checked" : ""}>${esc(aname(x))}</label>`).join("")}</span>
+    </fieldset>`).join("")}
+    <p class="muted small">标识留空的行不保存。插件设置还在用的岗位不能删。</p>
+    <div class="actions"><button type="submit">保存</button><button type="button" class="ghost" id="roles-cancel">取消</button></div></form></section>`;
+}
+
+function bindBlueprintBits(box, d, st) {
+  box.querySelectorAll("[data-step]").forEach((c) => c.addEventListener("change", async () => {
+    try { await api(`/api/projects/${d.id}/setup-steps/${c.dataset.step}`, { method: "PUT", body: { done: c.checked } }); await reload(); renderProjectPage(true); }
+    catch (e) { alert(e.message); }
+  }));
+  $("#roles-edit", box)?.addEventListener("click", () => { st.rolesEdit = true; renderProjectPage(true); });
+  $("#roles-cancel", box)?.addEventListener("click", () => { st.rolesEdit = false; renderProjectPage(true); });
+  $("#roles-form", box)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const roles = {};
+    for (const fs of e.target.querySelectorAll(".role-row")) {
+      const key = fs.querySelector('[name="key"]').value.trim();
+      if (!key) continue;
+      roles[key] = { name: fs.querySelector('[name="name"]').value.trim() || key, description: fs.querySelector('[name="description"]').value.trim(),
+        members: [...fs.querySelectorAll('[name="m"]:checked')].map((x) => x.value) };
+    }
+    try { await api(`/api/projects/${d.id}/roles`, { method: "PUT", body: { roles } }); st.rolesEdit = false; st.note = "岗位已保存"; st.bad = false; }
+    catch (err) { st.note = err.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
+  });
+}
+
+// 项目页“发布”里的“发布为蓝图”：从项目推出初稿，主持人勾选、改岗位与参数，过可移植检查后发布
+function blueprintPublishSection(d, st) {
+  const dr = st.bpDraft;
+  const pub = (dr?.published || []);
+  if (!dr) return `<section class="bp-publish"><h3>蓝图</h3><p class="muted small">把跑通的项目发布成蓝图：别人用它建出同样能干活的项目，补上自己的 Agent 和账号。不带群聊、记录与凭证。</p>
+    <button type="button" class="ghost" id="bp-draft">发布为蓝图…</button></section>`;
+  const chk = (name, xs, picked) => xs.map((x) => { const v = typeof x === "string" ? x : x.name, l = typeof x === "string" ? x : `${x.title}`;
+    return `<label class="check"><input type="checkbox" name="${name}" value="${esc(v)}" ${picked.includes(v) ? "checked" : ""}>${esc(l)}</label>`; }).join("") || '<span class="muted">无</span>';
+  return `<section class="bp-publish"><h3>发布为蓝图</h3><form id="bp-pub" class="rel-form">
+    ${pub.length ? `<div class="field"><label for="bpp-target">发布到</label><select id="bpp-target" name="blueprint_id"><option value="">新的蓝图</option>${pub.map((x) => `<option value="${esc(x.id)}">「${esc(x.title)}」的新版本（现在第 ${x.rev} 版）</option>`).join("")}</select></div>` : ""}
+    <div class="m-grid-2"><div class="field"><label for="bpp-name">标识（英文小写、数字、连字符）</label><input id="bpp-name" name="name" required pattern="[a-z0-9][a-z0-9-]{0,62}" value="${esc(dr.name)}"></div>
+      <div class="field"><label for="bpp-title">名称</label><input id="bpp-title" name="title" maxlength="40" value="${esc(dr.title)}"></div></div>
+    <div class="field"><label for="bpp-desc">一句话说明</label><input id="bpp-desc" name="description" maxlength="500" value="${esc(dr.description)}"></div>
+    <div class="field"><label for="bpp-readme">说明页（Markdown：能做什么、建好以后怎么用）</label><textarea id="bpp-readme" name="readme" rows="4">${esc(dr.readme)}</textarea></div>
+    <fieldset class="checks"><legend>带上</legend><label class="check"><input type="checkbox" name="brief" ${dr.brief ? "checked" : "disabled"}>纲要</label></fieldset>
+    <fieldset class="checks"><legend>技能</legend>${chk("skills", dr.options.skills, dr.skills)}</fieldset>
+    <fieldset class="checks"><legend>插件（连同设置）</legend>${chk("plugins", dr.options.plugins, dr.plugins)}</fieldset>
+    <fieldset class="checks"><legend>模板文件（档案里的文件多半是项目事实：只勾别人建项目时就该有的）</legend>${chk("files", dr.options.files, dr.files)}</fieldset>
+    <fieldset class="checks"><legend>岗位（从成员推出；接收方按岗位新建 Agent 或用自己的）</legend>
+      ${dr.roles.map((r, i) => `<div class="role-row"><label class="check"><input type="checkbox" name="role" value="${i}" checked></label>
+        <input name="role-key-${i}" value="${esc(r.key)}" pattern="[a-z][a-z0-9_]{0,39}" aria-label="岗位标识">
+        <input name="role-name-${i}" value="${esc(r.name)}" maxlength="40" aria-label="岗位名称">
+        <span class="muted small">${r.member ? `现在是 ${esc(aname(r.member))}` : ""}</span></div>`).join("") || '<span class="muted">没有成员 Agent</span>'}</fieldset>
+    <fieldset class="checks"><legend>参数：把项目里具体的值换成别人建项目时填的空（一行一个：标识 | 名称 | 现在的值）</legend>
+      <textarea name="params" rows="2" placeholder="product | 产品名 | 协同白板"></textarea></fieldset>
+    <div class="field"><label for="bpp-readers">给谁用（邮箱，逗号或换行分隔；项目参与者本来就能用）</label><textarea id="bpp-readers" name="readers" rows="1"></textarea></div>
+    <label class="check"><input type="checkbox" name="public">所有登录用户都能用</label>
+    <div class="actions"><button type="submit">检查并发布</button><button type="button" class="ghost" id="bp-cancel">取消</button></div></form></section>`;
+}
+
+function bindBlueprintPublish(box, d, st) {
+  $("#bp-draft", box)?.addEventListener("click", async () => {
+    try { st.bpDraft = await api(`/api/projects/${d.id}/blueprint-draft`); } catch (e) { st.note = e.message; st.bad = true; }
+    renderProjectPage(true);
+  });
+  $("#bp-cancel", box)?.addEventListener("click", () => { st.bpDraft = null; renderProjectPage(true); });
+  $("#bp-pub", box)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target, dr = st.bpDraft, all = (n) => [...f.querySelectorAll(`[name="${n}"]:checked`)].map((x) => x.value);
+    const roles = all("role").map((i) => ({ ...dr.roles[i], key: f[`role-key-${i}`].value.trim(), name: f[`role-name-${i}`].value.trim() }));
+    const params = f.params.value.split("\n").map((l) => l.split("|").map((x) => x.trim())).filter((x) => x[0])
+      .map(([key, label, value]) => ({ key, label: label || key, value: value || "", example: value || "" }));
+    const spec = { blueprint_id: f.blueprint_id?.value || null, name: f.name.value.trim(), title: f.title.value.trim(), description: f.description.value.trim(),
+      readme: f.readme.value, brief: f.brief.checked, skills: all("skills"), plugins: all("plugins"), files: all("files"), roles, params,
+      connectors: dr.connectors, checkpoints: dr.checkpoints, readers: f.readers.value.split(/[,，\s]+/).filter(Boolean), public: f.public.checked };
+    try {
+      const b = await withPluginConfirm((c, digest) => api(`/api/projects/${d.id}/blueprints`, { method: "POST", body: { spec, confirm: c, digest } }), "照样发布");
+      if (!b) return;
+      st.bpDraft = null; st.note = `已发布蓝图「${b.title}」第 ${b.rev} 版`; st.bad = false;
+      location.hash = `blueprint-${b.id}`;
+    } catch (err) { st.note = err.message; st.bad = true; renderProjectPage(true); }
+  });
+}
+
+// “项目”里的“给你看的页面”：别的项目发给你的对外页面（原来的“发布物”入口并进这里）
+function renderPagesForMe() {
+  api("/api/releases").then((list) => {
+    const mine = new Set((S.snap?.agents || []).filter((a) => a.mine).map((a) => a.id));
+    const pages = list.filter((r) => !r.inside && r.kind === "fact");
+    $("#pages-for-me").hidden = !pages.length;
+    $("#page-list").innerHTML = pages.map((r) => `<li><div class="card">
+      <button type="button" class="card-main" data-rel="${esc(r.id)}" aria-label="打开 ${esc(r.title)}">
+        <div class="card-head">${relKindPill(r)}<span class="name">${esc(r.title)}</span><span class="pill">v${r.version}</span></div>
+        <p class="card-desc">${esc(r.description || "没有说明")}</p>
+        <div class="card-meta"><span class="muted">来自「${esc(r.project_name)}」· ${esc(r.host)} · ${esc(relWhen(r))}</span></div>
+      </button>
+      <div class="card-foot"><span class="muted">${r.mine.filter((x) => mine.has(x)).length ? `${r.mine.map(aname).map(esc).join("、")} 已订阅` : "还没订阅"}</span></div>
+    </div></li>`).join("");
+    $("#page-list").querySelectorAll("[data-rel]").forEach((b) => b.addEventListener("click", () => { location.hash = `release-${b.dataset.rel}`; }));
+  }).catch(() => {});
+}
 
 function renderReleasesView() {
   const index = $("#release-index"), page = $("#release-page");
@@ -1832,14 +2115,14 @@ async function renderReleasePage(force = false) {
   if (!force && page.contains(document.activeElement) && document.activeElement.matches("input, textarea")) return;
   let r;
   try { r = await api(`/api/releases/${encodeURIComponent(rid)}`); }
-  catch (e) { page.innerHTML = `<nav class="crumbs"><a href="#releases">发布物</a></nav><p class="empty">${esc(e.status === 404 ? "这份发布物不存在，或者已经撤回、你不在读者名单里了。" : e.message)}</p>`; return; }
+  catch (e) { page.innerHTML = `<nav class="crumbs"><a href="#projects">项目</a></nav><p class="empty">${esc(e.status === 404 ? "这个页面不存在，或者已经撤回、你不在读者名单里了。" : e.message)}</p>`; return; }
   if (S.releaseSel !== rid) return;
   const sig = JSON.stringify([r, S.relNote]);
   if (page.dataset.sig === sig && !force) return;
   page.dataset.sig = sig;
   const myAgents = (S.snap?.agents || []).filter((a) => a.mine);
   const active = r.status === "active";
-  page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#releases">发布物</a><span aria-hidden="true">/</span><span class="here">${esc(r.title)}</span>
+  page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#projects">项目</a><span aria-hidden="true">/</span><span class="here">${esc(r.title)}</span>
       ${relKindPill(r)}<span class="pill">v${r.version}</span><span class="grow"></span>
       ${r.inside && r.project_id ? `<a class="button ghost sm" href="#project-${esc(r.project_id)}">回到项目</a>` : ""}</nav>
     <p class="page-desc">${esc(r.description || "")}</p>
@@ -1923,8 +2206,8 @@ function renderReleasesTab(box, d, st) {
   const views = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken)
     .flatMap((p) => (p.release_views || []).map((k) => ({ plugin: p.name, tab: k, label: `${p.title} · ${(p.tabs || []).find((t) => t.key === k)?.label || k}` })));
   const nf = st.relForm || { kind: "fact" };
-  box.innerHTML = `<p class="muted tab-intro">发布物是这个项目对外拿出的东西：按版本固定的快照。<b>技能包</b>是一组技能，可以给点名的人或所有人；
-      <b>交付件</b>是一组档案文件（可带一个插件页面，用来展示这些文件），只给点名的读者。读者看不到项目本身，只看到发布物；他们的 Agent 订阅后用的是自己的授权。${host ? "" : "由主持人发布。"}</p>
+  box.innerHTML = `${host ? blueprintPublishSection(d, st) : ""}<h3>对外页面</h3><p class="muted tab-intro">这个项目给项目外的人看的东西：一组档案文件的快照（可带一个插件页面，比如看板），按版本固定，只给点名的读者。
+      读者看不到项目本身；他们的 Agent 订阅后用的是自己的授权。做法（技能、插件、岗位）要给别人用，就发布成上面的蓝图。${host ? "" : "由主持人发布。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((r) => `<li class="plugin-card${r.status === "active" ? "" : " off"}">
       <div class="plugin-head">${relKindPill(r)}<div><b>${esc(r.title)}</b> <span class="muted">v${r.version} · <code>${esc(r.name)}</code></span>${r.status === "active" ? "" : ' <span class="pill bad">已撤回</span>'}
@@ -1941,9 +2224,9 @@ function renderReleasesTab(box, d, st) {
         <label>读者（邮箱，逗号或换行分隔；项目参与者本来就看得到）<textarea name="readers" rows="2">${esc((r.readers || []).map((x) => x.email).join("\n"))}</textarea></label>
         ${r.kind === "method" ? `<label class="check"><input type="checkbox" name="public" ${r.public ? "checked" : ""}>所有登录用户都看得到</label>` : `<label class="check"><input type="checkbox" name="follow" ${r.follow ? "checked" : ""}>跟随档案：这些文件更新时自动发布新版本</label>`}
         <div class="actions"><button type="submit">保存</button><button type="button" class="ghost" data-rel-cancel>取消</button></div></form>` : ""}
-    </li>`).join("") || `<li class="empty">这个项目还没有发布过东西${host ? "。下面新建一份" : ""}。</li>`}</ul>
-    ${host ? `<h3>新发布物</h3><form id="rel-new" class="rel-form">
-      <div class="seg" role="radiogroup" aria-label="类型">${["fact", "method"].map((k) => `<label class="check"><input type="radio" name="kind" value="${k}" ${nf.kind === k ? "checked" : ""}>${REL_KIND[k]}</label>`).join("")}</div>
+    </li>`).join("") || `<li class="empty">还没有对外页面${host ? "。下面新建一个" : ""}。</li>`}</ul>
+    ${host ? `<h3>新的对外页面</h3><form id="rel-new" class="rel-form">
+      <input type="hidden" name="kind" value="fact">
       <label>标题<input name="title" maxlength="80" required value="${esc(nf.title || "")}" placeholder="${nf.kind === "method" ? "交付数据查数口径" : "交付周报看板"}"></label>
       <label>名字（小写字母、数字、-；订阅者那边的目录名）<input name="name" maxlength="64" required pattern="[a-z0-9]+(-[a-z0-9]+)*" value="${esc(nf.name || "")}" placeholder="${nf.kind === "method" ? "delivery-query" : "weekly-board"}"></label>
       <label>说明<textarea name="description" rows="2" maxlength="2000">${esc(nf.description || "")}</textarea></label>
@@ -1955,6 +2238,7 @@ function renderReleasesTab(box, d, st) {
       <label>读者（邮箱，逗号或换行分隔）<textarea name="readers" rows="2" placeholder="lead@example.com"></textarea></label>
       <div class="actions"><button type="submit">发布</button></div></form>` : ""}`;
   const done = async (text, bad = false) => { st.note = text; st.bad = bad; await reload(); renderProjectPage(true); };
+  bindBlueprintPublish(box, d, st);
   box.querySelectorAll("input[name=kind]").forEach((x) => x.addEventListener("change", () => { st.relForm = { kind: x.value }; renderProjectPage(true); }));
   $("#rel-new", box)?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1981,7 +2265,7 @@ function renderReleasesTab(box, d, st) {
     catch (err) { await done(err.message, true); }
   });
   box.querySelectorAll("[data-rel-del]").forEach((b) => b.addEventListener("click", async () => {
-    if (!confirm("撤回这份发布物？读者与订阅者立即看不到、用不到。")) return;
+    if (!confirm("撤回这个对外页面？读者与订阅者立即看不到、用不到。")) return;
     try { await api(`/api/projects/${d.id}/releases/${b.dataset.relDel}`, { method: "DELETE" }); await done("已撤回"); }
     catch (err) { await done(err.message, true); }
   }));

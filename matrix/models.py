@@ -97,7 +97,7 @@ PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
 # 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
 RELEASES = "releases"      # 订阅的交付件在工作目录里的挂载名（只读副本，运行后丢弃）
-RELEASE_KINDS = {"method": "技能包", "fact": "交付件"}
+RELEASE_KINDS = {"method": "技能包", "fact": "对外页面"}  # 技能包已并进蓝图：只剩旧数据，不能再发布
 RELEASES_PER_PROJECT = 20
 RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
 RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
@@ -298,6 +298,10 @@ class Project:
     plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 所有者允许 Agent 在这个项目里直接用的别处来源：{agent_id: [场合]}（不变量 22，matrix/flow.py）。只给所有者看
     flow_grants: dict[str, list[str]] = field(default_factory=dict)
+    # 岗位（docs/blueprints.md 第 9 节）：{key: {name, description, members: [agent_id]}}。插件设置与触发引用岗位而不是名字
+    roles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    blueprint: dict[str, Any] | None = None   # 由蓝图建的：{id, name, title, version}
+    setup_steps: list[dict[str, Any]] = field(default_factory=list)  # 由蓝图建的项目剩下的手工步骤：[{id, text, done}]
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 
@@ -709,6 +713,7 @@ class Release:
     status: str = "active"               # active | withdrawn
     feedback: list[dict[str, Any]] = field(default_factory=list)  # 读者自己写的反馈：{id, user_id, text, at}
     created_at: float = field(default_factory=time.time)
+    migrated_to: str | None = None       # 旧的技能包并进蓝图后，对应的蓝图 id（docs/blueprints.md 第 7 节）
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

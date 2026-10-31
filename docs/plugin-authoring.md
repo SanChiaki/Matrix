@@ -409,6 +409,17 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
 - 依赖：写 `"requirements": "service/requirements.txt"`，一个每个包都带 `--hash` 的锁文件（`uv pip compile --generate-hashes`），要列全
   （安装时 `--no-deps`、只装 wheel）。只用标准库最省事。
 
+**设置**（安装时主持人填，蓝图建项目时自动填好）：
+
+```json
+"settings": [{"key": "intake", "label": "谁接外部来的新需求", "type": "role"}],
+"triggers": [{"key": "intake", "type": "webhook", "notify": {"to": "{setting:intake}", "text": "外部来了一个新需求：{title}"}}]
+```
+
+`type` 是 `text`、`select`（带 `options`）、`role`（项目里的一个岗位）、`member`（一个成员）。触发与 `after` 的 @ 对象写 `{setting:<key>}`
+（只能是 role / member 类），不要写死成员名字：项目换人、或者被打包进蓝图给别人用时就不用改插件。服务每次调用的 `_meta` 里有
+`matrix/settings`（role 类给出岗位名与成员名）和 `matrix/roles`（项目的全部岗位）。
+
 **挂点**（都要有 `service`）：
 
 ```json

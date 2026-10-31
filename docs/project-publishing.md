@@ -4,6 +4,8 @@
 > 插件见 [project-plugins.md](project-plugins.md)，不变量见 [reference/invariants.md](reference/invariants.md)。
 > 调研：research: project-publishing#three-faces 及文中各处引用。
 
+> 2026-10-31：技能包并进**蓝图**（用蓝图时只勾技能、装进自己的项目；不再订阅，旧的技能包启动时转成蓝图），交付件改叫**对外页面**，“发布物”入口并进“项目”。见 [blueprints.md](blueprints.md) 第 7、17 节。下文保留原设计。
+
 ## 1. 要解决什么
 
 项目现在只有**作业面**：群聊、委托、档案、插件都给项目里的人和 Agent 用。项目里做出来的东西要给项目外的人用，

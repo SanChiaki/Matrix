@@ -1,4 +1,4 @@
-"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；技能包可以公开，交付件只给读者；
+"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；对外页面（交付件）只给读者；技能包并进了蓝图；
 订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效；跟随档案；撤回；发布物里的插件视图只读快照；反馈回流。"""
 
 from __future__ import annotations
@@ -36,18 +36,16 @@ def assistant(net: Network, user: str):
 
 # ================= 发布：只经主持人 =================
 def test_only_host_publishes_and_contents_are_checked(tmp_path: Path):
-    """不变量 23：只有主持人能发布；技能包只带技能、交付件只带档案文件；名字、读者都要对得上。"""
+    """不变量 23：只有主持人能发布；对外页面只带档案文件；技能包不能再发布（并进了蓝图）；名字、读者都要对得上。"""
     net, _, host, reader, other, _, g = setup(tmp_path)
     net.invite(g.id, "other@x.io", actor=host)
     net.respond_invitation(g.id, True, actor=other)
     with pytest.raises(NetworkError, match="只有主持人"):
         net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], actor=other)
-    with pytest.raises(NetworkError, match="只带技能"):
-        net.create_release(g.id, "x", "method", "x", skills=["delivery-query"], files=["weekly.json"], actor=host)
+    with pytest.raises(NetworkError, match="并进蓝图"):
+        net.create_release(g.id, "x", "method", "x", skills=["delivery-query"], actor=host)
     with pytest.raises(NetworkError, match="没有这些文件"):
         net.create_release(g.id, "x", "fact", "x", files=["nope.json"], actor=host)
-    with pytest.raises(NetworkError, match="没有这些技能"):
-        net.create_release(g.id, "x", "method", "x", skills=["nope"], actor=host)
     with pytest.raises(NetworkError, match="没有用户"):
         net.create_release(g.id, "x", "fact", "x", files=["weekly.json"], readers=["ghost@x.io"], actor=host)
     with pytest.raises(NetworkError, match="名字"):
@@ -56,18 +54,17 @@ def test_only_host_publishes_and_contents_are_checked(tmp_path: Path):
                            public=True, actor=host)
     assert (r.version, r.public, r.readers) == (1, False, [reader])  # 交付件不能公开
     chat = net.project_chat(g.id, actor=host)
-    assert "主持人发布了交付件「交付周报」v1（读者：reader@x.io）" in chat.messages[-1].text
+    assert "主持人发布了对外页面「交付周报」v1（读者：reader@x.io）" in chat.messages[-1].text
     with pytest.raises(NetworkError, match="已经有"):
         net.create_release(g.id, "weekly", "fact", "again", files=["weekly.json"], actor=host)
 
 
-def test_fact_only_for_readers_method_can_be_public(tmp_path: Path):
-    """不变量 23：交付件只给点名的读者（加项目参与者），看不到的一律 404；公开的技能包所有登录用户都看得到。"""
+def test_fact_only_for_readers(tmp_path: Path):
+    """不变量 23：对外页面只给点名的读者（加项目参与者），看不到的一律 404。"""
     net, _, host, reader, other, _, g = setup(tmp_path)
     fact = net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], readers=["reader@x.io"], actor=host)
-    method = net.create_release(g.id, "query", "method", "查数口径", skills=["delivery-query"], public=True, actor=host)
-    assert {x["id"] for x in net.releases_for(reader)} == {fact.id, method.id}
-    assert {x["id"] for x in net.releases_for(other)} == {method.id}
+    assert {x["id"] for x in net.releases_for(reader)} == {fact.id}
+    assert net.releases_for(other) == []
     with pytest.raises(NetworkError, match="unknown release"):
         net.release_detail(fact.id, actor=other)
     with pytest.raises(NetworkError, match="unknown"):
@@ -78,7 +75,6 @@ def test_fact_only_for_readers_method_can_be_public(tmp_path: Path):
     assert net.release_detail(fact.id, actor=host)["readers"] == [{"id": reader, "email": "reader@x.io"}]
     with pytest.raises(NetworkError, match="unknown project"):  # 读者看不到项目本身
         net.project_detail(g.id, actor=reader)
-    assert net.release_detail(method.id, actor=other)["skills"][0]["name"] == "delivery-query"
 
 
 def test_snapshot_is_fixed_until_next_version_or_follow(tmp_path: Path):
@@ -128,8 +124,8 @@ def test_withdraw_hides_from_readers_and_subscribers(tmp_path: Path):
 
 # ================= 订阅：在订阅者自己的信任域里 =================
 def test_subscriptions_follow_reach(tmp_path: Path):
-    """不变量 23：订阅的交付件只在这一轮能到达的人都是读者时挂上：私聊里生效；在有不是读者的人的共享项目里不挂，
-    提示词只说明没挂上；订阅的技能包进技能层。"""
+    """不变量 23：订阅的对外页面只在这一轮能到达的人都是读者时挂上：私聊里生效；在有不是读者的人的共享项目里不挂，
+    提示词只说明没挂上。"""
     rounds: list[dict] = []
 
     def handler(call: ScriptCall) -> str:
@@ -140,22 +136,20 @@ def test_subscriptions_follow_reach(tmp_path: Path):
 
     net, _, host, reader, other, _, g = setup(tmp_path, handler)
     fact = net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], readers=["reader@x.io"], actor=host)
-    method = net.create_release(g.id, "query", "method", "查数口径", skills=["delivery-query"], public=True, actor=host)
     me = assistant(net, reader)
-    net.update_agent(me.id, actor=reader, subscriptions=[fact.id, method.id])
+    net.update_agent(me.id, actor=reader, subscriptions=[fact.id])
     with pytest.raises(NetworkError, match="unknown release"):  # 只能订阅自己看得到的
         net.update_agent(assistant(net, other).id, actor=other, subscriptions=[fact.id])
     with pytest.raises(NetworkError, match="unknown agent"):  # 只能给自己的 Agent 订阅
-        net.set_subscription(method.id, me.id, True, actor=other)
+        net.set_subscription(fact.id, me.id, True, actor=host)
 
     net.send_message(net.direct_chat(me.id, actor=reader).id, "看看", actor=reader, background=False)
-    assert rounds[-1]["files"] == ["weekly.json"] and "delivery-query" in rounds[-1]["skills"]
+    assert rounds[-1]["files"] == ["weekly.json"]
     assert "交付件「周报」v1，快照于" in rounds[-1]["prompt"] and f"./{RELEASES}/weekly/" in rounds[-1]["prompt"]
 
     j, chat = joint(net, other, "reader@x.io", reader, members=[])
     net.send_message(chat.id, f"@{me.name} 说说周报", actor=other, background=False)
     assert rounds[-1]["files"] == []  # other 不是读者：交付件不挂
-    assert "delivery-query" in rounds[-1]["skills"]  # 公开的技能包照常
     assert "交付件「周报」v1：这一轮没有挂上（这一轮能看到你输出的人里，有不在它读者名单上的）" in rounds[-1]["prompt"]
 
 
@@ -212,7 +206,8 @@ def test_release_view_reads_only_the_snapshot(tmp_path: Path):
 def test_feedback_comes_back_as_a_chat_event(tmp_path: Path):
     """不变量 23：读者自己写的反馈进项目群聊（事件，不唤醒任何成员）；读者只看得到自己的反馈。"""
     net, rt, host, reader, other, _, g = setup(tmp_path)
-    r = net.create_release(g.id, "query", "method", "查数口径", skills=["delivery-query"], public=True, actor=host)
+    r = net.create_release(g.id, "query", "fact", "查数口径", files=["weekly.json"], readers=["reader@x.io", "other@x.io"],
+                           actor=host)
     calls = len(rt.calls)
     net.release_feedback(r.id, "能不能加上延期原因？", actor=reader)
     net.release_feedback(r.id, "口径里少了回款", actor=other)
@@ -264,19 +259,30 @@ def test_release_api(tmp_path: Path):
     assert h.delete(f"/api/projects/{g.id}/releases/{rid}").json()["status"] == "withdrawn"
 
 
-def test_method_snapshot_reaches_skill_layer(tmp_path: Path):
-    """订阅的技能包排在项目技能、插件自带的技能之后：快照里的技能正文是发布时那一版。"""
-    got: list[str] = []
-
-    def handler(call: ScriptCall) -> str:
-        f = call.cwd / SKILLS / "delivery-query" / "SKILL.md"
-        got.append(f.read_text(encoding="utf-8") if f.is_file() else "")
-        return "ok"
-
-    net, _, host, reader, _, _, g = setup(tmp_path, handler)
-    r = net.create_release(g.id, "query", "method", "查数口径", skills=["delivery-query"], public=True, actor=host)
-    net.save_project_skill(g.id, "delivery-query", "怎么查交付数据", "第二版做法", actor=host)
-    me = assistant(net, reader)
-    net.set_subscription(r.id, me.id, True, actor=reader)
-    net.send_message(net.direct_chat(me.id, actor=reader).id, "查一下", actor=reader, background=False)
-    assert "先查项目清单" in got[-1] and "第二版" not in got[-1]
+def test_old_skill_packs_become_blueprints(tmp_path: Path):
+    """技能包并进蓝图：启动时还在发布中的技能包各转成一份只有技能的蓝图（同样的读者与公开），技能包撤回、订阅去掉，
+    群聊里说明去哪里找；用的人把它装进自己的项目。"""
+    from matrix.models import Release, new_id
+    net, _, host, reader, _, _, g = setup(tmp_path)
+    r = Release(id=new_id("rel"), project_id=g.id, name="query", kind="method", title="查数口径", description="怎么查",
+                skills=["delivery-query"], public=True)
+    with net._lock:  # 老数据：这个功能之前发布的技能包
+        net._cut_release(g, r, host)
+        net.store.releases[r.id] = r
+        assistant(net, reader).subscriptions.append(r.id)
+        net.store.save()
+    net2 = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    old = net2.store.releases[r.id]
+    assert old.status == "withdrawn" and old.migrated_to and not net2.store.agents[assistant(net, reader).id].subscriptions
+    b = net2.blueprint_detail(old.migrated_to, actor=reader)
+    assert b["title"] == "查数口径" and b["public"] and [x["name"] for x in b["skills"]] == ["delivery-query"]
+    assert "技能包「查数口径」并进了蓝图" in net2.project_chat(g.id).messages[-1].text
+    mine = net2.create_project("我的", "", [], actor=reader)
+    with pytest.raises(Exception):
+        net2.create_project_from_blueprint(b["id"], "", {}, actor=reader, project_id=mine.id)
+    from matrix.engine import NeedsConfirm
+    try:
+        net2.create_project_from_blueprint(b["id"], "", {}, actor=reader, project_id=mine.id)
+    except NeedsConfirm as e:
+        net2.create_project_from_blueprint(b["id"], "", {}, actor=reader, project_id=mine.id, confirm=True, digest=e.digest)
+    assert "先查项目清单" in (net2.store.project_skills_dir(mine.id) / "delivery-query" / "SKILL.md").read_text(encoding="utf-8")

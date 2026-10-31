@@ -88,6 +88,32 @@ def test_route_passive_delivery(tmp_path: Path):
         c.stop()
 
 
+def test_done_hands_off_to_the_next_stage(tmp_path: Path):
+    """人说“#N 完成”：叫引用了 #N 的后续任务的负责人；没人认领的，按标题前缀（“方案：…”）叫对应岗位的成员。
+    这样上一棒由人确认、下一棒自动接上（真实模型实测里方案没被叫醒，交棒卡住）。"""
+    c = engine(tmp_path)
+    members = [{"name": "小方", "roles": ["方案"]}, {"name": "小编", "roles": ["编码"]}, {"name": "小反", "roles": ["反馈"]}]
+    route = lambda text: json.loads(c.call("route_suggest", {"message": {"text": text, "author_kind": "user", "author": "wang@x.io"},  # noqa: E731
+                                                             "members": members, "relay": {"budget": 3}}, meta=NET)[0])
+    try:
+        c.call("task_create", {"title": "反馈：中文变方框", "claim": True}, meta=AGENT("小反"))
+        c.call("task_update", {"id": 1, "status": "in_review"}, meta=AGENT("小反"))
+        c.call("task_create", {"title": "方案：中文变方框（反馈 #1）"}, meta=AGENT("小反"))
+        c.call("task_create", {"title": "编码：别的事"}, meta=AGENT("小反"))
+        assert route("#1 完成")["wake"] == [{"agent": "小反", "reason": "#1 的负责人"},
+                                           {"agent": "小方", "reason": "#1 完成了，#2（方案）还没人认领"}]
+        c.call("task_claim", {"id": 2}, meta=AGENT("小方"))
+        c.call("task_create", {"title": "编码：按方案改（方案 #2）"}, meta=AGENT("小方"))
+        c.call("task_update", {"id": 2, "status": "in_review"}, meta=AGENT("小方"))
+        assert [w["agent"] for w in route("#2 完成")["wake"]] == ["小方", "小编"]
+        agent_says = json.loads(c.call("route_suggest", {"message": {"text": "#1 #2 都定了，编码请接 #3", "author_kind": "agent",
+                                                                     "author": "小方"}, "members": members, "relay": {"budget": 3}},
+                                       meta=NET)[0])
+        assert [w["agent"] for w in agent_says["wake"]] == ["小编"]  # 已完成的 #1 #2 不再叫它们的负责人，省下预算
+    finally:
+        c.stop()
+
+
 def test_pass_is_not_posted_only_for_route_wakes(tmp_path: Path):
     """被 route 叫来看的那一轮只回“（略过）”，网络不发进群聊；被人 @ 的那一轮回同样的话照常发出。"""
     net = Network(ScriptedRuntime(lambda call: "（略过）"), tmp_path / "data", seed=False,

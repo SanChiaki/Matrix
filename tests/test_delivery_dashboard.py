@@ -78,8 +78,10 @@ def test_delivery_dashboard_end_to_end(tmp_path: Path, data_service: str):
     fact = net.create_release(g.id, "huadong-weekly", "fact", "华东交付周报看板", files=["huadong-weekly.json"],
                               view={"plugin": "delivery-dashboard", "tab": "board"}, readers=["li@demo.local"],
                               follow=True, actor=zhang)
-    method = net.create_release(g.id, "dash-method", "method", "做交付看板的技能包", skills=["delivery-dashboard"],
-                                public=True, actor=zhang)
+    kit = net.publish_blueprint(g.id, {**net.blueprint_draft(g.id, actor=zhang), "name": "delivery-dashboard-kit",
+                                       "title": "做交付看板", "plugins": ["delivery-dashboard"], "public": True},
+                                confirm=True, actor=zhang)  # 原来的“技能包”：做法随插件与蓝图走
+    assert kit["manifest"]["files"] == [] and kit["manifest"]["plugins"][0]["name"] == "delivery-dashboard"  # 不带看板数据
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)
     dm = net.direct_chat(li_bot.id, actor=li)
@@ -88,5 +90,5 @@ def test_delivery_dashboard_end_to_end(tmp_path: Path, data_service: str):
     assert "华东交付周报看板」v1（快照于" in answer and "按期率" in answer
 
     net.send_message(chat.id, "@看板 Agent 刷新看板「华东交付周报」", actor=zhang, background=False)
-    assert fact.version == 2 and method.version == 1  # 跟随档案：看板文件更新，交付件切新版本
+    assert fact.version == 2 and net.blueprints.get(kit["id"])["rev"] == 1  # 跟随档案：看板文件更新，对外页面切新版本
     assert net.release_bridge(fact.id, "context", {}, actor=li)["release"]["version"] == 2

@@ -88,6 +88,34 @@ class CatalogGitIn(BaseModel):
     path: str = Field("", max_length=500)
 
 
+class RolesIn(BaseModel):
+    roles: dict[str, dict] = Field(default_factory=dict)
+
+
+class SettingsIn(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+
+
+class StepIn(BaseModel):
+    done: bool
+
+
+class BlueprintPublishIn(BaseModel):
+    spec: dict[str, Any]
+    confirm: bool = False
+    digest: str | None = Field(None, max_length=64)
+
+
+class BlueprintUseIn(BaseModel):
+    name: str = Field("", max_length=60)
+    params: dict[str, str] = Field(default_factory=dict)
+    roles: dict[str, dict] = Field(default_factory=dict)
+    parts: dict[str, Any] | None = None
+    project_id: str | None = None
+    confirm: bool = False
+    digest: str | None = Field(None, max_length=64)
+
+
 class DecideIn(BaseModel):
     approve: bool
     note: str = Field("", max_length=500)
@@ -479,11 +507,13 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
         raise HTTPException(400, str(e) or "上传的技能格式不对") from e
 
 
-async def plugin_package(request: Request) -> list[tuple[str, bytes]]:
-    """插件包：请求体是 zip，或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
+async def plugin_package(request: Request, limit: int | None = None) -> list[tuple[str, bytes]]:
+    """插件包（蓝图同样）：请求体是 zip，或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
     import base64
     from .models import PLUGIN_FILES, PLUGIN_LIMIT
     from .plugins import PluginError, unzip
+    files_max = 1000 if limit else PLUGIN_FILES
+    PLUGIN_LIMIT = limit or PLUGIN_LIMIT  # noqa: N806
     cap = PLUGIN_LIMIT * 2  # base64 膨胀
     buf = bytearray()
     async for chunk in request.stream():
@@ -493,8 +523,8 @@ async def plugin_package(request: Request) -> list[tuple[str, bytes]]:
     try:
         if "json" in request.headers.get("content-type", ""):
             files = json.loads(bytes(buf)).get("files") or []
-            return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:PLUGIN_FILES + 1]]
-        return unzip(bytes(buf))
+            return [(str(f["path"]), base64.b64decode(f["data"], validate=True)) for f in files[:files_max + 1]]
+        return unzip(bytes(buf), PLUGIN_LIMIT, files_max)
     except (PluginError, ValueError, KeyError, TypeError, AttributeError) as e:
         raise HTTPException(400, str(e) or "插件包格式不对") from e
 
@@ -948,6 +978,51 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/admin/plugins/submissions/{sid}")
     def admin_decide_submission(sid: str, body: DecideIn, user: Me) -> dict:
         return network.admin_decide_submission(user.id, sid, body.approve, body.note)
+
+    # ---- 岗位、插件设置与蓝图（docs/blueprints.md） ----
+    @app.put("/api/projects/{project_id}/roles")
+    def set_roles(project_id: str, body: RolesIn, user: Me) -> dict:
+        return network.project_view(network.set_project_roles(project_id, body.roles, actor=user.id), user.id)
+
+    @app.put("/api/projects/{project_id}/plugins/{name}/settings")
+    def set_plugin_settings(project_id: str, name: str, body: SettingsIn, user: Me) -> dict:
+        return network.set_plugin_settings(project_id, name, body.values, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/setup-steps/{step_id}")
+    def set_setup_step(project_id: str, step_id: str, body: StepIn, user: Me) -> dict:
+        return network.project_view(network.set_setup_step(project_id, step_id, body.done, actor=user.id), user.id)
+
+    @app.get("/api/projects/{project_id}/blueprint-draft")
+    def blueprint_draft(project_id: str, user: Me) -> dict:
+        return network.blueprint_draft(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/blueprints")
+    def publish_blueprint(project_id: str, body: BlueprintPublishIn, user: Me) -> dict:
+        return network.publish_blueprint(project_id, body.spec, body.confirm, body.digest, actor=user.id)
+
+    @app.get("/api/blueprints")
+    def blueprint_list(user: Me) -> list[dict]:
+        return network.blueprint_list(user.id)
+
+    @app.get("/api/blueprints/{bid}")
+    def blueprint_detail(bid: str, user: Me) -> dict:
+        return network.blueprint_detail(bid, user.id)
+
+    @app.post("/api/blueprints/{bid}/projects")
+    def use_blueprint(bid: str, body: BlueprintUseIn, user: Me) -> dict:
+        return network.create_project_from_blueprint(bid, body.name, body.params, body.roles, body.confirm, body.digest,
+                                                     actor=user.id, parts=body.parts, project_id=body.project_id)
+
+    @app.post("/api/blueprints/{bid}/withdraw")
+    def withdraw_blueprint(bid: str, user: Me) -> dict:
+        return network.withdraw_blueprint(bid, actor=user.id)
+
+    @app.post("/api/admin/blueprints")
+    async def admin_blueprint_upload(request: Request, user: Me) -> dict:
+        if not network.is_admin(user.id):
+            raise HTTPException(404, "unknown admin")
+        entries = await plugin_package(request, limit=10_000_000)
+        return await run_in_threadpool(network.admin_blueprint_upload, user.id, entries)
 
     @app.post("/api/projects/{project_id}/plugins/upload")
     async def upload_plugin(project_id: str, request: Request, user: Me, confirm: bool = False,

@@ -202,11 +202,24 @@ def route_suggest(a: dict, caller: dict) -> dict:
         if name and name != author and name not in involved and name not in {w["agent"] for w in wakes} \
                 and any(m["name"] == name for m in members):
             wakes.append({"agent": name, "reason": reason})
-    for t in refs:  # 先叫被提到的任务的负责人
-        if t["assignee"]:
+    for t in refs:  # 先叫被提到的任务的负责人；Agent 顺口提到已经完成的任务，不为它占一次唤醒
+        if t["assignee"] and (human or t["status"] not in ("done", "closed")):
             add(t["assignee"], f"#{t['id']} 的负责人")
-    for m in members:  # 再叫名字或能力被提到的
-        hits = [c for c in [m["name"], *(m.get("capabilities") or [])] if c and str(c) in text]
+    if human:  # 人确认完成了上一棒：叫后续任务（标题里引用了 #N、还没完成的）的负责人；没人认领的，按标题前缀找岗位
+        finished = {t["id"] for t in refs if t["status"] == "done"}
+        for t in data["tasks"]:
+            cited = {int(n) for n in REF.findall(t["title"])} & finished
+            if not cited or t["status"] in ("done", "closed") or t["id"] in finished:
+                continue
+            if t["assignee"]:
+                add(t["assignee"], f"#{min(cited)} 完成了，接着做 #{t['id']}")
+                continue
+            head = re.split(r"[:：]", t["title"], maxsplit=1)[0] if re.search(r"[:：]", t["title"]) else ""
+            for m in members:
+                if head and head in [m["name"], *(m.get("roles") or [])]:
+                    add(m["name"], f"#{min(cited)} 完成了，#{t['id']}（{head}）还没人认领")
+    for m in members:  # 再叫名字、岗位或能力被提到的
+        hits = [c for c in [m["name"], *(m.get("roles") or []), *(m.get("capabilities") or [])] if c and str(c) in text]
         if hits:
             add(m["name"], f"消息里提到「{hits[0]}」")
     if human and not command_only:  # 人的发言：被动投递给所有频道成员（Raft 的做法），剩下的按顺序

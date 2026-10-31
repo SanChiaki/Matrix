@@ -36,6 +36,7 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 | `triggers` | `[{key, type, table, cron, when, notify: {to, text}}]`，见“触发” |
 | `connectors` | 用到的外部服务（连接器 id 或服务名，≤10）：只是声明，启用时列进项目的连接器面板（`engine.connector_panel`） |
 | `release_views` | 能在交付件里打开的标签 key（要在 `tabs` 里）；那里页面是发布时的快照、桥只读快照（[releases.md](releases.md)） |
+| `settings` | 安装时主持人填的设置 `[{key, label, type, options, required}]`，`type` 是 `text` `select` `role`（项目岗位）`member`（成员）；触发与 `after` 的 `notify.to` 可写 `{setting:<key>}`（role / member 类），发消息时解析成岗位当时的成员；服务经 `_meta.matrix/settings`、`matrix/roles` 拿到（[blueprints.md](../blueprints.md) 第 9 节）。`PUT /api/projects/<id>/plugins/<name>/settings` |
 
 ## 安装、升级、卸载
 
