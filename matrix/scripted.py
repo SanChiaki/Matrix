@@ -350,12 +350,45 @@ def _wiki(call: ScriptCall) -> str | None:
     return None
 
 
+# ================= 接力分派（examples/plugins/relay，docs/plugin-hooks.md 第 8 节） =================
+# 研发项目里五个成员按角色接力：反馈 → 方案 → 编码 → 审查 → 部署。群聊里没 @ 人的问题由插件分派给“反馈”认领；
+# 各成员做完自己这一环，在回复最后写“需要 / 交给 下一环”，插件请下一环看一下。部署这一环等人确认。
+RELAY = {
+    "反馈": "已复现：Safari 17 打开登录页白屏，控制台报 `ReferenceError: structuredClone is not defined`。需要方案。",
+    "方案": "方案：在登录页的打包配置里把目标浏览器加上 Safari 15，并给 structuredClone 补一个兼容实现。交给编码。",
+    "编码": "已按方案改好：打包目标加了 Safari 15，补了兼容实现和一条回归用例（演示）。需要审查。",
+    "审查": "审查通过：兼容实现只在浏览器缺这个函数时生效，回归用例覆盖了 Safari。需要部署。",
+    "部署": "部署是高风险的一环：要上线的是登录页的兼容修复。等人在群聊里 @ 我确认后再执行。",
+}
+
+
+_RELAY_NAMES: dict[str, str] = {}  # Agent id → 角色名：续接的会话里提示词不再从名字开头
+
+
+def _relay(call: ScriptCall) -> str | None:
+    if "relay-handoff" not in call.skills:
+        return None
+    name = _name(call.prompt)
+    if name in RELAY:
+        _RELAY_NAMES[call.agent_id] = name
+    name = _RELAY_NAMES.get(call.agent_id, name)
+    if name not in RELAY:
+        return None
+    if name == "部署" and "确认部署" in _asked(call.prompt):
+        return "已部署登录页的兼容修复（演示）。"
+    if "分派给你认领" in call.prompt and MCP_PREFIX + "open_request" in call.tool_names:
+        call.tool("open_request", title="登录页在 Safari 上白屏", expected_outcome="定位原因、修好并上线")
+    return RELAY[name]
+
+
 def scenario_handler(call: ScriptCall) -> str:
     if (reply := _from_release(call)) is not None:
         return reply
     if (reply := _dashboard(call)) is not None:
         return reply
     if (reply := _wiki(call)) is not None:
+        return reply
+    if (reply := _relay(call)) is not None:
         return reply
     if (reply := _board_system(call)) is not None:
         return reply

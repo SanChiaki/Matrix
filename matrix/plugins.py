@@ -37,8 +37,10 @@ FIELD_TYPES = ("text", "longtext", "number", "date", "select", "bool", "agent", 
 TRIGGER_TYPES = ("webhook", "schedule", "record")
 TOOL_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 TOOL_SEP = "__"                        # 插件工具在 Agent 那里的名字：<插件名>__<工具名>（MCP 工具名只许字母、数字、_、-，≤64）
-TOOL_CLASSES = ("read", "write")
+TOOL_CLASSES = ("read", "write", "hook")  # hook：只给挂点（context、route）调，不开给 Agent 与页面
 HOOK_EVENTS = ("request.accepted",)   # after 挂点第一期只接验收过的用户任务
+ROUTE_EVENTS = ("message.posted",)    # route 挂点：项目群聊里有新消息（人的、Agent 的回复）
+ROUTE_KINDS = ("wake", "claim")       # route 能给的建议：叫来看一下 / 认领接手
 SERVICE_TOOLS_MAX = 40
 CONTEXT_BUDGET = 4000                  # 一个 context 挂点最多往提示词里加多少字符
 HOOKS_MAX = 5                          # 每种挂点最多几个
@@ -140,6 +142,15 @@ class AfterHook:
 
 
 @dataclass(frozen=True)
+class RouteHook:
+    """群聊里有新消息时问插件服务“该交给谁”：调一个 read 类工具，服务返回建议，网络过闸门后执行（docs/plugin-hooks.md 第 8 节）。
+    may 是插件申请的建议种类，安装时公开给主持人；建议了没申请的种类一律丢弃。"""
+    on: str
+    tool: str
+    may: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Manifest:
     name: str
     version: str
@@ -157,6 +168,7 @@ class Manifest:
     mounts: tuple[Mount, ...] = ()
     contexts: tuple[ContextHook, ...] = ()
     afters: tuple[AfterHook, ...] = ()
+    routes: tuple[RouteHook, ...] = ()
 
     def table(self, key: str) -> Table | None:
         return next((t for t in self.tables if t.key == key), None)
@@ -180,7 +192,8 @@ class Manifest:
             "hooks": {"mount": [{"resources": m.resources, "as": m.as_} for m in self.mounts],
                       "context": [{"label": c.label, "resource": c.resource, "tool": c.tool, "budget": c.budget}
                                   for c in self.contexts],
-                      "after": [{"on": a.on, "to": a.to, "tool": a.tool} for a in self.afters]},
+                      "after": [{"on": a.on, "to": a.to, "tool": a.tool} for a in self.afters],
+                      "route": [{"on": r.on, "tool": r.tool, "may": list(r.may)} for r in self.routes]},
             "triggers": [{"key": t.key, "type": t.type, "to": t.to, "text": t.text, "table": t.table, "cron": t.cron,
                           "when": ({"field": t.when_field, "equals": t.when_equals} if t.when_field else
                                    {"event": "create"} if t.on_create else None)} for t in self.triggers],
@@ -313,7 +326,7 @@ def parse_manifest(data: Any) -> Manifest:
     service = _service(data.get("service"))
     if service is not None and any(len(name) + len(TOOL_SEP) + len(n) > 64 for n, _ in service.tools):
         raise PluginError(f"工具在 Agent 那里叫 {name}{TOOL_SEP}<工具名>，最长 64 个字符：缩短插件名或工具名")
-    mounts, contexts, afters = _hooks(data.get("hooks"), service)
+    mounts, contexts, afters, routes = _hooks(data.get("hooks"), service)
     if not tabs and not tables and not triggers and service is None:
         raise PluginError("插件至少要有一个标签、一张表、一个触发或一个服务")
     conns = data.get("connectors") or []
@@ -329,7 +342,7 @@ def parse_manifest(data: Any) -> Manifest:
     if "service.read" in perms and service is None:
         raise PluginError("申请了读插件服务，但清单里没有 service")
     return Manifest(name, version, title, description, tuple(tabs), tuple(tables), perms, agent, tuple(triggers),
-                    connectors, tuple(dict.fromkeys(str(v) for v in views)), service, mounts, contexts, afters)
+                    connectors, tuple(dict.fromkeys(str(v) for v in views)), service, mounts, contexts, afters, routes)
 
 
 def _service(v: Any) -> Service | None:
@@ -359,7 +372,7 @@ def _service(v: Any) -> Service | None:
         if not TOOL_NAME.match(str(n)):
             raise PluginError(f"service.tools 里的工具名无效：{n!r}（字母开头，字母、数字、_、-）")
         if c not in TOOL_CLASSES:
-            raise PluginError(f"工具 {n} 的分级要是 read 或 write")
+            raise PluginError(f"工具 {n} 的分级要是 read、write 或 hook")
         out.append((str(n), str(c)))
     return Service(command, args_t, tuple(out), bool(v.get("network")), url)
 
@@ -379,13 +392,14 @@ def _templates(v: Any, what: str) -> tuple[tuple[str, str], ...]:
     return tuple((_s(k, f"{what} 的参数名", 64), _s(t, f"{what}.{k}", 1000, required=False)) for k, t in v.items())
 
 
-def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[ContextHook, ...], tuple[AfterHook, ...]]:
-    """挂点（docs/plugin-hooks.md 第 5 节）。mount、context 读的是服务的数据目录，所以要有 service。"""
+def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[ContextHook, ...], tuple[AfterHook, ...],
+                                                     tuple[RouteHook, ...]]:
+    """挂点（docs/plugin-hooks.md 第 5、8 节）。mount、context、route 读的是插件服务，所以要有 service。"""
     if v is None:
-        return (), (), ()
-    if not isinstance(v, dict) or set(v) - {"mount", "context", "after"}:
-        raise PluginError("hooks 是对象，只能有 mount / context / after")
-    lists = {k: v.get(k) or [] for k in ("mount", "context", "after")}
+        return (), (), (), ()
+    if not isinstance(v, dict) or set(v) - {"mount", "context", "after", "route"}:
+        raise PluginError("hooks 是对象，只能有 mount / context / after / route")
+    lists = {k: v.get(k) or [] for k in ("mount", "context", "after", "route")}
     for k, items in lists.items():
         if not isinstance(items, list) or len(items) > HOOKS_MAX:
             raise PluginError(f"hooks.{k} 必须是列表，最多 {HOOKS_MAX} 个")
@@ -397,8 +411,8 @@ def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[Co
         cls = service.tool_class(name) if service else None
         if cls is None:
             raise PluginError(f"{what} 的工具 {name!r} 不在 service.tools 里")
-        if need and cls != need:
-            raise PluginError(f"{what} 只能用 {need} 类工具：{name}")
+        if need == "read" and cls not in ("read", "hook"):
+            raise PluginError(f"{what} 只能用 read 或 hook 类工具：{name}")
         return name
 
     mounts = []
@@ -434,7 +448,20 @@ def _hooks(v: Any, service: Service | None) -> tuple[tuple[Mount, ...], tuple[Co
         else:
             afters.append(AfterHook(on, tool=tool_ok(a["tool"], f"hooks.after[{i}]"),
                                     args=_templates(a.get("args"), f"hooks.after[{i}].args")))
-    return tuple(mounts), tuple(contexts), tuple(afters)
+    routes = []
+    for i, r in enumerate(lists["route"]):
+        if not isinstance(r, dict):
+            raise PluginError(f"hooks.route[{i}] 必须是对象")
+        on = str(r.get("on") or "")
+        if on not in ROUTE_EVENTS:
+            raise PluginError(f"hooks.route[{i}].on 只能是 {'/'.join(ROUTE_EVENTS)}")
+        may = r.get("may") or []
+        if not isinstance(may, list) or not may or any(k not in ROUTE_KINDS for k in may):
+            raise PluginError(f"hooks.route[{i}].may 是列表，取 {'/'.join(ROUTE_KINDS)}")
+        routes.append(RouteHook(on, tool_ok(r.get("tool"), f"hooks.route[{i}]", "read"), tuple(dict.fromkeys(may))))
+    if len(routes) > 1:
+        raise PluginError("hooks.route 一个插件最多一个")
+    return tuple(mounts), tuple(contexts), tuple(afters), tuple(routes)
 
 
 def _caps(v: Any, allowed: Any, what: str) -> tuple[str, ...]:

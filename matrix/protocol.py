@@ -527,6 +527,18 @@ def format_transcript(messages: list[Message], me: str, name: Callable[[str | No
     return "\n\n".join(lines) if len(lines) > 1 else ""
 
 
+def format_route(plugin: str, who: str, text: str, reason: str, claim: bool) -> str:
+    """route 挂点叫醒一个成员时送达的说明：消息原文 + 插件给的理由。认领那一轮可以把它登记成任务，叫来看的不能。"""
+    quote = "\n".join(f"> {line}" for line in text[:2000].splitlines())
+    why = f"（理由：{reason}）" if reason else ""
+    if claim:
+        return (f"## 插件「{plugin}」把这条消息分派给你认领{why}\n{who} 在群聊里说：\n{quote}\n\n"
+                f"这条消息没有 @ 任何人。你接手的话按人交代给你的事处理：有交付目标就用 open_request 登记，下发人是 {who}。"
+                "不适合你就在群聊里说明，不要硬接。")
+    return (f"## 插件「{plugin}」请你看一下这条消息{why}\n{who} 在群聊里说：\n{quote}\n\n"
+            "它没有 @ 你：需要你接着做就在群聊里回应你这一环的结果；这条消息不能登记为你的任务。没你的事就简短说明。")
+
+
 def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
     parts = ["## 网络通知：有成员把知识共享给了你"]
     for k in items:

@@ -125,7 +125,7 @@ def test_install_from_catalog_and_upload_is_host_only(tmp_path: Path):
                   plugins=pluginfs.PluginCatalog(EXAMPLE))
     host, guest, other = users(net, "h@x.io", "g@x.io", "o@x.io")
     g, chat = joint(net, host, "g@x.io", guest)
-    assert [p["name"] for p in net.plugin_catalog()] == ["sales-pipeline", "llm-wiki"]
+    assert [p["name"] for p in net.plugin_catalog()] == ["sales-pipeline", "llm-wiki", "relay"]
     with pytest.raises(NetworkError):
         net.install_plugin(g.id, "sales-pipeline", actor=guest)
     rev = g.archive_rev

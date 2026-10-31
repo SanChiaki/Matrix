@@ -94,7 +94,7 @@
 | `context` | 每一轮运行前 | 往提示词里加一段，标明来源插件。`file`：数据目录里一个文件，截到 `budget`，变了才重推（同 `abilities_seen`）；`tool`：调一个 `read` 类工具，参数模板可用 `{mission}`（任务目标）、`{latest}`（这一轮 @ 它的那条消息），结果截到预算，每轮都调 | `_seat_round` / `_task_round` 拼档案推送的地方；全部插件共用一个总预算 |
 | `after` | 事件之后 | `notify`：像触发一样往群聊发消息 @ 一个成员，代表启用它的人；`tool`：调一个工具，把事件内容（标题、交付说明、产物文件名）作为参数 | 交付、验收、回复落定的地方（`_deliver`、验收处理、`_seat_round` 末尾） |
 | `page` / `tables` / `triggers` | 照旧 | 照旧 | [project-plugins.md](project-plugins.md) |
-| `route`（预留） | 一条消息、一个任务要分给谁时 | 给出建议：唤醒谁、谁来认领 | 第三期，见第 8 节 |
+| `route` | 项目群聊里有新消息时（人的、Agent 的回复） | 插件给建议：叫谁来看一下（wake）、谁来认领（claim）；网络按第 8 节的四条规则过闸门后执行 | 新消息落进群聊之后（`send_message`、`_seat_round` 末尾），后台调 `_route` |
 
 `after` 的事件第一期只开这几个：`request.accepted`（人验收了一个用户任务）、`task.accepted`（委托方验收了一个委托）、`file.published`（档案里多了文件）。
 **只接验收过的结果**，不接每一条回复：写进 Wiki、记忆的应该是确认过的东西。验收的人就是那道质量关。
@@ -143,14 +143,34 @@
 没申请写能力的 `write` 工具被拒；来源越界的写入先确认；`context` 注入有预算、标来源；`after` 只在验收后触发，代表启用它的人；
 停用或卸载后挂点全部失效。
 
-## 8. 协作类插件（第三期，先定边界）
+## 8. 协作类插件：route 挂点（2026-10-31 已实现）
 
-Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消息该唤醒谁，一个任务谁来认领。边界先定下来：
+Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消息该唤醒谁，一个任务谁来认领。边界：
 
 - 插件只能**建议**唤醒或认领，最终由网络执行，并照样受深度、次数、成环检查（不变量 4）。
   Raft 出过同一个 Agent 被自动唤醒 181 次的事故，结构性上限不能交给插件（research: raft#crash-loop-breaker、research: raft#inbox-wake）。
 - 认领只能在项目成员之间（参照 research: raft#tasks-claim），委托仍要经 `delegate`，验收仍归直接委托方（不变量 2、5、6）。
 - "一个 Agent 一个会话跨所有频道"直接违反默认隔离（不变量 7），做成插件也不允许。
+
+**清单**：`"hooks": {"route": [{"on": "message.posted", "tool": "<工具>", "may": ["wake", "claim"]}]}`，一个插件最多一个。
+工具是 read 或 hook 类（hook：只给挂点调，不开给 Agent 与页面）。网络传入 `message`（id、正文、作者、作者是人还是 Agent、@ 了谁）、
+`members`（名字、描述、能力、是否在忙）、`may`；服务返回 `{"claim": {"agent", "reason"} | null, "wake": [{"agent", "reason"}]}`。
+
+**网络的闸门**（`Network._route`）：
+
+1. **预算**：一条人发的消息开一串接力，带 `ROUTE_BUDGET`（3）次自动唤醒；这一串里 route 引出的唤醒（认领、叫来看）都从这里扣，
+   Agent 的回复沿用它所在那一串。用完了在群聊里说一次“要继续请 @ 成员”。
+2. **链**：这一串里已经出现过的成员（人 @ 的、route 叫过的、正在回复的）不能再被 route 唤醒，防止来回叫。
+3. **只看项目群聊**：项目会话、私聊、助理对话的消息从不送给 route；只给别人看的消息（有 `audience`）也不送。
+4. **认领**：只针对人发的、没 @ 任何人的消息，每条只能认领一次（`Message.claimed_by`）。认领那一轮，这条消息算交代给它的，
+   可以 `open_request`，下发人是原作者；叫来看的那一轮不能把这条消息登记成任务。Agent 的回复不能被认领。
+
+另外：建议了没申请的种类、不是项目成员、上一轮失败等人处理的成员，一律拒绝。接受和拒绝都写进项目 `log.jsonl`（`plugin.route`，
+只记成员和理由，不记消息内容），接受的在群聊里公开记一条（“插件「X」请 Y 看一下：理由”）。唤醒走和人 @ 同一条路
+（席位收件箱 → 一轮运行），送达的说明里带消息原文和插件给的理由（`protocol.format_route`）。
+接力的状态只在内存里：服务重启后旧接力不再自动唤醒（偏保守）。
+
+示例：`examples/plugins/relay`（「接力分派」），演示见 `examples/relay/`。
 
 ## 9. 第一个验证场景：LLM Wiki
 
@@ -181,7 +201,7 @@ Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消�
    读写分级与留痕、插件用量、不变量 20 修改与 24、测试。
 2. **上下文挂点**：`mount`、`context`（`file`、`tool`）、预算与来源标注、写入的信息流判断；LLM Wiki 示例插件走通第 9 节。
 3. **事件挂点**：`after`（`notify`、`tool`），设置项（`hooks.settings`）；记忆插件作为第二个验证场景（隐式提炼，可见性更难）。
-4. **协作挂点**：`route`，第 8 节的边界；一个 Raft 式或 Multica 式的协作插件。
+4. **协作挂点**：`route`，第 8 节的边界；一个 Raft 式或 Multica 式的协作插件。（2026-10-31 已做：「接力分派」）
 
 每一期同步更新 [about.html](../matrix/static/about.html) 的架构图、[plugin-authoring.md](plugin-authoring.md) 与 `docs/reference/plugins.md`。
 

@@ -135,6 +135,15 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
   `accept_request` 验收之后调用（`_after_accepted`），只接项目群聊里的任务；`notify` 以验收的人的身份、`via` 插件标题发进群聊。
   失败写 `plugin.after.failed` 进日志。
 - **页面**：桥的 `service.call` 要申请 `service.read`，只能调 read 类工具；SDK 是 `matrix.service.call(tool, args)`。发布物里的页面没有服务。
+- **工具分级 `hook`**：只给挂点（`context`、`route`）调，不出现在 Agent 的工具里，页面也调不到。
+- **route 挂点**（设计见 [plugin-hooks.md](../plugin-hooks.md) 第 8 节）：`hooks.route` 最多一个，`on` 只有 `message.posted`，`tool` 是 read 或 hook 类，
+  `may` 取 `wake` / `claim`。项目群聊里人发的消息（`send_message`）和 Agent 的回复（`_seat_round` 末尾，被拦下等确认的不算）落进群聊后，
+  后台调 `_route`（登记进 `_running`，`wait_quiet` 会等它）。人发的消息开一串接力（`_cascades`：预算 `ROUTE_BUDGET`、链上的成员），
+  @ 到的成员与 route 唤醒的成员在收件箱项里带上接力 id，席位记在 `_seat_cascade`，它的回复沿用。闸门依次检查：申请了这个种类、
+  是项目成员、接力还在、不在链上、认领只对人发的没 @ 人且没被认领的消息、席位没卡住、预算还有。接受的：预算减一、进链、认领的写
+  `Message.claimed_by`，往席位收件箱放 `{"kind": "route", …}` 并唤醒，群聊里记一条事件；认领那一轮 `ctx.addressed` 带上这条消息，
+  `open_request` 的下发人是原作者。每次写一行 `plugin.route`（接受、拒绝与理由）进项目 `log.jsonl`；服务出错写 `plugin.route.failed`。
+  预算用完时群聊里说一次。接力只在内存里，重启后不再自动唤醒。
 
 ## 接口
 

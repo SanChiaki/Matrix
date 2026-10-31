@@ -404,7 +404,7 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
   每次调用都记日志，但不记参数和结果。
 - 只能放进部署方的插件目录（`plugins.json`）：服务端执行的代码要部署方审核过。
 
-**挂点**（都要有 `service`，读的是它的 MCP 资源）：
+**挂点**（都要有 `service`）：
 
 ```json
 "hooks": {
@@ -419,6 +419,21 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
 | `mount` | URI 以 `resources` 开头的资源只读放进 Agent 工作目录的 `plugins/<插件>/<as>/`（去掉前缀就是相对路径），每轮刷新 |
 | `context` | 每轮往提示词里加一段，标明来自你的插件：`resource`（一个资源，没变就不重推）或 `tool`（调一个 read 类工具，参数模板可用 `{latest}`、`{mission}`），截到 `budget`（≤4000） |
 | `after` | 项目群聊里的用户任务被验收之后：`notify` 以验收的人的名义 @ 成员（`{agent}` 是接任务的 Agent），或 `tool` 由网络调一个工具 |
+
+**route 挂点**：让插件决定“这条消息该交给谁”，做 Raft、Multica 这类协作方式（完整示例 `examples/plugins/relay`）：
+
+```json
+"service": {"command": "python", "args": ["{plugin}/service/relay_engine.py"], "tools": {"route_suggest": "hook"}},
+"hooks": {"route": [{"on": "message.posted", "tool": "route_suggest", "may": ["wake", "claim"]}]}
+```
+
+- 项目群聊里每条新消息（人的、Agent 的回复）网络都会调一次这个工具，参数是 `message`（`text`、`author`、`author_kind`：user / agent、
+  `mentions`）、`members`（`name`、`description`、`capabilities`、`busy`）、`may`。
+- 工具返回 JSON：`{"claim": {"agent": "成员名", "reason": "…"}, "wake": [{"agent": "成员名", "reason": "…"}]}`，都可以省略。
+  `claim` 是请他认领接手（他可以把这条消息登记成任务），`wake` 是请他看一下。
+- 你只给建议，网络决定执行哪些：一条人发的消息引出的接力最多自动唤醒 3 次；这一串里出现过的成员不会再被叫；只看项目群聊；
+  认领只对人发的、没 @ 人的消息，每条一次。被拒的建议和理由写进项目日志。`reason` 会公开显示在群聊里。
+- 工具分级写 `hook`：只给挂点调，Agent 和页面都看不到它。`may` 里只写你要用的种类，安装时公开给主持人。
 
 这些挂点只对装了插件的项目里的运行生效，dsh、Claude Code、Codex 和云侧、端侧都一样。
 

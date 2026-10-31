@@ -55,9 +55,9 @@ def service_data(net: Network, g) -> Path:
 @pytest.mark.parametrize("over, why", [
     ({"service": {"command": "rm -rf /", "tools": {"x": "read"}}}, "command"),
     ({"service": {"command": "python", "tools": {}}}, "service.tools"),
-    ({"service": {"command": "python", "tools": {"x": "admin"}}}, "read 或 write"),
+    ({"service": {"command": "python", "tools": {"x": "admin"}}}, "read、write 或 hook"),
     ({"service": {"command": "python", "transport": "http", "tools": {"x": "read"}}}, "stdio"),
-    ({"hooks": {"context": [{"tool": "write", "label": "x"}]}}, "read 类"),
+    ({"hooks": {"context": [{"tool": "write", "label": "x"}]}}, "read 或 hook 类"),
     ({"hooks": {"context": [{"tool": "nope", "label": "x"}]}}, "不在 service.tools"),
     ({"hooks": {"context": [{"resource": "wiki:///a.md", "tool": "index", "label": "x"}]}}, "二选一"),
     ({"hooks": {"context": [{"resource": "../etc/passwd", "label": "x"}]}}, "资源 URI"),
@@ -68,7 +68,7 @@ def service_data(net: Network, g) -> Path:
     ({"service": {"command": "python", "tools": {"a.b": "read"}}}, "工具名无效"),
     ({"name": "x" * 60}, "最长 64"),
     ({"hooks": {"after": [{"on": "message.added", "notify": {"to": "a", "text": "b"}}]}}, "request.accepted"),
-    ({"hooks": {"route": []}}, "只能有"),
+    ({"hooks": {"router": []}}, "只能有"),
 ])
 def test_manifest_rejects_bad_service_and_hooks(over: dict, why: str):
     with pytest.raises(pluginfs.PluginError, match=why):

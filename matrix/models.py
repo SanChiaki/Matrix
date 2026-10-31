@@ -125,6 +125,7 @@ PLUGIN_TOOLS = ("plugin_records", "plugin_write")
 # 用这个保留名经同一条回调向网络取，三种 harness、云侧端侧都一样
 LIST_TOOLS = "__list_tools__"
 PLUGIN_MOUNT = "plugins"         # 插件 mount 挂点在工作目录里的挂载名（只读副本，运行后丢弃）
+ROUTE_BUDGET = 3                 # 一条人发的消息引出的接力里，插件 route 最多自动唤醒几次（docs/plugin-hooks.md 第 8 节）
 PLUGIN_CONTEXT_TOTAL = 8000      # 全部插件的 context 挂点一轮最多往提示词里加多少字符
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
@@ -330,6 +331,7 @@ class Message:
     via: str | None = None               # user：经哪个插件发的（插件页面经确认发出，或插件的触发代表启用它的人发出）、哪个助理起草的
     draft_id: str | None = None          # event：助理对话里起草的一条消息（前端渲染成确认卡）
     held_id: str | None = None           # event：一条等所有者确认的输出（所有者看到确认卡，别人只看到“等确认”）
+    claimed_by: str | None = None        # user：被插件的 route 分派给哪个成员认领（Agent id），每条只能认领一次
     ts: float = field(default_factory=time.time)
 
 

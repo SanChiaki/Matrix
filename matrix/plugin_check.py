@@ -146,10 +146,14 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     if m.service is not None:
         where = m.service.url or " ".join([m.service.command or "", *m.service.args])
         lines.append(f"  插件服务（{'部署方的远程服务' if m.service.url else '网络托管'}）：{where}；开给 Agent 的工具："
-                     + "、".join(f"{m.name}__{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools))
+                     + ("、".join(f"{m.name}__{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools
+                                 if c != "hook") or "无")
+                     + "".join(f"；只给挂点用：{n}" for n, c in m.service.tools if c == "hook"))
         hooks = ([f"挂载 {x.resources}… → plugins/{m.name}/{x.as_}/" for x in m.mounts]
                  + [f"上下文「{x.label}」（{x.resource or x.tool}，≤{x.budget} 字）" for x in m.contexts]
-                 + [f"{x.on} 之后 {'@' + (x.to or '') if x.to else '调 ' + (x.tool or '')}" for x in m.afters])
+                 + [f"{x.on} 之后 {'@' + (x.to or '') if x.to else '调 ' + (x.tool or '')}" for x in m.afters]
+                 + [f"route：{x.on} 时调 {x.tool}，可以建议 {'、'.join({'wake': '叫来看一下', 'claim': '认领'}[k] for k in x.may)}"
+                    for x in m.routes])
         if hooks:
             lines.append("  挂点：" + "；".join(hooks))
     for t in m.triggers:

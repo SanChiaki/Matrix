@@ -1,0 +1,30 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "title": "接力分派",
+  "description": "群聊里没 @ 人的需求，按成员的能力分派给一个人认领；成员回复里写“需要 X”“交给 X”时叫下一环。只给建议，唤醒由网络按预算执行",
+  "service": {
+    "command": "python",
+    "args": [
+      "{plugin}/service/relay_engine.py"
+    ],
+    "transport": "stdio",
+    "network": false,
+    "tools": {
+      "route_suggest": "hook",
+      "explain": "read"
+    }
+  },
+  "hooks": {
+    "route": [
+      {
+        "on": "message.posted",
+        "tool": "route_suggest",
+        "may": [
+          "wake",
+          "claim"
+        ]
+      }
+    ]
+  }
+}
