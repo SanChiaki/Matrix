@@ -32,8 +32,9 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   主持人可以从部署方目录装、上传、填地址装，Agent 只能提议），
   经挂点影响项目里的运行：工具、只读挂载、提示词里标明来源的一段、验收后的通知（如示例「项目 Wiki」），以及建议群聊消息交给谁
   （route，如示例「队友协作（Raft 式）」：插件只建议，网络按预算与规则执行）。不硬编排流程。
-- **发布物**：项目对外拿出的东西，主持人发布、按版本固定。技能包（一组技能）可以公开，交付件（档案文件，可带插件页面）只给点名的读者；
-  读者给自己的 Agent 订阅，用自己的授权，发布方看不到对话。项目内容离开项目只经这里。
+- **蓝图与对外页面**：做法给别人用走**蓝图**（项目去掉数据、人和凭证后的配方；别人勾选部件、建新项目或装进已有项目，拿走的是拷贝；
+  技能包 2026-10-31 并进了蓝图）。结果给别人看走**对外页面**（原交付件，代码里是 `Release(kind="fact")`：档案文件的快照，可带插件页面，
+  只给点名的读者，读者在“项目”的“给你看的页面”里看，给自己的 Agent 订阅、用自己的授权，发布方看不到对话）。
 
 ## 按需阅读
 
@@ -45,8 +46,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
-| 发布与订阅：发布物（技能包 / 交付件）、读者、版本与跟随档案、订阅生效条件、发布物里的插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
-| 蓝图：对外交付的唯一形式，项目去掉数据、人和凭证后的配方；用它建项目或只取技能（技能包并进来，未做）；项目岗位与插件设置 | [docs/blueprints.md](docs/blueprints.md)（第 16 节是第一版的实现说明），示例 `examples/blueprints/` |
+| 对外页面（发布物，原交付件；技能包已并进蓝图）：读者、版本与跟随档案、订阅生效条件、插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
+| 蓝图：对外交付的唯一形式，项目去掉数据、人和凭证后的配方；建新项目或装进已有项目，部件可勾选（技能包并进来）；项目岗位与插件设置；对外页面（原交付件） | [docs/blueprints.md](docs/blueprints.md)（第 16 节是第一版的实现说明），示例 `examples/blueprints/` |
 | 项目插件（表、沙箱页面与桥、技能、触发；插件服务与挂点；自己装、沙箱、后台目录与上架申请） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)、[docs/plugin-hooks.md](docs/plugin-hooks.md)、[docs/plugin-install.md](docs/plugin-install.md)，示例 `examples/llm-wiki/`，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |

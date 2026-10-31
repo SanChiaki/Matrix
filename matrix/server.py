@@ -110,6 +110,8 @@ class BlueprintUseIn(BaseModel):
     name: str = Field("", max_length=60)
     params: dict[str, str] = Field(default_factory=dict)
     roles: dict[str, dict] = Field(default_factory=dict)
+    parts: dict[str, Any] | None = None
+    project_id: str | None = None
     confirm: bool = False
     digest: str | None = Field(None, max_length=64)
 
@@ -1009,7 +1011,7 @@ def create_app(network: Network) -> FastAPI:
     @app.post("/api/blueprints/{bid}/projects")
     def use_blueprint(bid: str, body: BlueprintUseIn, user: Me) -> dict:
         return network.create_project_from_blueprint(bid, body.name, body.params, body.roles, body.confirm, body.digest,
-                                                     actor=user.id)
+                                                     actor=user.id, parts=body.parts, project_id=body.project_id)
 
     @app.post("/api/blueprints/{bid}/withdraw")
     def withdraw_blueprint(bid: str, user: Me) -> dict:

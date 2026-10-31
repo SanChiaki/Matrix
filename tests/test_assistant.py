@@ -244,7 +244,8 @@ def test_schedules_wake_the_home_without_a_requester(tmp_path: Path):
     assert net.run_schedules(MONDAY_8 + 3600) == 1
     net.wait_quiet()
     assert len(home.messages) == count
-    # 一次性的
+    # 一次性的（先停掉每天 8 点的：现在 + 10 分钟可能正好落在 8 点那一分钟，两个一起到点）
+    net.set_schedule_enabled(s.id, False, actor=alice)
     say(net, home.id, "10 分钟后提醒", alice)
     once = next(x for x in net.store.schedules.values() if x.title == "一次")
     assert net.run_schedules(once.at - 60) == 0 and net.run_schedules(once.at + 1) == 1
@@ -253,7 +254,7 @@ def test_schedules_wake_the_home_without_a_requester(tmp_path: Path):
     with pytest.raises(NetworkError, match="已经到过点了"):
         net.set_schedule_enabled(once.id, True, actor=alice)
     say(net, home.id, "看看定时", alice)
-    assert "「提醒」：每天 08:00，启用" in h.results[-1] and "「一次」" in h.results[-1]
+    assert "「提醒」：每天 08:00，已停用" in h.results[-1] and "「一次」" in h.results[-1]
 
 
 def test_schedule_limits_failures_and_ownership(tmp_path: Path):

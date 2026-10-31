@@ -128,10 +128,10 @@ def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monke
     bp = net.admin_blueprint_upload(ops, entries(DEV_TEAM))
     mine = net.create_agent("老开发", "写代码", [], ["file.write"], actor=wang)
     theirs = net.create_agent("别人的", "x", [], [], actor=li)
-    with pytest.raises(NetworkError, match="只能选你自己的"):
+    with pytest.raises(NetworkError, match="只能选你自己的 Agent 或项目里的成员"):
         net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, {"dev": {"agent": theirs.id}}, actor=wang)
     g, items, _ = use(net, bp["id"], wang, roles={"dev": {"agent": mine.id}})
-    assert "岗位「开发」由你的「老开发」担任" in items and g.roles["dev"]["members"] == [mine.id]
+    assert "岗位「开发」由「老开发」担任" in items and g.roles["dev"]["members"] == [mine.id]
     before_projects, before_agents = set(net.store.projects), set(net.store.agents)
 
     def boom(*a, **k):
@@ -140,6 +140,36 @@ def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monke
     with pytest.raises(NetworkError, match="已撤回：磁盘满了"):
         use(net, bp["id"], wang, "坏的")
     assert set(net.store.projects) == before_projects and set(net.store.agents) == before_agents
+
+
+def test_pick_parts_into_existing_project(tmp_path: Path):
+    """用蓝图时勾选要的部件（默认全选）；也可以装进自己主持的已有项目——只勾技能，就是以前的“订阅技能包”：
+    技能复制进项目，占位符里没选的岗位换成岗位名；已有的同名岗位沿用，不新建 Agent。"""
+    net, ops, wang, li = make_net(tmp_path)
+    bp = net.admin_blueprint_upload(ops, entries(DEV_TEAM))
+    a = net.create_agent("老测试", "测试", [], [], actor=wang)
+    g = net.create_project("老项目", "", [a.id], actor=wang)
+    net.set_brief(g.id, "原来的纲要", actor=wang)
+    agents_before = set(net.store.agents)
+    with pytest.raises(NetworkError, match="unknown project|只有主持人"):
+        net.create_project_from_blueprint(bp["id"], "", {"product": "x"}, parts={"skills": ["dev-conventions"]},
+                                          project_id=g.id, actor=li)
+    with pytest.raises(NeedsConfirm) as e:
+        net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, parts={"brief": False, "roles": [], "plugins": [],
+                                          "files": [], "connectors": [], "skills": ["dev-conventions"]}, project_id=g.id, actor=wang)
+    assert e.value.items[0] == "装进项目「老项目」：技能 dev-conventions"
+    out = net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, confirm=True, actor=wang, project_id=g.id,
+                                            parts={"brief": False, "roles": [], "plugins": [], "files": [], "connectors": [],
+                                                   "skills": ["dev-conventions"]})
+    assert out["project"]["id"] == g.id and set(net.store.agents) == agents_before and g.brief == "原来的纲要"
+    skill = (net.store.project_skills_dir(g.id) / "dev-conventions" / "SKILL.md").read_text(encoding="utf-8")
+    assert "问 @需求分析" in skill and g.blueprint is None and not g.plugins
+    net.set_project_roles(g.id, {"qa": {"name": "测试", "members": [a.id]}}, actor=wang)
+    with pytest.raises(NeedsConfirm) as e:
+        net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, parts={"roles": ["qa"], "brief": True},
+                                          project_id=g.id, actor=wang)
+    told = "\n".join(e.value.items)
+    assert "岗位「测试」沿用项目里已有的（老测试）" in told and "纲要：会换成蓝图里的纲要" in told and "覆盖项目里的同名技能" in told
 
 
 # ================= 从项目发布 =================

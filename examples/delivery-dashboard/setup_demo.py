@@ -28,7 +28,7 @@ sys.path.insert(0, str(ROOT.parents[1]))
 
 from matrix import auth  # noqa: E402
 from matrix.connector_catalog import ConnectorCatalog  # noqa: E402
-from matrix.engine import Network  # noqa: E402
+from matrix.engine import NeedsConfirm, Network  # noqa: E402
 from matrix.plugins import PluginCatalog  # noqa: E402
 from matrix.runtime import ScriptedRuntime  # noqa: E402
 from matrix.scripted import scenario_handler  # noqa: E402
@@ -92,15 +92,16 @@ def main() -> None:
     net.wait_idle(chat.id)
     step("张工验收、标为待发布；触发叫看板 Agent 核对并写了发布说明")
 
-    method = net.create_release(g.id, "delivery-dashboard-method", "method", "做交付看板的技能包",
-                                "用交付数据做看板的做法：查数口径、看板文件格式、登记与刷新。不含任何项目数据。",
-                                skills=["delivery-dashboard"], public=True, actor=zhang)
+    kit = net.publish_blueprint(g.id, {**net.blueprint_draft(g.id, actor=zhang), "name": "delivery-dashboard-kit",
+                                       "title": "做交付看板",
+                                       "description": "用交付数据做看板的做法：看板插件、查数口径、登记与刷新。不含任何项目数据。",
+                                       "plugins": ["delivery-dashboard"], "public": True}, confirm=True, actor=zhang)
     fact = net.create_release(g.id, "huadong-weekly", "fact", "华东交付周报看板",
                               "华东区域在建项目的按期率、延期与风险项目，工作日早上自动刷新。",
                               files=[rec["fields"]["file"]], view={"plugin": "delivery-dashboard", "tab": "board"},
                               readers=["li@demo.local"], follow=True, actor=zhang)
     net.write_plugin_record(g.id, "delivery-dashboard", "dashboards", {"status": "已发布"}, rec["id"], actor=zhang)
-    step("张工发布了公开的技能包和给李总的看板（交付件，带看板视图，跟随档案）")
+    step("张工把做法发布成公开的蓝图「做交付看板」，把给李总的看板发布成对外页面（带看板视图，跟随档案）")
 
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)
@@ -108,8 +109,12 @@ def main() -> None:
     net.release_feedback(fact.id, "能不能再加一张：各项目经理名下的延期项目数？", actor=li)
     step("李总的助理订阅了看板并回答了一次；李总写了一条反馈，回到项目群聊")
 
-    net.set_subscription(method.id, net.assistant_of(wang).id, True, actor=wang)
-    step("王工的助理订阅了公开的技能包")
+    south = net.create_project("华南交付", "", [], actor=wang)
+    try:
+        net.create_project_from_blueprint(kit["id"], "", {}, actor=wang, project_id=south.id)
+    except NeedsConfirm as e:
+        net.create_project_from_blueprint(kit["id"], "", {}, actor=wang, project_id=south.id, confirm=True, digest=e.digest)
+    step("王工把蓝图「做交付看板」装进了自己的项目「华南交付」（看板插件与它带的技能）")
 
     net.store.save()
     server.shutdown()

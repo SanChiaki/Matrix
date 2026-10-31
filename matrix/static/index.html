@@ -42,8 +42,6 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4.5c0-.8.7-1.5 1.5-1.5h3l1.5 1.5h4.5c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-9c-.8 0-1.5-.7-1.5-1.5z"/></svg>项目</button>
     <button type="button" class="tab" data-view="blueprints" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6h12M6 6v7.5M8.5 8.5h3M8.5 11h2"/></svg>蓝图</button>
-    <button type="button" class="tab" data-view="releases" aria-pressed="false">
-      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5 8 2.5l5.5 3v5L8 13.5l-5.5-3z"/><path d="M2.5 5.5 8 8.5l5.5-3M8 8.5v5"/></svg>发布物</button>
     <button type="button" class="tab" data-view="agents" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="4" width="11" height="9" rx="2.5"/><path d="M8 4V1.8M5.8 8.2h.01M10.2 8.2h.01"/></svg>Agent</button>
     <div class="more-wrap">
@@ -179,6 +177,11 @@
         <button type="button" id="project-new">新建项目</button>
       </div>
       <ul id="project-list" class="cards"></ul>
+      <section id="pages-for-me" hidden>
+        <h3>给你看的页面</h3>
+        <p class="muted">别的项目给你看的对外页面：按版本固定的快照（一组文件，常带一个看板之类的页面）。你看不到那个项目本身；让自己的 Agent 订阅后，它能读这些文件来回答你。</p>
+        <ul id="page-list" class="cards"></ul>
+      </section>
     </div>
     <div class="pane" id="project-page" hidden></div>
     <aside id="project-editor" class="side"></aside>
@@ -197,7 +200,7 @@
   <section id="view-releases" class="view" hidden aria-label="发布物">
     <div class="pane" id="release-index">
       <div class="view-head">
-        <div><h1>发布物</h1><p>别的项目发布给你的东西：按版本固定的快照。<b>技能包</b>是一组做法（技能），<b>交付件</b>是一组文件（可以带一个展示它们的插件页面）。你看到的只是发布出来的内容，不是那个项目本身；让自己的 Agent 订阅后，它在你这边用你自己的授权运行，发布方看不到你问了什么。</p></div>
+        <div><h1>给你看的页面</h1><p>别的项目给你看的对外页面：按版本固定的快照。你看到的只是这些内容，不是那个项目本身；让自己的 Agent 订阅后，它在你这边用你自己的授权运行，发布方看不到你问了什么。</p></div>
       </div>
       <ul id="release-list" class="cards"></ul>
     </div>

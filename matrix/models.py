@@ -97,7 +97,7 @@ PLUGIN_AGENT_CAPS = ("records.read", "records.write")
 
 # 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
 RELEASES = "releases"      # 订阅的交付件在工作目录里的挂载名（只读副本，运行后丢弃）
-RELEASE_KINDS = {"method": "技能包", "fact": "交付件"}
+RELEASE_KINDS = {"method": "技能包", "fact": "对外页面"}  # 技能包已并进蓝图：只剩旧数据，不能再发布
 RELEASES_PER_PROJECT = 20
 RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
 RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
@@ -713,6 +713,7 @@ class Release:
     status: str = "active"               # active | withdrawn
     feedback: list[dict[str, Any]] = field(default_factory=list)  # 读者自己写的反馈：{id, user_id, text, at}
     created_at: float = field(default_factory=time.time)
+    migrated_to: str | None = None       # 旧的技能包并进蓝图后，对应的蓝图 id（docs/blueprints.md 第 7 节）
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
