@@ -298,6 +298,10 @@ class Project:
     plugins: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 所有者允许 Agent 在这个项目里直接用的别处来源：{agent_id: [场合]}（不变量 22，matrix/flow.py）。只给所有者看
     flow_grants: dict[str, list[str]] = field(default_factory=dict)
+    # 岗位（docs/blueprints.md 第 9 节）：{key: {name, description, members: [agent_id]}}。插件设置与触发引用岗位而不是名字
+    roles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    blueprint: dict[str, Any] | None = None   # 由蓝图建的：{id, name, title, version}
+    setup_steps: list[dict[str, Any]] = field(default_factory=list)  # 由蓝图建的项目剩下的手工步骤：[{id, text, done}]
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
 

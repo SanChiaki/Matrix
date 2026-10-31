@@ -99,6 +99,21 @@ class Trigger:
 
 
 @dataclass(frozen=True)
+class Setting:
+    """安装时主持人填的一项设置（docs/blueprints.md 第 9 节）。role：项目里的一个岗位；member：一个成员；text / select：文本。
+    触发与 after 的 notify.to 可以写 {setting:<key>}（role / member 类），发消息时解析成当时的成员。"""
+    key: str
+    label: str
+    type: str
+    options: tuple[str, ...] = ()
+    required: bool = False
+
+
+SETTING_TYPES = ("text", "select", "role", "member")
+SETTING_REF = re.compile(r"^\{setting:([a-z][a-z0-9_]{0,39})\}$")
+
+
+@dataclass(frozen=True)
 class Service:
     """插件服务：一个标准 MCP 服务（不变量 24），两种来源二选一：
     - command：网络托管的 stdio 进程。`python` 是网络自己的解释器；args 里 `{plugin}` 换成装进项目的包目录，`{data}` 换成这个安装的数据目录。
@@ -171,6 +186,18 @@ class Manifest:
     contexts: tuple[ContextHook, ...] = ()
     afters: tuple[AfterHook, ...] = ()
     routes: tuple[RouteHook, ...] = ()
+    settings: tuple[Setting, ...] = ()
+
+    def setting(self, key: str) -> Setting | None:
+        return next((x for x in self.settings if x.key == key), None)
+
+    def trigger_label(self, t: Trigger) -> str:
+        """给人看的触发说明：@ 的是设置时写设置的名字（“谁接外部来的新需求”），不露出占位符。"""
+        ref = SETTING_REF.match(t.to)
+        if ref is None:
+            return t.label
+        st = self.setting(ref.group(1))
+        return t.label.replace(f"@{t.to}", f"@「{st.label if st else ref.group(1)}」")
 
     def table(self, key: str) -> Table | None:
         return next((t for t in self.tables if t.key == key), None)
@@ -198,7 +225,9 @@ class Manifest:
                                   for c in self.contexts],
                       "after": [{"on": a.on, "to": a.to, "tool": a.tool} for a in self.afters],
                       "route": [{"on": r.on, "tool": r.tool, "may": list(r.may)} for r in self.routes]},
-            "triggers": [{"key": t.key, "type": t.type, "to": t.to, "text": t.text, "table": t.table, "cron": t.cron,
+            "settings": [{"key": x.key, "label": x.label, "type": x.type, "options": list(x.options), "required": x.required}
+                         for x in self.settings],
+            "triggers": [{"key": t.key, "type": t.type, "to": t.to, "label": self.trigger_label(t), "text": t.text, "table": t.table, "cron": t.cron,
                           "when": ({"field": t.when_field, "equals": t.when_equals} if t.when_field else
                                    {"event": "create"} if t.on_create else None)} for t in self.triggers],
         }
@@ -345,8 +374,38 @@ def parse_manifest(data: Any) -> Manifest:
             raise PluginError(f"release_views[{i}] 不是清单里的标签：{v!r}")
     if "service.read" in perms and service is None:
         raise PluginError("申请了读插件服务，但清单里没有 service")
+    settings = _settings(data.get("settings"))
+    for who, to in [(f"触发 {t.key}", t.to) for t in triggers] + [("after 挂点", a.to) for a in afters if a.to]:
+        ref = SETTING_REF.match(to or "")
+        if ref:
+            st = next((x for x in settings if x.key == ref.group(1)), None)
+            if st is None or st.type not in ("role", "member"):
+                raise PluginError(f"{who} 的 @ 对象 {to} 要是清单 settings 里 role 或 member 类的设置")
     return Manifest(name, version, title, description, tuple(tabs), tuple(tables), perms, agent, tuple(triggers),
-                    connectors, tuple(dict.fromkeys(str(v) for v in views)), service, mounts, contexts, afters, routes)
+                    connectors, tuple(dict.fromkeys(str(v) for v in views)), service, mounts, contexts, afters, routes,
+                    settings)
+
+
+def _settings(v: Any) -> tuple[Setting, ...]:
+    if v is None:
+        return ()
+    if not isinstance(v, list) or len(v) > 20:
+        raise PluginError("settings 必须是列表，最多 20 项")
+    out: list[Setting] = []
+    for i, x in enumerate(v):
+        if not isinstance(x, dict):
+            raise PluginError(f"settings[{i}] 必须是对象")
+        key = _key(x.get("key"), f"settings[{i}].key")
+        if any(o.key == key for o in out):
+            raise PluginError(f"设置 {key} 重复")
+        typ = str(x.get("type") or "text")
+        if typ not in SETTING_TYPES:
+            raise PluginError(f"设置 {key} 的 type 要是 {'/'.join(SETTING_TYPES)}")
+        opts = tuple(_s(o, f"设置 {key} 的选项", 60) for o in (x.get("options") or []))
+        if typ == "select" and not opts:
+            raise PluginError(f"设置 {key} 是 select，要有 options")
+        out.append(Setting(key, _s(x.get("label") or key, f"设置 {key} 的 label", 40), typ, opts, bool(x.get("required"))))
+    return tuple(out)
 
 
 def _service(v: Any) -> Service | None:
@@ -513,7 +572,7 @@ def schema_changes(old: Manifest, new: Manifest) -> list[str]:
 
 
 # ================= 包 =================
-def unzip(data: bytes) -> list[tuple[str, bytes]]:
+def unzip(data: bytes, limit: int = PLUGIN_LIMIT, max_files: int = PLUGIN_FILES) -> list[tuple[str, bytes]]:
     import io
     import zipfile
     try:
@@ -525,8 +584,8 @@ def unzip(data: bytes) -> list[tuple[str, bytes]]:
         if m.is_dir():
             continue
         total += m.file_size
-        if total > PLUGIN_LIMIT or len(out) >= PLUGIN_FILES:
-            raise PluginError(f"插件包超过 {PLUGIN_LIMIT // 1_000_000} MB 或 {PLUGIN_FILES} 个文件")
+        if total > limit or len(out) >= max_files:
+            raise PluginError(f"包超过 {limit // 1_000_000} MB 或 {max_files} 个文件")
         out.append((m.filename, z.read(m)))
     return out
 

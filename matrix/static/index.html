@@ -40,6 +40,8 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.8" y="2.5" width="3.6" height="11" rx="1"/><rect x="6.2" y="2.5" width="3.6" height="7" rx="1"/><rect x="10.6" y="2.5" width="3.6" height="9" rx="1"/></svg>看板<span id="todo-count" class="count" hidden></span></button>
     <button type="button" class="tab" data-view="projects" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 4.5c0-.8.7-1.5 1.5-1.5h3l1.5 1.5h4.5c.8 0 1.5.7 1.5 1.5v6c0 .8-.7 1.5-1.5 1.5h-9c-.8 0-1.5-.7-1.5-1.5z"/></svg>项目</button>
+    <button type="button" class="tab" data-view="blueprints" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="1.5"/><path d="M2 6h12M6 6v7.5M8.5 8.5h3M8.5 11h2"/></svg>蓝图</button>
     <button type="button" class="tab" data-view="releases" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 5.5 8 2.5l5.5 3v5L8 13.5l-5.5-3z"/><path d="M2.5 5.5 8 8.5l5.5-3M8 8.5v5"/></svg>发布物</button>
     <button type="button" class="tab" data-view="agents" aria-pressed="false">
@@ -180,6 +182,16 @@
     </div>
     <div class="pane" id="project-page" hidden></div>
     <aside id="project-editor" class="side"></aside>
+  </section>
+
+  <section id="view-blueprints" class="view" hidden aria-label="蓝图">
+    <div class="pane" id="blueprint-index">
+      <div class="view-head">
+        <div><h1>蓝图</h1><p>别人跑通了的项目，去掉数据、人和凭证之后的配方：纲要、岗位、技能、插件、要连的系统、人在哪里介入。用它建项目，补上你自己的 Agent 和账号，就得到一个同样能干活的项目；建出来的是一份拷贝，归你。</p></div>
+      </div>
+      <ul id="blueprint-list" class="cards"></ul>
+    </div>
+    <div class="pane" id="blueprint-page" hidden></div>
   </section>
 
   <section id="view-releases" class="view" hidden aria-label="发布物">

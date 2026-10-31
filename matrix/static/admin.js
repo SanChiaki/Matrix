@@ -456,6 +456,19 @@ const PL_SERVICE = (x) => !x.service ? '<span class="muted">无</span>'
 async function loadPlugins() {
   $("#pl-error").textContent = "";
   try { P.data = await api("/api/admin/plugins"); renderPlugins(); } catch (e) { $("#pl-error").textContent = e.message; }
+  loadBlueprints();
+}
+
+async function loadBlueprints() {
+  try {
+    const list = (await api("/api/blueprints")).filter((b) => b.source === "catalog");
+    table("#t-blueprints", [
+      { label: "蓝图", html: (b) => `<b>${esc(b.title)}</b> <span class="muted">${esc(b.version)} · 第 ${b.rev} 版</span><div class="muted">${esc(b.description)}</div>` },
+      { label: "岗位", html: (b) => esc(b.roles.join("、")) },
+      { label: "用过", num: true, html: (b) => num(b.uses) },
+      { label: "", html: (b) => b.status === "active" ? `<button type="button" class="link danger" data-bp-withdraw="${esc(b.id)}">撤回</button>` : '<span class="muted">已撤回</span>' },
+    ], list, "目录里还没有蓝图");
+  } catch (e) { $("#pl-error").textContent = e.message; }
 }
 
 function renderPlugins() {
@@ -529,6 +542,22 @@ function bindPlugins() {
       $("#pl-git-dialog").close();
     } catch (e) { $("#plg-error").textContent = e.message; }
     finally { $("#plg-submit").disabled = false; }
+  });
+  $("#bp-zip").addEventListener("click", async () => {
+    const file = await pickZip();
+    if (!file) return;
+    try {
+      const r = await fetch("/api/admin/blueprints", { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+      loadBlueprints();
+    } catch (e) { $("#pl-error").textContent = e.message; }
+  });
+  $("#t-blueprints").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("[data-bp-withdraw]");
+    if (!b || !confirm("撤回后不能再用它建项目，已经建的项目不受影响。")) return;
+    try { await api(`/api/blueprints/${b.dataset.bpWithdraw}/withdraw`, { method: "POST" }); loadBlueprints(); }
+    catch (e) { $("#pl-error").textContent = e.message; }
   });
   $("#pl-zip").addEventListener("click", async () => {
     const file = await pickZip();

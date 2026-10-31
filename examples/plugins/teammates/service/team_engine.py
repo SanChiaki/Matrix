@@ -205,8 +205,8 @@ def route_suggest(a: dict, caller: dict) -> dict:
     for t in refs:  # 先叫被提到的任务的负责人
         if t["assignee"]:
             add(t["assignee"], f"#{t['id']} 的负责人")
-    for m in members:  # 再叫名字或能力被提到的
-        hits = [c for c in [m["name"], *(m.get("capabilities") or [])] if c and str(c) in text]
+    for m in members:  # 再叫名字、岗位或能力被提到的
+        hits = [c for c in [m["name"], *(m.get("roles") or []), *(m.get("capabilities") or [])] if c and str(c) in text]
         if hits:
             add(m["name"], f"消息里提到「{hits[0]}」")
     if human and not command_only:  # 人的发言：被动投递给所有频道成员（Raft 的做法），剩下的按顺序
