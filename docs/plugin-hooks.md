@@ -170,7 +170,17 @@ Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消�
 （席位收件箱 → 一轮运行），送达的说明里带消息原文和插件给的理由（`protocol.format_route`）。
 接力的状态只在内存里：服务重启后旧接力不再自动唤醒（偏保守）。
 
-示例：`examples/plugins/relay`（「接力分派」），演示见 `examples/relay/`。
+服务还能拿到：`relay`（这一串剩下的预算 `budget`、已经在链上的成员 `involved`），好按剩下的预算排先后、不提会被拒的建议；
+`members[].assistant` 标出谁是某人的个人助理。被 `wake` 叫来看的那一轮，成员判断不是自己的事可以只回 `ROUTE_PASS`（“（略过）”），
+网络不发进群聊，这一串也就到此为止（被动投递时大多数成员应该沉默）。认领、被人 @ 的那一轮回同样的话照常发出。
+
+插件服务的工具调用还带上网络认定的调用者（MCP 的 `_meta["matrix/caller"]`：agent 的 id 与名字 / user / network，以及
+`_meta["matrix/project"]`），服务可以据此加锁、记账；不信参数里自报的名字。
+
+示例：`examples/plugins/teammates`（「队友协作（Raft 式）」，research: raft#inbox-wake、research: raft#tasks-claim），演示见 `examples/teammates/`：
+人在群聊里的每条发言都送给频道成员（被动投递），成员不是自己的事就略过；工作项在插件的任务板上，认领是先到先得的锁，
+状态照 Raft 的转移表，Agent 最多交到待验收，人在群聊里说“#N 完成”。刻意不照搬的：一个 Agent 一个会话跨所有频道（违反不变量 7）、
+不限次数的被动唤醒（Raft 出过 181 次的事故，这里受预算与链约束）、发言前的新鲜度 hold（以后再说）。
 
 ## 9. 第一个验证场景：LLM Wiki
 
@@ -201,7 +211,7 @@ Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消�
    读写分级与留痕、插件用量、不变量 20 修改与 24、测试。
 2. **上下文挂点**：`mount`、`context`（`file`、`tool`）、预算与来源标注、写入的信息流判断；LLM Wiki 示例插件走通第 9 节。
 3. **事件挂点**：`after`（`notify`、`tool`），设置项（`hooks.settings`）；记忆插件作为第二个验证场景（隐式提炼，可见性更难）。
-4. **协作挂点**：`route`，第 8 节的边界；一个 Raft 式或 Multica 式的协作插件。（2026-10-31 已做：「接力分派」）
+4. **协作挂点**：`route`，第 8 节的边界；一个 Raft 式或 Multica 式的协作插件。（2026-10-31 已做：「队友协作（Raft 式）」）
 
 每一期同步更新 [about.html](../matrix/static/about.html) 的架构图、[plugin-authoring.md](plugin-authoring.md) 与 `docs/reference/plugins.md`。
 

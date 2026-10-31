@@ -144,6 +144,11 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
   `Message.claimed_by`，往席位收件箱放 `{"kind": "route", …}` 并唤醒，群聊里记一条事件；认领那一轮 `ctx.addressed` 带上这条消息，
   `open_request` 的下发人是原作者。每次写一行 `plugin.route`（接受、拒绝与理由）进项目 `log.jsonl`；服务出错写 `plugin.route.failed`。
   预算用完时群聊里说一次。接力只在内存里，重启后不再自动唤醒。
+  传给服务的还有 `relay`（剩余预算、链上的成员）与 `members[].assistant`。只因 route 的 `wake` 醒来的一轮（没有认领、没被 @），
+  回复正好是 `ROUTE_PASS`（“（略过）”）时不发进群聊（`_seat_round`）。
+- **调用者身份**：`_service_call` 给每次工具调用带 `_meta`：`matrix/caller`（Agent 调的是 `{"kind": "agent", "id", "name"}`，页面是
+  `{"kind": "user", "email"}`，挂点是 `{"kind": "network"}`）与 `matrix/project`。挂点（hook 类）调用成功后也算改了数据（`data_rev` 加一、
+  推 `plugin.records`）。
 
 ## 接口
 

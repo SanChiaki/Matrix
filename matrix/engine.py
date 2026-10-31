@@ -2538,7 +2538,7 @@ class Network:
     # ---- 插件服务（docs/plugin-hooks.md，不变量 24）：部署方目录里的插件可以带一个标准 MCP 服务，网络按项目托管一个 stdio 进程，
     # 或者连部署方运行的远程服务（带项目令牌）。服务的工具按原名（<插件>__<工具>）出现在成员 Agent 的网络工具里，三种 harness、
     # 云侧端侧一样；挂点由网络在运行前后完成：mount（服务的资源只读放进工作目录）、context（提示词里加标明来源的一段）、
-    # after（验收之后通知成员或调用工具）。服务不调模型、不拿凭证；身份、权限、留痕都在这里，服务看到的只是参数。
+    # after（验收之后通知成员或调用工具）。服务不调模型、不拿凭证；身份、权限、留痕都在这里，服务看到的是参数和网络认定的调用者（_meta）。
     def _service_plugins(self, g: Project | None) -> list[tuple[str, pluginfs.Manifest]]:
         """调用方持有锁。项目里启用着的、带服务的插件。"""
         out = []
@@ -2583,16 +2583,19 @@ class Network:
         if cls is None:
             raise NetworkError(f"插件「{m.title}」没有开出工具 {tool!r}：可用的有 {'、'.join(n for n, _ in m.service.tools)}")
         client = self._service_client(g, name, m)
-        try:
-            text, err = client.call(tool, args)
+        agent = self.store.agents.get(by.get("by_agent") or "")
+        caller = ({"kind": "agent", "id": agent.id, "name": agent.name} if agent is not None else
+                  {"kind": "user", "email": self._email(by.get("by_user"))} if by.get("by_user") else {"kind": "network"})
+        try:  # 调用者由网络认定，经 MCP 的 _meta 交给服务：服务可以据此加锁、记账，不信模型自报
+            text, err = client.call(tool, args, meta={"matrix/caller": caller, "matrix/project": g.id})
         except ServiceError as e:
             raise NetworkError(f"插件「{m.title}」的服务出错：{e}") from e
         with self._lock:
             self._plugin_log(g, "plugin.service.call", plugin=name, tool=tool, cls=cls, ok=not err, **by)
-            if cls == "write" and not err and name in g.plugins:
+            if cls in ("write", "hook") and not err and name in g.plugins:  # 挂点调用也可能改服务的数据
                 g.plugins[name]["data_rev"] = g.plugins[name].get("data_rev", 0) + 1
                 self.store.save()
-        if cls == "write" and not err:
+        if cls in ("write", "hook") and not err:
             self.bus.emit("plugin.records", project_id=g.id, plugin=name, table=None)
         return text, err
 
@@ -2785,18 +2788,22 @@ class Network:
             agents = {x: self.store.agents[x] for x in g.member_ids if x in self.store.agents}
             names = {a.name: aid for aid, a in agents.items()}
             members = [{"name": a.name, "description": a.description, "capabilities": list(a.capabilities),
-                        "busy": seat_id(conv.id, aid) in self._running} for aid, a in agents.items()]
+                        "busy": seat_id(conv.id, aid) in self._running,
+                        "assistant": self.assistant_of(a.owner_id) is a} for aid, a in agents.items()]
             message = {"id": msg.id, "text": msg.text[:8000],
                        "author_kind": "agent" if msg.role == "agent" else "user",
                        "author": self._name(msg.agent_id) if msg.role == "agent" else self._email(msg.user_id),
                        "mentions": [self._name(x) for x in msg.mentions]}
             if msg.role == "agent":
                 self._cascades.get(cascade, {}).get("chain", set()).add(msg.agent_id)
+            state = self._cascades.get(cascade) or {"budget": 0, "chain": set()}
+            relay = {"budget": state["budget"], "involved": sorted(self._name(x) for x in state["chain"])}
         for name, m in plugins:
             r = m.routes[0]
             try:
                 text, err = self._service_call(g, name, m, r.tool, {"message": message, "members": members,
-                                                                      "may": list(r.may)}, via="route", message=msg.id)
+                                                                      "may": list(r.may), "relay": relay},
+                                               via="route", message=msg.id)
                 data = json.loads(text) if not err else None
             except (NetworkError, ValueError) as e:
                 with self._lock:
@@ -4427,6 +4434,8 @@ class Network:
         if home:
             notices = "\n\n".join(filter(None, [format_now(), notices, TAINT_NOTE if ctx.tainted else ""]))
         scheduled_only = bool(items) and all(it["kind"] == "schedule" for it in items) and not ctx.addressed
+        # 只因为插件 route“叫来看一下”而醒的一轮：不是自己的事可以只回“（略过）”，不发进群聊（被动投递的成员大多应该沉默）
+        route_only = bool(items) and all(it["kind"] == "route" and not it.get("claim") for it in items) and not ctx.addressed
         with self._lock:
             open_reqs = [r for r in self.store.requests.values() if r.conversation_id == conv.id
                          and r.agent_id == agent.id and r.status in ("in_progress", "in_review")]
@@ -4455,6 +4464,8 @@ class Network:
             self._auto_accept(ctx)
             if scheduled_only and res.final_text.strip().rstrip("。.") == NOTHING_NEW:
                 return  # 定时到点、没有新情况：不打扰主人
+            if route_only and res.final_text.strip().strip("。.") == ROUTE_PASS:
+                return  # 被叫来看、不是自己的事：不发言，这一串接力也到此为止
             text = res.final_text.strip() or "（空回复）"
             with self._lock:
                 ctx.sources = list(seat.session_sources)
@@ -6498,6 +6509,7 @@ SESSION_REQUESTS = 15  # 项目会话推送的没结束的用户任务条数
 HOME_MESSAGES = 3      # 助理对话的总览里每个项目带的群聊最近消息条数
 HOME_REQUESTS = 5      # 助理对话的总览里每个项目带的没结束的用户任务条数
 NOTHING_NEW = "没有新情况"  # 定时到点时没有值得说的：助理只回这一句，网络就不往助理对话发
+ROUTE_PASS = "（略过）"  # 被插件 route 叫来看、不是自己的事：只回这一句，网络就不往群聊发
 ASSISTANT_DESCRIPTION = ("你的助理：帮你汇总各项目等你处理的事，按你的话定时提醒，"
                          "起草要发进项目群聊的消息（你确认后才发）；进项目时跟着你，帮你协调。")
 MORNING_BRIEF = (f"汇总我今天要处理的事：等我验收、审批、确认的，各项目里进行中的任务和新动态。"

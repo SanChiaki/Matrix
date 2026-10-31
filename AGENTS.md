@@ -30,7 +30,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
   项目页另有**连接器面板**：这个项目用到了哪些外部服务、每个成员能不能用，项目从不持有谁的授权。
 - **插件**：项目装上的扩展（表、沙箱页面、技能、触发）；部署方目录里的插件还可以带一个**插件服务**（标准 MCP，网络托管或部署方运行），
   经挂点影响项目里的运行：工具、只读挂载、提示词里标明来源的一段、验收后的通知（如示例「项目 Wiki」），以及建议群聊消息交给谁
-  （route，如示例「接力分派」：插件只建议，网络按预算与规则执行）。不硬编排流程。
+  （route，如示例「队友协作（Raft 式）」：插件只建议，网络按预算与规则执行）。不硬编排流程。
 - **发布物**：项目对外拿出的东西，主持人发布、按版本固定。技能包（一组技能）可以公开，交付件（档案文件，可带插件页面）只给点名的读者；
   读者给自己的 Agent 订阅，用自己的授权，发布方看不到对话。项目内容离开项目只经这里。
 
@@ -89,12 +89,12 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
-| `examples/relay/` | 接力分派演示：五个成员按“反馈 → 方案 → 编码 → 审查 → 部署”接力，`setup_demo.py`（加 `--prepare` 只搭项目），见该目录 README |
+| `examples/teammates/` | 队友协作（Raft 式）演示：前端、后端、测试三个队友，被动投递、任务板认领、略过不发言、人说“#N 完成”，`setup_demo.py`（加 `--prepare` 只搭项目），见该目录 README |
 | `examples/llm-wiki/` | 项目 Wiki 演示：两份演示资料（`materials/`）与 `setup_demo.py`（装插件、建知识管家、放资料），见该目录 README |
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
-| `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；接力分派（`relay`：route 挂点，按能力分派认领、按“需要 X”叫下一环）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
+| `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则、接力分派示例） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -116,7 +116,7 @@ uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校
 uv run python examples/delivery-dashboard/setup_demo.py              # 搭交付看板演示数据（.matrix-dashboard-demo，见该目录 README）
 uv run python examples/dashboard-system/setup_demo.py                # 搭“接入已有看板系统”演示数据（.matrix-board-demo，见该目录 README）
 uv run python examples/llm-wiki/setup_demo.py                        # 搭项目 Wiki 演示数据（.matrix-wiki-demo，见该目录 README）
-uv run python examples/relay/setup_demo.py                           # 搭接力分派演示数据（.matrix-relay-demo，见该目录 README）
+uv run python examples/teammates/setup_demo.py                       # 搭队友协作（Raft 式）演示数据（.matrix-team-demo，见该目录 README）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness

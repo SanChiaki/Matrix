@@ -1,7 +1,7 @@
 """route 挂点（docs/plugin-hooks.md 第 8 节，不变量 24）：插件只建议唤醒或认领，网络过闸门后执行。四条规则：
 1. 一条人发的消息开一串接力，自动唤醒有预算；2. 这一串里出现过的成员不再被 route 唤醒；3. 只看项目群聊；
 4. 认领只针对人发的、没 @ 人的消息，每条一次，认领那一轮下发人是原作者，叫来看的那一轮不能登记任务。
-另有示例插件「接力分派」走通一遍。"""
+示例插件「队友协作（Raft 式）」见 test_teammates.py。"""
 
 from __future__ import annotations
 
@@ -204,35 +204,3 @@ def test_may_limits_kinds(tmp_path: Path):
     net.send_message(net.project_chat(g.id, actor=host).id, "修一下", actor=host, background=False)
     assert not log
     assert ("甲", "没申请 claim") in [(r["agent"], r["why"]) for e in route_log(net, g) for r in e["refused"]]
-
-
-# ================= 示例：接力分派 =================
-def test_relay_example_end_to_end(tmp_path: Path):
-    """不变量 24：示例插件「接力分派」。没 @ 人的问题按能力分派给反馈认领（任务的下发人是发问题的人），
-    反馈 → 方案 → 编码自动接力，3 次用完后请人接手；人 @ 审查后审查叫部署，部署等人确认。"""
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("relay_demo", ROOT / "examples" / "relay" / "setup_demo.py")
-    demo = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(demo)
-    net = Network(ScriptedRuntime(scenario_handler), tmp_path / "data", seed=False,
-                  plugins=pluginfs.PluginCatalog(ROOT / "examples" / "plugins.json"))
-    host, = users(net, "wang@x.io")
-    net.ensure_assistant(host)
-    ids = {n: net.create_agent(n, d, caps, auth, actor=host).id for n, d, caps, auth in demo.ROLES}
-    g = net.create_project("登录页", "", list(ids.values()), actor=host)
-    net.install_plugin(g.id, "relay", actor=host)
-    chat = net.project_chat(g.id, actor=host)
-
-    first = net.send_message(chat.id, "登录页在 Safari 上白屏，用户进不去，帮忙看看", actor=host, background=False)
-    replies = [m for m in chat.messages if m.role == "agent"]
-    assert [net._name(m.agent_id) for m in replies] == ["反馈", "方案", "编码"]
-    assert first.claimed_by == ids["反馈"]
-    req = next(r for r in net.store.requests.values() if r.agent_id == ids["反馈"])
-    assert req.requester_id == host
-    assert any("用完了" in m.text for m in chat.messages if m.role == "event")
-
-    net.send_message(chat.id, "@审查 帮忙审查一下编码的改动", actor=host, background=False)
-    assert [net._name(m.agent_id) for m in chat.messages if m.role == "agent"][-2:] == ["审查", "部署"]
-    assert "等人在群聊里 @ 我确认" in chat.messages[-1].text
-    net.send_message(chat.id, "@部署 确认部署", actor=host, background=False)
-    assert chat.messages[-1].text == "已部署登录页的兼容修复（演示）。"

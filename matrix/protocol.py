@@ -536,7 +536,8 @@ def format_route(plugin: str, who: str, text: str, reason: str, claim: bool) -> 
                 f"这条消息没有 @ 任何人。你接手的话按人交代给你的事处理：有交付目标就用 open_request 登记，下发人是 {who}。"
                 "不适合你就在群聊里说明，不要硬接。")
     return (f"## 插件「{plugin}」请你看一下这条消息{why}\n{who} 在群聊里说：\n{quote}\n\n"
-            "它没有 @ 你：需要你接着做就在群聊里回应你这一环的结果；这条消息不能登记为你的任务。没你的事就简短说明。")
+            "它没有 @ 你：需要你接着做就在群聊里回应你这一环的结果；这条消息不能登记为你的任务。"
+            "不是你的事就只回“（略过）”四个字，网络不会把它发进群聊。")
 
 
 def format_shared_knowledge(items: list[KnowledgeItem]) -> str:

@@ -270,8 +270,11 @@ class RemoteMCP:
         result = self._call("resources/read", {"uri": uri}) or {}
         return "\n".join(str(c.get("text", "")) for c in result.get("contents") or [] if isinstance(c, dict))
 
-    def call_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
-        result = self._call("tools/call", {"name": name, "arguments": args}) or {}
+    def call_tool(self, name: str, args: dict[str, Any], meta: dict[str, Any] | None = None) -> tuple[str, bool]:
+        params: dict[str, Any] = {"name": name, "arguments": args}
+        if meta:
+            params["_meta"] = meta
+        result = self._call("tools/call", params) or {}
         parts = []
         for c in result.get("content") or []:
             if not isinstance(c, dict):

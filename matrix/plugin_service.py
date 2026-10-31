@@ -5,7 +5,7 @@
   环境里只有运行一个程序必需的变量，不带任何凭证与网络的密钥。
 - 部署方运行的远程 MCP（`RemoteService`）：网络每次调用带一个只对这个项目、这个插件有效的签名令牌（`sign_token`），
   服务按它切分数据；密钥由部署方放在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>` 里。
-网络是 MCP 客户端：列工具、调工具、列资源、读资源。工具调用的身份、权限、留痕都在 engine，服务看到的只是参数。
+网络是 MCP 客户端：列工具、调工具、列资源、读资源。工具调用的身份、权限、留痕都在 engine，服务看到的是参数和网络认定的调用者（_meta）。
 """
 
 from __future__ import annotations
@@ -148,10 +148,14 @@ class StdioClient:
                 raise ServiceError(f"插件服务报错：{err.get('message', err)}")
             return msg.get("result")
 
-    def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT) -> tuple[str, bool]:
+    def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT,
+             meta: dict[str, Any] | None = None) -> tuple[str, bool]:
+        params: dict[str, Any] = {"name": name, "arguments": args}
+        if meta:
+            params["_meta"] = meta
         with self._lock:
             self.last_used = time.time()
-            res = self._request("tools/call", {"name": name, "arguments": args}, timeout) or {}
+            res = self._request("tools/call", params, timeout) or {}
         parts = [c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict) and c.get("type") == "text"]
         return _clip("\n".join(parts)), bool(res.get("isError"))
 
@@ -217,8 +221,9 @@ class RemoteService:
     def alive(self) -> bool:
         return True
 
-    def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT) -> tuple[str, bool]:
-        text, err = self._wrap(self.mcp.call_tool, name, args)
+    def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT,
+             meta: dict[str, Any] | None = None) -> tuple[str, bool]:
+        text, err = self._wrap(self.mcp.call_tool, name, args, meta)
         return _clip(text), err
 
     def resources(self) -> list[dict[str, Any]]:

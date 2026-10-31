@@ -350,35 +350,47 @@ def _wiki(call: ScriptCall) -> str | None:
     return None
 
 
-# ================= 接力分派（examples/plugins/relay，docs/plugin-hooks.md 第 8 节） =================
-# 研发项目里五个成员按角色接力：反馈 → 方案 → 编码 → 审查 → 部署。群聊里没 @ 人的问题由插件分派给“反馈”认领；
-# 各成员做完自己这一环，在回复最后写“需要 / 交给 下一环”，插件请下一环看一下。部署这一环等人确认。
-RELAY = {
-    "反馈": "已复现：Safari 17 打开登录页白屏，控制台报 `ReferenceError: structuredClone is not defined`。需要方案。",
-    "方案": "方案：在登录页的打包配置里把目标浏览器加上 Safari 15，并给 structuredClone 补一个兼容实现。交给编码。",
-    "编码": "已按方案改好：打包目标加了 Safari 15，补了兼容实现和一条回归用例（演示）。需要审查。",
-    "审查": "审查通过：兼容实现只在浏览器缺这个函数时生效，回归用例覆盖了 Safari。需要部署。",
-    "部署": "部署是高风险的一环：要上线的是登录页的兼容修复。等人在群聊里 @ 我确认后再执行。",
-}
+# ================= 队友协作（Raft 式，examples/plugins/teammates） =================
+# 群聊里人发的每条消息都送给频道成员（不用 @），成员自己判断要不要接：不是自己的事只回“（略过）”。
+# 工作项在插件的任务板上，先认领再动手；做完交 in_review，人在群聊里说“#N 完成”。
+TEAM = "teammates"
+_TEAM_NAMES: dict[str, str] = {}  # Agent id → 名字：续接的会话里提示词不再从名字开头
 
 
-_RELAY_NAMES: dict[str, str] = {}  # Agent id → 角色名：续接的会话里提示词不再从名字开头
+def _team_said(prompt: str) -> str:
+    said = re.findall(r"^\*\*用户[^*]*\*\*(?:（@[^）]*）)?：(.+)$", prompt, re.M)
+    if not said:
+        said = re.findall(r"^> (.+)$", prompt, re.M)  # route 送来的消息原文
+    return said[-1].strip() if said else ""
 
 
-def _relay(call: ScriptCall) -> str | None:
-    if "relay-handoff" not in call.skills:
+def _team(call: ScriptCall) -> str | None:
+    if "teammate-protocol" not in call.skills or f"{MCP_PREFIX}{TEAM}__tasks" not in call.tool_names:
         return None
     name = _name(call.prompt)
-    if name in RELAY:
-        _RELAY_NAMES[call.agent_id] = name
-    name = _RELAY_NAMES.get(call.agent_id, name)
-    if name not in RELAY:
-        return None
-    if name == "部署" and "确认部署" in _asked(call.prompt):
-        return "已部署登录页的兼容修复（演示）。"
-    if "分派给你认领" in call.prompt and MCP_PREFIX + "open_request" in call.tool_names:
-        call.tool("open_request", title="登录页在 Safari 上白屏", expected_outcome="定位原因、修好并上线")
-    return RELAY[name]
+    if name in ("前端", "后端", "测试"):
+        _TEAM_NAMES[call.agent_id] = name
+    name = _TEAM_NAMES.get(call.agent_id, "")
+    text = _team_said(call.prompt)
+    t = lambda tool, **a: call.tool(f"{TEAM}__{tool}", **a)  # noqa: E731
+    if "做完了吗" in text and "（@ 你）" in call.prompt:  # 人点名问进度：把自己进行中的任务交待验收
+        board = t("tasks", mine=True, status="in_progress")
+        ids = re.findall(r"^#(\d+)", board, re.M)
+        for n in ids:
+            t("task_update", id=int(n), status="in_review", note=f"{name}这部分做完了（演示），请验收")
+        return f"做完了：{'、'.join('#' + n for n in ids)} 已交待验收。" if ids else "我手上没有进行中的任务。"
+    if "建任务" in text:
+        board = t("tasks", status="todo")
+        if name == "后端" and "验证码" in text:
+            n = re.search(r"^#(\d+) .*验证码", board, re.M).group(1)
+            r = t("task_claim", id=int(n))
+            return f"我来做 #{n}：验证码的生成和校验接口。" if "认领成功" in r else "（略过）"
+        if name == "前端" and "登录页" in text:
+            r = t("task_create", title="登录页的验证码输入框（配合后端的接口）", claim=True)
+            n = re.search(r"#(\d+)", r).group(1)
+            return f"前端部分我开了 #{n} 并认领：登录页的验证码输入框，接后端的接口。"
+        return "（略过）"
+    return "（略过）"
 
 
 def scenario_handler(call: ScriptCall) -> str:
@@ -388,7 +400,7 @@ def scenario_handler(call: ScriptCall) -> str:
         return reply
     if (reply := _wiki(call)) is not None:
         return reply
-    if (reply := _relay(call)) is not None:
+    if (reply := _team(call)) is not None:
         return reply
     if (reply := _board_system(call)) is not None:
         return reply
