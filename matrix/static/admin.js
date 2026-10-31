@@ -53,6 +53,7 @@ async function api(path, opts = {}) {
 function deny(title, text) {
   $("#dash").hidden = true;
   $("#models").hidden = true;
+  $("#plugins").hidden = true;
   $(".admin-tabs").hidden = true;
   $("#denied").hidden = false;
   $("#denied-title").textContent = title;
@@ -443,13 +444,140 @@ function bindCatalog() {
   });
 }
 
+// ---------- 插件（/api/admin/plugins） ----------
+const P = { data: null };
+const PL_SOURCE = (x) => x.origin === "file" ? '<span class="muted">plugins.json</span>'
+  : x.info.source?.kind === "git" ? `git <code>${esc(x.info.source.url)}</code>${x.info.source.path ? ` <code>${esc(x.info.source.path)}</code>` : ""}`
+    + ` <span class="muted">@${esc((x.info.source.commit || "").slice(0, 7))}</span>`
+  : x.info.source?.kind === "submission" ? `上架申请 · ${esc(x.info.source.by || "")}` : "上传";
+const PL_SERVICE = (x) => !x.service ? '<span class="muted">无</span>'
+  : x.service.hosted ? `托管${x.service.network ? " · 要联网" : ""}${x.service.requirements ? " · 有依赖" : ""}` : `远程 <code>${esc(x.service.host || "")}</code>`;
+
+async function loadPlugins() {
+  $("#pl-error").textContent = "";
+  try { P.data = await api("/api/admin/plugins"); renderPlugins(); } catch (e) { $("#pl-error").textContent = e.message; }
+}
+
+function renderPlugins() {
+  const d = P.data, f = $("#pl-policy");
+  f.remote.value = d.policy.remote;
+  f.allow.value = d.policy.allow.join("\n");
+  f.deny.value = d.policy.deny.join("\n");
+  f.hosted_upload.checked = d.policy.hosted_upload;
+  f.sandbox_catalog.checked = d.policy.sandbox_catalog;
+  $("#pl-sandbox").textContent = d.sandbox.available ? "沙箱：可用（bubblewrap）。"
+    : `沙箱：不可用（${d.sandbox.note}）。主持人上传的托管插件装不上，目录里的托管插件由本部署直接运行。`;
+  $("#pl-cat-hint").innerHTML = "所有项目的主持人都能从这里安装。装进项目的是当时那一版的拷贝：这里更新后，主持人在插件卡上看到“升级”。"
+    + (d.catalog_file ? ` 文件里的条目在 <code>${esc(d.catalog_file)}</code> 里改。` : "")
+    + (d.catalog_error ? ` <span class="key-state missing">文件有错：${esc(d.catalog_error)}</span>` : "");
+  table("#t-plugin-catalog", [
+    { label: "插件", html: (x) => `<b>${esc(x.title)}</b> <code>${esc(x.name)}</code> <span class="muted">${esc(x.version)}</span>` },
+    { label: "来源", html: PL_SOURCE },
+    { label: "服务", html: PL_SERVICE },
+    { label: "在用的项目", num: true, html: (x) => num(x.installs) },
+    { label: "", html: (x) => x.origin === "file" ? "" : `<span class="row-actions">`
+      + (x.info.source?.kind === "git" ? `<button type="button" class="link" data-pl-refresh="${esc(x.name)}">重新拉取</button>` : "")
+      + `<button type="button" class="link danger" data-pl-remove="${esc(x.name)}">移出目录</button></span>` },
+  ], d.catalog, "目录是空的：从 git 仓库添加、上传插件包，或者批准上架申请");
+  const subs = [...d.submissions].sort((a, b) => (a.status === "pending" ? 0 : 1) - (b.status === "pending" ? 0 : 1));
+  table("#t-plugin-subs", [
+    { label: "插件", html: (x) => `<b>${esc(x.title)}</b> <code>${esc(x.name)}</code> <span class="muted">${esc(x.version)}</span>` },
+    { label: "提交", html: (x) => `${esc(x.by || "")}<div class="muted">${when(x.created_at)}</div>` },
+    { label: "说明与文件", html: (x) => `<div>${esc(x.note || "（没写说明）")}</div><div class="pl-sub-files">${x.files.map((p) =>
+      `<button type="button" class="link" data-pl-file="${esc(x.id)}" data-path="${esc(p)}">${esc(p)}</button>`).join("")}</div>`
+      + (x.lint?.length ? `<ul class="pl-lint">${x.lint.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "") },
+    { label: "状态", html: (x) => x.status === "pending" ? '<span class="pill off">待审核</span>'
+      : `<span class="pill ${x.status === "approved" ? "on" : "off"}">${x.status === "approved" ? "已上架" : "未通过"}</span>`
+        + (x.review_note ? `<div class="muted">${esc(x.review_note)}</div>` : "") },
+    { label: "", html: (x) => x.status !== "pending" ? "" : `<span class="row-actions"><button type="button" class="link" data-pl-ok="${esc(x.id)}">批准上架</button>`
+      + `<button type="button" class="link danger" data-pl-no="${esc(x.id)}">拒绝</button></span>` },
+  ], subs, "还没有上架申请");
+  for (const td of document.querySelectorAll("#t-plugin-subs td:nth-child(3)")) td.classList.add("wrap");
+}
+
+function pickZip() {
+  return new Promise((resolve) => {
+    const inp = Object.assign(document.createElement("input"), { type: "file", accept: ".zip,application/zip" });
+    inp.addEventListener("change", () => resolve(inp.files[0] || null));
+    inp.click();
+  });
+}
+
+function bindPlugins() {
+  const lines = (t) => t.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+  $("#pl-policy").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    $("#plp-save").disabled = true;
+    try {
+      P.data = await api("/api/admin/plugins/policy", { method: "PUT", body: { remote: f.remote.value, allow: lines(f.allow.value),
+        deny: lines(f.deny.value), hosted_upload: f.hosted_upload.checked, sandbox_catalog: f.sandbox_catalog.checked } });
+      renderPlugins();
+      $("#pl-error").textContent = "";
+    } catch (e) { $("#pl-error").textContent = e.message; }
+    finally { $("#plp-save").disabled = false; }
+  });
+  $("#pl-git").addEventListener("click", () => { $("#plg-error").textContent = ""; $("#pl-git-dialog").showModal(); $("#plg-url").focus(); });
+  $("#plg-cancel").addEventListener("click", () => $("#pl-git-dialog").close());
+  $("#pl-git-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = ev.target;
+    $("#plg-submit").disabled = true;
+    try {
+      P.data = await api("/api/admin/plugins/catalog/git", { method: "POST", body: { url: f.url.value.trim(), ref: f.ref.value.trim(), path: f.path.value.trim() } });
+      renderPlugins();
+      $("#pl-git-dialog").close();
+    } catch (e) { $("#plg-error").textContent = e.message; }
+    finally { $("#plg-submit").disabled = false; }
+  });
+  $("#pl-zip").addEventListener("click", async () => {
+    const file = await pickZip();
+    if (!file) return;
+    try {
+      const r = await fetch("/api/admin/plugins/catalog/upload", { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+      P.data = data;
+      renderPlugins();
+    } catch (e) { $("#pl-error").textContent = e.message; }
+  });
+  $("#plugins").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    $("#pl-error").textContent = "";
+    try {
+      if (b.dataset.plRefresh) P.data = await api(`/api/admin/plugins/catalog/${encodeURIComponent(b.dataset.plRefresh)}/refresh`, { method: "POST" });
+      if (b.dataset.plRemove) {
+        if (!confirm("移出目录？已经装进项目的照常可用，只是之后没有升级来源。")) return;
+        P.data = await api(`/api/admin/plugins/catalog/${encodeURIComponent(b.dataset.plRemove)}`, { method: "DELETE" });
+      }
+      if (b.dataset.plFile) {
+        const r = await api(`/api/admin/plugins/submissions/${b.dataset.plFile}/file?path=${encodeURIComponent(b.dataset.path)}`);
+        $("#plf-title").textContent = r.path;
+        $("#plf-body").textContent = r.text;
+        $("#pl-file-dialog").showModal();
+        return;
+      }
+      if (b.dataset.plOk || b.dataset.plNo) {
+        const ok = Boolean(b.dataset.plOk);
+        const note = prompt(ok ? "批准上架：给提交的人留一句（可空）" : "拒绝的理由（提交的人看得到）", "");
+        if (note === null) return;
+        P.data = await api(`/api/admin/plugins/submissions/${b.dataset.plOk || b.dataset.plNo}`, { method: "POST", body: { approve: ok, note } });
+      }
+      renderPlugins();
+    } catch (e) { $("#pl-error").textContent = e.message; }
+  });
+}
+
 // ---------- 标签页 ----------
 function showTab() {
-  const tab = location.hash === "#models" ? "models" : "usage";
+  const tab = ["#models", "#plugins"].includes(location.hash) ? location.hash.slice(1) : "usage";
   for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
   $("#dash").hidden = tab !== "usage";
   $("#models").hidden = tab !== "models";
+  $("#plugins").hidden = tab !== "plugins";
   if (tab === "models") loadCatalog();
+  else if (tab === "plugins") loadPlugins();
   else if (!S.data) load();
   else render();
 }
@@ -463,6 +591,7 @@ async function init() {
   if (!me.admin) return deny("没有权限", "管理后台只给部署方指定的管理员。");
   $(".admin-tabs").hidden = false;
   bindCatalog();
+  bindPlugins();
   for (const r of document.querySelectorAll('input[name="days"]')) {
     r.addEventListener("change", () => { S.days = Number(r.value); load(); });
   }

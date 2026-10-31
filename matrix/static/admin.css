@@ -106,3 +106,14 @@ button.link.danger { color: var(--rejected); }
   .tile b { font-size: 20px; }
   #me { display: none; }
 }
+
+/* 插件 */
+.pl-policy { display: grid; gap: 10px; max-width: 760px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; }
+.pl-policy textarea { font-family: var(--mono, monospace); font-size: 12.5px; }
+.pl-policy .actions { display: flex; justify-content: flex-end; }
+.pl-sub-files { display: flex; flex-wrap: wrap; gap: 4px 10px; white-space: normal; max-width: 520px; }
+.pl-lint { color: var(--human); white-space: normal; max-width: 520px; font-size: 12px; margin: 4px 0 0; padding-left: 16px; }
+.table-wrap td.wrap { white-space: normal; min-width: 220px; }
+dialog.pl-file pre { max-height: 60vh; overflow: auto; background: var(--bg); padding: 10px 12px; border-radius: 8px; font-size: 12px;
+  white-space: pre-wrap; word-break: break-word; width: min(880px, 90vw); }

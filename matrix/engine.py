@@ -46,7 +46,8 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
-from .plugin_service import ServiceError, ServiceHost, resolve_command
+from .plugin_service import ServiceError, ServiceHost, build_env, resolve_command, venv_python
+from . import plugin_sources as sources, sandbox
 from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
@@ -138,6 +139,15 @@ class HookRateLimited(NetworkError):
     pass
 
 
+class NeedsConfirm(NetworkError):
+    """安装 / 升级前要主持人看过再确认的事（结构变化、数据去向）。digest 是这次看到的包的指纹：确认时带回来，
+    包在这期间变了就重新确认。"""
+
+    def __init__(self, message: str, items: list[str], digest: str):
+        super().__init__(message)
+        self.items, self.digest = items, digest
+
+
 class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
@@ -166,7 +176,11 @@ class Network:
         self._remote_tools: dict[str, tuple[float, list[dict[str, Any]]]] = {}  # connection id → (取的时间, 工具)
         self._connector_skills_version: float | None = None
         # 插件目录（部署方维护的 plugins.json，热加载）；插件页面的帧令牌密钥只在内存，重启后旧令牌作废
-        self.plugin_dir_catalog = plugins or pluginfs.PluginCatalog(self.store.root / "plugins.json")
+        # 加上管理后台加进目录的（plugin_sources.ManagedCatalog）；主持人自己装的按部署方的策略放行（docs/plugin-install.md）
+        self.plugin_policy = sources.PolicyStore(self.store.root)
+        self.plugin_submissions = sources.Submissions(self.store.root)
+        self.plugin_dir_catalog = sources.CombinedCatalog(
+            plugins or pluginfs.PluginCatalog(self.store.root / "plugins.json"), sources.ManagedCatalog(self.store.root))
         self._manifests: dict[str, tuple[float, pluginfs.Manifest]] = {}
         self._drafts: dict[str, dict[str, Any]] = {}      # 插件页面要以人名义发的消息，等确认卡
         self.services = ServiceHost()                     # 插件服务进程（不变量 24），一个安装一个
@@ -2011,15 +2025,24 @@ class Network:
                                "failures": st.get("failures", 0), "by": self._email(st.get("by_user")),
                                "last_run": st.get("last_fired"), "has_hook": bool(st.get("hook_hash")),
                                "error": st.get("error")}
-            out.append({**m.public(), "enabled": not meta.get("disabled"), "source": meta.get("source"), "installed_by": self._email(meta.get("by_user")),
+            out.append({**m.public(), "enabled": not meta.get("disabled"), "source": meta.get("source"),
+                        "runs": meta.get("runs", self._runs_guess(m, meta)), "url": meta.get("url"),
+                        "has_secret": (bool(self._plugin_secret(g.id, name)) if m.service and m.service.url
+                                       and meta.get("source") != "catalog" else None),
+                        "installed_by": self._email(meta.get("by_user")),
                         "installed_at": meta.get("installed_at"), "data_rev": meta.get("data_rev", 0),
                         "update": cat.manifest.version if cat and cat.manifest.version != m.version else None,
                         "counts": {t.key: len(pluginfs.Records(data / f"{t.key}.json").load()) for t in m.tables},
                         "trigger_state": trig})
         return out
 
+    @staticmethod
+    def _runs_guess(m: pluginfs.Manifest, meta: dict[str, Any]) -> str | None:
+        """这个功能之前装的插件没有记 runs：按清单推。"""
+        return None if m.service is None else "remote" if m.service.url else "host"
+
     def install_plugin(self, project_id: str, name: str, confirm: bool = False,
-                       actor: str | None = None) -> dict[str, Any]:
+                       actor: str | None = None, digest: str | None = None) -> dict[str, Any]:
         """主持人从部署方目录安装（或升级到目录里的版本）。装进项目的是这一版的拷贝，目录更新了不自动换。"""
         item = self.plugin_dir_catalog.get(name)
         if item is None:
@@ -2028,25 +2051,103 @@ class Network:
             files = pluginfs.dir_files(item.dir)
         except (OSError, pluginfs.PluginError) as e:
             raise NetworkError(str(e)) from e
-        return self._install_plugin(project_id, files, "catalog", confirm, actor)
+        return self._install_plugin(project_id, files, "catalog", confirm, actor, digest)
 
     def upload_plugin(self, project_id: str, entries: list[tuple[str, bytes]], confirm: bool = False,
-                      actor: str | None = None) -> dict[str, Any]:
-        """主持人上传插件包（zip 或文件夹）。代码只在看项目页的人的浏览器沙箱里跑。"""
+                      actor: str | None = None, digest: str | None = None) -> dict[str, Any]:
+        """主持人上传插件包（zip 或文件夹）。页面代码只在看项目页的人的浏览器沙箱里跑；带托管服务的进沙箱，
+        带远程服务的按部署方策略放行（docs/plugin-install.md）。"""
         try:
             files = pluginfs.package_files(entries)
         except pluginfs.PluginError as e:
             raise NetworkError(str(e)) from e
-        return self._install_plugin(project_id, files, "upload", confirm, actor)
+        return self._install_plugin(project_id, files, "upload", confirm, actor, digest)
+
+    def install_plugin_url(self, project_id: str, url: str, confirm: bool = False, actor: str | None = None,
+                           digest: str | None = None) -> dict[str, Any]:
+        """主持人填一个地址安装：`.zip` 插件包或 plugin.json。之后可以按同一个地址检查更新。"""
+        with self._lock:
+            self.hosted_project(project_id, actor)
+        try:
+            files, host = sources.fetch_package(self.plugin_policy.get(), url)
+        except sources.SourceError as e:
+            raise NetworkError(str(e)) from e
+        return self._install_plugin(project_id, files, "url", confirm, actor, digest, origin=url.strip())
+
+    def refresh_plugin(self, project_id: str, name: str, confirm: bool = False, actor: str | None = None,
+                       digest: str | None = None) -> dict[str, Any]:
+        """按地址装的插件：再取一次，内容变了就按升级走（同样要确认）。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            meta = self._plugin_meta(g, name)
+            url = meta.get("url")
+        if meta.get("source") != "url" or not url:
+            raise NetworkError("只有按地址安装的插件能这样检查更新")
+        try:
+            files, _ = sources.fetch_package(self.plugin_policy.get(), url)
+        except sources.SourceError as e:
+            raise NetworkError(str(e)) from e
+        if sources.package_hash(files) == meta.get("sha256"):
+            with self._lock:
+                return {**next(p for p in self.project_plugins(g) if p["name"] == name), "unchanged": True}
+        try:
+            other = pluginfs.check_package(files).name != name
+        except pluginfs.PluginError as e:
+            raise NetworkError(str(e)) from e
+        if other:
+            raise NetworkError(f"{url} 现在给的不是插件 {name}")
+        return self._install_plugin(project_id, files, "url", confirm, actor, digest, origin=url)
+
+    def _plugin_runs(self, m: pluginfs.Manifest, source: str) -> str | None:
+        """插件服务在哪里跑：remote（远程服务）、sandbox（本部署的沙箱）、host（网络直接托管，只有目录里的）。
+        主持人自己装的不合部署方策略时抛 NetworkError（不变量 24）。"""
+        if m.service is None:
+            return None
+        policy = self.plugin_policy.get()
+        if source == "catalog":
+            if m.service.url:
+                return "remote"
+            return "sandbox" if policy.sandbox_catalog and sandbox.available()[0] else "host"
+        if m.service.url:
+            try:
+                sources.check_remote(policy, m.service.url)
+            except sources.SourceError as e:
+                raise NetworkError(f"不能装这个远程插件：{e}") from e
+            return "remote"
+        hint = "可以改成远程服务（service.url），或者提交上架申请，由管理员审核后放进部署方目录"
+        if not policy.hosted_upload:
+            raise NetworkError(f"部署方不允许主持人自己装带托管服务的插件：{hint}")
+        ok, why = sandbox.available()
+        if not ok:
+            raise NetworkError(f"这个部署没有可用的沙箱（{why}），自己装的插件不能带托管服务：{hint}")
+        if m.service.network:
+            raise NetworkError(f"自己装的托管插件不能联网（清单里 service.network 是 true）：{hint}")
+        if m.service.command != "python":
+            raise NetworkError("自己装的托管插件只能用 Python 运行：service.command 写 python")
+        return "sandbox"
+
+    def _plugin_env(self, files_or_dir: dict[Path, bytes] | Path, m: pluginfs.Manifest, source: str) -> Path | None:
+        """清单带依赖锁文件时建（或取缓存的）独立环境。调用方不持有锁（第一次要下载）。"""
+        if m.service is None or not m.service.requirements:
+            return None
+        req = (files_or_dir[Path(m.service.requirements)] if isinstance(files_or_dir, dict)
+               else (files_or_dir / m.service.requirements).read_bytes())
+        try:
+            return build_env(req, self.store.root / "plugin-envs", trusted=source == "catalog")
+        except ServiceError as e:
+            raise NetworkError(f"插件「{m.title}」{e}") from e
 
     def _install_plugin(self, project_id: str, files: dict[Path, bytes], source: str, confirm: bool,
-                        actor: str | None) -> dict[str, Any]:
+                        actor: str | None, digest: str | None = None, origin: str | None = None) -> dict[str, Any]:
         try:
             m = pluginfs.check_package(files)
         except pluginfs.PluginError as e:
             raise NetworkError(str(e)) from e
-        if m.service is not None and source != "catalog":  # 不变量 24：服务端执行的代码只来自部署方目录
-            raise NetworkError("带插件服务（service）的插件只能从部署方的插件目录安装：服务端要执行的代码要部署方审核过")
+        runs = self._plugin_runs(m, source)  # 不变量 24：服务端执行的代码只在目录、沙箱、或作者自己的远程服务里
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+        self._plugin_env(files, m, source)
+        sha = sources.package_hash(files)
         with self._lock:
             g = self.hosted_project(project_id, actor)
             old = g.plugins.get(m.name)
@@ -2058,9 +2159,15 @@ class Network:
                     changes = pluginfs.schema_changes(self._manifest(g, m.name, active=False), m)
                 except NetworkError:
                     changes = []
-                if changes and not confirm:
-                    raise NetworkError("升级会改变已有数据的结构：" + "；".join(changes)
-                                       + "。旧数据仍保留在记录文件与日志里，确认后再升级")
+            told = sources.disclosure(m, runs) if source != "catalog" else []
+            stale = bool(digest) and digest != sha
+            if stale or ((changes or told) and not confirm):
+                if changes and not told and not stale:
+                    raise NeedsConfirm("升级会改变已有数据的结构：" + "；".join(changes)
+                                       + "。旧数据仍保留在记录文件与日志里，确认后再升级", changes, sha)
+                head = f"安装插件「{m.title}」{m.version} 前请确认" + ("（包和上次看到的不一样了）" if digest and digest != sha else "")
+                items = told + changes or ["插件包和确认时看到的不一样了"]
+                raise NeedsConfirm(head + "：" + "；".join(items), items, sha)
             pluginfs.install(self.store.project_plugins_dir(g.id), files)
             self.services.stop(g.id, m.name)  # 升级：旧版本的进程停掉，下次用到时按新版本启动
             states = (old or {}).get("triggers", {})
@@ -2068,24 +2175,62 @@ class Network:
                 "version": m.version, "title": m.title, "source": source, "by_user": actor,
                 "installed_at": time.time(), "data_rev": (old or {}).get("data_rev", 0),
                 "disabled": bool((old or {}).get("disabled")),  # 升级不改变启停
+                "runs": runs, "sha256": sha, **({"url": origin} if origin else {}),
                 # 触发默认不开：主持人看过以后逐个启用；升级保留已有触发的状态
                 "triggers": {t.key: states.get(t.key, {"enabled": False}) for t in m.triggers}}
+            secret = None
+            if runs == "remote" and source != "catalog" and not self._plugin_secret(g.id, m.name):
+                secret = self._new_plugin_secret(g.id, m.name)
             self._archive_changed(g, "plugin.upgrade" if old else "plugin.install", by_user=actor, plugin=m.name,
-                                  version=m.version, source=source, changes=changes)
+                                  version=m.version, source=source, changes=changes, runs=runs, sha256=sha,
+                                  **({"url": origin} if origin else {}))
         caps = "、".join(PLUGIN_PAGE_CAPS[p] for p in m.page_permissions) or "无"
         verb = f"把插件「{m.title}」升级到 {m.version}" if old else f"安装了插件「{m.title}」{m.version}"
+        where = {"remote": f"；插件服务在 {sources.service_host(m)}，项目内容会按挂点发到那里（主持人确认过）",
+                 "sandbox": "；插件服务在本部署的沙箱里运行，不能联网"}.get(runs or "", "") if source != "catalog" else ""
         self._archive_saved(g, f"主持人{verb}。页面申请的能力：{caps}"
-                               + (f"；Agent 可用记录工具（{'、'.join(m.agent_tools)}）" if m.agent_tools else ""))
+                               + (f"；Agent 可用记录工具（{'、'.join(m.agent_tools)}）" if m.agent_tools else "") + where)
         with self._lock:
-            return next(p for p in self.project_plugins(g) if p["name"] == m.name)
+            out = next(p for p in self.project_plugins(g) if p["name"] == m.name)
+        return {**out, "secret": secret} if secret else out
+
+    @staticmethod
+    def _secret_key(project_id: str, name: str) -> str:
+        return f"plugin-{project_id}-{name}"
+
+    def _plugin_secret(self, project_id: str, name: str) -> bytes | None:
+        try:
+            v = self.vault.get(self._secret_key(project_id, name)).get("secret")
+        except VaultError:
+            return None
+        return v.encode() if v else None
+
+    def _new_plugin_secret(self, project_id: str, name: str) -> str:
+        secret = "ps_" + secrets.token_urlsafe(32)
+        self.vault.put(self._secret_key(project_id, name), {"secret": secret})
+        self.services.stop(project_id, name)
+        return secret
+
+    def reset_plugin_secret(self, project_id: str, name: str, actor: str | None = None) -> str:
+        """自己装的远程插件：生成（或重置）这个安装的签名密钥，只返回这一次；旧密钥立即失效。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            meta = self._plugin_meta(g, name)
+            if meta.get("runs") != "remote" or meta.get("source") == "catalog":
+                raise NetworkError("只有自己装的远程插件有单独的签名密钥（目录里的由部署方配置）")
+            secret = self._new_plugin_secret(g.id, name)
+            self._archive_changed(g, "plugin.secret.reset", by_user=actor, plugin=name)
+            self.store.save()
+        return secret
 
     def uninstall_plugin(self, project_id: str, name: str, actor: str | None = None) -> Project:
-        """卸载：删掉包与触发，记录留着（plugin-data/），重新装回来还在。"""
+        """卸载：删掉包、触发与签名密钥，记录留着（plugin-data/），重新装回来还在。"""
         with self._lock:
             g = self.hosted_project(project_id, actor)
             meta = self._plugin_meta(g, name)
             self.services.stop(g.id, name)
             shutil.rmtree(self.store.project_plugins_dir(g.id) / name, ignore_errors=True)
+            self.vault.delete(self._secret_key(g.id, name))
             del g.plugins[name]
             self._archive_changed(g, "plugin.uninstall", by_user=actor, plugin=name)
         self._archive_saved(g, f"主持人卸载了插件「{meta.get('title', name)}」（记录保留，重新安装后恢复）")
@@ -2562,15 +2707,37 @@ class Network:
         return d
 
     def _service_client(self, g: Project, name: str, m: pluginfs.Manifest) -> Any:
-        """调用方不持有锁（第一次用到时启动进程，要几秒）。"""
+        """调用方不持有锁（第一次用到时启动进程，要几秒）。按安装来源决定在哪里跑（不变量 24）：
+        目录里的远程服务用部署方的密钥；自己装的远程服务每次都按部署方现在的策略再查一遍、用这个安装的密钥；
+        自己装的托管插件只进沙箱（沙箱不可用就不跑）；目录里的托管插件有沙箱且部署方没关时也进。"""
         assert m.service is not None
+        source = (g.plugins.get(name) or {}).get("source", "catalog")
+        policy = self.plugin_policy.get()
         try:
             if m.service.url:
-                return self.services.remote(g.id, name, m.version, m.service.url)
+                if source == "catalog":
+                    return self.services.remote(g.id, name, m.version, m.service.url)
+                try:  # 每次都按现在的策略、现在解析出的地址查：主机换到内网地址（DNS 重绑定）也拦得住大部分
+                    sources.check_remote(policy, m.service.url)
+                except sources.SourceError as e:
+                    raise ServiceError(str(e)) from e
+                secret = self._plugin_secret(g.id, name)
+                if not secret:
+                    raise ServiceError("这个安装还没有签名密钥：请主持人在插件卡片上生成")
+                return self.services.remote(g.id, name, m.version, m.service.url, secret)
             data = self._service_data(g, name)
-            argv = resolve_command(m.service.command or "", m.service.args,
-                                   self.store.project_plugins_dir(g.id) / name, data)
-            return self.services.client(g.id, name, m.version, argv, data)
+            pkg = self.store.project_plugins_dir(g.id) / name
+            env = self._plugin_env(pkg, m, source)
+            py = str(venv_python(env)) if env else None
+            argv = resolve_command(m.service.command or "", m.service.args, pkg, data, py)
+            boxed = source != "catalog" or (policy.sandbox_catalog and sandbox.available()[0])
+            if boxed:
+                ok, why = sandbox.available()
+                if not ok:
+                    raise ServiceError(f"沙箱不可用（{why}），自己装的托管插件不能运行")
+                argv = sandbox.wrap(argv, ro=[pkg, *sandbox.python_dirs(py), *([env] if env else [])], rw=[data],
+                                    network=m.service.network and source == "catalog")
+            return self.services.client(g.id, name, m.version, argv, data, sandbox.limits if boxed else None)
         except ServiceError as e:
             raise NetworkError(f"插件「{m.title}」的服务不可用：{e}") from e
 
@@ -2584,7 +2751,10 @@ class Network:
             raise NetworkError(f"插件「{m.title}」没有开出工具 {tool!r}：可用的有 {'、'.join(n for n, _ in m.service.tools)}")
         client = self._service_client(g, name, m)
         agent = self.store.agents.get(by.get("by_agent") or "")
+        third = m.service.url and (g.plugins.get(name) or {}).get("source", "catalog") != "catalog"
         caller = ({"kind": "agent", "id": agent.id, "name": agent.name} if agent is not None else
+                  # 自己装的远程插件在第三方那里：只给成员 id，不给邮箱
+                  {"kind": "user", "id": by.get("by_user")} if by.get("by_user") and third else
                   {"kind": "user", "email": self._email(by.get("by_user"))} if by.get("by_user") else {"kind": "network"})
         try:  # 调用者由网络认定，经 MCP 的 _meta 交给服务：服务可以据此加锁、记账，不信模型自报
             text, err = client.call(tool, args, meta={"matrix/caller": caller, "matrix/project": g.id})
@@ -4764,7 +4934,7 @@ class Network:
                 if p is None:
                     continue
                 blocks.append(format_proposal_notice(p, self._name(p.agent_id) if p.agent_id else ""))
-                wake.append(f"提议 {p.name} 已{'批准' if p.status == 'approved' else '拒绝'}")
+                wake.append(f"{'插件' if p.kind == 'plugin' else ''}提议 {p.name} 已{'批准' if p.status == 'approved' else '拒绝'}")
         return "\n\n".join(blocks), wake
 
     # ================= 运行时调用 =================
@@ -5650,6 +5820,73 @@ class Network:
         return (f"已提交提议 {p.id}（{name}），等人审核。批准后它会加入项目「{g.name}」，结果会作为通知送给你；"
                 "在那之前不要假设它存在。"), False
 
+    # ---- 提议装插件（Agent 提议，主持人批准后以主持人的身份安装） ----
+    def _plugin_offer(self, name: str, url: str) -> tuple[dict[Path, bytes], str, pluginfs.Manifest]:
+        """按目录里的名字或地址取包：返回（文件, 来源, 清单）。调用方不持有锁（按地址要联网）。"""
+        try:
+            if url:
+                files, _ = sources.fetch_package(self.plugin_policy.get(), url)
+                source = "url"
+            else:
+                item = self.plugin_dir_catalog.get(name)
+                if item is None:
+                    names = "、".join(x.manifest.name for x in self.plugin_dir_catalog.items()) or "（目录是空的）"
+                    raise NetworkError(f"部署方目录里没有 {name}。目录里有：{names}")
+                files, source = pluginfs.dir_files(item.dir), "catalog"
+            return files, source, pluginfs.check_package(files)
+        except (sources.SourceError, pluginfs.PluginError, OSError) as e:
+            raise NetworkError(str(e)) from e
+
+    def _tool_propose_plugin(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        g = self._require_project(ctx, delegate=False)
+        name, url = str(args.get("name") or "").strip(), str(args.get("url") or "").strip()
+        reason = " ".join(str(args.get("reason") or "").split())[:500]
+        if bool(name) == bool(url) or not reason:
+            return "name 和 url 二选一，reason 不能为空", True
+        try:
+            files, source, m = self._plugin_offer(name, url)
+            runs = self._plugin_runs(m, source)
+        except NetworkError as e:
+            return str(e), True
+        with self._lock:
+            if m.name in g.plugins and g.plugins[m.name].get("version") == m.version:
+                return f"项目里已经装了「{m.title}」{m.version}", True
+            if any(p.kind == "plugin" and p.status == "pending" and p.project_id == g.id and p.name == m.name
+                   for p in self.store.proposals.values()):
+                return f"已经有一个待主持人处理的「{m.title}」提议", True
+            p = Proposal(id=new_id("prop"), proposer_id=ctx.agent_id, context_kind=ctx.kind, context_id=ctx.id,
+                         conversation_id=ctx.conversation_id, project_id=g.id, name=m.name, description=m.description,
+                         capabilities=[], authority=[], max_authority=[], reason=reason, owner_id=g.owner_id,
+                         kind="plugin",
+                         plugin={"name": m.name, "url": url or None, "catalog": source == "catalog", "title": m.title,
+                                 "version": m.version, "description": m.description, "runs": runs,
+                                 "host": sources.service_host(m), "page_permissions": list(m.page_permissions),
+                                 "disclosure": sources.disclosure(m, runs) if source != "catalog" else [],
+                                 "digest": sources.package_hash(files)})
+            self.store.proposals[p.id] = p
+            self.store.save()
+        self.bus.emit("proposal.updated", proposal=p.to_dict())
+        self._archive_saved(g, f"{self._name(ctx.agent_id)} 提议给项目装插件「{m.title}」：{reason}（等主持人决定）")
+        return (f"已提交提议 {p.id}（插件「{m.title}」），等主持人决定；结果会作为通知送给你。"
+                "在那之前不要假设它已经装上。"), False
+
+    def install_proposed_plugin(self, proposal_id: str, note: str = "", actor: str | None = None) -> dict[str, Any]:
+        """主持人批准装插件的提议：装的是提议时看到的那一份（指纹对不上就要求重新确认）。"""
+        with self._lock:
+            p = self._proposal(proposal_id, actor)
+            if p.kind != "plugin" or p.status != "pending":
+                raise NetworkError(f"提议 {p.id} 不是待处理的插件提议")
+            info = dict(p.plugin or {})
+        if info.get("url"):
+            out = self.install_plugin_url(p.project_id, info["url"], True, actor, info.get("digest"))
+        else:
+            out = self.install_plugin(p.project_id, info["name"], True, actor, info.get("digest"))
+        with self._lock:
+            p.status, p.note, p.decided_at = "approved", note.strip(), time.time()
+            self.store.save()
+        self._proposal_decided(p)
+        return out
+
     def approve_proposal(self, proposal_id: str, name: str | None = None, description: str | None = None,
                          capabilities: list[str] | None = None, authority: list[str] | None = None,
                          model: dict[str, str] | None = None, model_preset: str | None = None, note: str = "",
@@ -5658,6 +5895,8 @@ class Network:
         以批准人的身份创建（新 Agent 归批准人）并作为他的成员加入项目。"""
         with self._lock:
             p = self._proposal(proposal_id, actor)
+            if p.kind != "agent":
+                raise NetworkError("这是装插件的提议：用安装来批准")
             if p.status != "pending":
                 raise NetworkError(f"提议 {p.id} 已经{'批准' if p.status == 'approved' else '拒绝'}")
             g = self.store.projects.get(p.project_id)
@@ -6212,6 +6451,130 @@ class Network:
         self.bus.emit("models.updated")
         return self.admin_models(actor)
 
+    # ---- 插件：安装策略、后台目录、上架申请（docs/plugin-install.md） ----
+    def admin_plugins(self, actor: str | None) -> dict[str, Any]:
+        """管理后台的插件页：策略、沙箱状态、目录（文件里的 + 后台加的，各有几个项目在用）、上架申请。
+        只给插件层面的东西，不给项目名。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        ok, why = sandbox.available()
+        with self._lock:
+            used: dict[str, int] = {}
+            for g in self.store.projects.values():
+                for n, meta in g.plugins.items():
+                    if meta.get("source") == "catalog":
+                        used[n] = used.get(n, 0) + 1
+        cat = self.plugin_dir_catalog
+        rows = []
+        for x in cat.items():
+            info = dict(x.info)
+            info["added_by"] = self._email(info.get("added_by"))
+            rows.append({**x.manifest.public(), "origin": x.origin, "info": info, "installs": used.get(x.manifest.name, 0)})
+        subs = [{**m, "by": self._email(m.get("by_user")), "reviewed_by": self._email(m.get("reviewed_by"))}
+                for m in self.plugin_submissions.list()]
+        return {"policy": self.plugin_policy.get().to_dict(), "sandbox": {"available": ok, "note": why},
+                "catalog": rows, "catalog_file": str(cat.path) if cat.path else None, "catalog_error": cat.error,
+                "submissions": subs}
+
+    def admin_save_plugin_policy(self, actor: str | None, data: dict[str, Any]) -> dict[str, Any]:
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            self.plugin_policy.save(data)
+        except sources.SourceError as e:
+            raise NetworkError(f"策略不对：{e}") from e
+        except OSError as e:
+            raise NetworkError(f"策略写不进去（{self.plugin_policy.path}）：{e.strerror or e}") from e
+        self.bus.emit("plugin.catalog")
+        return self.admin_plugins(actor)
+
+    def _managed_add(self, actor: str | None, files: dict[Path, bytes], source: dict[str, Any]) -> dict[str, Any]:
+        reserved = {x.manifest.name for x in self.plugin_dir_catalog.files.items()}
+        try:
+            self.plugin_dir_catalog.managed.add(files, source, actor, reserved)
+        except (sources.SourceError, pluginfs.PluginError) as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("plugin.catalog")
+        return self.admin_plugins(actor)
+
+    def admin_catalog_git(self, actor: str | None, url: str, ref: str = "", path: str = "") -> dict[str, Any]:
+        """从 git 仓库加一个插件进目录：记下提交号与包的指纹。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            files, commit = sources.git_package(url, ref, path)
+        except sources.SourceError as e:
+            raise NetworkError(str(e)) from e
+        return self._managed_add(actor, files, {"kind": "git", "url": url.strip(), "ref": ref.strip(),
+                                                "path": path.strip().strip("/"), "commit": commit})
+
+    def admin_catalog_upload(self, actor: str | None, entries: list[tuple[str, bytes]]) -> dict[str, Any]:
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            files = pluginfs.package_files(entries)
+        except pluginfs.PluginError as e:
+            raise NetworkError(str(e)) from e
+        return self._managed_add(actor, files, {"kind": "upload"})
+
+    def admin_catalog_refresh(self, actor: str | None, name: str) -> dict[str, Any]:
+        """从 git 加的：按原来的仓库、分支、路径再拉一次。项目里装的不自动换，主持人在插件卡上看到“升级”。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        info = self.plugin_dir_catalog.managed.entries().get(name)
+        if info is None or (info.get("source") or {}).get("kind") != "git":
+            raise NetworkError(f"{name} 不是从 git 仓库加的，没法重新拉取")
+        src = info["source"]
+        return self.admin_catalog_git(actor, src["url"], src.get("ref", ""), src.get("path", ""))
+
+    def admin_catalog_remove(self, actor: str | None, name: str) -> dict[str, Any]:
+        """从目录里拿掉。已经装进项目的是那一版的拷贝，照常可用（只是没有升级来源了）。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            self.plugin_dir_catalog.managed.remove(name)
+        except sources.SourceError as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("plugin.catalog")
+        return self.admin_plugins(actor)
+
+    def submit_plugin(self, entries: list[tuple[str, bytes]], note: str = "", actor: str | None = None) -> dict[str, Any]:
+        """任何登录的人都可以把插件包交给管理员审核（上架申请）；批准后进部署方目录，所有项目都能装。"""
+        from .plugin_check import lint
+        if actor is None or actor not in self.store.users:
+            raise NetworkError("登录后才能提交")
+        try:
+            files = pluginfs.package_files(entries)
+            m = pluginfs.check_package(files)
+            meta = self.plugin_submissions.add(files, actor, note, lint(files, m))
+        except (pluginfs.PluginError, sources.SourceError) as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("plugin.submission", user_id=actor, submission_id=meta["id"])
+        return meta
+
+    def my_plugin_submissions(self, actor: str | None) -> list[dict[str, Any]]:
+        return [{**m, "reviewed_by": None} for m in self.plugin_submissions.list(by=actor)]
+
+    def admin_submission_file(self, actor: str | None, sid: str, path: str) -> str:
+        """审核时看包里的一个文件（文本，最多 200 KB）。"""
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            files = self.plugin_submissions.files(sid)
+        except (sources.SourceError, OSError, pluginfs.PluginError) as e:
+            raise NetworkError(str(e)) from e
+        b = files.get(Path(path))
+        self._check(b is not None, f"file {path}")
+        return b[:200_000].decode("utf-8", errors="replace")
+
+    def admin_decide_submission(self, actor: str | None, sid: str, approve: bool, note: str = "") -> dict[str, Any]:
+        self._check(actor is None or self.is_admin(actor), "admin")
+        try:
+            meta = self.plugin_submissions.get(sid)
+            if approve:
+                if meta["status"] != "pending":
+                    raise sources.SourceError(f"申请 {sid} 已经处理过")
+                self._managed_add(actor, self.plugin_submissions.files(sid),
+                                  {"kind": "submission", "id": sid, "by": self._email(meta.get("by_user"))})
+            meta = self.plugin_submissions.decide(sid, "approved" if approve else "rejected", actor, note)
+        except (sources.SourceError, OSError, pluginfs.PluginError) as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("plugin.submission", user_id=meta["by_user"], submission_id=sid)
+        return self.admin_plugins(actor)
+
     def snapshot(self, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             agents = [a for a in self.store.agents.values() if self.can_see_agent(a, actor)]
@@ -6355,7 +6718,8 @@ class Network:
                 if g is None or not self.can_see_project(g, actor):
                     return None
                 return data if ev_type == "plugin.records" or data.get("user_id") == actor else None
-            if ev_type in ("skills.updated", "connection.updated", "draft.updated", "schedule.updated", "held.updated"):
+            if ev_type in ("skills.updated", "connection.updated", "draft.updated", "schedule.updated", "held.updated",
+                           "plugin.submission"):
                 # 我的技能、我的连接器、助理起草的消息、我的定时、等我确认的输出：只给本人
                 return data if data.get("user_id") == actor else None
             if ev_type == "release.updated":  # 只推 id：看得到的人自己去取（不变量 23）
@@ -6452,6 +6816,7 @@ TOOL_HANDLERS = {
     "add_link": Network._tool_add_link,
     "propose_brief": Network._tool_propose_brief,
     "propose_skill": Network._tool_propose_skill,
+    "propose_plugin": Network._tool_propose_plugin,
     "read_chat": Network._tool_read_chat,
     "read_request": Network._tool_read_request,
     "open_request": Network._tool_open_request,

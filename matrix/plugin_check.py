@@ -103,11 +103,15 @@ def lint(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
                 if table.field(n) is None:
                     out.append(f"触发 {t.key} 的消息里 {{{n}}} 不是表 {table.key} 的字段，会换成空")
 
-    # 插件服务：只能放进部署方目录；程序要在包里；挂点模板里的占位符
+    # 插件服务：谁能装、在哪里跑（docs/plugin-install.md）；程序要在包里；挂点模板里的占位符
     if m.service is not None:
-        out.append("带 service：只能放进部署方的插件目录（plugins.json），主持人上传会被拒绝")
         if m.service.url:
-            out.append(f"远程服务：部署方要在 Matrix 和服务两边配同一个签名密钥（环境变量 {secret_env(m.name)}）")
+            out.append(f"远程服务：放进部署方目录时，部署方在 Matrix 和服务两边配同一个签名密钥（环境变量 {secret_env(m.name)}）；"
+                       "主持人按地址自己装时，每个安装一把密钥，服务要按项目 id 认")
+        elif m.service.network:
+            out.append("托管服务要联网：只能经上架审核放进部署方目录，主持人自己上传会被拒绝")
+        elif m.service.command != "python":
+            out.append(f"托管服务用 {m.service.command} 运行：只能放进部署方目录，主持人自己上传的只能用 python")
         for a in m.service.args:
             if a.startswith("{plugin}/") and Path(a[len("{plugin}/"):]) not in files:
                 out.append(f"service.args 里的 {a} 不在包里")
@@ -145,7 +149,7 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
                                              for c in m.agent_tools) or "不开放记录工具"))
     if m.service is not None:
         where = m.service.url or " ".join([m.service.command or "", *m.service.args])
-        lines.append(f"  插件服务（{'部署方的远程服务' if m.service.url else '网络托管'}）：{where}；开给 Agent 的工具："
+        lines.append(f"  插件服务（{'远程服务' if m.service.url else '网络托管'}）：{where}；开给 Agent 的工具："
                      + ("、".join(f"{m.name}__{n}（{'读' if c == 'read' else '写'}）" for n, c in m.service.tools
                                  if c != "hook") or "无")
                      + "".join(f"；只给挂点用：{n}" for n, c in m.service.tools if c == "hook"))

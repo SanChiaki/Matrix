@@ -45,6 +45,18 @@
     用假服务核对（printenv、`/proc/*/environ`、`ps eww`），升级 dsh 时变红就不能上线。
   - 没设密钥时 dsh 不发请求，这一轮报 `MISSING_CREDENTIAL`；页面在供应商和用它的模型上标“未设置”。
 
+## 插件（“插件”标签页）
+
+设计见 [plugin-install.md](../plugin-install.md)。`GET /api/admin/plugins` 一次给出：
+
+- **主持人自己装**（`PUT /api/admin/plugins/policy`，存 `<data>/plugin-policy.json`）：远程服务插件 `public` / `listed` / `off`、允许与禁止的主机、
+  能不能上传托管插件、目录里的托管插件进不进沙箱；沙箱可不可用（`sandbox.available()` 的探测结果与原因）。改了立即生效，已经装上的远程插件也按新策略。
+- **部署方目录**：文件里的（`plugins.json`，只读，在文件里改）和后台加的（从 git 仓库添加 / 上传插件包 / 批准的上架申请；git 的可以重新拉取，
+  后台加的可以移出目录），每个插件的来源（git 地址与提交号、谁加的）、服务类型、有几个项目在用（只给数量，不给项目名）。
+- **上架申请**：说明、提交的人、包里的文件（点开看内容，`GET …/submissions/<id>/file?path=`，最多 200 KB 文本）、体检结果；批准上架或拒绝（写理由）。
+
+不是管理员的人调这些接口按“不存在”处理。
+
 ## 用量台账
 
 每次调用运行时（`Network._invoke`，自动续接的那一次也算一次），追加一行到 `<data>/usage.jsonl`：

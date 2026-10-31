@@ -133,6 +133,8 @@ TOOL_GUIDE: dict[str, str] = {
     "propose_brief": "建议修改项目纲要（写完整的新纲要和理由），主持人决定。",
     "propose_skill": ("把一个值得反复用的做法提议为项目技能（name：小写英文与连字符，description：什么时候用，"
                       "body：怎么做，reason：为什么值得沉淀），主持人批准后项目里的成员才能用。"),
+    "propose_plugin": ("项目缺一个现成的业务场景（看板、知识库、任务板……）时，提议主持人装一个插件"
+                       "（name：部署方目录里的插件名，或 url：插件作者给的地址；reason：拿来做什么）。主持人批准后才装上。"),
     "suggest_connector": ("需要某个外部服务（如飞书、GitHub、某个数据库）却没有对应的连接器时，提醒你的所有者"
                           "（connector：哪个服务，reason：拿来做什么）。只是提醒，不会授权或安装；提醒完用现有的能力继续。"),
     "read_chat": ("读项目群聊的消息（query 按关键词找，limit 条数，默认最近 20 条；助理对话里写 project：项目名）："
@@ -652,6 +654,13 @@ def format_failure_notice(task: Task, agent_name: str, max_retries: int) -> str:
 
 
 def format_proposal_notice(p: Proposal, agent_name: str) -> str:
+    if p.kind == "plugin":
+        title = (p.plugin or {}).get("title") or p.name
+        text = ([f"## 网络通知：你提议的插件「{title}」已装进项目", "它的工具、技能与页面下一轮起可用。"]
+                if p.status == "approved" else [f"## 网络通知：你提议的插件「{title}」没有装", "用现有的能力继续。"])
+        if p.note:
+            text.append(f"主持人的意见：{p.note}")
+        return "\n".join(text)
     if p.status == "approved":
         text = [f"## 网络通知：你提议的 Agent 已批准", f"新成员：{agent_name}（已加入项目，可以委托）"]
     else:

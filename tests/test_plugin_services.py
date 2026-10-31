@@ -64,7 +64,7 @@ def service_data(net: Network, g) -> Path:
     ({"hooks": {"context": [{"resource": "wiki:///a.md", "label": "x", "budget": 99999}]}}, "budget"),
     ({"hooks": {"mount": [{"resources": "wiki:///../", "as": "w"}]}}, "资源 URI"),
     ({"service": {"command": "python", "url": "https://x.io/mcp", "tools": {"x": "read"}}}, "二选一"),
-    ({"service": {"url": "http://10.0.0.5/mcp", "tools": {"x": "read"}}}, "https"),
+    ({"service": {"url": "ftp://10.0.0.5/mcp", "tools": {"x": "read"}}}, "https"),
     ({"service": {"command": "python", "tools": {"a.b": "read"}}}, "工具名无效"),
     ({"name": "x" * 60}, "最长 64"),
     ({"hooks": {"after": [{"on": "message.added", "notify": {"to": "a", "text": "b"}}]}}, "request.accepted"),
@@ -93,19 +93,21 @@ def test_example_wiki_package_is_valid():
     assert [c.resource for c in m.contexts] == ["wiki:///wiki/index.md"] and m.mounts[0].as_ == "wiki"
     assert m.afters[0].on == "request.accepted" and m.afters[0].to == "{agent}"
     assert {p.parts[1] for p in files if p.parts[0] == "skills"} == {"wiki-ingest", "wiki-query", "wiki-lint"}
-    assert not [w for w in lint(files, m) if "service" not in w]
+    assert not lint(files, m)
 
 
 # ================= 只从部署方目录安装、进程环境 =================
-def test_upload_with_service_is_refused(tmp_path: Path):
-    """不变量 24：服务端要执行的代码只来自部署方目录；主持人上传的包带 service 一律拒绝。"""
+def test_upload_with_service_is_refused_without_sandbox(tmp_path: Path, monkeypatch):
+    """不变量 24：服务端要执行的代码只来自部署方目录或沙箱；没有沙箱时主持人上传的包带托管服务一律拒绝，
+    目录里的同一个包照常可以装。"""
+    monkeypatch.setenv("MATRIX_PLUGIN_SANDBOX", "off")
     net, _, host, _, g, _ = setup(tmp_path)
     entries = [(f"llm-wiki/{p.as_posix()}", b) for p, b in load(WIKI).items()]
-    with pytest.raises(NetworkError, match="部署方的插件目录"):
-        net.upload_plugin(g.id, entries, actor=host)
+    with pytest.raises(NetworkError, match="没有可用的沙箱"):
+        net.upload_plugin(g.id, entries, confirm=True, actor=host)
     assert "llm-wiki" not in g.plugins
     net.install_plugin(g.id, "llm-wiki", actor=host)  # 目录里的同一个包可以装
-    assert "llm-wiki" in g.plugins
+    assert "llm-wiki" in g.plugins and g.plugins["llm-wiki"]["runs"] == "host"
 
 
 def test_service_env_has_no_secrets(tmp_path: Path, monkeypatch):
