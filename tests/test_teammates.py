@@ -106,6 +106,10 @@ def test_done_hands_off_to_the_next_stage(tmp_path: Path):
         c.call("task_create", {"title": "编码：按方案改（方案 #2）"}, meta=AGENT("小方"))
         c.call("task_update", {"id": 2, "status": "in_review"}, meta=AGENT("小方"))
         assert [w["agent"] for w in route("#2 完成")["wake"]] == ["小方", "小编"]
+        agent_says = json.loads(c.call("route_suggest", {"message": {"text": "#1 #2 都定了，编码请接 #3", "author_kind": "agent",
+                                                                     "author": "小方"}, "members": members, "relay": {"budget": 3}},
+                                       meta=NET)[0])
+        assert [w["agent"] for w in agent_says["wake"]] == ["小编"]  # 已完成的 #1 #2 不再叫它们的负责人，省下预算
     finally:
         c.stop()
 

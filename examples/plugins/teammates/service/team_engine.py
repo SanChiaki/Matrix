@@ -202,8 +202,8 @@ def route_suggest(a: dict, caller: dict) -> dict:
         if name and name != author and name not in involved and name not in {w["agent"] for w in wakes} \
                 and any(m["name"] == name for m in members):
             wakes.append({"agent": name, "reason": reason})
-    for t in refs:  # 先叫被提到的任务的负责人
-        if t["assignee"]:
+    for t in refs:  # 先叫被提到的任务的负责人；Agent 顺口提到已经完成的任务，不为它占一次唤醒
+        if t["assignee"] and (human or t["status"] not in ("done", "closed")):
             add(t["assignee"], f"#{t['id']} 的负责人")
     if human:  # 人确认完成了上一棒：叫后续任务（标题里引用了 #N、还没完成的）的负责人；没人认领的，按标题前缀找岗位
         finished = {t["id"] for t in refs if t["status"] == "done"}

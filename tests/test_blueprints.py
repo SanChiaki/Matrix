@@ -210,7 +210,7 @@ def test_publish_from_project_and_reuse(tmp_path: Path):
     assert any("日期「2026-11-01」" in x for x in e.value.items)
     b = net.publish_blueprint(g.id, spec, confirm=True, digest=e.value.digest, actor=wang)
     assert "{param:site}迭代：@{role:fe} 负责页面" in b["brief"]
-    assert b["manifest"]["plugins"] == [{"name": "teammates", "version": "0.2.1", "source": "catalog", "settings": {"intake": "{role:fe}"}}]
+    assert b["manifest"]["plugins"] == [{"name": "teammates", "version": "0.2.2", "source": "catalog", "settings": {"intake": "{role:fe}"}}]
     outsider, = users(net, "zhao@x.io")
     assert [x["id"] for x in net.blueprint_list(li)] == [b["id"]] and net.blueprint_list(outsider) == []
     g2, _, _ = use(net, b["id"], li, "商城", params={"site": "商城"})
