@@ -3022,7 +3022,7 @@ function imFieldsHtml(d) {
 
 function imHtml() {
   if (!S.im) { loadIm(); return '<p class="hint">加载中…</p>'; }
-  const code = S.imCode ? `<div class="im-code" role="status">在${esc(S.imCode.title)}里给机器人发这串字：<code>${esc(S.imCode.code)}</code>
+  const code = S.imCode ? `<div class="im-code" role="status">在「${esc(S.imCode.title)}」里给机器人发这串字：<code>${esc(S.imCode.code)}</code>
       <span class="s">10 分钟内有效，只显示这一次；发过去就绑定好了。</span></div>` : "";
   const li = (c) => {
     const b = c.binding, stuck = ["kicked", "auth_failed", "error", "stopped"].includes(c.status);

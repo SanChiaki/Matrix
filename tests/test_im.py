@@ -386,3 +386,46 @@ def test_external_drivers_are_discovered_by_entry_point(monkeypatch):
     drivers, errors = registry.load_drivers()
     assert drivers["acme"] is Acme and drivers["wecom"] is registry.BUILTIN["wecom"]
     assert set(errors) == {"broken", "bad", "clash"}
+
+
+def wait(cond, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while not cond():
+        if time.time() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def test_the_driver_template_works_through_the_bridge(make, monkeypatch):
+    """不变量 25 对样板驱动（examples/im-driver，企业内部 IM 照它改）同样成立：经同一个桥，先绑定才进网络，
+    群里只回“请私聊”；能改消息的 IM 先发占位、再改成正式回复。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "im-driver"))
+    from matrix.im.testing import assert_driver
+    from matrix_im_demo.devserver import DevServer
+    from matrix_im_demo.driver import DemoDriver
+
+    assert_driver(DemoDriver)
+    srv = DevServer()
+    monkeypatch.setenv("DEMO_IM_URL", srv.url)
+    try:
+        net, b = make(drivers=(DemoDriver,))
+        [alice] = users(net, "alice@x.io")
+        net.ensure_assistant(alice)
+        out = b.create_channel("demo-im", {"app_id": "app-1", "app_secret": "demo-secret"}, alice)
+        cid = out["channel"]["id"]
+        assert wait(lambda: net.store.im_channels[cid].status == "online")
+        srv.say("bob", "你好")
+        assert wait(lambda: srv.texts("bob") == [UNBOUND_TEXT])
+        srv.say("alice-im", out["code"])
+        assert wait(lambda: any("绑定好了" in t for t in srv.texts("alice-im")))
+        srv.say("alice-im", "你好")
+        assert wait(lambda: srv.texts("alice-im")[-1] == "回复：你好")
+        assert any(f["op"] == "send" and f["text"] == WORKING_TEXT for f in srv.sent)  # 先占位，后改成回复
+        assert home_texts(net, alice) == ["你好"]
+        srv.say("alice-im", "@助理 看一下", group="研发群")
+        assert wait(lambda: srv.texts("研发群") == [GROUP_TEXT])
+        assert home_texts(net, alice) == ["你好"]
+    finally:
+        srv.close()

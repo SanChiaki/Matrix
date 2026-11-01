@@ -46,7 +46,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
-| IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)，给驱动作者的指南见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)（改了驱动接口要同步改它） |
+| IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)；接企业内部 IM（确认清单、连接方式、写驱动、本地测、上线、真机验收）见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)，样板 `examples/im-driver/`（改了驱动接口要同步改这两处） |
 | 对外页面（发布物，原交付件；技能包已并进蓝图）：读者、版本与跟随档案、订阅生效条件、插件视图、反馈 | [docs/reference/releases.md](docs/reference/releases.md)，设计见 [docs/project-publishing.md](docs/project-publishing.md)，示例 `examples/delivery-dashboard/` |
 | 蓝图：对外交付的唯一形式，项目去掉数据、人和凭证后的配方；建新项目或装进已有项目，部件可勾选（技能包并进来）；项目岗位与插件设置；对外页面（原交付件） | [docs/blueprints.md](docs/blueprints.md)（第 16 节是第一版的实现说明），示例 `examples/blueprints/` |
 | 项目插件（表、沙箱页面与桥、技能、触发；插件服务与挂点；自己装、沙箱、后台目录与上架申请） | [docs/reference/plugins.md](docs/reference/plugins.md)，设计见 [docs/project-plugins.md](docs/project-plugins.md)、[docs/plugin-hooks.md](docs/plugin-hooks.md)、[docs/plugin-install.md](docs/plugin-install.md)，示例 `examples/llm-wiki/`，给插件作者的指南见 [docs/plugin-authoring.md](docs/plugin-authoring.md)（改了清单字段、SDK、触发行为要同步改它） |
@@ -96,6 +96,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/events.py` | 进程内事件总线（带 seq，供 SSE 与 CLI 消费） |
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
+| `examples/im-driver/` | IM 驱动样板：虚构的“演示 IM”（能改消息、不能发卡片）的驱动包（entry point `matrix.im_drivers`）、能在终端里扮演 IM 用户的本地服务 `devserver.py`、驱动自己的测试（在默认 `testpaths` 里）；企业内部 IM 照它改 |
 | `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
 | `examples/teammates/` | 队友协作（Raft 式）演示：前端、后端、测试三个队友，被动投递、任务板认领、略过不发言、人说“#N 完成”，`setup_demo.py`（加 `--prepare` 只搭项目），见该目录 README |
 | `examples/llm-wiki/` | 项目 Wiki 演示：两份演示资料（`materials/`）与 `setup_demo.py`（装插件、建知识管家、放资料），见该目录 README |

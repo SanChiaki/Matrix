@@ -7,6 +7,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
+      args:
+        IM_DRIVERS: ${MATRIX_IM_DRIVERS:-}   # 企业内部 IM 的驱动包，见 docs/im-driver-authoring.md
     restart: unless-stopped
     volumes:
       - matrix-data:/data            # Matrix 状态（state.json、对话、任务、Agent 私有目录、群组档案）

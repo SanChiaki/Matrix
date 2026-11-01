@@ -23,6 +23,9 @@ COPY --chown=matrix:matrix pyproject.toml uv.lock ./
 COPY --chown=matrix:matrix matrix ./matrix
 USER matrix
 RUN uv sync --frozen --no-dev
+# 企业内部 IM 的驱动包（docs/im-driver-authoring.md 第五节）：pip 安装参数，多个用空格隔开；空着不装
+ARG IM_DRIVERS=""
+RUN if [ -n "$IM_DRIVERS" ]; then uv pip install --no-cache $IM_DRIVERS; fi
 
 ENV MATRIX_HOST=0.0.0.0 \
     MATRIX_DATA=/data \

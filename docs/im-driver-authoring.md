@@ -1,93 +1,181 @@
-# 写一个 IM 驱动
+# 企业内部 IM 接入指南
 
-给要把企业内部 IM（或飞书等）接进 Matrix 的人。驱动只管和 IM 收发；谁的话能进网络、回复推到哪、卡片按钮认谁，
-都由桥（`matrix/im/bridge.py`）决定，驱动不用、也不该自己判断（不变量 25，见 [reference/im.md](reference/im.md)）。
+给要把企业内部 IM（或飞书等）接进 Matrix 的人：IM 侧的开发、写驱动的人、部署方。做完之后，人在你们的 IM 里和机器人单聊，
+就是在和自己的 Matrix 助理说话：消息进他的助理对话，回复回到 IM，定时提醒与早报推到 IM，助理起草的消息推成可确认的卡片。
 
-改了驱动接口（`matrix/im/base.py`）、注册方式或一致性检查，要同步改这份文档。
+- 桥的规则（谁的话能进网络、回复推到哪、推什么）见 [reference/im.md](reference/im.md)，不变量 25。**驱动只管收发**，
+  这些判断都在桥（`matrix/im/bridge.py`）里，驱动不用、也不该自己做。
+- 样板：[examples/im-driver](../examples/im-driver)（虚构的“演示 IM”的驱动包，带一个能在终端里扮演 IM 用户的本地服务）。
+  照它改最快；企业微信驱动 `matrix/im/wecom.py` 是一个真实的、能力更全的例子（流式、卡片、媒体解密）。
+- 改了驱动接口（`matrix/im/base.py`）、注册方式或一致性检查，要同步改这份文档。
 
-## 最小的驱动
+整个过程：一、和 IM 方确认 → 二、选连接方式 → 三、照样板写驱动 → 四、本地测 → 五、上线 → 六、真机验收。
 
-```python
-# acme_im/driver.py
-from matrix.im.base import Capabilities, Chat, Driver, Field, Inbound
+## 一、先和 IM 方确认这些
 
-class AcmeDriver(Driver):
-    kind = "acme"                       # 2–32 位小写字母、数字、-、_
-    title = "Acme IM"                   # 界面上的名字，也是消息上的“来自 Acme IM”
-    fields = (Field("app_id", "App ID"), Field("app_secret", "App Secret", secret=True))
-    caps = Capabilities(stream=False, edit=False, cards=False, proactive=True,
-                        max_text_bytes=4000, rate_per_minute=20)
+| 要确认的 | 为什么 | 落到驱动的哪里 |
+| --- | --- | --- |
+| 有没有机器人（应用）账号，凭证是什么 | 每个机器人一套凭证，接入时填 | `fields`（密钥标 `secret=True`） |
+| 能不能由我们**主动连出去**收消息：长连接、WebSocket、长轮询、消息队列 | Matrix 不对外开端口收回调，见第二节 | `start()` 里的连接线程 |
+| 每条消息里发送人的标识：是否稳定（改名、换部门不变）、是否按应用加密 | 绑定就绑这个标识；加密的也行，只要稳定 | `Inbound.sender` |
+| 单聊、群聊怎么区分；群里 @ 机器人时正文长什么样 | 第一版只做单聊，群里只回“请私聊”；正文要去掉 @ | `Inbound.chat`、`text` |
+| 消息有没有唯一 id，会不会重推 | 桥按它去重 | `Inbound.msg_id` |
+| 怎么回复一条消息；能不能**改已发的消息**、能不能流式输出 | 能改或能流式，回复就能先占位再刷新 | `caps.edit` / `stream`、`open_reply()` |
+| 能不能**主动**给某个人发单聊（用户没先说话时）；有没有时间窗口 | 定时提醒、早报、委托回报靠它 | `caps.proactive`、`push()` |
+| 有没有带按钮的互动卡片，点击怎么回来，能不能更新卡片 | 草稿的“发送 / 放弃”；没有就用文字指令 | `caps.cards`、`push_card()`、`sink.on_action` |
+| 单条消息的长度上限、支持 markdown 吗 | 桥按上限切段 | `caps.max_text_bytes` |
+| 限频：每个会话每分钟几条 | 桥按它节流（进度刷新超了就丢） | `caps.rate_per_minute`、`min_update_interval` |
+| 回复有没有时限（如企业微信的流式 10 分钟） | 桥在时限前收尾，之后改主动推送 | `caps.reply_ttl` |
+| 一个机器人能不能同时有多条连接；新连接是否顶掉旧的、怎么通知 | 被顶掉就停下等人处理，不来回顶 | `on_status("kicked")` |
+| 图片、文件怎么下载：要不要鉴权、要不要解密；下载地址在公网还是内网 | 附件进助理对话 | `InboundFile.fetch()`，见第八节 |
+| 心跳要求、断线怎么发现 | 断线要自己重连 | 心跳线程 |
+| 有没有测试租户 | 第六节的真机验收要用 | — |
 
-    def start(self):                    # 立即返回；连接、心跳、重连放在自己的线程里
-        ...                             # 连上后 self.sink.on_status("online")
+## 二、连接方式
 
-    def stop(self): ...
+Matrix 服务只监听 `127.0.0.1`（对外经部署方的反向代理），所以驱动和 IM 之间最好是 **Matrix 主动连出去**：
 
-    def respond(self, handle, chat: Chat, text: str): ...   # 回复收到的那条消息
-    def push(self, chat: Chat, text: str): ...              # 主动发一条（proactive=True 才会被调用）
+1. **长连接**（WebSocket 等；企业微信智能机器人、飞书的事件长连接都是）：首选，样板就是这种。
+2. **长轮询 / 拉取接口**：驱动里一个线程循环拉，同样只连出去。
+3. **只有回调地址**（IM 往你给的 URL 推）：桥目前没有给驱动开 HTTP 入口，驱动也**不要**在 Matrix 进程里自己开端口对外。办法：
+   - 让 IM 方或内网中间件（消息队列、网关）提供拉取或长连接，驱动连它；
+   - 在内网放一个小的转发服务：接 IM 的回调、验签，驱动用长连接连它（就像样板的 `devserver.py` 那样）。
+   确实需要回调入口时，再给桥加一个统一的（验签、限流、走部署方的反向代理），不要在各个驱动里各开各的。
 
-    # 收到消息时：
-    #   self.sink.on_message(Inbound(msg_id=..., chat=Chat("single", uid), sender=uid, text=..., handle=...))
+IM 的地址只由部署方配（环境变量），不做成用户在界面上能填的字段：能填地址就能让网络替他连任意内网地址。
+
+## 三、照样板写驱动
+
+```
+examples/im-driver/
+  pyproject.toml               包名、依赖、entry point
+  matrix_im_demo/driver.py     驱动（换掉「协议」那几处）
+  matrix_im_demo/devserver.py  本地的演示 IM：给测试用，也能在终端里扮演 IM 里的人
+  tests/test_demo_im_driver.py 驱动自己的测试
 ```
 
-在包的 `pyproject.toml` 里注册：
+1. 复制这个目录，改包名、`kind`（2–32 位小写字母、数字、`-`、`_`）、`title`（界面上的名字，也是消息上的“来自 …”）、`fields`。
+2. 换掉标着「协议」的方法：`_login`（登录 / 订阅）、`_frame` 与 `parse_message`（收）、`_send_text` / `_edit`（发、改）。
+   线程结构照抄：连接线程（连接、登录、读帧、断线指数退避重连）+ 心跳线程 + 派发线程。
+3. 按第一节的答案定 `caps`（见下面的“能力与降级”）。
+4. 在 `pyproject.toml` 里注册：
 
-```toml
-[project.entry-points."matrix.im_drivers"]
-acme = "acme_im.driver:AcmeDriver"
-```
+   ```toml
+   [project.entry-points."matrix.im_drivers"]
+   acme = "acme_im.driver:AcmeDriver"
+   ```
 
-装进 Matrix 所在的环境（`uv pip install ./acme-im` 或作为依赖加进部署），重启服务就能在后台“IM 机器人”页和个人的
-“在 IM 里找助理”里选到。`kind` 和内置驱动重名、加载失败、不是 `Driver` 子类的会被跳过，原因列在后台页上。
+   装进 Matrix 所在的环境就能在后台“IM 机器人”页和个人的“在 IM 里找助理”里选到。`kind` 和内置驱动重名、加载失败、
+   不是 `Driver` 子类的会被跳过，原因列在后台页首。外部包不能顶替内置驱动。
 
-## 接口
+### 接口
 
-- `fields`：接入时要填的项，界面据此生成表单。`secret=True` 的只进加密保管库、不回显；`required=False` 可以不填。
-  构造时拿到 `config`（非密钥）与 `secrets`（密钥）两个 dict。**构造函数里不要连网**。
-- `start()` / `stop()`：状态经 `sink.on_status(status, error)` 报：`connecting`、`online`、`auth_failed`（凭证不对，别重试）、
-  `kicked`（同一个机器人在别处连上了，别重连）、`error`。报了 `auth_failed` / `kicked` 桥会停掉这个驱动，等人点“重新连接”。
+- `fields`：接入时要填的项，界面据此生成表单。`secret=True` 的只进加密保管库、不回显、改的时候留空沿用；`required=False` 可以不填。
+  构造时拿到 `config`（非密钥）与 `secrets`（密钥）两个 dict。**构造函数里不要连网**（一致性检查会用空配置构造）。
+- `start()` / `stop()`：`start()` 立即返回，连接放在自己的线程里。状态经 `sink.on_status(status, error)` 报：
+  `connecting`、`online`、`auth_failed`（凭证不对，别重试）、`kicked`（同一个机器人在别处连上了，别重连）、`error`（临时错误，自己重连）。
+  报了 `auth_failed` / `kicked` 桥会停掉这个驱动，等人改了配置或点“重新连接”。
 - `sink.on_message(Inbound)`：
   - `msg_id`：IM 里这条消息的标识，桥用它去重；
   - `chat`：`Chat("single", <对方标识>)` 或 `Chat("group", <群标识>)`；
   - `sender`：发消息的人在这个 IM（这个机器人）下的**稳定**标识，绑定就绑它；
   - `text`：去掉开头的 @机器人；`quote`：引用的那条的文字；
   - `files`：`InboundFile(name, mime, fetch)`，`fetch()` 只在桥决定收下这条消息后才调用，可以在里面下载、解密，并改掉 `name` / `mime`；
-  - `handle`：你自己回复时要用的东西（如企业微信的 `req_id`），桥原样交回 `respond` / `open_reply`。
-- `sink.on_action(Action)`：卡片按钮被点了（`key` 是 `Button.key`）。返回值是要显示在卡片上的结果，能改卡片的驱动用它更新。
-- **回调在哪个线程**：如果你的发送要等 IM 的回执、回执又由读消息的线程收，就不要在读消息的线程里调 `sink`（桥处理时会让你发消息）。
-  像 `wecom.py` 那样另开一个派发线程。
-- 出错时抛 `DriverError`：桥把它记在渠道或绑定上，不往上抛。
+  - `handle`：你自己回复时要用的东西（消息 id、请求号……），桥原样交回 `respond` / `open_reply`。
+- `respond(handle, chat, text)`：回复收到的那条；`push(chat, text)`：主动发一条（`proactive=True` 才会被调用）。
+  能改消息或能流式的覆盖 `open_reply(handle, chat)`，返回自己的 `Reply`（`update(text)` 刷新、`finish(text)` 收尾，样板的 `DemoReply`）；
+  能发卡片的覆盖 `push_card(chat, card)`，按钮点击经 `sink.on_action(Action)` 回来（`key` 是 `Button.key`），
+  返回值是要显示在卡片上的结果，能更新卡片的驱动用它更新（见 `wecom.py`）。
+- **回调在哪个线程**：桥处理一条消息时会让驱动发消息并等回执；回执如果也由读帧线程收，就不要在读帧线程里调 `sink`，
+  另开派发线程（样板与 `wecom.py` 都是这样），否则会互相等死。
+- 发不出去时抛 `DriverError`：桥把它记在机器人或绑定的状态上（界面上看得到），不往上抛，内容仍在 Matrix 里。
 
-## 能力与降级
+### 能力与降级
 
 | `Capabilities` | 含义 | 没有时桥怎么做 |
 | --- | --- | --- |
 | `stream` / `edit` | 一条回复能边做边刷新 / 发出的消息能改 | 不发占位、不刷新，收尾时 `respond` 一条 |
 | `cards` | 能发带按钮的卡片，点击经 `on_action` 回来 | `Card.as_text()`：文字 + “回复「发送 3」” |
-| `proactive` | 能主动给一个单聊发消息 | 只在回复里说话 |
-| `max_text_bytes` | 一条正文的上限（UTF-8 字节） | 桥按它切段 |
-| `reply_ttl` | 一条回复从开始到收尾的时限（秒） | 桥在到点前 30 秒收尾，之后主动推送 |
-| `min_update_interval`、`rate_per_minute` | 刷新间隔、每会话每分钟条数 | 桥按它节流 |
+| `proactive` | 能主动给一个单聊发消息 | 只在回复里说话；推送记成绑定的错误；太长的回复截断并提示去 Matrix 看 |
+| `max_text_bytes` | 一条正文的上限（UTF-8 字节，至少 200） | 桥按它切段，后面几段主动推送 |
+| `reply_ttl` | 一条回复从开始到收尾的时限（秒，大于 60） | 桥在到点前 30 秒收尾成“还在做，做好了发给你”，之后主动推送 |
+| `min_update_interval`、`rate_per_minute` | 刷新间隔、每会话每分钟条数 | 桥按它节流：刷新超了就丢，正式消息等到能发 |
 
-能流式或能改消息的，覆盖 `open_reply(handle, chat)` 返回自己的 `Reply`（`update(text)` 刷新、`finish(text)` 收尾）；
-能发卡片的覆盖 `push_card(chat, card)`。
+## 四、本地测
 
-## 检查与测试
-
-```python
-from matrix.im.testing import assert_driver
-from acme_im.driver import AcmeDriver
-
-def test_driver_shape():
-    assert_driver(AcmeDriver)    # 声明齐不齐、该实现的方法实现了没有、空配置能不能构造
+```bash
+uv run pytest -q examples/im-driver/tests     # 样板自己的测试；你的驱动包照这个写
 ```
 
-行为测试照 `matrix/im/fake.py`（内存里的假驱动）与 `tests/test_wecom.py`（本地起一个假的长连接服务）的写法。
-桥的规则已经由 `tests/test_im.py` 对任何驱动都保证了，驱动只需要测自己的收发。
+1. **结构检查**：在驱动包的测试里跑 `matrix.im.testing.assert_driver(MyDriver)`（声明齐不齐、该实现的方法实现了没有、空配置能不能构造）。
+2. **收发测试**：起一个假的 IM 服务（照 `devserver.py`，或者 Matrix 的 `tests/test_wecom.py`），把驱动的地址指过去，
+   测登录、收消息、回复、改消息、主动推送、凭证不对不重试、被顶掉不重连、断线重连。
+   桥的规则已经由 Matrix 的 `tests/test_im.py` 对任何驱动保证了（其中一条就是对着样板驱动跑的），驱动只需要测自己的收发。
+3. **接进本地 Matrix 走一遍**（两个终端，在 Matrix 仓库里）：
 
-## 安全
+   ```bash
+   uv run --with-editable examples/im-driver python -m matrix_im_demo.devserver --port 8790   # 终端 1：演示 IM
+   ```
 
-- 驱动要连的地址如果做成可填，只能由部署方填（环境变量或部署方配置），不要做成用户在界面上可填的字段：网络会被当跳板。
-- 下载 IM 消息里的文件用 `matrix.mcp_client.fetch_public`（只连 https 公网、不跟重定向、有大小上限）；企业内网的 IM 文件服务
-  需要另行评估，别直接放宽。
+   ```bash
+   DEMO_IM_URL=ws://127.0.0.1:8790 uv run --with-editable examples/im-driver matrix --runtime scripted   # 终端 2：Matrix
+   ```
+
+   打开 http://127.0.0.1:8765 注册，进“助理与定时 → 在 IM 里找助理 → 接上我自己的机器人”，选“演示 IM”，App ID 随便填，App Secret 填 `demo-secret`，
+   拿到绑定码；在演示 IM 的终端里输入 `alice: <绑定码>`，再输入 `alice: 有什么要我处理的？`，就能看到机器人的回复打印出来。
+   换成你的驱动：把 `--with-editable` 指向你的包、环境变量换成你的地址，连你们 IM 的测试租户。
+
+## 五、上线（部署方）
+
+1. **把驱动包装进 Matrix 的环境**：
+   - Docker（`deploy/`）：在 `deploy/.env` 里写 `MATRIX_IM_DRIVERS`，值是 pip 的安装参数，多个用空格隔开，例如
+     内部 PyPI 上的包名 `acme-im==1.2.0`，或 `git+https://git.corp.example/im/acme-im.git@v1.2.0`；
+     然后 `docker compose up -d --build`。镜像构建时装进去，空着就不装。
+   - 不用 Docker：`uv pip install <包>` 装进 Matrix 所在的虚拟环境，重启服务。
+2. **驱动要的环境变量**（IM 的地址等）写进 `deploy/.env`（Docker 会带进容器），或服务的启动环境。
+3. 重启后打开后台 `/admin#im`：页首没有“有 IM 驱动没加载上”就是装好了。
+4. **接机器人**，两种可以同时有：
+   - **部署方的机器人**（大家共用）：管理员在后台“IM 机器人”页添加，填驱动要的字段；每个人在应用里拿绑定码发给它。
+   - **个人的机器人**：每个人在“助理与定时 → 在 IM 里找助理 → 接上我自己的机器人”接自己的，只能绑自己（接上时直接给一个绑定码）。
+5. **告诉用户怎么绑定**：Matrix 里“助理与定时 → 在 IM 里找助理”→ 点“拿绑定码”拿一个 8 位绑定码（10 分钟有效）→
+   在 IM 里和机器人单聊、把码发给它 → 回“绑定好了”。之后在 IM 里说的话进助理对话；“推送”开关管没人说话时的提醒推不推。
+6. **只支持单进程部署**：一个机器人只能有一条连接，两个 Matrix 进程会互相顶掉。
+
+## 六、真机验收
+
+接上测试租户后，照这张表在 IM 里走一遍（企业微信 2026-11-01 按这张表走过，见 [reference/im.md](reference/im.md)“真机验证”）：
+
+| # | 在 IM 里做 | 应该看到 |
+| --- | --- | --- |
+| 1 | 单聊把绑定码发给机器人 | 回“绑定好了”；后台 / 个人卡片上状态是“在线”、有绑定 |
+| 2 | 另一个没绑定的人给机器人发消息 | 回“还没有绑定……”；谁的助理对话里都没有这条 |
+| 3 | 在群里 @ 机器人 | 回“我只在单聊里工作：请私聊我。”；内容不进 Matrix |
+| 4 | 单聊问一句话 | 能改消息或流式的：先“收到，正在处理…”，再变成回复；Matrix 的助理对话里有这条，带“来自<IM 名>” |
+| 5 | 在 Matrix 网页里和助理说一句 | IM 里**收不到**这一轮的回复 |
+| 6 | 单聊发“10 分钟后提醒我喝水” | 10 分钟后不用说话，IM 里收到提醒（主动推送） |
+| 7 | 单聊发“在<项目名>项目里说：周五交初稿” | 收到草稿正文和带“发送”“放弃”的卡片（没有卡片的 IM：文字“回复「发送 1」”）；发送后项目群聊里出现这条 |
+| 8 | 发一张图片、一个文件（IM 支持的话） | 助理对话里这条消息带附件 |
+| 9 | 用真模型问一个要做几分钟的事、要一篇很长的文字 | 中途按进度刷新（能改消息的）；超长的分成几条 |
+| 10 | 重启 Matrix 服务 | 机器人自己连回来、状态“在线”，绑定还在 |
+| 11 | 把同一个机器人在别处也连上 | 这边显示“在别处连上了，这里已断开”，不来回顶；点“重新连接”恢复 |
+| 12 | 把 Secret 改错 | 显示“凭证不对”，不反复重试 |
+
+## 七、排错
+
+| 看到 | 原因与处理 |
+| --- | --- |
+| 后台页首“有 IM 驱动没加载上” | 包装错了环境、import 出错、`kind` 和内置重名：按括号里的原因改，重启 |
+| 状态“连接中”一直不变、或“出错了” | 连不上 IM 的地址：查环境变量、网络（容器能不能访问内网 IM）、IM 的白名单 |
+| “凭证不对” | `auth_failed`：改字段后点“重新连接” |
+| “在别处连上了，这里已断开” | 同一个机器人还有别的连接（另一个 Matrix 进程、IM 方的调试工具）：停掉那边再点“重新连接” |
+| 绑定上有错误 | 最近一次主动推送失败（例如 IM 要求用户先说过话）：内容仍在 Matrix 里，让这个人在 IM 里先说一句 |
+| 回复只来了最后一条、没有占位 | 驱动没声明 `stream` / `edit`，或 IM 回得太快（脚本助理几乎是瞬间回复） |
+| 驱动自己的报错 | 打在服务的标准错误输出里（Docker：`docker compose logs matrix`） |
+
+## 八、安全
+
+- IM 的地址只由部署方配（环境变量或部署方配置），不要做成用户在界面上可填的字段：网络会被当跳板。
+- 下载 IM 消息里的文件用 `matrix.mcp_client.fetch_public`（只连 https 公网、不跟重定向、有大小上限）。企业内网的 IM 文件服务
+  不能直接用它：需要按部署方配置的白名单放行（参照 `web_fetch` 的做法），先和维护者商量，别直接放宽。
 - 不要在日志、异常信息里带出 `secrets`。
+- 外部驱动包是装进 Matrix 进程里的 Python 代码，权限和服务本身一样大：部署方只装审查过、信得过的包。

@@ -1,7 +1,7 @@
 # IM 入口：在企业微信等 IM 里和自己的助理单聊
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。需求 #63，不变量见 [invariants.md](invariants.md) 第 25 条（也涉及 10、13、21）。
-> 写驱动见 [im-driver-authoring.md](../im-driver-authoring.md)。
+> 接企业内部 IM（写驱动、本地测、上线、真机验收）见 [im-driver-authoring.md](../im-driver-authoring.md)，样板驱动包在 `examples/im-driver/`。
 
 人在 IM 里和一个机器人单聊，就是在和自己的助理说话：消息进他的**助理对话**，回复回到 IM。第一版只做单聊助理；
 群里 @ 机器人只回一句“请私聊”。参照 OpenAI dots 的“只有所有者能指挥”与“各渠道历史分开”
@@ -18,7 +18,9 @@ IM ⇄ 驱动（matrix/im/wecom.py，或 entry point 装上的外部驱动）⇄
   （流式、改消息、卡片、主动推送、单条长度、回复时限、刷新间隔、每分钟条数）。
 - **桥**写全部规则，对每个驱动都一样：绑定、只认绑定的人、回复回到哪里、推什么、按能力降级、限频。
 - **注册**（`matrix/im/registry.py`）：内置企业微信；外部驱动包用 entry point `matrix.im_drivers` 注册，装进同一个环境就被发现，
-  重名、加载失败的跳过（后台“IM 机器人”页列出原因）。外部包不能顶替内置驱动。
+  重名、加载失败的跳过（后台“IM 机器人”页列出原因）。外部包不能顶替内置驱动。Docker 部署用 `MATRIX_IM_DRIVERS` 在构建镜像时装（`deploy/README.md`）。
+- **样板**（`examples/im-driver/`）：虚构的“演示 IM”（能改消息、不能发卡片）的驱动包与本地服务；`tests/test_im.py` 对它经桥跑一遍，
+  它自己的测试也在默认的 `uv run pytest` 里。
 - 服务进程里 `server.main()` 建一个 `ImBridge` 并 `start()`（一个机器人只能有一条连接：只支持单进程部署）。
   `create_app(network)` 不传桥时建一个不连 IM 的，供测试与只看 REST 的场合。
 
@@ -111,3 +113,11 @@ IM ⇄ 驱动（matrix/im/wecom.py，或 entry point 装上的外部驱动）⇄
 - 服务重启后，进行中的回复改由主动推送补发；没用的绑定码作废。
 - 只支持单进程部署：一个机器人只能有一条连接，两个进程会互相顶掉。
 - 飞书还没有驱动：接口为它留了位置（事件长连接 + 改消息 / 更新卡片对应 `edit` 与 `cards`）。
+- 只有回调地址（webhook）的 IM：桥没有给驱动开 HTTP 入口，要经内网的转发服务或拉取接口（[im-driver-authoring.md](../im-driver-authoring.md) 第二节）。
+
+## 真机验证
+
+2026-11-01 用一个真的企业微信智能机器人（个人机器人、长连接）按 [im-driver-authoring.md](../im-driver-authoring.md) 第六节走过：
+绑定、单聊收发（先用脚本助理，再用 dsh + 平台配的模型）、定时到点主动推送、草稿的正文 + 按钮卡片与点“发送”（草稿发进了项目群聊）、
+服务重启后自动重连且绑定还在，都和预期一致；网页里说的那一轮，企业微信里没有收到。脚本助理回得太快时只看得到最后的文字，看不到占位。
+没在真机上专门测：没绑定的人、群里 @、图片与文件、被另一条连接顶掉（这些由 `tests/test_im.py`、`tests/test_wecom.py` 对假服务覆盖）。
