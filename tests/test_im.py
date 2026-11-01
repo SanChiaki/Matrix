@@ -354,7 +354,7 @@ def test_secrets_stay_in_the_vault_and_other_peoples_bots_are_404(make, tmp_path
     assert o.patch(f"/api/me/im-bindings/{bid}", json={"push": False}).status_code == 404
     assert o.get("/api/admin/im").status_code == 404
     events = json.dumps([e.to_dict() for e in net.bus.since(0)], ensure_ascii=False)
-    state = (tmp_path / "data" / "state.json").read_text()
+    state = (tmp_path / "data" / "state.json").read_text(encoding="utf-8")
     assert secret not in events and secret not in state
     assert net.event_view("im.updated", {"user_id": net.store.im_channels[cid].owner_id}, "someone") is None
     assert a.delete(f"/api/me/im/{cid}").status_code == 200

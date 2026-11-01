@@ -103,36 +103,24 @@ class DemoDriver(Driver):
         attempt = 0
         while not self._stop.is_set():
             self.sink.on_status("connecting", "" if attempt == 0 else "连接断了，正在重连")
+            opened = False
             try:
-                ws = connect(self.url, open_timeout=10, ping_interval=None, close_timeout=3)
+                with connect(self.url, open_timeout=10, ping_interval=None, close_timeout=3) as ws:
+                    opened = True
+                    result = self._session(ws)
             except Exception as e:
-                attempt += 1
-                self.sink.on_status("error", f"连不上演示 IM：{type(e).__name__}")
-                if self._stop.wait(min(MAX_BACKOFF, 2 ** (attempt - 1))):
-                    return
-                continue
-            self._ws, self._missed = ws, 0
-            try:
-                ok, err = self._login(ws)
-                if not ok:
-                    self.sink.on_status("auth_failed", err)  # 凭证不对：别重试，等人改了再点“重新连接”
-                    return
+                if opened:  # 关连接时出的错：当作断线
+                    result = "dropped"
+                else:
+                    attempt += 1
+                    self.sink.on_status("error", f"连不上演示 IM：{type(e).__name__}")
+                    if self._stop.wait(min(MAX_BACKOFF, 2 ** (attempt - 1))):
+                        return
+                    continue
+            if result == "auth_failed":  # 凭证不对：别重试，等人改了再点“重新连接”
+                return
+            if result == "online":
                 attempt = 0
-                self.sink.on_status("online")
-                threading.Thread(target=self._heartbeat, args=(ws,), name="demo-im-beat", daemon=True).start()
-                for raw in ws:
-                    self._frame(raw)
-            except ConnectionClosed:
-                pass
-            except Exception as e:
-                self.sink.on_status("error", f"{type(e).__name__}: {e}")
-            finally:
-                self._ws = None
-                self._fail_acks("连接断了")
-                try:
-                    ws.close()
-                except Exception:
-                    pass
             if self._kicked:  # 同一个应用在别处登录了：不重连，免得两个实例互相顶
                 self.sink.on_status("kicked", "这个机器人在别处连上了（同一个机器人只能有一条连接）")
                 return
@@ -141,6 +129,29 @@ class DemoDriver(Driver):
             attempt += 1
             if self._stop.wait(min(MAX_BACKOFF, 2 ** (attempt - 1))):
                 return
+
+    def _session(self, ws: ClientConnection) -> str:
+        """一条连接从登录到断开。返回 auth_failed（登录被拒）、online（登录成功过）或 dropped（没登录上就断了）。"""
+        self._ws, self._missed = ws, 0
+        result = "dropped"
+        try:
+            ok, err = self._login(ws)
+            if not ok:
+                self.sink.on_status("auth_failed", err)
+                return "auth_failed"
+            result = "online"
+            self.sink.on_status("online")
+            threading.Thread(target=self._heartbeat, args=(ws,), name="demo-im-beat", daemon=True).start()
+            for raw in ws:
+                self._frame(raw)
+        except ConnectionClosed:
+            pass
+        except Exception as e:
+            self.sink.on_status("error", f"{type(e).__name__}: {e}")
+        finally:
+            self._ws = None
+            self._fail_acks("连接断了")
+        return result
 
     def _heartbeat(self, ws: ClientConnection) -> None:
         while not self._stop.wait(self.heartbeat):
