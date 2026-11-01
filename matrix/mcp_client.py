@@ -160,6 +160,17 @@ def _public_opener() -> urllib.request.OpenerDirector:
 _PUBLIC_OPENER = _public_opener()
 
 
+def fetch_public(url: str, limit: int, timeout: float = 30) -> tuple[bytes, str]:
+    """下载一个 https 公网地址的内容（IM 消息里的图片、文件），不跟重定向、不连内网；超过 limit 字节报错。
+    返回（内容，Content-Disposition 头）。"""
+    check_public_url(url)
+    with _PUBLIC_OPENER.open(urllib.request.Request(url, method="GET"), timeout=timeout) as resp:
+        data = resp.read(limit + 1)
+        if len(data) > limit:
+            raise MCPError(f"文件超过上限 {limit // 1_000_000} MB")
+        return data, resp.headers.get("Content-Disposition", "") or ""
+
+
 class MCPError(RuntimeError):
     pass
 

@@ -117,3 +117,6 @@ button.link.danger { color: var(--rejected); }
 .table-wrap td.wrap { white-space: normal; min-width: 220px; }
 dialog.pl-file pre { max-height: 60vh; overflow: auto; background: var(--bg); padding: 10px 12px; border-radius: 8px; font-size: 12px;
   white-space: pre-wrap; word-break: break-word; width: min(880px, 90vw); }
+/* IM 机器人页 */
+#im .table-wrap { margin-top: 16px; }
+#im-driver-errors:empty { display: none; }

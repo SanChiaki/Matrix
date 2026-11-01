@@ -660,6 +660,43 @@ class Schedule:
 
 
 @dataclass
+class ImChannel:
+    """一个 IM 机器人（docs/reference/im.md，不变量 25）：个人的（owner_id 是它的主人，只能绑主人）或部署方的
+    （owner_id 为空，管理员配置，很多人各自绑定）。密钥在保管库 `im-<id>`，不在这里。"""
+
+    id: str
+    kind: str                            # 驱动：wecom，或经 entry point 装上的外部驱动
+    owner_id: str | None                 # 个人机器人的主人；None = 部署方的
+    title: str = ""
+    config: dict[str, str] = field(default_factory=dict)  # 驱动的非密钥字段（如企业微信的 Bot ID）
+    enabled: bool = True
+    status: str = "stopped"              # connecting | online | auth_failed | kicked | error | stopped
+    error: str = ""
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ImBinding:
+    """某个人在某个 IM 机器人上的身份：sender 是经绑定码核验过的、这个人在那个 IM 里的标识。"""
+
+    id: str
+    channel_id: str
+    user_id: str
+    sender: str
+    chat_id: str                         # 推送用的单聊
+    push: bool = True                    # 没人说话时的消息（定时、早报、等你处理的事）推不推到这里
+    error: str = ""                      # 最近一次推送失败的原因
+    last_inbound_at: float | None = None
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Approval:
     """Agent 想在工作目录以外操作（dsh 沙箱升权）时向它的所有者发起的一次性申请。"""
 

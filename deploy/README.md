@@ -67,6 +67,16 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，把 CA 加进容器的证书库（或设 `SSL_CERT_FILE`）。
 升级 dsh 后跑 `matrix-dsh-check`，`web-fetch` 一项确认自带的 `web_fetch` 仍然关得掉。
 
+## IM 入口（可选）
+
+企业微信是内置的：在后台 `/admin#im` 添加部署方的机器人，或让每个人在“助理与定时 → 在 IM 里找助理”接自己的（[docs/reference/im.md](../docs/reference/im.md)）。
+连接是从容器出站的长连接，不用开端口；私有化部署的企业微信在 `.env` 里写 `MATRIX_WECOM_URL`。
+
+企业内部 IM 按 [docs/im-driver-authoring.md](../docs/im-driver-authoring.md) 写成驱动包，在 `.env` 里写 `MATRIX_IM_DRIVERS`
+（pip 安装参数，空格隔开，例如 `acme-im==1.2.0` 或 `git+https://git.corp.example/im/acme-im.git@v1.2.0`）和驱动要的环境变量，
+然后 `docker compose up -d --build`：构建镜像时装进去。后台“IM 机器人”页首没有“有 IM 驱动没加载上”就是装好了。
+只支持一个 Matrix 进程：同一个机器人两条连接会互相顶掉。
+
 ## 更新
 
 ```bash

@@ -29,6 +29,7 @@ from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, cap
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
+from .im.bridge import ImBridge
 from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
@@ -389,6 +390,22 @@ class DraftSendIn(BaseModel):
     text: str | None = Field(None, max_length=4000)  # 主人在确认卡上改过的文本；不写就照草稿发
 
 
+class ImIn(BaseModel):
+    kind: str = Field(..., max_length=32)
+    title: str = Field("", max_length=60)
+    values: dict[str, str] = Field(default_factory=dict)  # 驱动声明的字段；密钥只进保管库，不回显
+
+
+class ImPatch(BaseModel):
+    title: str | None = Field(None, max_length=60)
+    enabled: bool | None = None
+    values: dict[str, str] | None = None  # 只改填了的；密钥留空 = 沿用原来的
+
+
+class ImBindingPatch(BaseModel):
+    push: bool | None = None
+
+
 class SchedulePatch(BaseModel):
     enabled: bool
 
@@ -542,10 +559,14 @@ PLUGIN_FRAME_HEADERS = {
 }
 
 
-def create_app(network: Network) -> FastAPI:
+def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
+    """im：IM 桥。不传时建一个不连 IM 的（测试与只看 REST 的场合）；服务进程里由 main() 建好并 start()。"""
+    im = im or ImBridge(network)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         yield
+        im.stop()
         # 事件流阻塞在线程里等事件，uvicorn 取消不了线程：不主动唤醒，进程会卡在关闭阶段，
         # 浏览器那头的连接也一直不断，EventSource 就不会触发重连。
         network.bus.close()
@@ -567,6 +588,7 @@ def create_app(network: Network) -> FastAPI:
         return JSONResponse({"detail": str(e)}, status_code=400)
 
     app.state.network = network
+    app.state.im = im
 
     def set_cookie(resp: Response, token: str) -> None:
         resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, path="/")
@@ -1187,6 +1209,50 @@ def create_app(network: Network) -> FastAPI:
         network.discard_draft(draft_id, actor=user.id)
         return {"ok": True}
 
+    # ---- IM：在 IM 里和自己的助理单聊（不变量 25）。个人机器人只给主人；部署方的人人能绑定、只有管理员能改 ----
+    @app.get("/api/me/im")
+    def my_im(user: Me) -> dict:
+        return im.my_channels(user.id)
+
+    @app.post("/api/me/im")
+    def add_im(body: ImIn, user: Me) -> dict:
+        return im.create_channel(body.kind, body.values, user.id, title=body.title)
+
+    @app.patch("/api/me/im/{channel_id}")
+    def patch_im(channel_id: str, body: ImPatch, user: Me) -> dict:
+        return im.update_channel(channel_id, user.id, values=body.values, title=body.title, enabled=body.enabled)
+
+    @app.post("/api/me/im/{channel_id}/reconnect")
+    def reconnect_im(channel_id: str, user: Me) -> dict:
+        return im.reconnect(channel_id, user.id)
+
+    @app.delete("/api/me/im/{channel_id}")
+    def delete_im(channel_id: str, user: Me) -> dict:
+        im.delete_channel(channel_id, user.id)
+        return {"ok": True}
+
+    @app.post("/api/me/im/{channel_id}/code")
+    def im_code(channel_id: str, user: Me) -> dict:
+        return im.issue_code(channel_id, user.id)
+
+    @app.patch("/api/me/im-bindings/{binding_id}")
+    def patch_im_binding(binding_id: str, body: ImBindingPatch, user: Me) -> dict:
+        im.update_binding(binding_id, user.id, push=body.push)
+        return {"ok": True}
+
+    @app.delete("/api/me/im-bindings/{binding_id}")
+    def delete_im_binding(binding_id: str, user: Me) -> dict:
+        im.delete_binding(binding_id, user.id)
+        return {"ok": True}
+
+    @app.get("/api/admin/im")
+    def admin_im(user: Me) -> dict:
+        return im.admin_channels(user.id)
+
+    @app.post("/api/admin/im")
+    def admin_add_im(body: ImIn, user: Me) -> dict:
+        return im.create_channel(body.kind, body.values, user.id, title=body.title, shared=True)
+
     # ---- 用到别处资料、等所有者确认的回复与交付（不变量 22）：只有 Agent 的所有者能决定，别人一律 404 ----
     @app.post("/api/held/{held_id}")
     def decide_held(held_id: str, body: HeldIn, user: Me) -> dict:
@@ -1572,7 +1638,11 @@ def main() -> None:
     if network.plugin_dir_catalog.items():
         print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
     network.start_scheduler()
-    config = uvicorn.Config(create_app(network), host=args.host, port=args.port, log_level="warning",
+    im = ImBridge(network)
+    im.start()
+    if im.driver_errors:
+        print(f"有 IM 驱动没加载上：{im.driver_errors}")
+    config = uvicorn.Config(create_app(network, im), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3)
     MatrixServer(config, network).run()
 

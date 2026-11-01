@@ -54,6 +54,7 @@ function deny(title, text) {
   $("#dash").hidden = true;
   $("#models").hidden = true;
   $("#plugins").hidden = true;
+  $("#im").hidden = true;
   $(".admin-tabs").hidden = true;
   $("#denied").hidden = false;
   $("#denied-title").textContent = title;
@@ -598,15 +599,111 @@ function bindPlugins() {
   });
 }
 
+// ---------- IM 机器人：大家共用的（部署方的）；个人的在应用里 ----------
+const I = { data: null, edit: null };
+const IM_STATUS = { online: "在线", connecting: "连接中", auth_failed: "凭证不对", kicked: "在别处连上了，这里已断开",
+  error: "出错了", stopped: "已停用" };
+
+async function loadIm() {
+  try { I.data = await api("/api/admin/im"); }
+  catch (e) { $("#im-error").textContent = e.message; return; }
+  renderIm();
+}
+
+function renderIm() {
+  const d = I.data;
+  const errs = Object.entries(d.driver_errors || {});
+  $("#im-driver-errors").innerHTML = errs.length ? `<div class="warn-box">有 IM 驱动没加载上：${errs.map(([k, v]) =>
+    `<code>${esc(k)}</code>（${esc(v)}）`).join("；")}</div>` : "";
+  const title = (kind) => d.drivers.find((x) => x.kind === kind)?.title || kind;
+  table("#t-im", [
+    { label: "名称", html: (c) => `<b>${esc(c.title)}</b> <span class="muted">${esc(title(c.kind))}</span>` },
+    { label: "状态", html: (c) => `<span class="pill ${c.status === "online" ? "on" : "off"}">${esc(IM_STATUS[c.status] || c.status)}</span>`
+      + (c.error ? `<div class="muted">${esc(c.error)}</div>` : "") },
+    { label: "绑定的人", num: true, html: (c) => num(c.bound) },
+    { label: "启用", html: (c) => `<input type="checkbox" data-im-enable="${esc(c.id)}" ${c.enabled ? "checked" : ""} aria-label="启用 ${esc(c.title)}">` },
+    { label: "", html: (c) => `<span class="row-actions"><button type="button" class="link" data-im-edit="${esc(c.id)}">编辑</button>`
+      + `<button type="button" class="link" data-im-reconnect="${esc(c.id)}">重新连接</button>`
+      + `<button type="button" class="link danger" data-im-del="${esc(c.id)}">删除</button></span>` },
+  ], d.channels, "还没有：每个人只能接自己的机器人");
+}
+
+function imFields(kind, c = null) {
+  const drv = I.data.drivers.find((x) => x.kind === kind);
+  $("#imf-fields").innerHTML = (drv?.fields || []).map((f) => `<div class="field wide"><label for="imf-${esc(f.key)}">${esc(f.label)}</label>
+    <input id="imf-${esc(f.key)}" name="${esc(f.key)}" maxlength="2000" ${f.secret ? 'type="password" autocomplete="new-password"' : ""}
+      value="${f.secret ? "" : esc(c?.config?.[f.key] || "")}" ${f.required && !(f.secret && c?.secrets_set.includes(f.key)) ? "required" : ""}
+      placeholder="${f.secret && c?.secrets_set.includes(f.key) ? "已设置，留空不改" : ""}">
+    ${f.help ? `<span class="muted m-hint">${esc(f.help)}</span>` : ""}</div>`).join("");
+}
+
+function openIm(c = null) {
+  I.edit = c;
+  const sel = $("#imf-kind");
+  sel.innerHTML = I.data.drivers.map((x) => `<option value="${esc(x.kind)}">${esc(x.title)}</option>`).join("");
+  sel.value = c ? c.kind : I.data.drivers[0]?.kind || "";
+  sel.disabled = !!c;
+  $("#imf-title").value = c?.title || "";
+  $("#im-form-title").textContent = c ? "编辑机器人" : "添加机器人";
+  $("#imf-error").textContent = "";
+  imFields(sel.value, c);
+  $("#im-dialog").showModal();
+}
+
+async function submitIm(ev) {
+  ev.preventDefault();
+  const kind = $("#imf-kind").value, drv = I.data.drivers.find((x) => x.kind === kind);
+  const values = Object.fromEntries((drv?.fields || []).map((f) => [f.key, $(`#imf-${f.key}`).value]));
+  const title = $("#imf-title").value;
+  try {
+    if (I.edit) await api(`/api/me/im/${I.edit.id}`, { method: "PATCH", body: { title, values } });
+    else await api("/api/admin/im", { method: "POST", body: { kind, title, values } });
+  } catch (e) { $("#imf-error").textContent = e.message; return; }
+  $("#im-dialog").close();
+  loadIm();
+}
+
+function bindIm() {
+  $("#im-add").addEventListener("click", () => openIm());
+  $("#imf-kind").addEventListener("change", () => imFields($("#imf-kind").value));
+  $("#imf-cancel").addEventListener("click", () => $("#im-dialog").close());
+  $("#im-form").addEventListener("submit", submitIm);
+  $("#t-im").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    const c = I.data.channels.find((x) => x.id === (b.dataset.imEdit || b.dataset.imReconnect || b.dataset.imDel));
+    if (!c) return;
+    $("#im-error").textContent = "";
+    try {
+      if (b.dataset.imEdit) return openIm(c);
+      if (b.dataset.imReconnect) await api(`/api/me/im/${c.id}/reconnect`, { method: "POST" });
+      if (b.dataset.imDel) {
+        if (!confirm(`删除「${c.title}」？${c.bound ? `${c.bound} 个人的绑定会一起删掉，` : ""}保存的密钥也一起删。`)) return;
+        await api(`/api/me/im/${c.id}`, { method: "DELETE" });
+      }
+    } catch (e) { $("#im-error").textContent = e.message; }
+    loadIm();
+  });
+  $("#t-im").addEventListener("change", async (ev) => {
+    const cb = ev.target.closest("[data-im-enable]");
+    if (!cb) return;
+    try { await api(`/api/me/im/${cb.dataset.imEnable}`, { method: "PATCH", body: { enabled: cb.checked } }); }
+    catch (e) { $("#im-error").textContent = e.message; }
+    loadIm();
+  });
+}
+
 // ---------- 标签页 ----------
 function showTab() {
-  const tab = ["#models", "#plugins"].includes(location.hash) ? location.hash.slice(1) : "usage";
+  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im" }[location.hash] || "usage";
   for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
   $("#dash").hidden = tab !== "usage";
   $("#models").hidden = tab !== "models";
   $("#plugins").hidden = tab !== "plugins";
+  $("#im").hidden = tab !== "im";
   if (tab === "models") loadCatalog();
   else if (tab === "plugins") loadPlugins();
+  else if (tab === "im") loadIm();
   else if (!S.data) load();
   else render();
 }
@@ -621,6 +718,7 @@ async function init() {
   $(".admin-tabs").hidden = false;
   bindCatalog();
   bindPlugins();
+  bindIm();
   for (const r of document.querySelectorAll('input[name="days"]')) {
     r.addEventListener("change", () => { S.days = Number(r.value); load(); });
   }

@@ -7410,8 +7410,8 @@ class Network:
                     return None
                 return data if ev_type == "plugin.records" or data.get("user_id") == actor else None
             if ev_type in ("skills.updated", "connection.updated", "draft.updated", "schedule.updated", "held.updated",
-                           "plugin.submission"):
-                # 我的技能、我的连接器、助理起草的消息、我的定时、等我确认的输出：只给本人
+                           "plugin.submission", "im.updated"):
+                # 我的技能、我的连接器、助理起草的消息、我的定时、等我确认的输出、我的 IM 机器人与绑定：只给本人
                 return data if data.get("user_id") == actor else None
             if ev_type == "release.updated":  # 只推 id：看得到的人自己去取（不变量 23）
                 r = self.store.releases.get(str(data.get("release_id", "")))

@@ -483,6 +483,7 @@ function onEvent(ev) {
   }
   if (ev.type === "models.updated") { loadModels(); return; }  // 管理后台改了模型目录
   if (ev.type === "schedule.updated") { loadSchedules(); return; }
+  if (ev.type === "im.updated") { loadIm(); return; }
   if (ev.type === "draft.updated" && S.view === "board") loadBoard();
   if (ev.type === "held.updated") {
     if (S.view === "board") loadBoard();
@@ -2668,11 +2669,15 @@ function renderMembers() {
     box.innerHTML = `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : ""}
       <h3>定时</h3><ul class="member-list sched-list">${schedulesHtml()}</ul><p class="error sched-error" role="alert"></p>
       <p class="hint">定时只唤醒你自己的助理，到点后它在这里回复你；没有新情况就不打扰。在这里说一句就能建，比如“每个工作日早上 8 点给我早报”。</p>
+      <h3 class="im-head">在 IM 里找助理</h3><div class="im-box">${imHtml()}</div><p class="error im-error" role="alert"></p>
+      <p class="hint">绑定后在 IM 里和机器人单聊，就是在和助理说话；回复回到 IM。只有你绑定的那个身份说的话会交给助理，别人发给机器人的、群里的都不会。
+        网页里说的话不会推到 IM。</p>
       <p class="hint">助理看得到你参与的各个项目（只是你能看到的部分），往项目里说话要先起草、你确认后才以你的名义发出。
         共享项目里合作方写的内容送到的那一轮，它不用你授权的服务。</p>
       ${a ? `<dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${modelDd(a)}</dd></dl>` : ""}
       ${workdirsHtml(c)}`;
     bindSchedules(box);
+    bindIm(box);
     bindWorkdirs(box, c);
     return;
   }
@@ -2839,7 +2844,7 @@ function renderThread() {
       const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
         `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPillOf(r)}</a>`).join("");
       const body = m.text ? `<div class="body">${mentionHtml(m.text)}</div>` : "";
-      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? `<span class="pill plugin" title="${m.via.endsWith(" 起草") ? "助理起草、确认后以本人的名义发出" : `经插件「${esc(m.via)}」发出：触发或插件页面里确认后发送`}">${m.via.endsWith(" 起草") ? esc(m.via) : `经 ${esc(m.via)}`}</span>` : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
+      return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? viaPill(m.via) : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
       <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`;
@@ -2991,6 +2996,80 @@ function bindDrafts(root) {
   }));
   act("data-dsend", (id) => `/api/drafts/${id}/send`, (card) => ({ text: $(".draft-text", card).value }));
   act("data-ddiscard", (id) => `/api/drafts/${id}/discard`, () => ({}));
+}
+
+// 消息从哪来：助理起草的（“X 起草”）、在 IM 里发的（“来自 企业微信”）、插件代发的（插件名）
+function viaPill(via) {
+  if (via.endsWith(" 起草")) return `<span class="pill plugin" title="助理起草、确认后以本人的名义发出">${esc(via)}</span>`;
+  if (via.startsWith("来自")) return `<span class="pill plugin" title="本人在 ${esc(via.slice(2))} 里和助理说的">${esc(via)}</span>`;
+  return `<span class="pill plugin" title="经插件「${esc(via)}」发出：触发或插件页面里确认后发送">经 ${esc(via)}</span>`;
+}
+
+// ---------- IM：在 IM 里和自己的助理单聊。只认你绑定的那个身份（不变量 25） ----------
+const IM_STATUS = { online: "在线", connecting: "连接中", auth_failed: "凭证不对", kicked: "在别处连上了，这里已断开",
+  error: "出错了", stopped: "已停用" };
+
+async function loadIm() {
+  try { S.im = await api("/api/me/im"); } catch { return; }
+  if (S.view === "chats" && S.conv?.is_home) renderMembers();
+}
+
+function imFieldsHtml(d) {
+  return (d?.fields || []).map((f) => `<label>${esc(f.label)}<input name="${esc(f.key)}" maxlength="2000"
+      ${f.secret ? 'type="password" autocomplete="new-password"' : 'autocomplete="off"'} ${f.required ? "required" : ""}></label>
+      ${f.help ? `<span class="hint">${esc(f.help)}</span>` : ""}`).join("");
+}
+
+function imHtml() {
+  if (!S.im) { loadIm(); return '<p class="hint">加载中…</p>'; }
+  const code = S.imCode ? `<div class="im-code" role="status">在「${esc(S.imCode.title)}」里给机器人发这串字：<code>${esc(S.imCode.code)}</code>
+      <span class="s">10 分钟内有效，只显示这一次；发过去就绑定好了。</span></div>` : "";
+  const li = (c) => {
+    const b = c.binding, stuck = ["kicked", "auth_failed", "error", "stopped"].includes(c.status);
+    return `<li><span class="m-body"><span class="n">${esc(c.title)}${c.shared ? ' <span class="tag">大家共用</span>' : ""}</span>
+      <span class="s">${esc(IM_STATUS[c.status] || c.status)}${c.error ? ` · ${esc(c.error)}` : ""} · ${b ? "已绑定" : "还没绑定"}${b?.error ? ` · 推送没成功：${esc(b.error)}` : ""}</span></span>
+      <span class="im-actions">${b
+        ? `<label class="switch" title="定时、早报、等你处理的事也推到这里"><input type="checkbox" data-im-push="${esc(b.id)}" ${b.push ? "checked" : ""}> 主动推送</label>
+           <button type="button" class="ghost sm" data-im-unbind="${esc(b.id)}">解除绑定</button>`
+        : `<button type="button" class="sm" data-im-code="${esc(c.id)}" data-im-title="${esc(c.driver_title)}">拿绑定码</button>`}
+        ${!c.shared && stuck ? `<button type="button" class="ghost sm" data-im-reconnect="${esc(c.id)}">重新连接</button>` : ""}
+        ${!c.shared ? `<button type="button" class="ghost sm" data-im-del="${esc(c.id)}">删除</button>` : ""}</span></li>`;
+  };
+  const rows = [...S.im.personal, ...S.im.shared];
+  const kinds = S.im.drivers.filter((d) => !S.im.personal.some((c) => c.kind === d.kind));
+  const form = kinds.length ? `<details class="im-add"><summary>接上我自己的机器人</summary>
+      <form class="im-form"><label>IM<select name="kind">${kinds.map((d) => `<option value="${esc(d.kind)}">${esc(d.title)}</option>`).join("")}</select></label>
+      <div class="im-fields">${imFieldsHtml(kinds[0])}</div><button type="submit">接上</button></form></details>` : "";
+  return `${code}<ul class="member-list im-list">${rows.map(li).join("") || '<li class="empty">还没有可以用的机器人</li>'}</ul>${form}`;
+}
+
+function bindIm(box) {
+  const err = (e) => { $(".im-error", box).textContent = e.message; };
+  const run = async (fn) => { try { await fn(); await loadIm(); } catch (e) { err(e); } };
+  const showCode = (r, title) => { S.imCode = { code: r.code, title }; };
+  box.querySelectorAll("[data-im-code]").forEach((b) => b.addEventListener("click", () => run(async () => {
+    showCode(await api(`/api/me/im/${b.dataset.imCode}/code`, { method: "POST" }), b.dataset.imTitle);
+  })));
+  box.querySelectorAll("[data-im-push]").forEach((cb) => cb.addEventListener("change", () => run(() =>
+    api(`/api/me/im-bindings/${cb.dataset.imPush}`, { method: "PATCH", body: { push: cb.checked } }))));
+  box.querySelectorAll("[data-im-unbind]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("解除绑定？之后在 IM 里说的话不再交给助理。")) run(() => api(`/api/me/im-bindings/${b.dataset.imUnbind}`, { method: "DELETE" }));
+  }));
+  box.querySelectorAll("[data-im-reconnect]").forEach((b) => b.addEventListener("click", () => run(() =>
+    api(`/api/me/im/${b.dataset.imReconnect}/reconnect`, { method: "POST" }))));
+  box.querySelectorAll("[data-im-del]").forEach((b) => b.addEventListener("click", () => {
+    if (confirm("删除这个机器人？保存的密钥和绑定一起删掉。")) run(() => api(`/api/me/im/${b.dataset.imDel}`, { method: "DELETE" }));
+  }));
+  const form = $(".im-form", box);
+  if (!form) return;
+  const kind = form.elements.kind;
+  kind.addEventListener("change", () => { $(".im-fields", form).innerHTML = imFieldsHtml(S.im.drivers.find((d) => d.kind === kind.value)); });
+  form.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const d = S.im.drivers.find((x) => x.kind === kind.value);
+    const values = Object.fromEntries(d.fields.map((f) => [f.key, form.elements[f.key].value]));
+    run(async () => { showCode(await api("/api/me/im", { method: "POST", body: { kind: d.kind, values } }), d.title); });
+  });
 }
 
 // ---------- 定时：只属于你，唤醒你自己的助理；在助理对话里说一句就能建 ----------

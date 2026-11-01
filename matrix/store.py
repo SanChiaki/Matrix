@@ -17,7 +17,7 @@ from dataclasses import asdict, fields
 
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
-                     Decision, Delegation, Device, Draft, Held,
+                     Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
                      KnowledgeItem, Message, Project, Proposal, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
                      new_id, seat_id)
 
@@ -213,6 +213,8 @@ class Store:
         self.held: dict[str, Held] = {}        # 用到别处资料、等所有者确认的输出（不变量 22）
         self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
         self.releases: dict[str, Release] = {}    # 项目发出去的发布物（不变量 23）
+        self.im_channels: dict[str, ImChannel] = {}  # IM 机器人（个人的与部署方的）
+        self.im_bindings: dict[str, ImBinding] = {}  # 人在 IM 机器人上的身份
         if self.path.exists():
             self._load()
         else:
@@ -315,6 +317,8 @@ class Store:
                 "held": [h.to_dict() for h in self.held.values()],
                 "schedules": [x.to_dict() for x in self.schedules.values()],
                 "releases": [r.to_dict() for r in self.releases.values()],
+                "im_channels": [x.to_dict() for x in self.im_channels.values()],
+                "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -411,6 +415,10 @@ class Store:
             self.schedules[x["id"]] = Schedule(**_known(Schedule, x))
         for r in raw.get("releases", []):  # 旧数据没有：缺省为空
             self.releases[r["id"]] = Release(**_known(Release, r))
+        for x in raw.get("im_channels", []):  # 旧数据没有：缺省为空
+            self.im_channels[x["id"]] = ImChannel(**_known(ImChannel, x))
+        for x in raw.get("im_bindings", []):
+            self.im_bindings[x["id"]] = ImBinding(**_known(ImBinding, x))
         self._one_trust_domain()
         self.default_assistants()
         if migrated:
