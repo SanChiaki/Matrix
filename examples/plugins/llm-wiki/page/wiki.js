@@ -96,7 +96,6 @@ $("#q").addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.v
 matrix.on((event) => { if (event === "records.changed") open(current).catch(fail); });
 
 (async () => {
-  const ctx = await matrix.context();
-  if (ctx.theme === "light") document.documentElement.classList.add("light");
+  await matrix.context();  // SDK 顺带按看的人切换深浅
   await open("wiki/index.md");
 })().catch(fail);

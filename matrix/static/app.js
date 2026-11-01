@@ -7,7 +7,8 @@ const S = { snap: null, view: "network", agentSel: null, projectSel: null, convI
 const STATUS_CN = { running: "执行中", in_review: "待验收", completed: "已完成", failed: "失败", rejected: "已拒绝",
   idle: "空闲", busy: "运行中", thinking: "思考中", waiting: "等委托", pending: "待审核", approved: "已批准" };
 const modelLabel = (m) => m ? `${m.provider} / ${m.model}${m.reasoning_effort ? ` · ${m.reasoning_effort}` : ""}` : "";
-const PROJECT_COLORS = ["#b48cff", "#3fbf7f", "#f2a541", "#e5534b", "#4cc9f0", "#ff7eb6"];
+// 项目的识别色：tokens.css 里的 --project-1 … --project-6（docs/design-system.md）
+const PROJECT_COLORS = [1, 2, 3, 4, 5, 6].map((n) => `var(--project-${n})`);
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pill = (st) => `<span class="pill status ${esc(st)}">${esc(STATUS_CN[st] || st)}</span>`;
@@ -115,6 +116,11 @@ function initTheme() {
   const paint = () => {
     const label = root.dataset.theme === "light" ? "切换到深色模式" : "切换到浅色模式";
     btn.setAttribute("aria-label", label); btn.title = label;
+    // 插件页面跟着换（SDK 收到 theme 事件自己切换）；只发给网络自己的插件框，不发给外部页面标签
+    document.querySelectorAll("iframe.plugin-frame").forEach((f) => {
+      if (/^\/(plugin|release)-frame\//.test(new URL(f.src, location.href).pathname))
+        f.contentWindow?.postMessage({ matrix: 1, event: "theme", data: { theme: root.dataset.theme } }, "*");
+    });
   };
   btn.addEventListener("click", () => {
     root.dataset.theme = root.dataset.theme === "light" ? "dark" : "light";
@@ -279,11 +285,11 @@ const BOARD_COLS = [
   { key: "running", title: "进行中", match: (r) => r.status === "in_progress" },
   { key: "in_review", title: "待验收", match: (r) => r.status === "in_review" },
   { key: "completed", title: "已完成", match: (r) => r.status === "completed" },
-  { key: "failed", title: "已取消", match: (r) => r.status === "cancelled" },
+  { key: "cancelled", title: "已取消", match: (r) => r.status === "cancelled" },  // 取消不是出错：用中性色
 ];
 const REQ_CN = { in_progress: "进行中", in_review: "待验收", completed: "已完成", cancelled: "已取消" };
 const reqPillOf = (r) => reqPill(r.status);
-const reqPill = (st) => `<span class="pill status ${st === "in_progress" ? "running" : st === "cancelled" ? "rejected" : esc(st)}">${REQ_CN[st] || esc(st)}</span>`;
+const reqPill = (st) => `<span class="pill status ${st === "in_progress" ? "running" : esc(st)}">${REQ_CN[st] || esc(st)}</span>`;
 
 async function loadBoard() {
   try { S.board = await api("/api/board"); } catch { return; }
@@ -623,7 +629,7 @@ function renderGraph() {
       "aria-label": a.status ? `${a.name}，${STATUS_CN[a.status] || a.status}` : a.name }, nodes);
     el("circle", { r: 34, class: "halo" }, g);
     S.snap.projects.filter((gr) => gr.member_ids.includes(a.id)).forEach((gr, i) =>
-      el("circle", { r: 23 + i * 4, fill: "none", stroke: gcolor(gr.id), "stroke-width": 1.5, opacity: 0.7 }, g));
+      el("circle", { r: 23 + i * 4, fill: "none", style: `stroke: ${gcolor(gr.id)}`, "stroke-width": 1.5, opacity: 0.7 }, g));  // 展示属性里的 var() 不生效
     el("circle", { r: 18, class: "core" }, g);
     el("text", { class: "glyph" }, g).textContent = initial(a.name);
     el("text", { y: 46 }, g).textContent = a.name.replace(/ Agent$/, "");

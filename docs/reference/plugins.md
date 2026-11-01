@@ -85,7 +85,8 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 - **以人名义发言**：`chat.post` 只生成草稿（10 分钟、只属于这个人），父页面弹确认卡，人点“发送”才调
   `POST /api/plugin-drafts/<id>/send`；桥里没有发送这一步。发出的消息 `Message.via` 是插件名，群聊里标出“经 X 插件”。
 - 父页面把 `plugin.records` 事件转给当前插件页面：`{matrix: 1, event: "records.changed", data: {table}}`；
-  `context` 带主题（`theme`），页面可以跟着深浅色。
+  `context` 带主题（`theme`）；看的人切换深浅色时父页面再发 `{matrix: 1, event: "theme", data: {theme}}`（只发给网络自己的插件框与发布物框），
+  SDK 收到后给 `<html>` 切换 `light` 类。插件页面经 `../_matrix/tokens.css` 用主界面同一份设计变量（[设计语言](../design-system.md)）。
 
 ## Agent 这一侧
 

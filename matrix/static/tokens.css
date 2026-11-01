@@ -40,6 +40,8 @@
   /* 对外页面（发布物） */
   --release: #e0a95c;
   --release-soft: rgba(224, 169, 92, .14);
+  /* 别人的信任域（介绍页的图） */
+  --peer: #6fd3b1;
 
   /* ---- 网络图 ---- */
   --edge: #4a4f60;
@@ -50,6 +52,14 @@
   --node-human: #2e271d;
   --grid-dot: rgba(255, 255, 255, .05);
   --glass: rgba(11, 12, 15, .75);
+
+  /* ---- 项目识别色：项目头像、网络图里的项目环，按项目顺序轮流用 ---- */
+  --project-1: #b48cff;
+  --project-2: #3fbf7f;
+  --project-3: #f2a541;
+  --project-4: #e5534b;
+  --project-5: #4cc9f0;
+  --project-6: #ff7eb6;
 
   /* ---- 图表（管理后台、插件里的图） ---- */
   --chart-ok: #7a82f2;
@@ -140,6 +150,7 @@
   --plugin-line: rgba(15, 135, 150, .45);
   --release: #a8661a;
   --release-soft: rgba(168, 102, 26, .1);
+  --peer: #1f9a74;
 
   --edge: #c4c8d2;
   --edge-strong: #9aa0ad;
