@@ -312,6 +312,24 @@ button.icon.sm { width: 22px; height: 22px; padding: 3px; }
 .held-card .body { padding: 6px 8px; border-left: 2px solid var(--border-strong); margin: 6px 0; }
 .todo-item.held { display: block; }
 .sched-list .s { white-space: normal; }
+#members-panel h3.im-head { margin-top: 20px; }
+.im-box + .im-error:empty { display: none; }
+.im-list li { flex-wrap: wrap; }
+.im-list .s { white-space: normal; }
+.im-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.im-actions button.sm { padding: 4px 9px; font-size: 12px; }
+.im-actions .switch { gap: 4px; font-size: 12px; }
+.im-actions .switch input { width: auto; margin: 0; }
+.im-code { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; margin-bottom: 10px; font-size: 13px;
+  border-radius: var(--radius-sm); border: 1px solid color-mix(in srgb, var(--human) 30%, transparent);
+  background: color-mix(in srgb, var(--human) 5%, transparent); }
+.im-code code { font-size: 18px; letter-spacing: 3px; color: var(--text); user-select: all; }
+.im-code .s { font-size: 11.5px; color: var(--muted); }
+.im-add { margin-bottom: 10px; }
+.im-add summary { cursor: pointer; font-size: 13px; }
+.im-form, .im-fields { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.im-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.im-form button { align-self: flex-start; }
 .tag.model { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 11px; }
 fieldset.model { border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
 fieldset.model legend { padding: 0; margin-bottom: 6px; font-size: 12.5px; font-weight: 500; color: var(--text-2); }

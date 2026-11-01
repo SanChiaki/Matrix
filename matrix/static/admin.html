@@ -18,6 +18,7 @@
     <a href="#usage" data-tab="usage">使用情况</a>
     <a href="#models" data-tab="models">模型</a>
     <a href="#plugins" data-tab="plugins">插件</a>
+    <a href="#im" data-tab="im">IM 机器人</a>
   </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
@@ -163,6 +164,33 @@
   <dialog id="pl-file-dialog" class="m-dialog pl-file">
     <form method="dialog"><h2 id="plf-title"></h2><pre id="plf-body"></pre>
       <div class="actions m-actions"><button type="submit">关闭</button></div></form>
+  </dialog>
+  <div id="im" data-pane="im" hidden>
+    <div class="view-head">
+      <div><h1>IM 机器人</h1>
+        <p>大家共用的机器人：在这里配一个，每个人在应用里拿绑定码、在 IM 里发给它，就能在 IM 里和自己的助理单聊。
+          只有绑定的那个身份说的话会交给助理；个人也可以在“助理与定时”里接自己的机器人。</p></div>
+      <button type="button" id="im-add">添加机器人</button>
+    </div>
+    <p class="error" id="im-error" role="alert"></p>
+    <div id="im-driver-errors"></div>
+    <div class="table-wrap"><table id="t-im"></table></div>
+  </div>
+  <dialog id="im-dialog" class="m-dialog">
+    <form id="im-form" method="dialog">
+      <h2 id="im-form-title">添加机器人</h2>
+      <div class="m-grid">
+        <div class="field"><label for="imf-kind">IM</label><select id="imf-kind" name="kind"></select></div>
+        <div class="field"><label for="imf-title">名称</label><input id="imf-title" name="title" maxlength="60" placeholder="如 公司助理"></div>
+      </div>
+      <div class="m-grid" id="imf-fields"></div>
+      <p class="muted m-hint">密钥加密保存在 Matrix，保存后不再显示；要换就填新的，留空不改。</p>
+      <p class="error" id="imf-error" role="alert"></p>
+      <div class="actions m-actions">
+        <button type="button" class="ghost" id="imf-cancel">取消</button>
+        <button type="submit" id="imf-submit">保存</button>
+      </div>
+    </form>
   </dialog>
   <dialog id="m-dialog" class="m-dialog">
     <form id="m-form" method="dialog">

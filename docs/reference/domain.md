@@ -21,6 +21,8 @@
 | Draft（草稿） | 助理在助理对话里替主人起草、要发进某个项目群聊的一条消息（`pending → sent / discarded`）。只有主人看得到、能发；发出时以主人的身份、`Message.via = "<助理名> 起草"`，`message_id` 指向发出的那条。助理对话里对应的事件消息带 `draft_id` |
 | Schedule（定时） | 一个人的定时：`cron` 或一次性的 `at`，到点往 `agent_id`（他自己的 Agent，通常是助理）的私聊收件箱投一条，带 `title` 与 `instruction`。`created_by` 记是谁建的（人、注册时默认、助理），`failures` / `error` 记送不到的原因。只给主人看 |
 | Release（发布物） | 项目对外拿出的东西：主持人发布，按版本固定成快照（`releases/<id>/v<N>/`）。`method` 带技能、可公开；`fact` 带档案文件（可带插件视图 `view`）、只给 `readers`；`follow` 是事实跟随档案自动切版本。`AgentNode.subscriptions` 是人给自己的 Agent 订阅的发布物，只在这一轮能看到输出的人都看得到时生效。见 [releases.md](releases.md)、不变量 23 |
+| ImChannel（IM 机器人） | 一个 IM 里的机器人：`kind` 是驱动（`wecom` 或外部驱动），`owner_id` 是主人（个人的，只能绑主人）或为空（部署方的，管理员配、很多人各自绑定）。`config` 是驱动的非密钥字段，密钥在 `vault/im-<id>`；`status` 是 connecting / online / auth_failed / kicked / error / stopped。见 [im.md](im.md) |
+| ImBinding（IM 绑定） | 某个人在某个 IM 机器人上的身份：`sender` 是核验过绑定码的那个 IM 标识，`chat_id` 是推送用的单聊，`push` 管没人说话时的消息推不推，`error` 记最近一次推送失败。只给本人看（不变量 25） |
 | 插件 | 项目装上的一个业务扩展：清单声明的表（记录在 `projects/<id>/plugin-data/`，是项目档案的一部分）、沙箱里的页面、技能、触发。元数据在 `Project.plugins[name]`（版本、来源、安装人、`disabled`、`data_rev`、各触发的启用人与状态），只有主持人装。触发发的群聊消息、插件页面确认后发的消息带 `Message.via`（插件名）。见 [plugins.md](plugins.md)、不变量 20 |
 
 权限词表：`web.research`（部署方配了抓取白名单 `fetch.json` 时，云侧用 `mcp__matrix_web__fetch` 替代 dsh 自带的 `web_fetch`，见 [security.md](security.md)）、`file.write`、`shell.exec`、`delegate`、`connector.use`（这一轮能用勾给它的连接器）。新增权限的同步点见 AGENTS.md「工作方式」。
