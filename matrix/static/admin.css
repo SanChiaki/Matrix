@@ -1,6 +1,4 @@
 /* 管理后台（/admin）：沿用 style.css 的颜色与控件，页面自己滚动 */
-:root { --chart-ok: #7a82f2; --chart-fail: #e0605a; }
-:root[data-theme="light"] { --chart-ok: #5a62e0; --chart-fail: #d03c36; }
 
 body.admin { display: block; overflow: auto; height: auto; min-height: 100%; }
 .admin-top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 12px 32px;
@@ -82,7 +80,7 @@ button.link.danger { color: var(--rejected); }
 .m-hint { font-size: 12.5px; margin: 0 0 8px; }
 .m-dialog { padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); color: var(--text);
   width: min(560px, 94vw); box-shadow: var(--shadow); }
-.m-dialog::backdrop { background: rgba(10, 12, 18, .45); }
+.m-dialog::backdrop { background: var(--scrim-strong); }
 .m-dialog form { display: flex; flex-direction: column; gap: 14px; padding: 20px 22px; }
 .m-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .m-grid .wide { grid-column: 1 / -1; }
@@ -110,7 +108,7 @@ button.link.danger { color: var(--rejected); }
 /* 插件 */
 .pl-policy { display: grid; gap: 10px; max-width: 760px; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 14px 16px; }
-.pl-policy textarea { font-family: var(--mono, monospace); font-size: 12.5px; }
+.pl-policy textarea { font-family: var(--font-mono); font-size: 12.5px; }
 .pl-policy .actions { display: flex; justify-content: flex-end; }
 .pl-sub-files { display: flex; flex-wrap: wrap; gap: 4px 10px; white-space: normal; max-width: 520px; }
 .pl-lint { color: var(--human); white-space: normal; max-width: 520px; font-size: 12px; margin: 4px 0 0; padding-left: 16px; }

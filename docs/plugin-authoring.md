@@ -206,6 +206,16 @@ Agent 写的记录在页面上照常显示、照常发 `records.changed`，但**
 引入后页面里有一个全局的 `matrix`。所有方法都返回 Promise；被拒绝时抛 `Error`，`message` 是中文原因
 （如“插件没有申请「写插件自己的表」”“字段 stage 只能是：线索、沟通、报价”），可以直接显示给人看。
 
+### 用主界面的设计变量
+
+```html
+<link rel="stylesheet" href="../_matrix/tokens.css">
+```
+
+和主界面同一份颜色、字号、间距、圆角变量（路径规则同上）。用 `var(--accent)`、`var(--surface)`、`var(--fs-md)` 这些，
+页面就和主界面一个样子；`matrix.context()` 的 `theme` 是 `"light"` 时给 `<html>` 加 `class="light"`。
+变量清单与规则见 [设计语言](design-system.md)。
+
 ### 方法
 
 **`matrix.context()`**：开页面时先调一次。

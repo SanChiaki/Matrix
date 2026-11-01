@@ -37,6 +37,9 @@ from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
 STATIC = Path(__file__).parent / "static"
+# 插件页面里 ../_matrix/<名字> 取到的网络自带文件：桥客户端，和主界面同一份设计变量（docs/design-system.md）
+FRAME_ASSETS = {"_matrix/sdk.js": ("plugin-sdk.js", "text/javascript"),
+                "_matrix/tokens.css": ("tokens.css", "text/css")}
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -1094,10 +1097,10 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.get("/plugin-frame/{token}/{path:path}")
     def plugin_frame_file(token: str, path: str) -> FileResponse:
         try:
-            if path == "_matrix/sdk.js":  # 给插件页面用的桥客户端，和插件文件同源（同一个令牌）
+            if path in FRAME_ASSETS:  # 给插件页面用的桥客户端与设计变量，和插件文件同源（同一个令牌）
                 network.plugin_frame_check(token)
-                return FileResponse(STATIC / "plugin-sdk.js", headers=PLUGIN_FRAME_HEADERS,
-                                    media_type="text/javascript")
+                return FileResponse(STATIC / FRAME_ASSETS[path][0], headers=PLUGIN_FRAME_HEADERS,
+                                    media_type=FRAME_ASSETS[path][1])
             return FileResponse(network.plugin_frame_file(token, path), headers=PLUGIN_FRAME_HEADERS)
         except NetworkError:
             raise HTTPException(404, "not found") from None
@@ -1139,10 +1142,10 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.get("/release-frame/{token}/{path:path}")
     def release_frame_file(token: str, path: str) -> FileResponse:
         try:
-            if path == "_matrix/sdk.js":
+            if path in FRAME_ASSETS:
                 network.release_frame_check(token)
-                return FileResponse(STATIC / "plugin-sdk.js", headers=PLUGIN_FRAME_HEADERS,
-                                    media_type="text/javascript")
+                return FileResponse(STATIC / FRAME_ASSETS[path][0], headers=PLUGIN_FRAME_HEADERS,
+                                    media_type=FRAME_ASSETS[path][1])
             return FileResponse(network.release_frame_file(token, path), headers=PLUGIN_FRAME_HEADERS)
         except NetworkError:
             raise HTTPException(404, "not found") from None

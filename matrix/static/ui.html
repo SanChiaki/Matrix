@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Matrix 设计语言</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/style.css">
+<script>document.documentElement.dataset.theme = localStorage.getItem("theme")
+  || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
+<!-- 样式指南：tokens.css 的变量与 style.css 里的通用部件，用真实的类名摆出来。规则见 docs/design-system.md。
+     改了变量或通用部件，在这里看一眼深浅两种主题。这一页只许用变量（tests/test_design.py）。 -->
+<style>
+  body.guide { display: block; overflow: auto; height: auto; min-height: 100%; }
+  .g-top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-8);
+    background: var(--glass); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
+  .g-top .grow { flex: 1; }
+  .g-main { max-width: 1080px; margin: 0 auto; padding: var(--sp-8) var(--sp-8) var(--sp-12); }
+  .g-main > p { color: var(--text-2); max-width: 640px; margin: var(--sp-2) 0 0; }
+  .g-sec { margin-top: var(--sp-10); }
+  .g-sec > h2 { font-size: var(--fs-lg); margin-bottom: var(--sp-1); }
+  .g-sec > p { color: var(--muted); font-size: var(--fs-md); margin: 0 0 var(--sp-4); max-width: 640px; }
+  .g-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3); }
+  .g-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
+  .g-sw { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+  .g-sw i { display: block; height: 52px; border-bottom: 1px solid var(--border); }
+  .g-sw div { padding: var(--sp-2) var(--sp-3); font-size: var(--fs-sm); }
+  .g-sw code { display: block; color: var(--muted); font-size: var(--fs-xs); }
+  .g-type { display: grid; grid-template-columns: 120px 1fr; gap: var(--sp-2) var(--sp-4); align-items: baseline; }
+  .g-type code { color: var(--muted); }
+  .g-space { display: flex; align-items: flex-end; gap: var(--sp-4); }
+  .g-space div { display: flex; flex-direction: column; align-items: center; gap: var(--sp-1); font-size: var(--fs-xs); color: var(--muted); }
+  .g-space i { display: block; background: var(--accent-soft); border: 1px solid var(--accent-line); }
+  .g-radius i { display: block; width: 64px; height: 44px; background: var(--surface-3); border: 1px solid var(--border-strong); }
+  .g-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-4); }
+  .g-two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--sp-4); }
+</style>
+</head>
+<body class="guide">
+<header class="g-top">
+  <a class="brand" href="/" style="display:inline-flex;align-items:center;gap:var(--sp-2);color:var(--text);text-decoration:none;font-weight:600">
+    <img src="/static/logo.svg" width="24" height="24" alt="">Matrix</a>
+  <span class="muted">设计语言</span>
+  <span class="grow"></span>
+  <button type="button" class="ghost" id="theme">切换深浅</button>
+</header>
+<main class="g-main">
+  <h1>设计语言</h1>
+  <p>颜色、字号、间距都来自 <code>tokens.css</code>，部件来自 <code>style.css</code>。页面和插件只用这里有的东西；这里没有的，先补进来再用。</p>
+
+  <section class="g-sec">
+    <h2>中性色</h2>
+    <p>三层面：底色、面、抬高的面。层级靠面的明暗和细边框区分，不靠阴影。</p>
+    <div class="g-grid" id="neutrals"></div>
+  </section>
+
+  <section class="g-sec">
+    <h2>语义色</h2>
+    <p>颜色只表达一件事。靛蓝是主操作和 Agent，琥珀是人和“等人处理”，绿是完成，红是失败或危险。</p>
+    <div class="g-grid" id="semantics"></div>
+  </section>
+
+  <section class="g-sec">
+    <h2>字号</h2>
+    <p>只有七级。界面正文 13px，长文 14px；页面标题 20px。</p>
+    <div class="g-type" id="type"></div>
+  </section>
+
+  <section class="g-sec">
+    <h2>间距与圆角</h2>
+    <p>间距按 4px 递增；圆角按层级：标签最小，控件次之，卡片、弹窗依次变大。</p>
+    <div class="g-two">
+      <div class="g-space" id="space"></div>
+      <div class="g-row g-radius" id="radius"></div>
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>按钮</h2>
+    <p>一个区域只有一个主按钮。其余用描边按钮；删除这类危险操作用红字按钮，放在最右边。</p>
+    <div class="g-row">
+      <button type="button">新建项目</button>
+      <button type="button" class="ghost">项目配置</button>
+      <button type="button" class="danger" style="margin-left:0">删除项目</button>
+      <button type="button" class="link">查看详情</button>
+      <button type="button" disabled>保存</button>
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>表单</h2>
+    <div class="g-two">
+      <div class="g-panel" style="display:flex;flex-direction:column;gap:var(--sp-4)">
+        <div class="field"><label for="g-name">名称</label><input id="g-name" placeholder="例如：白板定价"><p class="hint">成员在群聊里 @ 的就是这个名字。</p></div>
+        <div class="field"><label for="g-desc">描述</label><textarea id="g-desc" rows="3" placeholder="这件事是什么"></textarea></div>
+        <div class="field"><label for="g-sel">运行位置</label><select id="g-sel"><option>云侧</option><option>端侧</option></select></div>
+      </div>
+      <div class="g-panel" style="display:flex;flex-direction:column;gap:var(--sp-4)">
+        <div class="field"><span class="field-label">可见范围</span>
+          <div class="seg"><label><input type="radio" name="g-seg" checked>仅你</label><label><input type="radio" name="g-seg">项目成员</label></div></div>
+        <label class="switch"><input type="checkbox" checked>验收后通知我</label>
+        <p class="error">名称不能为空。</p>
+        <p class="warn-box">这个连接器在共享项目里用到时，会先问授权人。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>状态与标签</h2>
+    <p>状态用圆角药丸（带圆点），属性用小方角标签。两者不混用。</p>
+    <div class="g-row">
+      <span class="pill status running">进行中</span>
+      <span class="pill status in_review">待验收</span>
+      <span class="pill status completed">已完成</span>
+      <span class="pill status failed">失败</span>
+      <span class="pill">2 名成员</span>
+      <span class="pill plugin">插件</span>
+      <span class="pill rel-fact">对外页面</span>
+    </div>
+    <div class="g-row" style="margin-top:var(--sp-3)">
+      <span class="tag">file.write</span><span class="tag ok">已授权</span><span class="tag warn">待确认</span><span class="tag no">已撤销</span>
+      <span class="tag model">deepseek-chat</span><kbd>Ctrl</kbd><kbd>Enter</kbd>
+    </div>
+  </section>
+
+  <section class="g-sec">
+    <h2>卡片</h2>
+    <ul class="cards">
+      <li><div class="card">
+        <button type="button" class="card-main">
+          <div class="card-head"><span class="avatar" aria-hidden="true">知</span><span class="name">知识管家</span><span class="pill status completed">空闲</span></div>
+          <p class="card-desc">维护项目 Wiki：把资料编进 wiki、按 wiki 带出处回答问题、把验收过的结论写回。</p>
+          <div class="card-meta"><span class="tag">file.write</span></div>
+        </button>
+        <div class="card-foot"><span>白板定价</span><button type="button" class="ghost">对话</button></div>
+      </div></li>
+      <li class="selected"><div class="card">
+        <button type="button" class="card-main">
+          <div class="card-head"><span class="avatar" aria-hidden="true">W</span><span class="name">wang 的助理（选中）</span></div>
+          <p class="card-desc">帮你汇总各项目等你处理的事，按你的话定时提醒，起草要发进项目群聊的消息。</p>
+        </button>
+        <div class="card-foot"><span>助理</span><button type="button" class="ghost">对话</button></div>
+      </div></li>
+      <li class="empty">还没有项目。</li>
+    </ul>
+  </section>
+
+  <section class="g-sec">
+    <h2>页内标签</h2>
+    <div class="page-tabs" role="tablist">
+      <button type="button" role="tab" aria-selected="true">说明</button>
+      <button type="button" role="tab" aria-selected="false">资料 <span class="count">2</span></button>
+      <button type="button" role="tab" aria-selected="false">插件 <span class="count">1</span></button>
+    </div>
+  </section>
+</main>
+<script>
+  const $ = (s) => document.querySelector(s);
+  const swatches = (el, names) => { $(el).innerHTML = names.map((n) =>
+    `<div class="g-sw"><i style="background:var(${n})"></i><div>${n.slice(2)}<code>${getComputedStyle(document.documentElement).getPropertyValue(n).trim()}</code></div></div>`).join(""); };
+  function paint() {
+    swatches("#neutrals", ["--bg", "--surface", "--surface-2", "--surface-3", "--border-strong", "--muted", "--text-2", "--text"]);
+    swatches("#semantics", ["--accent", "--human", "--completed", "--rejected", "--plugin", "--release"]);
+  }
+  $("#type").innerHTML = [["--fs-2xl", "28 · 大数字"], ["--fs-xl", "20 · 页面标题"], ["--fs-lg", "16 · 区块标题"], ["--fs-base", "14 · 长文正文"],
+    ["--fs-md", "13 · 界面正文、控件"], ["--fs-sm", "12 · 次要信息、提示"], ["--fs-xs", "11 · 计数、图例"]]
+    .map(([v, d]) => `<code>${v}</code><span style="font-size:var(${v})">${d}：被 @ 的 Agent 接下任务</span>`).join("");
+  $("#space").innerHTML = [1, 2, 3, 4, 6, 8, 12].map((n) =>
+    `<div><i style="width:var(--sp-${n});height:var(--sp-${n})"></i>sp-${n}</div>`).join("");
+  $("#radius").innerHTML = ["xs", "sm", "", "lg", "pill"].map((n) => { const v = n ? `--radius-${n}` : "--radius";
+    return `<div class="g-space"><div><i style="border-radius:var(${v})"></i>${v.slice(2)}</div></div>`; }).join("");
+  $("#theme").addEventListener("click", () => {
+    const r = document.documentElement; r.dataset.theme = r.dataset.theme === "light" ? "dark" : "light";
+    localStorage.setItem("theme", r.dataset.theme); paint();
+  });
+  paint();
+</script>
+</body>
+</html>
