@@ -104,3 +104,51 @@ def test_checked_files_found():
     names = {p.name for p in MIGRATED}
     assert {"style.css", "admin.css", "app.js", "about.html", "index.html", "ui.html"} <= names
     assert sum(1 for p in MIGRATED if p.name == "style.css" and "examples" in p.parts) >= 4
+
+
+def _theme_colors() -> tuple[dict[str, str], dict[str, str]]:
+    """tokens.css 里深色、浅色两套用十六进制写的颜色变量（浅色套在深色之上覆盖）。"""
+    text = TOKENS.read_text(encoding="utf-8")
+    dark_part, light_part = text.split(':root[data-theme="light"]', 1)
+    full = lambda h: "#" + "".join(c * 2 for c in h[1:]) if len(h) == 4 else h  # #fff → #ffffff
+    hexes = lambda part: {k: full(v) for k, v in re.findall(r"(--[a-z0-9-]+)\s*:\s*(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})\b", part)}
+    dark = hexes(dark_part)
+    return dark, {**dark, **hexes(light_part.split("@media", 1)[0])}
+
+
+def _contrast(a: str, b: str | list[float]) -> float:
+    rgb = lambda h: [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)] if isinstance(h, str) else h
+    lin = lambda c: c / 12.92 if c <= .03928 else ((c + .055) / 1.055) ** 2.4
+    lum = lambda h: sum(w * lin(c) for w, c in zip((.2126, .7152, .0722), rgb(h)))
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + .05) / (lo + .05)
+
+
+def test_text_colors_meet_wcag_aa():
+    """文字色在各层面上、语义色在各层面和 12% 的同色底（状态药丸）上都不低于 4.5:1（WCAG AA 小字）。"""
+    surfaces = ("--bg", "--surface", "--surface-2", "--surface-3")
+    text = ("--text", "--text-2", "--muted")
+    semantic = ("--accent", "--human", "--completed", "--rejected", "--plugin", "--release")
+    bad = []
+    for theme, colors in zip(("深色", "浅色"), _theme_colors()):
+        rgb = lambda h: [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        for fg in text + semantic:
+            for s in surfaces:
+                grounds = [(s, colors[s])]
+                if fg in semantic:  # 药丸：12% 的同色底
+                    tint = [c * .12 + g * .88 for c, g in zip(rgb(colors[fg]), rgb(colors[s]))]
+                    grounds.append((f"12% {fg} 叠 {s}", tint))
+                for name, ground in grounds:
+                    ratio = _contrast(colors[fg], ground)
+                    if ratio < 4.5:
+                        bad.append(f"{theme} {fg} 在 {name} 上 {ratio:.2f}")
+    assert not bad, "对比度不到 4.5:1：\n" + "\n".join(bad)
+
+
+def test_page_intros_stay_short():
+    """页面标题下的说明不超过两行（620px 宽、13px 字，约 90 字）：讲这一页能做什么，细节放到用到它的地方。"""
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    intros = re.findall(r'<div class="view-head">\s*<div><h1>(.*?)</h1><p>(.*?)</p>', html, re.S)
+    assert intros, "没找到页头说明：结构改了就同步改这个检查"
+    long = [f"{h}（{len(p)} 字）" for h, p in intros if len(p) > 90]
+    assert not long, "页头说明超过两行：" + "、".join(long)

@@ -11,9 +11,11 @@ function safeUrl(raw) {
 function inline(src) {
   const codes = [];
   let s = esc(src).replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+  // 链接到不能点的地址（如工作目录里的相对路径 wiki/x.md）：不留原样的 [文字](路径)，显示文字和路径
   s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
     const href = safeUrl(url);
-    return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>` : m;
+    return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`
+      : `${text} \u0000${codes.push(url) - 1}\u0000`;
   });
   // 裸链接：前面不能是字母数字或 href=" / > 之类，避免把已生成的 <a> 再包一层
   // 中文标点（全角括号、引号、冒号等）不算进链接：“地址（说明）”里的“（”是正文
