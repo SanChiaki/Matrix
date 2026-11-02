@@ -83,12 +83,13 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 内网的模型供应商、抓取目标用自签 CA 时，把根 CA（PEM，扩展名 `.crt`）放进 `deploy/ca-certificates/`，然后
 `docker compose up -d --build`：构建时加进镜像的系统证书库（构建后面几步的 npm / PyPI 下载也用它）。
 
-两类客户端读证书的方式不一样，排查时别被 curl 误导：
+不同客户端读证书的方式不一样，排查时别被 curl / pip 误导：
 
 | 谁 | 用什么 | 读系统证书库 / `SSL_CERT_FILE` |
 |---|---|---|
 | dsh（连模型供应商、自带的 `web_fetch`） | Node | 默认不读，只信 Node 自带的 CA 包。镜像里设了 `NODE_USE_SYSTEM_CA=1` 才读系统库；**`SSL_CERT_FILE` 对它无效** |
-| Matrix 的抓取（`mcp__matrix_web__fetch`）、云端连接器 | Python（OpenSSL） | 读系统库，也认 `SSL_CERT_FILE` |
+| uv（构建时装 Python 依赖） | Rust | 默认不读，只信自带的 CA 包。镜像里设了 `UV_SYSTEM_CERTS=1` 才读系统库（报 `invalid peer certificate: UnknownIssuer` 就是它） |
+| Matrix 的抓取（`mcp__matrix_web__fetch`）、云端连接器、pip | Python（OpenSSL） | 读系统库，也认 `SSL_CERT_FILE` |
 | curl、openssl | OpenSSL | 读系统库 |
 
 所以 curl 能通、dsh 报 `TRANSPORT: Connection error` 时，多半是 Node 不信这张 CA。确认：
@@ -114,6 +115,10 @@ docker compose exec matrix node -e 'require("https").get(process.argv[1], r => c
 设了 `MATRIX_PYPI_INDEX` 时镜像改用 `uv sync --no-dev`（不带 `--frozen`）：`--frozen` 直接用 `uv.lock` 里写死的
 `files.pythonhosted.org` 下载地址，不看 index 配置，换了源也照样去公网；不 frozen 时从配置的源重新解析，已锁定的版本优先。
 （自己改 Dockerfile 换源时同理，`UV_DEFAULT_INDEX` 加 `--frozen` 不生效。）
+
+`MATRIX_PYPI_INDEX` 可以是 http 源：镜像给 pip 加 `--trusted-host`（不加时 pip 只打一行 WARNING 就跳过这个源，接着报
+“找不到 uv”，像是源里没有这个包），也给 uv 设上 `UV_INSECURE_HOST`。这两个开关对 https 源会关掉证书校验，所以只在 http 源上加；
+https 源的自签 CA 放进 `deploy/ca-certificates/`。
 
 构建最后会确认 `dsh` 在 PATH 上（Node 装在别的前缀时补一个链接），找不到就构建失败，不会等到 Agent 第一轮才报 `FileNotFoundError`。
 
