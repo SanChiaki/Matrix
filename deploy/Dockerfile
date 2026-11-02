@@ -13,10 +13,11 @@ ARG NODE_TARBALL=""
 
 # 内网根 CA：deploy/ca-certificates/*.crt 进系统证书库，在 apt 之前（基础镜像自带 ca-certificates），
 # 构建里的下载（含经 HTTPS 拦截代理的）与运行时都用它。
-# NODE_USE_SYSTEM_CA：dsh 是 Node 程序，Node 默认只信自带的 CA 包，不读 /etc/ssl/certs，也不读 SSL_CERT_FILE；
-# 打开后改用系统证书库（含公共根证书，对公网没有影响），内网 CA 进了系统库 dsh 才信。
+# Node（dsh）和 Rust（uv）默认都只信自己带的 CA 包，不读 /etc/ssl/certs，也不读 SSL_CERT_FILE：
+# NODE_USE_SYSTEM_CA / UV_SYSTEM_CERTS 让它们改用系统证书库（含公共根证书，对公网没有影响），内网 CA 进了系统库才信。
 COPY deploy/ca-certificates/ /usr/local/share/ca-certificates/matrix/
-ENV NODE_USE_SYSTEM_CA=1
+ENV NODE_USE_SYSTEM_CA=1 \
+    UV_SYSTEM_CERTS=1
 
 # bubblewrap：dsh 在 Linux 上的沙箱 runner（bwrap → Landlock）。容器需要 seccomp=unconfined 才能建命名空间，见 compose。
 # APT_MIRROR：镜像根地址（其下有 debian、debian-security），替换 deb.debian.org。
@@ -42,7 +43,11 @@ RUN set -eux; \
     npm install -g ${NPM_REGISTRY:+--registry="$NPM_REGISTRY"} @deepseek-ai/dsh@${DSH_VERSION}; \
     command -v dsh || ln -sf "$(npm prefix -g)/bin/dsh" /usr/local/bin/dsh; \
     command -v dsh; \
-    pip install --no-cache-dir ${PYPI_INDEX:+--index-url "$PYPI_INDEX"} uv==${UV_VERSION}; \
+    # PYPI_INDEX 是 http:// 时：pip 要 --trusted-host，不然静默跳过这个源，报“找不到 uv”，像是源里没有；
+    # 后面的 uv 也设上 UV_INSECURE_HOST。只给 http 源加：这两个开关对 https 源会关掉证书校验。
+    PYPI_HTTP_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    pip install --no-cache-dir ${PYPI_INDEX:+--index-url "$PYPI_INDEX"} ${PYPI_HTTP_HOST:+--trusted-host "$PYPI_HTTP_HOST"} \
+      uv==${UV_VERSION}; \
     apt-get purge -y gnupg; apt-get autoremove -y; rm -rf /var/lib/apt/lists/* /root/.npm
 
 # 非 root 运行：dsh 的会话、凭据都在这个用户的 ~/.dsh（挂卷持久化）
@@ -54,10 +59,14 @@ COPY --chown=matrix:matrix matrix ./matrix
 USER matrix
 # 换了 PyPI 源就不能 --frozen：frozen 直接用 uv.lock 里写死的 files.pythonhosted.org 地址，不看 index。
 # 不 frozen 时从配置的源重新解析，已锁定的版本优先。
-RUN if [ -n "$PYPI_INDEX" ]; then UV_DEFAULT_INDEX="$PYPI_INDEX" uv sync --no-dev; else uv sync --frozen --no-dev; fi
+RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
+    if [ -n "$PYPI_INDEX" ]; then UV_DEFAULT_INDEX="$PYPI_INDEX" uv sync --no-dev; else uv sync --frozen --no-dev; fi
 # 企业内部 IM 的驱动包（docs/im-driver-authoring.md 第五节）：pip 安装参数，多个用空格隔开；空着不装
 ARG IM_DRIVERS=""
-RUN if [ -n "$PYPI_INDEX" ]; then export UV_DEFAULT_INDEX="$PYPI_INDEX"; fi; \
+RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
+    if [ -n "$PYPI_INDEX" ]; then export UV_DEFAULT_INDEX="$PYPI_INDEX"; fi; \
     if [ -n "$IM_DRIVERS" ]; then uv pip install --no-cache $IM_DRIVERS; fi
 
 ENV MATRIX_HOST=0.0.0.0 \
