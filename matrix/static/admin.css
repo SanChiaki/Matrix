@@ -120,3 +120,4 @@ dialog.pl-file pre { max-height: 60vh; overflow: auto; background: var(--bg); pa
 /* IM 机器人页 */
 #im .table-wrap { margin-top: 16px; }
 #im-driver-errors:empty { display: none; }
+#pf-compat { font-family: var(--font-mono); font-size: var(--fs-md); }

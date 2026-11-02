@@ -229,9 +229,11 @@
           <option value="anthropic-messages">Anthropic Messages</option>
         </select></div>
         <div class="field wide"><label for="pf-url">地址</label><input id="pf-url" name="base_url" maxlength="500" required placeholder="如 https://api.example.com/v1"></div>
+        <div class="field wide"><label for="pf-compat">兼容开关（可选，JSON）</label><textarea id="pf-compat" name="compat" rows="3" maxlength="4000" spellcheck="false" placeholder='如 glm：{"thinkingFormat": "zai", "maxTokensField": "max_tokens", "supportsDeveloperRole": false, "supportsStore": false}'></textarea></div>
         <div class="field wide"><label for="pf-key">密钥</label><input id="pf-key" name="api_key" type="password" maxlength="4000" autocomplete="new-password"></div>
       </div>
-      <p class="muted m-hint">密钥保存后不再显示；要换就填新的。删掉供应商时密钥一起删。标识保存后不能改。</p>
+      <p class="muted m-hint">密钥保存后不再显示；要换就填新的。删掉供应商时密钥一起删。标识保存后不能改。
+        兼容开关原样交给 dsh 的 <code>llm-pi-ai</code>（<code>compat</code>），非标准的 OpenAI 兼容端点回 400 时多半要配它；键名和取值看 dsh 文档。</p>
       <p class="error" id="pf-error" role="alert"></p>
       <div class="actions m-actions">
         <button type="button" class="ghost" id="pf-cancel">取消</button>

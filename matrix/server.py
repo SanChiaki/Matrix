@@ -10,6 +10,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import shutil
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -461,6 +464,7 @@ class ProviderIn(BaseModel):
     name: str = Field("", max_length=80)
     api: str = Field(min_length=1, max_length=40)
     base_url: str = Field(min_length=1, max_length=500)
+    compat: dict[str, Any] | None = None  # dsh 的协议兼容开关，原样下发；形状由 model_catalog.parse_compat 查
     api_key: str | None = Field(None, max_length=4000)  # 只写：空 = 沿用已存的
 
 
@@ -1630,6 +1634,9 @@ def main() -> None:
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
+    if args.runtime == "dsh" and shutil.which(args.dsh_bin) is None:  # 不然启动正常，到第一轮才 FileNotFoundError
+        print(f"[matrix] 警告：找不到 dsh（--dsh-bin {args.dsh_bin}，PATH={os.environ.get('PATH', '')}）："
+              f"云侧 Agent 每一轮都会失败。装好 dsh 或用 --dsh-bin 指到它，再跑 matrix-dsh-check 确认", file=sys.stderr)
     catalog = network.models
     if catalog.active:
         print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")

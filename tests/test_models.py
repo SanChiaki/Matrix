@@ -318,3 +318,46 @@ def test_provider_key_only_reaches_the_dsh_process(tmp_path: Path):
     assert r.json()["providers"][0]["has_key"] is True
     r = admin.put("/api/admin/models", json={"models": [FLASH], "rev": r.json()["rev"]})
     assert r.json()["providers"] == [] and not (tmp_path / "vault" / "model-provider-hi-code.bin").exists()
+
+
+GLM_COMPAT = {"thinkingFormat": "zai", "supportsReasoningEffort": True, "maxTokensField": "max_tokens",
+              "supportsDeveloperRole": False, "supportsStore": False}
+
+
+def test_provider_compat_reaches_the_overlay(tmp_path: Path):
+    """非标准的 OpenAI 兼容端点（glm 一类）要 dsh 的 compat 开关才发得对：供应商上配，原样进覆盖层；
+    不配时覆盖层里没有这个键；形状不对整份拒绝；后台保存来回不丢、不夹带密钥。"""
+    from matrix.model_catalog import llm_config
+    glm = {"id": "modelada", "name": "ModelAda", "api": "openai-completions",
+           "base_url": "https://model.example.internal/v1", "compat": GLM_COMPAT}
+    model = {"id": "glm", "provider": "modelada", "model": "glm-5.2", "reasoning_effort": "max",
+             "context_window": 400000, "max_tokens": 64000}
+    presets, _, (prov,) = parse_catalog({"models": [model], "providers": [glm]})
+    cfg = llm_config(prov, presets[0])
+    assert cfg["compat"] == GLM_COMPAT and cfg["models"][0]["reasoningEfforts"] == {"max": "max"}
+    cfg["compat"]["thinkingFormat"] = "x"  # 改下发的那份不动目录里的
+    assert prov.compat["thinkingFormat"] == "zai"
+    overlay = build_patch_yaml([], model=presets[0].run_model(), llm_provider={"id": prov.id, "config": llm_config(prov, presets[0])})
+    assert '"compat": {"thinkingFormat": "zai"' in overlay and '"supportsDeveloperRole": false' in overlay
+
+    plain = parse_catalog({"models": [], "providers": [HI, {**HI, "id": "empty", "compat": {}}]})[2]
+    assert all(p.compat is None and "compat" not in p.public() for p in plain)
+    assert "compat" not in llm_config(plain[0], presets[0])
+    # 一层对象（chatTemplateKwargs 之类）可以；更深的、非标量、坏键名、太长的不行
+    assert parse_catalog({"models": [], "providers": [{**glm, "compat": {"chatTemplateKwargs": {"enable_thinking": True}}}]})
+    for compat in ("zai", {"a": {"b": {"c": 1}}}, {"a": None}, {"1x": True}, {"a b": 1}, {"a": float("nan")},
+                   {"a": "x" * 5000}):
+        with pytest.raises(ValueError, match="compat"):
+            parse_catalog({"models": [], "providers": [{**glm, "compat": compat}]})
+
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    admin = TestClient(create_app(net))
+    login(admin, "admin@example.com")
+    rev = admin.get("/api/admin/models").json()["rev"]
+    r = admin.put("/api/admin/models", json={"models": [model], "rev": rev, "providers": [{**glm, "api_key": "sk-1"}]})
+    assert r.status_code == 200 and r.json()["providers"][0]["compat"] == GLM_COMPAT
+    saved = json.loads((tmp_path / "models.json").read_text(encoding="utf-8"))
+    assert saved["providers"][0]["compat"] == GLM_COMPAT and "sk-1" not in json.dumps(saved)
+    bad = admin.put("/api/admin/models", json={"models": [model], "rev": r.json()["rev"],
+                                               "providers": [{**glm, "compat": {"a": [[1]]}}]})
+    assert bad.status_code == 409 and "compat" in bad.json()["detail"]  # 校验失败与其它目录错误一样是 409
