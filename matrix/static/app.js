@@ -1,5 +1,5 @@
 // Matrix UI：网络图 / Agent 管理 / 项目管理 / 对话管理。状态来自 /api/network，事件流驱动刷新。
-import { renderMarkdown } from "./md.js";
+import { renderMarkdown, mapText } from "./md.js";
 
 const $ = (s, el = document) => el.querySelector(s);
 const svgNS = "http://www.w3.org/2000/svg";
@@ -2846,8 +2846,9 @@ function renderThread() {
   // 每个中断席位只在它最后一条系统消息上给“继续”
   const lastSys = {};
   c.messages.forEach((m, i) => { if (m.role === "system" && m.agent_id) lastSys[m.agent_id] = i; });
-  const mentionHtml = (text) => esc(text).replace(/@([^\s@，。,:：]+(?: [A-Z][\w-]*)*)/g, (s) =>
-    members().some((a) => s.slice(1).toLowerCase().startsWith(a.name.toLowerCase())) ? `<span class="mention">${s}</span>` : s);
+  // 人发的消息也按 Markdown 渲染（和 Agent 的回复一样）；@成员 只在正文里标出，代码和链接里的不动
+  const mentionHtml = (text) => mapText(renderMarkdown(text), (part) => part.replace(/@([^\s@，。,:：]+(?: [A-Z][\w-]*)*)/g, (s) =>
+    members().some((a) => s.slice(1).toLowerCase().startsWith(a.name.toLowerCase())) ? `<span class="mention">${s}</span>` : s));
   const items = c.messages.map((m, i) => {
     const delegs = m.task_ids.length ? `<div class="delegs" aria-label="本轮委托">${treeOf(m.task_ids)}</div>` : "";
     const who = agent(m.agent_id);
@@ -2867,7 +2868,7 @@ function renderThread() {
       // 被认定为任务的消息：标出任务与状态，点开到看板
       const reqs = (c.requests || []).filter((r) => r.message_id === m.id).map((r) =>
         `<a class="req-tag" href="#board" data-req="${esc(r.id)}">任务 · ${esc(r.agent_name)} ${reqPillOf(r)}</a>`).join("");
-      const body = m.text ? `<div class="body">${mentionHtml(m.text)}</div>` : "";
+      const body = m.text ? `<div class="body md">${mentionHtml(m.text)}</div>` : "";
       return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? viaPill(m.via) : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
