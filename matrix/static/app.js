@@ -392,21 +392,21 @@ async function renderRequest(box = $("#board-detail")) {
   const r = await api(`/api/requests/${id}`).catch(() => null);
   if (!r || S.reqSel !== id) return;
   const mine = !r.requester_id || r.requester_id === S.me?.id;
+  const open = r.status === "in_progress" || r.status === "in_review";
+  const cancelBtn = open && mine ? '<button type="button" class="danger" id="req-cancel">取消这个任务</button>' : "";
   box.innerHTML = `<h2 class="panel-title">${esc(r.title)} ${reqPillOf(r)}</h2>
     <p class="muted">${esc(r.agent_name)} 接下 · ${esc(convWhere(r))} · ${time(r.created_at)}
-      ${r.requester_id && !mine ? ` · ${esc(r.requester)} 下发` : ""}</p>
+      ${r.requester_id && !mine ? ` · ${esc(r.requester)} 下发` : ""} · <a href="#${esc(r.conversation_id)}">打开对话</a></p>
     <dl><dt>交代的原话</dt><dd>${esc(r.message)}</dd><dt>交付要求</dt><dd>${esc(r.expected_outcome)}</dd>
       ${r.summary ? `<dt>交付说明</dt><dd class="md">${renderMarkdown(r.summary)}</dd>` : ""}
       ${r.revisions ? `<dt>返工</dt><dd>退回 ${r.revisions} 次${r.feedback ? ` · 最近意见：${esc(r.feedback)}` : ""}</dd>` : ""}</dl>
-    ${r.status === "in_review" && mine ? `<form id="req-review" class="stack">
-      <div class="actions"><button type="button" id="req-accept">验收通过</button></div>
-      <label for="req-feedback" class="sr-only">要改什么</label>
-      <textarea id="req-feedback" rows="3" placeholder="不满意：写明要改什么，${esc(r.agent_name)} 会在原会话里修改后重新交付"></textarea>
-      <div class="actions"><button type="submit" class="ghost">退回修改</button></div></form>`
-      : r.status === "in_review" ? `<p class="hint">等 ${esc(r.requester)} 验收。</p>` : ""}
-    ${(r.status === "in_progress" || r.status === "in_review") && mine ? '<p><button type="button" class="link" id="req-cancel">取消这个任务</button></p>' : ""}
     ${reqProjectField(r, mine)}
-    <div class="actions"><a class="button ghost sm" href="#${esc(r.conversation_id)}">打开对话</a></div>
+    ${r.status === "in_review" && mine ? `<form id="req-review" class="stack">
+      <div class="field"><label for="req-feedback">不满意的话，写明要改什么</label>
+      <textarea id="req-feedback" rows="3" placeholder="${esc(r.agent_name)} 会在原会话里修改后重新交付"></textarea></div>
+      <div class="actions"><button type="button" id="req-accept">验收通过</button><button type="submit" class="ghost">退回修改</button>${cancelBtn}</div></form>`
+      : r.status === "in_review" ? `<p class="hint">等 ${esc(r.requester)} 验收。</p>${cancelBtn ? `<div class="actions">${cancelBtn}</div>` : ""}`
+      : cancelBtn ? `<div class="actions">${cancelBtn}</div>` : ""}
     ${r.tasks.length ? `<h3>为它发起的委托 · ${r.tasks.length}</h3><div class="delegs">${r.tasks.map((t) => delegBtn(t, !!t.parent_task_id)).join("")}</div>
       <div id="req-task"></div>` : ""}
     <p class="error" role="alert"></p>`;

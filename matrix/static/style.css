@@ -15,6 +15,9 @@ h2 { font-size: var(--fs-lg); }
 h3 { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 20px 0 8px; font-weight: 600; }
 code { font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--text-2); }
 ::selection { background: var(--accent-soft); }
+/* 没有自己样式的链接用主色；:where() 不加权重，部件里的链接样式照样生效 */
+:where(a) { color: var(--accent); text-underline-offset: 2px; }
+:where(a):hover { color: var(--accent-hover); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 * { scrollbar-width: thin; scrollbar-color: var(--surface-3) transparent; }
@@ -78,6 +81,12 @@ main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overf
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
   box-shadow: var(--shadow-pop); outline: none; }
 .side.open { display: block; animation: modal-in .16s ease-out; }
+/* 弹窗里的操作行：主按钮在最右，次要按钮在它左边，危险操作在最左、离主按钮最远（DOM 里主按钮仍在最前） */
+.side .actions { flex-direction: row-reverse; justify-content: flex-start; flex-wrap: wrap; }
+.side .actions button.danger { margin-left: 0; margin-right: auto; }
+/* 表单最后一行操作是弹窗的底栏：长表单滚动时也看得到 */
+.side form > .actions:last-child { position: sticky; bottom: -24px; z-index: 1; margin: 8px -32px -24px; padding: 16px 32px;
+  background: var(--surface); border-top: 1px solid var(--border); }
 .view[hidden] .side.open { display: none; }
 @keyframes modal-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.98); } }
 .modal-backdrop { position: fixed; inset: 0; z-index: 50; background: var(--scrim); backdrop-filter: blur(3px); }
@@ -86,6 +95,7 @@ main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overf
 .side > h2, .panel-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-lg); margin-bottom: 6px; }
 .side > p { margin: 0 0 16px; }
 .muted { color: var(--muted); font-size: var(--fs-md); }
+.cards > .empty { grid-column: 1 / -1; }  /* 卡片网格里的空状态占满一行，不挤在第一格 */
 .empty { list-style: none; color: var(--muted); font-size: var(--fs-md); padding: 32px; text-align: center; border: 1px dashed var(--border-strong); border-radius: var(--radius); }
 .placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px; padding: 48px 24px; min-height: 60%; height: 100%; color: var(--muted); font-size: var(--fs-md); }
 #thread > li:only-child:has(.placeholder) { flex: 1; display: flex; }
@@ -109,7 +119,7 @@ main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overf
 .avatar { width: 30px; height: 30px; border-radius: var(--radius-sm); flex: none; display: grid; place-items: center; font-size: var(--fs-md); font-weight: 600; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); }
 .avatar.sm { width: 24px; height: 24px; border-radius: var(--radius-sm); font-size: var(--fs-xs); }
 .swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
-dl { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px 12px; margin: 16px 0 0; font-size: var(--fs-md); }
+dl { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px 12px; margin: 16px 0; font-size: var(--fs-md); }
 dt { color: var(--muted); }
 dd { margin: 0; word-break: break-word; color: var(--text-2); }
 dd.bad { color: var(--rejected); }
@@ -161,7 +171,8 @@ form.editor { display: flex; flex-direction: column; gap: 16px; margin-top: 20px
 .field > label, .field-label { font-size: var(--fs-md); font-weight: 500; color: var(--text-2); }
 .hint { font-size: var(--fs-sm); color: var(--muted); margin: 0; }
 .checks { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin: 0; padding: 0; }
-.checks legend { padding: 0; margin-bottom: 6px; font-size: var(--fs-md); font-weight: 500; color: var(--text-2); float: left; width: 100%; }
+.checks legend { float: left; width: 100%; margin: 0; padding: 8px 12px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-2);
+  background: var(--surface-2); border-bottom: 1px solid var(--border); }  /* 列表框的表头：标题在框里，不压在边框上 */
 .checks label { display: flex; align-items: flex-start; gap: 12px; padding: 8px 12px; font-size: var(--fs-md); cursor: pointer; border-top: 1px solid var(--border); }
 .checks label:first-of-type { border-top: 0; }
 .checks label:hover { background: var(--surface-2); }
@@ -242,7 +253,7 @@ button.icon svg { width: 14px; height: 14px; }
 .side-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 #members-panel, #task-detail, #archive-panel { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
 #members-panel[hidden], #task-detail[hidden], #archive-panel[hidden] { display: none; }
-#members-panel h3 { margin-top: 0; }
+#members-panel > h3:first-child { margin-top: 0; }
 .member-list { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .member-list li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: var(--radius-sm); }
 .member-list li:hover { background: var(--surface-2); }
@@ -570,6 +581,7 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .deleg.child { margin-left: 12px; }
   .pane { padding: 16px; }
   .side { padding: 20px 16px; }
+  .side form > .actions:last-child { bottom: -20px; margin: 8px -16px -20px; padding: 12px 16px; }
   .view-head { flex-direction: column; align-items: stretch; gap: 12px; }
   .view-head button { width: 100%; }
   .msg.user .content { max-width: 92%; }

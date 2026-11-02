@@ -78,13 +78,18 @@
 
   <section class="g-sec">
     <h2>按钮</h2>
-    <p>一个区域只有一个主按钮。其余用描边按钮；删除这类危险操作用红字按钮，放在最右边。</p>
+    <p>一个区域只有一个主按钮，其余用描边按钮。弹窗底栏里主按钮在最右，危险操作在最左。</p>
     <div class="g-row">
       <button type="button">新建项目</button>
       <button type="button" class="ghost">项目配置</button>
       <button type="button" class="danger" style="margin-left:0">删除项目</button>
       <button type="button" class="link">查看详情</button>
       <button type="button" disabled>保存</button>
+    </div>
+    <div class="side open" style="position:static;transform:none;display:block;width:auto;max-height:none;margin-top:var(--sp-4);animation:none">
+      <h2>新建项目</h2><p class="muted">弹窗：标题、内容、底栏。</p>
+      <form onsubmit="return false"><div class="field"><label for="g-dlg">名称</label><input id="g-dlg"></div>
+        <div class="actions"><button type="submit">保存</button><button type="button" class="ghost">取消</button><button type="button" class="danger">删除项目</button></div></form>
     </div>
   </section>
 

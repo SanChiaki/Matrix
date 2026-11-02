@@ -8,6 +8,8 @@
 :root {
   color-scheme: dark;
 
+  /* 文字色在 --bg / --surface / --surface-2 / --surface-3 上、语义色在它们和 12% 的同色底上都不低于 4.5:1（WCAG AA），
+     tests/test_design.py 检查 */
   /* ---- 中性色：底 → 面 → 抬高的面 ---- */
   --bg: #0b0c0f;
   --surface: #121318;
@@ -17,7 +19,7 @@
   --border-strong: rgba(255, 255, 255, .13);
   --text: #e8e9ed;
   --text-2: #b4b8c2;
-  --muted: #7d8391;
+  --muted: #848a97;
 
   /* ---- 强调色：靛蓝 = 主操作与 Agent ---- */
   --accent: #8b93ff;
@@ -32,7 +34,7 @@
   --on-human: #1a1206;
   --running: #8b93ff;
   --completed: #4cc38a;
-  --rejected: #ef6b65;
+  --rejected: #ef6d67;
   /* 插件页面与沙箱框：标明“这是插件的内容”，不是插件自己的主色 */
   --plugin: #5cc8d6;
   --plugin-soft: rgba(92, 200, 214, .12);
@@ -131,25 +133,25 @@
   --border-strong: rgba(16, 20, 32, .16);
   --text: #16181d;
   --text-2: #3d424c;
-  --muted: #6a7080;
+  --muted: #656b7a;
 
-  --accent: #5a62e0;
-  --accent-hover: #4850cf;
-  --accent-soft: rgba(90, 98, 224, .1);
-  --accent-line: rgba(90, 98, 224, .45);
+  --accent: #454edc;
+  --accent-hover: #3a42c4;
+  --accent-soft: rgba(69, 78, 220, .1);
+  --accent-line: rgba(69, 78, 220, .45);
   --on-accent: #fff;
 
-  --agent: #5a62e0;
-  --human: #b26d17;
+  --agent: #454edc;
+  --human: #895412;
   --on-human: #fff;
-  --running: #5a62e0;
-  --completed: #1d8a56;
-  --rejected: #d03c36;
-  --plugin: #0f8796;
-  --plugin-soft: rgba(15, 135, 150, .09);
-  --plugin-line: rgba(15, 135, 150, .45);
-  --release: #a8661a;
-  --release-soft: rgba(168, 102, 26, .1);
+  --running: #454edc;
+  --completed: #176f45;
+  --rejected: #b12f29;
+  --plugin: #0c6a76;
+  --plugin-soft: rgba(12, 106, 118, .09);
+  --plugin-line: rgba(12, 106, 118, .45);
+  --release: #8b5516;
+  --release-soft: rgba(139, 85, 22, .1);
   --peer: #1f9a74;
 
   --edge: #c4c8d2;
@@ -161,8 +163,8 @@
   --grid-dot: rgba(16, 20, 32, .08);
   --glass: rgba(255, 255, 255, .8);
 
-  --chart-ok: #5a62e0;
-  --chart-fail: #d03c36;
+  --chart-ok: #454edc;
+  --chart-fail: #b12f29;
 
   --shadow: 0 1px 2px rgba(16, 20, 32, .05), 0 8px 24px rgba(16, 20, 32, .06);
 }
