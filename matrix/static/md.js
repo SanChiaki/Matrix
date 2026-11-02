@@ -58,6 +58,20 @@ function list(lines, i) {
   return [`<${ordered ? "ol" : "ul"}>${li}</${ordered ? "ol" : "ul"}>`, i];
 }
 
+// 只改 renderMarkdown 输出里的正文文字（如把 @成员 标出来）：跳过标签本身，也跳过 code / pre / a 里面的文字。
+// 输出里正文的 < 都已转义成 &lt;，所以按 < … > 切开就能分出标签。
+export function mapText(html, fn) {
+  let skip = 0;
+  return html.split(/(<[^>]*>)/).map((part) => {
+    if (part.startsWith("<")) {
+      const tag = part.match(/^<(\/?)(code|pre|a)\b/i);
+      if (tag) skip = Math.max(0, skip + (tag[1] ? -1 : 1));
+      return part;
+    }
+    return skip ? part : fn(part);
+  }).join("");
+}
+
 export function renderMarkdown(src) {
   const lines = String(src ?? "").replace(/\r\n?/g, "\n").split("\n");
   const out = [];

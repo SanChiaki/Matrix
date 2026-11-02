@@ -473,6 +473,7 @@ button.link:hover { background: none; text-decoration: underline; }
 .md th { background: var(--surface-2); font-weight: 600; color: var(--text); }
 .md.report { font-size: var(--fs-md); padding: 16px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); max-height: 520px; overflow: auto; }
 .msg .body.md { white-space: normal; }
+.msg.user .md code { background: var(--bg); }  /* 人的气泡本身是 --surface-3，代码块换深一层才看得出来 */
 
 .composer { padding: 0 32px 24px; }
 #msg-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); transition: border-color .15s, box-shadow .15s; }
