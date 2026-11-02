@@ -92,6 +92,8 @@ async function submitAuth(e) {
 async function enter() {
   S.me = await api("/api/me");
   $("#me-email").textContent = S.me.email;
+  $("#me-initial").textContent = (S.me.email[0] || "?").toUpperCase();
+  $("#me-btn").title = S.me.email;
   $("#admin-link").hidden = !S.me.admin;
   if (!S.started) { S.started = true; await start(); }
   else { await reload(); route(); }
@@ -114,8 +116,7 @@ async function init() {
 function initTheme() {
   const btn = $("#theme-toggle"), root = document.documentElement;
   const paint = () => {
-    const label = root.dataset.theme === "light" ? "切换到深色模式" : "切换到浅色模式";
-    btn.setAttribute("aria-label", label); btn.title = label;
+    $("#theme-label").textContent = root.dataset.theme === "light" ? "切换到深色模式" : "切换到浅色模式";
     // 插件页面跟着换（SDK 收到 theme 事件自己切换）；只发给网络自己的插件框，不发给外部页面标签
     document.querySelectorAll("iframe.plugin-frame").forEach((f) => {
       if (/^\/(plugin|release)-frame\//.test(new URL(f.src, location.href).pathname))
@@ -138,14 +139,15 @@ function initTheme() {
 async function start() {
   const info = S.info;
   S.defaultModel = info.default_model;
-  $("#runtime").textContent = `Runtime · ${info.runtime}`;
-  if (info.default_model) $("#runtime").title = `未单独配置模型的 Agent 使用：${modelLabel(info.default_model)}`;
+  $("#runtime").textContent = info.runtime;
+  $("#runtime").title = `运行时：${info.runtime}${info.default_model ? `；未单独配置模型的 Agent 使用 ${modelLabel(info.default_model)}` : ""}`;
   $("#board-agent").addEventListener("change", () => { S.boardAgent = $("#board-agent").value; renderBoard(); });
   $("#board-project").addEventListener("change", () => { S.boardProject = $("#board-project").value; renderBoard(); });
   // 走 URL 而不是直接 show()：否则切回对话页时 URL 还停在 "#network"，
   // 刷新后会被路由回网络图。
   document.querySelectorAll(".tab[data-view]").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   setupMore();
+  setupAccount();
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
   const upMine = (folder) => pickSkillPackage("/api/me/skills", folder).then(async (x) => {
     if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
@@ -682,7 +684,7 @@ function renderNetDetail() {
 function renderAgentsView() { renderAgents(); renderAgentEditor(); }
 
 // 卡片上的“对话”：链接到 #g-<项目> / #dm-<Agent>，路由负责打开（私聊第一次打开时创建）
-const chatBtn = (hash, label) => `<a class="button sm chat-btn" href="#${esc(hash)}" aria-label="${esc(label)}">
+const chatBtn = (hash, label) => `<a class="button ghost sm chat-btn" href="#${esc(hash)}" aria-label="${esc(label)}">
   <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2.5 4.5a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2H7l-3 2.5v-2.5h0a1.5 1.5 0 0 1-1.5-1.5z"/></svg>对话</a>`;
 
 function renderAgents() {
@@ -694,10 +696,11 @@ function renderAgents() {
       <button type="button" class="card-main" data-id="${esc(a.id)}" aria-label="编辑 ${esc(a.name)}">
         <div class="card-head">${avatar(a.name)}<span class="name">${esc(a.name)}</span>${pill(a.status)}</div>
         <p class="card-desc">${esc(a.description)}</p>
-        <div class="card-meta">${tags(a.authority, "ok")}${modelTag(a)}${a.device_runtime
-          ? `<span class="tag model" title="在我的电脑上">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "我的电脑") : "设备离线"}</span>` : ""}</div>
+        <div class="card-meta">${tags(a.authority)}${modelTag(a)}</div>
       </button>
-      <div class="card-foot"><span>${a.mine ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`}</span>
+      <div class="card-foot"><span>${!a.mine ? `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`
+        : a.device_runtime ? `<span class="muted" title="在我的电脑上运行">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "我的电脑") : "设备离线"}</span>`
+        : '<span class="muted">云侧运行</span>'}</span>
         ${!a.mine ? '<span class="muted">共享项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
     </div></li>`).join("") || '<li class="empty">还没有 Agent。点“新建 Agent”创建一个。</li>';
   $("#agent-list").querySelectorAll(".card-main").forEach((b) =>
@@ -879,11 +882,11 @@ function renderProjects() {
   $("#project-list").innerHTML = S.snap.projects.map((g) => `
     <li><div class="card">
       <button type="button" class="card-main" data-id="${esc(g.id)}" aria-label="打开 ${esc(g.name)}">
-        <div class="card-head"><span class="swatch" style="background:${gcolor(g.id)}"></span><span class="name">${esc(g.name)}</span>${kindTag(g)}<span class="pill">${g.member_ids.length} 名成员</span></div>
+        <div class="card-head"><span class="avatar group" aria-hidden="true" style="background:${gcolor(g.id)}">#</span><span class="name">${esc(g.name)}</span>${kindTag(g)}</div>
         <p class="card-desc">${esc(g.description || "没有描述")}</p>
         <div class="card-meta">${tags(g.member_ids.map(aname))}</div>
       </button>
-      <div class="card-foot"><span>${g.participants.length ? `<span class="muted">${g.participants.length + 1} 人参与</span>` : ""}</span>${chatBtn(`p-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
+      <div class="card-foot"><span class="muted">${g.member_ids.length} 名成员${g.participants.length ? ` · ${g.participants.length + 1} 人参与` : ""}</span>${chatBtn(`p-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
     </div></li>`).join("") || '<li class="empty">还没有项目。</li>';
   $("#project-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { location.hash = `project-${b.dataset.id}`; }));
@@ -2399,29 +2402,26 @@ function renderConvList() {
 // 侧栏顶部的“助理”：和当前助理的私聊（换了助理就跟着换）
 const homeConv = () => S.snap?.conversations.find((c) => c.kind === "dm" && !c.archived && c.agent_id === S.me?.assistant_id);
 
-// “更多”：少用的视图收在这里。点开是一列按钮（不是菜单语义：每一项就是切到那个视图）
-function setupMore() {
-  const wrap = $(".more-wrap"), btn = $("#nav-more"), menu = $("#more-menu");
-  const items = () => [...menu.querySelectorAll("button")];
+// 侧栏里的弹出菜单（“更多”、账号）：点按钮开关，点外面、按 Esc、焦点离开就关，上下键在项之间移动
+function setupPopover(wrap, btn, menu, place, first = (items) => items[0]) {
+  const items = () => [...menu.querySelectorAll("button, a[href]")].filter((x) => !x.hidden);
   const close = (focus) => {
     if (menu.hidden) return;
     menu.hidden = true; btn.setAttribute("aria-expanded", "false");
     if (focus) btn.focus();
   };
-  const place = () => {  // 侧栏竖着时弹在右边，窄屏横着时弹在下面；不超出窗口
-    const r = btn.getBoundingClientRect(), rail = $(".rail").getBoundingClientRect();
-    const side = rail.height > rail.width;
-    const left = side ? rail.right + 6 : r.left, top = side ? r.top : r.bottom + 6;
+  const at = (left, top) => {  // 不超出窗口
     menu.style.left = `${Math.max(8, Math.min(left, innerWidth - menu.offsetWidth - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(top, innerHeight - menu.offsetHeight - 8))}px`;
   };
   btn.addEventListener("click", () => {
     if (!menu.hidden) { close(); return; }
     menu.hidden = false; btn.setAttribute("aria-expanded", "true");
-    place();
-    (items().find((b) => b.getAttribute("aria-pressed") === "true") || items()[0]).focus();
+    const r = btn.getBoundingClientRect(), rail = $(".rail").getBoundingClientRect();
+    at(...place(r, rail.height > rail.width, rail));
+    first(items())?.focus();
   });
-  menu.addEventListener("click", (e) => { if (e.target.closest("button")) close(); });
+  menu.addEventListener("click", (e) => { if (e.target.closest("button, a")) close(); });
   document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) close(); });
   wrap.addEventListener("focusout", (e) => { if (e.relatedTarget && !wrap.contains(e.relatedTarget)) close(); });
   wrap.addEventListener("keydown", (e) => {
@@ -2434,6 +2434,24 @@ function setupMore() {
     list[(go + list.length) % list.length].focus();
   });
   window.addEventListener("resize", () => close());
+}
+
+// “更多”：少用的视图收在这里。点开是一列按钮（不是菜单语义：每一项就是切到那个视图）。
+// 侧栏竖着时弹在右边，窄屏横着时弹在下面
+function setupMore() {
+  setupPopover($(".more-wrap"), $("#nav-more"), $("#more-menu"),
+    (r, side, rail) => side ? [rail.right + 6, r.top] : [r.left, r.bottom + 6],
+    (items) => items.find((b) => b.getAttribute("aria-pressed") === "true") || items[0]);
+}
+
+// 账号：管理后台、深浅色、退出。侧栏竖着时在按钮上方弹出（按钮在侧栏最底下），窄屏横着时在下面
+function setupAccount() {
+  const menu = $("#me-menu");
+  setupPopover($(".me-wrap"), $("#me-btn"), menu,
+    (r, side) => {
+      menu.style.minWidth = side ? `${r.width}px` : "";  // 竖着时和账号按钮一样宽
+      return side ? [r.left, r.top - menu.offsetHeight - 6] : [r.right - menu.offsetWidth, r.bottom + 6];
+    });
 }
 
 function renderChats() {

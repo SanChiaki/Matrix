@@ -63,7 +63,18 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
 .more-menu[hidden] { display: none; }
 .more-menu .tab { width: 100%; }
-.rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding: 12px 8px 0; border-top: 1px solid var(--border); font-size: var(--fs-sm); color: var(--muted); }
+.rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 4px; padding: 12px 0 0; border-top: 1px solid var(--border); font-size: var(--fs-sm); color: var(--muted); }
+/* 运行状态一行：左边是空闲 / 运行中，右边小字是运行时 */
+.rail-status { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 12px; min-width: 0; }
+#runtime { font-family: var(--font-mono); font-size: var(--fs-xs); white-space: nowrap; }
+/* 账号按钮：头像 + 邮箱，点开是账号菜单 */
+.me-wrap { display: flex; flex-direction: column; min-width: 0; }
+.me-btn { width: 100%; justify-content: flex-start; gap: 8px; padding: 6px 8px; border: 0; background: transparent; color: var(--text-2); font-weight: 500; font-size: var(--fs-md); }
+.me-btn:hover, .me-btn[aria-expanded="true"] { background: var(--surface-3); color: var(--text); }
+.me-btn #me-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.me-btn .chev { width: 14px; height: 14px; margin-left: auto; flex: none; color: var(--muted); }
+.more-menu a.tab { display: flex; align-items: center; text-decoration: none; border-radius: var(--radius-sm); }
+.more-menu [hidden] { display: none; }
 .status-line { display: flex; align-items: center; gap: 8px; }
 .status-line::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--completed); box-shadow: 0 0 0 3px color-mix(in srgb, var(--completed) 15%, transparent); }
 .status-line.busy::before { background: var(--running); box-shadow: 0 0 0 3px var(--accent-soft); animation: pulse 1.4s ease-in-out infinite; }
@@ -118,7 +129,6 @@ main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overf
 .tag.no { color: var(--rejected); background: color-mix(in srgb, var(--rejected) 8%, transparent); border-color: color-mix(in srgb, var(--rejected) 20%, transparent); text-decoration: line-through; }
 .avatar { width: 30px; height: 30px; border-radius: var(--radius-sm); flex: none; display: grid; place-items: center; font-size: var(--fs-md); font-weight: 600; color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent); }
 .avatar.sm { width: 24px; height: 24px; border-radius: var(--radius-sm); font-size: var(--fs-xs); }
-.swatch { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
 dl { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 12px 12px; margin: 16px 0; font-size: var(--fs-md); }
 dt { color: var(--muted); }
 dd { margin: 0; word-break: break-word; color: var(--text-2); }
@@ -149,7 +159,7 @@ summary:hover { color: var(--text-2); }
 }
 .card-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .card:has(.card-main:focus-visible) { border-color: var(--accent-line); }
-.card .card-foot { margin: 0 16px; padding: 12px 0 12px; align-items: center; }
+.card .card-foot { margin: 0 16px; padding: 8px 0; min-height: 48px; align-items: center; }  /* 有没有按钮都一样高 */
 .card .card-foot > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 a.button {
   display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: var(--radius-sm); white-space: nowrap;
@@ -344,10 +354,6 @@ body.gated > .rail, body.gated > main { visibility: hidden; }
 .gate .error:empty { display: none; }
 button.link { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 500; font-size: inherit; }
 button.link:hover { background: none; text-decoration: underline; }
-.rail-foot .me { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 4px; }
-.rail-foot .me #me-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
-.rail-foot a.link { color: var(--accent); font-weight: 500; text-decoration: none; white-space: nowrap; }
-.rail-foot a.link:hover { text-decoration: underline; }
 .tab .count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--human); color: var(--on-human);
   font-size: var(--fs-xs); font-weight: 600; text-align: center; line-height: 18px; }
 .tab .count[hidden] { display: none; }
@@ -541,6 +547,9 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .rail nav { flex-direction: row; gap: 4px; }
   .tab { width: auto; }
   .rail-foot { margin: 0 0 0 auto; flex-direction: row; align-items: center; gap: 12px; padding: 0; border-top: 0; }
+  .rail-status { padding: 0; }
+  .me-btn { width: auto; }
+  .me-btn #me-email, .me-btn .chev { display: none; }  /* 横着的顶栏里只留头像 */
   /* 窄屏下左栏变成顶栏：对话列表改成可横向滚动的一排 */
   .rail-convs { flex: 0 1 auto; min-width: 0; flex-direction: row; align-items: center; gap: 6px; margin: 0; padding: 0 0 0 12px; border-top: 0; border-left: 1px solid var(--border); }
   .rail-convs-head { padding: 0; }
@@ -571,7 +580,7 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .rail nav { flex: 1; min-width: 0; }
   .tab { padding: 8px 6px; font-size: var(--fs-md); white-space: nowrap; }
   .tab svg { display: none; }
-  .rail-foot { width: 100%; margin: 0; font-size: var(--fs-sm); }
+  .rail-foot { width: 100%; margin: 0; font-size: var(--fs-sm); justify-content: space-between; }
   .rail-convs { order: 3; width: 100%; padding: 0; border-left: 0; }
   /* 窄屏：委托路线放不下“A → B”，名称单行省略，状态换到下一行 */
   .deleg .route { flex-wrap: wrap; row-gap: 4px; }
@@ -647,7 +656,6 @@ details.manual summary { cursor: pointer; font-size: var(--fs-md); color: var(--
 #req-task { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 #req-task:empty { display: none; }
 /* 主题切换：深色时显示太阳（点了变浅色），浅色时显示月亮 */
-.theme-toggle { margin-left: auto; border-color: transparent; }
 .theme-toggle .moon, :root[data-theme="light"] .theme-toggle .sun { display: none; }
 :root[data-theme="light"] .theme-toggle .moon { display: block; }
 /* 项目：按方面分栏的汇总 */

@@ -78,16 +78,25 @@
       <ul id="archived-list" class="conv-list" aria-label="已归档的对话"></ul>
     </details>
   </div>
+  <!-- 侧栏底部：运行状态一行；账号收进一个菜单（管理后台、深浅色、退出），不再四样东西挤一行 -->
   <div class="rail-foot">
-    <span id="live" class="status-line" aria-live="polite"></span>
-    <span id="runtime"></span>
-    <span class="me"><span id="me-email"></span>
-      <button type="button" class="ghost icon sm theme-toggle" id="theme-toggle">
-        <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>
-        <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg>
+    <div class="rail-status"><span id="live" class="status-line" aria-live="polite"></span><span id="runtime"></span></div>
+    <div class="me-wrap">
+      <button type="button" class="me-btn" id="me-btn" aria-expanded="false" aria-controls="me-menu">
+        <span class="avatar sm" id="me-initial" aria-hidden="true"></span><span id="me-email"></span>
+        <svg class="chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 10 8 6.5l3.5 3.5"/></svg>
       </button>
-      <a class="link" id="admin-link" href="/admin" hidden>管理后台</a>
-      <button type="button" class="link" id="logout">退出</button></span>
+      <div id="me-menu" class="more-menu" aria-label="账号" hidden>
+        <a class="tab" id="admin-link" href="/admin" hidden>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2.5 13.5V9M6.2 13.5V5.5M9.8 13.5v-5M13.5 13.5v-11"/></svg>管理后台</a>
+        <button type="button" class="tab theme-toggle" id="theme-toggle">
+          <svg class="sun" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1.5v1.5M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1 1M11.6 11.6l1 1M3.4 12.6l1-1M11.6 4.4l1-1"/></svg>
+          <svg class="moon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13.5 9.5A5.5 5.5 0 0 1 6.5 2.5a5.5 5.5 0 1 0 7 7z"/></svg>
+          <span id="theme-label">切换深浅色</span></button>
+        <button type="button" class="tab" id="logout">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 2.5H3.5v11H6M10 5l3 3-3 3M13 8H6"/></svg>退出</button>
+      </div>
+    </div>
   </div>
 </aside>
 
