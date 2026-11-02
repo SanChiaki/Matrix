@@ -46,6 +46,17 @@ docker compose up -d --build
 协议、地址、密钥），不用进容器改 dsh：密钥加密存在 `matrix-data` 卷的 `vault/` 里，`models.json` 里只有协议和地址。
 保管密钥（`MATRIX_VAULT_KEY` 或数据卷里的 `vault.key`）丢了，就要在后台重新填一遍各供应商的密钥。
 
+供应商可以带 `compat`：dsh `llm-pi-ai` 的协议兼容开关，原样交给 dsh。非标准的 OpenAI 兼容端点（如 glm 系列）不配它时每轮都是
+`INVALID_REQUEST: 400`。后台供应商表单里的“兼容开关”就是它，写在文件里是：
+
+```json
+{"id": "modelada", "name": "ModelAda", "api": "openai-completions", "base_url": "https://model.example.internal/v1",
+ "compat": {"thinkingFormat": "zai", "supportsReasoningEffort": true, "maxTokensField": "max_tokens",
+            "supportsDeveloperRole": false, "supportsStore": false}}
+```
+
+Matrix 只查形状；键名写错时那一轮 dsh 会报出是哪个键、能用的有哪些。
+
 ## 内网抓取白名单（可选）
 
 dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒绝，也没有白名单可配。要让云侧 Agent 抓内网页面，
@@ -64,8 +75,50 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 - `replace_builtin`：关掉 dsh 自带的 `web_fetch`（默认是），只留 Matrix 的 `mcp__matrix_web__fetch`，`web_search` 不受影响。
   两个都在时模型常挑自带的那个，在内网地址上碰壁，所以默认关掉。
 
-只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，把 CA 加进容器的证书库（或设 `SSL_CERT_FILE`）。
+只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，见下面的「内网 CA / 自签证书」。
 升级 dsh 后跑 `matrix-dsh-check`，`web-fetch` 一项确认自带的 `web_fetch` 仍然关得掉。
+
+## 内网 CA / 自签证书
+
+内网的模型供应商、抓取目标用自签 CA 时，把根 CA（PEM，扩展名 `.crt`）放进 `deploy/ca-certificates/`，然后
+`docker compose up -d --build`：构建时加进镜像的系统证书库（构建后面几步的 npm / PyPI 下载也用它）。
+
+两类客户端读证书的方式不一样，排查时别被 curl 误导：
+
+| 谁 | 用什么 | 读系统证书库 / `SSL_CERT_FILE` |
+|---|---|---|
+| dsh（连模型供应商、自带的 `web_fetch`） | Node | 默认不读，只信 Node 自带的 CA 包。镜像里设了 `NODE_USE_SYSTEM_CA=1` 才读系统库；**`SSL_CERT_FILE` 对它无效** |
+| Matrix 的抓取（`mcp__matrix_web__fetch`）、云端连接器 | Python（OpenSSL） | 读系统库，也认 `SSL_CERT_FILE` |
+| curl、openssl | OpenSSL | 读系统库 |
+
+所以 curl 能通、dsh 报 `TRANSPORT: Connection error` 时，多半是 Node 不信这张 CA。确认：
+
+```bash
+docker compose exec matrix node -e 'require("https").get(process.argv[1], r => console.log("OK", r.statusCode)).on("error", e => console.log("ERR", e.code || e.message))' https://<模型地址>/v1
+```
+
+`SELF_SIGNED_CERT_IN_CHAIN` / `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` 就是证书没进 Node。不想重建镜像时，也可以把 CA 挂进容器、
+在 `.env` 里写 `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`（在 Node 自带的 CA 包之外追加，只对 dsh 生效）。
+
+## 内网 / 无公网构建
+
+构建要访问 apt（deb.debian.org）、NodeSource、npm、PyPI。只有内网镜像时在 `.env` 里写（都空着 = 官方源）：
+
+| 变量 | 作用 |
+|---|---|
+| `MATRIX_APT_MIRROR` | Debian 镜像根地址（其下有 `debian`、`debian-security`），替换 deb.debian.org |
+| `MATRIX_NODE_TARBALL` | Node 官方二进制包（`node-v24.*-linux-x64.tar.xz`）的地址，代替 NodeSource（内网通常只镜像 nodejs.org） |
+| `MATRIX_NPM_REGISTRY` | 装 dsh 用的 npm 源 |
+| `MATRIX_PYPI_INDEX` | 装 uv 与 Python 依赖用的 PyPI 源 |
+
+设了 `MATRIX_PYPI_INDEX` 时镜像改用 `uv sync --no-dev`（不带 `--frozen`）：`--frozen` 直接用 `uv.lock` 里写死的
+`files.pythonhosted.org` 下载地址，不看 index 配置，换了源也照样去公网；不 frozen 时从配置的源重新解析，已锁定的版本优先。
+（自己改 Dockerfile 换源时同理，`UV_DEFAULT_INDEX` 加 `--frozen` 不生效。）
+
+构建最后会确认 `dsh` 在 PATH 上（Node 装在别的前缀时补一个链接），找不到就构建失败，不会等到 Agent 第一轮才报 `FileNotFoundError`。
+
+**非标准的 OpenAI 兼容端点**（glm 等）每轮都报 `INVALID_REQUEST: 400` 时，多半要在后台的供应商上配“兼容开关”
+（dsh `llm-pi-ai` 的 `compat`，见上面「预置模型」）。
 
 ## IM 入口（可选）
 

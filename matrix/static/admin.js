@@ -277,7 +277,8 @@ function renderCatalog() {
   ], d.models, d.active ? "目录是空的：云侧 Agent 只能用运行时默认的模型" : "还没有模型");
   table("#t-providers", [
     { label: "名称", html: (p) => `<b>${esc(p.name)}</b> <code>${esc(p.id)}</code>` },
-    { label: "协议", html: (p) => esc(API_NAMES[p.api] || p.api) },
+    { label: "协议", html: (p) => esc(API_NAMES[p.api] || p.api)
+      + (p.compat ? ` <span class="muted" title="${esc(JSON.stringify(p.compat))}">· 兼容开关 ${num(Object.keys(p.compat).length)} 项</span>` : "") },
     { label: "地址", html: (p) => `<code>${esc(p.base_url)}</code>` },
     { label: "密钥", html: (p) => p.has_key ? '<span class="key-state">已设置</span>' : '<span class="key-state missing">未设置</span>' },
     { label: "模型", num: true, html: (p) => num(d.models.filter((m) => m.provider === p.id).length) },
@@ -314,7 +315,7 @@ async function saveCatalog({ models = M.data.models, dflt = M.data.default, prov
       reasoning_effort: m.reasoning_effort || null, description: m.description || "",
       context_window: m.context_window || null, max_tokens: m.max_tokens || null, image: !!m.image })),
     providers: providers.map((p) => ({ id: p.id, name: p.name, api: p.api, base_url: p.base_url,
-      api_key: keys[p.id] || null })) };
+      compat: p.compat || null, api_key: keys[p.id] || null })) };
   M.data = await api("/api/admin/models", { method: "PUT", body });
   renderCatalog();
 }
@@ -372,6 +373,7 @@ function openProvider(p = null) {
   const f = $("#p-form");
   f.reset();
   for (const k of ["name", "base_url"]) f[k].value = p?.[k] || "";
+  f.compat.value = p?.compat ? JSON.stringify(p.compat, null, 2) : "";
   f.api.value = p?.api || "openai-completions";
   f.pid.value = p?.id || "";
   f.pid.readOnly = !!p;
@@ -386,8 +388,13 @@ function openProvider(p = null) {
 async function submitProvider(ev) {
   ev.preventDefault();
   const f = ev.target, v = (k) => f[k].value.trim();
+  let compat = null;
+  if (v("compat")) {
+    try { compat = JSON.parse(v("compat")); } catch { compat = undefined; }
+    if (!compat || typeof compat !== "object" || Array.isArray(compat)) { $("#pf-error").textContent = "兼容开关要写成 JSON 对象，如 {\"thinkingFormat\": \"zai\"}"; return; }
+  }
   const p = { id: M.editProvider?.id || v("pid") || slug(v("name"), M.data.providers, "provider"), name: v("name"),
-    api: f.api.value, base_url: v("base_url") };
+    api: f.api.value, base_url: v("base_url"), compat };
   if (!M.editProvider && M.data.providers.some((x) => x.id === p.id)) { $("#pf-error").textContent = `标识 ${p.id} 已经有了`; return; }
   if (!M.data.active && !confirm("保存供应商会启用模型目录：之后云侧 Agent 只能选目录里的模型，自己填的模型对不上的改用默认。"
     + "接着把要用的模型加进来。继续？")) return;

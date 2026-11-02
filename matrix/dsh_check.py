@@ -162,7 +162,7 @@ PROVIDER_DONE = "MATRIX-PROVIDER-OK"
 
 class FakeProvider:
     """OpenAI chat completions 的最小假服务（SSE）。带工具的第一次请求让 Agent 用 bash 找密钥，之后收尾；
-    记下每次请求的认证头、模型、推理强度与工具结果。"""
+    记下每次请求的认证头、模型、推理强度、工具结果，以及受 compat 影响的系统提示角色和输出上限字段。"""
 
     def __init__(self, probe: str) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -176,9 +176,11 @@ class FakeProvider:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 tools = {t.get("function", {}).get("name") for t in body.get("tools") or []}
                 results = [str(m.get("content")) for m in body.get("messages") or [] if m.get("role") == "tool"]
+                msgs = body.get("messages") or [{}]
                 fake.requests.append({"auth": self.headers.get("Authorization") or self.headers.get("x-api-key") or "",
                                       "model": body.get("model"), "effort": body.get("reasoning_effort"),
-                                      "bash": "bash" in tools, "results": results})
+                                      "bash": "bash" in tools, "results": results,
+                                      "role": msgs[0].get("role"), "max_tokens": "max_tokens" in body})
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -213,8 +215,11 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
              f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}')")
     fake = FakeProvider(probe)
     try:
-        prov = Provider(id=prov0.id, name=prov0.name, api=prov0.api, base_url=fake.url)
-        preset = ModelPreset(id="check", label="Fake", provider=prov.id, model="fake-1", reasoning_effort="high")
+        # compat：不配时 dsh 发 developer 角色与 max_completion_tokens，glm 一类端点据此回 400
+        prov = Provider(id=prov0.id, name=prov0.name, api=prov0.api, base_url=fake.url,
+                        compat={"supportsDeveloperRole": False, "maxTokensField": "max_tokens"})
+        preset = ModelPreset(id="check", label="Fake", provider=prov.id, model="fake-1", reasoning_effort="high",
+                             max_tokens=4096)
         res = rt.run(RunRequest(agent_id="check", context_id="provider", prompt="跑一下", cwd=workdir / "provider",
                                 authority=list(AUTHORITY_PLUGINS), model=preset.run_model(), timeout_s=timeout_s,
                                 llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
@@ -232,6 +237,11 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
     efforts = {r["effort"] for r in reqs if r["bash"]}
     if efforts != {"high"}:
         report.add(WARN, "effort", f"推理强度 high 到供应商那里是 {sorted(map(str, efforts))}（model_catalog.llm_config 的映射可能要改）")
+    ignored = sorted({f"角色 {r['role']}" for r in reqs if r["role"] != "system"}
+                     | ({"没用 max_tokens 字段"} if not all(r["max_tokens"] for r in reqs) else set()))
+    report.add(FAIL if ignored else OK, "compat",
+               f"供应商的 compat 没生效（{'、'.join(ignored)}）：非标准的兼容端点会 400，model_catalog.llm_config 要改" if ignored
+               else "供应商的 compat 生效（系统提示用 system 角色、输出上限用 max_tokens）")
     results = " ".join(x for r in reqs for x in r["results"])
     leaked = [k for k, ok in (("printenv", "PRINTENV=0" not in results), ("/proc", re.search(r"PROC=[1-9]", results) is None),
                               ("ps", re.search(r"PS=[1-9]", results) is None)) if not ok]

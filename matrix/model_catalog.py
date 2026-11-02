@@ -26,12 +26,17 @@
   不是这里的 id 的，按 dsh 里已配置的供应商名处理（如 `deepseek-official`）。供应商的密钥不在这个文件里：
   由网络加密保管（`vault/model-provider-<id>.bin`），每轮只放进那个 dsh 进程的环境变量（`Provider.key_env`）。
   覆盖层里只写这一轮用到的那一个供应商（dsh 对 `llm-pi-ai` 的配置是整段替换，research: deepseek-harness#model-providers）。
+- 供应商的 `compat`（可选）：dsh `llm-pi-ai` 的协议兼容开关（如 glm 一类端点要的
+  `{"thinkingFormat": "zai", "supportsDeveloperRole": false, "maxTokensField": "max_tokens"}`），原样放进覆盖层的
+  这个供应商。Matrix 只查形状（键是标识符、值是 JSON 标量或小对象）；哪些键、哪些取值合法由 dsh 判，写错的
+  那一轮 dsh 报错并说清是哪个键。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -59,6 +64,7 @@ class Provider:
     name: str
     api: str
     base_url: str
+    compat: dict[str, Any] | None = None  # dsh 的协议兼容开关，原样下发（见模块说明）
 
     @property
     def key_env(self) -> str:
@@ -66,7 +72,10 @@ class Provider:
         return "MATRIX_LLM_" + re.sub(r"[^A-Z0-9]", "_", self.id.upper()) + "_API_KEY"
 
     def public(self) -> dict[str, Any]:
-        return {"id": self.id, "name": self.name, "api": self.api, "base_url": self.base_url}
+        out: dict[str, Any] = {"id": self.id, "name": self.name, "api": self.api, "base_url": self.base_url}
+        if self.compat:
+            out["compat"] = json.loads(json.dumps(self.compat))  # 深拷贝：调用方改了也不动目录里的
+        return out
 
 @dataclass(frozen=True)
 class ModelPreset:
@@ -102,8 +111,11 @@ def llm_config(prov: Provider, preset: ModelPreset) -> dict[str, Any]:
         m["maxTokens"] = preset.max_tokens
     if preset.reasoning_effort:  # Matrix 用 dsh 的强度名，原样交给供应商
         m["reasoningEfforts"] = {preset.reasoning_effort: preset.reasoning_effort}
-    return {"api": prov.api, "baseURL": prov.base_url, "displayName": prov.name, "apiKeyEnv": prov.key_env,
-            "models": [m]}
+    out: dict[str, Any] = {"api": prov.api, "baseURL": prov.base_url, "displayName": prov.name,
+                           "apiKeyEnv": prov.key_env, "models": [m]}
+    if prov.compat:  # 供应商级：dsh 把它作为这个供应商所有模型的默认（research: deepseek-harness#model-providers）
+        out["compat"] = json.loads(json.dumps(prov.compat))
+    return out
 
 def _positive(v: Any, where: str) -> int | None:
     if v in (None, ""):
@@ -111,6 +123,37 @@ def _positive(v: Any, where: str) -> int | None:
     if isinstance(v, bool) or not isinstance(v, int) or not 0 < v <= 100_000_000:
         raise ValueError(f"{where} 必须是正整数")
     return v
+
+COMPAT_KEY = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+COMPAT_LIMIT = 4000  # 序列化后的字节数上限
+
+
+def _compat_value(v: Any, depth: int) -> bool:
+    """JSON 标量；或一层小对象 / 列表（`chatTemplateKwargs` 之类），里面仍是标量。"""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v is not None and not (isinstance(v, float) and not math.isfinite(v))
+    if depth >= 1:
+        return False
+    if isinstance(v, list):
+        return all(_compat_value(x, depth + 1) for x in v)
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and k for k in v) and all(_compat_value(x, depth + 1) for x in v.values())
+    return False
+
+def parse_compat(v: Any, where: str) -> dict[str, Any] | None:
+    """供应商的 `compat`：只查形状，键名与取值由 dsh 校验（见模块说明）。空对象当没填。"""
+    if v in (None, ""):
+        return None
+    if not isinstance(v, dict):
+        raise ValueError(f"{where} 必须是对象")
+    for k, val in v.items():
+        if not isinstance(k, str) or not COMPAT_KEY.match(k):
+            raise ValueError(f"{where} 的键 {k!r} 无效（字母开头，字母、数字、_）")
+        if not _compat_value(val, 0):
+            raise ValueError(f"{where}.{k} 只能是字符串、布尔、数字，或由它们组成的一层对象 / 列表")
+    if len(json.dumps(v, ensure_ascii=False).encode()) > COMPAT_LIMIT:
+        raise ValueError(f"{where} 太长（上限 {COMPAT_LIMIT} 字节）")
+    return dict(v) or None
 
 def parse_providers(data: Any) -> list[Provider]:
     if data is None:
@@ -133,7 +176,8 @@ def parse_providers(data: Any) -> list[Provider]:
         u = urlparse(url)
         if u.scheme not in ("http", "https") or not u.hostname or any(c.isspace() for c in url) or len(url) > 500:
             raise ValueError(f"providers[{i}]（{pid}）的 base_url 必须是 http(s) 地址")
-        out.append(Provider(id=pid, name=str(p.get("name") or pid).strip(), api=api, base_url=url))
+        out.append(Provider(id=pid, name=str(p.get("name") or pid).strip(), api=api, base_url=url,
+                            compat=parse_compat(p.get("compat"), f"providers[{i}]（{pid}）的 compat")))
     return out
 
 def parse_catalog(data: Any) -> tuple[list[ModelPreset], str | None, list[Provider]]:

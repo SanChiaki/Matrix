@@ -1,0 +1,2 @@
+# 内网根 CA（PEM，扩展名必须是 .crt）放这里，构建镜像时加进系统证书库。见 deploy/README.md「内网 CA / 自签证书」。
+# 这里的 .crt 不进仓库（.gitignore），各部署方自己放。
