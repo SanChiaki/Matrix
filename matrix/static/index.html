@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Matrix</title>
 <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/tokens.css">
 <link rel="stylesheet" href="/static/style.css">
 <!-- 在首次绘制前定主题，避免闪一下深色：用户选过的优先，否则跟随系统 -->
 <script>document.documentElement.dataset.theme = localStorage.getItem("theme")
@@ -114,12 +115,12 @@
     <div class="pane">
       <div class="view-head">
         <div><h1>看板</h1><p>你交代给 Agent 的任务：有交付目标的事由接手的 Agent 登记，交付后由你验收。闲聊不算任务；Agent 之间的委托在任务详情里看。最上面是等你处理的事。</p></div>
-        <div class="board-filter">
-          <label for="board-project" class="sr-only">按项目筛选</label>
-          <select id="board-project"></select>
-          <label for="board-agent" class="sr-only">按 Agent 筛选</label>
-          <select id="board-agent"></select>
-        </div>
+      </div>
+      <div class="board-filter">
+        <label for="board-project" class="sr-only">按项目筛选</label>
+        <select id="board-project"></select>
+        <label for="board-agent" class="sr-only">按 Agent 筛选</label>
+        <select id="board-agent"></select>
       </div>
       <section id="todo" class="todo" aria-labelledby="todo-title" hidden>
         <h2 id="todo-title">待我处理</h2>

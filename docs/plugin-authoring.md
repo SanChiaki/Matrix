@@ -206,6 +206,16 @@ Agent 写的记录在页面上照常显示、照常发 `records.changed`，但**
 引入后页面里有一个全局的 `matrix`。所有方法都返回 Promise；被拒绝时抛 `Error`，`message` 是中文原因
 （如“插件没有申请「写插件自己的表」”“字段 stage 只能是：线索、沟通、报价”），可以直接显示给人看。
 
+### 用主界面的设计变量
+
+```html
+<link rel="stylesheet" href="../_matrix/tokens.css">
+```
+
+和主界面同一份颜色、字号、间距、圆角变量（路径规则同上）。用 `var(--accent)`、`var(--surface)`、`var(--fs-md)` 这些，
+页面就和主界面一个样子。深浅色不用自己处理：调过 `matrix.context()` 后，SDK 按看的人的主题给 `<html>` 加或去掉 `class="light"`，看的人切换时也跟着换。
+变量清单与规则见 [设计语言](design-system.md)。
+
 ### 方法
 
 **`matrix.context()`**：开页面时先调一次。
@@ -295,7 +305,7 @@ if (ctx.mode === "release") { /* 只读快照：archive.read / archive.file */ }
 
 ### 跟随深浅色
 
-`context().theme` 是项目页当前的主题。示例的做法是 CSS 默认深色，`theme === "light"` 时给 `<html>` 加一个 `light` 类覆盖颜色变量。
+引用了 `../_matrix/tokens.css` 就自动跟随：SDK 在 `context()` 返回时、以及看的人切换深浅色时（`theme` 事件），给 `<html>` 加或去掉 `light` 类，变量随之换成浅色值。自己定义了颜色的页面，照这个类写浅色值即可；`context().theme` 仍然是当前主题，`matrix.on((event, data) => …)` 也会收到 `theme` 事件（`data.theme`）。
 
 ## 5. 技能
 

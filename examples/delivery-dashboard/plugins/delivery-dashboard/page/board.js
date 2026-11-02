@@ -197,7 +197,6 @@ async function loadRelease() {
 (async () => {
   try {
     ctx = await matrix.context();
-    if (ctx.theme !== "light") document.documentElement.classList.add("dark");
     if (ctx.mode === "release") { await loadRelease(); return; }
     members = await matrix.members().catch(() => []);
     await loadProject();

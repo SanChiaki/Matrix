@@ -1,0 +1,172 @@
+/* Matrix 设计变量（design tokens）：颜色、字号、间距、圆角、阴影、动效的唯一来源。
+   规则见 docs/design-system.md。页面与插件只用这里的变量，不写死颜色与刻度外的数值；
+   新增变量先改这个文件和那份文档。
+
+   主题：默认深色；<html data-theme="light"> 是浅色。插件页面里也认 <html class="light">（旧写法）。
+   插件页面经 ../_matrix/tokens.css 引用这同一份文件。 */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 中性色：底 → 面 → 抬高的面 ---- */
+  --bg: #0b0c0f;
+  --surface: #121318;
+  --surface-2: #181a20;
+  --surface-3: #1f2229;
+  --border: rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .13);
+  --text: #e8e9ed;
+  --text-2: #b4b8c2;
+  --muted: #7d8391;
+
+  /* ---- 强调色：靛蓝 = 主操作与 Agent ---- */
+  --accent: #8b93ff;
+  --accent-hover: #a1a8ff;
+  --accent-soft: rgba(139, 147, 255, .14);
+  --accent-line: rgba(139, 147, 255, .45);
+  --on-accent: #0d0f1a;
+
+  /* ---- 语义色：谁（人 / Agent）与状态 ---- */
+  --agent: #8b93ff;
+  --human: #e9b26b;
+  --on-human: #1a1206;
+  --running: #8b93ff;
+  --completed: #4cc38a;
+  --rejected: #ef6b65;
+  /* 插件页面与沙箱框：标明“这是插件的内容”，不是插件自己的主色 */
+  --plugin: #5cc8d6;
+  --plugin-soft: rgba(92, 200, 214, .12);
+  --plugin-line: rgba(92, 200, 214, .5);
+  /* 对外页面（发布物） */
+  --release: #e0a95c;
+  --release-soft: rgba(224, 169, 92, .14);
+  /* 别人的信任域（介绍页的图） */
+  --peer: #6fd3b1;
+
+  /* ---- 网络图 ---- */
+  --edge: #4a4f60;
+  --edge-strong: #6b7186;
+  --select: #fff;
+  --ring: #c39bff;
+  --node-agent: #262a3a;
+  --node-human: #2e271d;
+  --grid-dot: rgba(255, 255, 255, .05);
+  --glass: rgba(11, 12, 15, .75);
+
+  /* ---- 项目识别色：项目头像、网络图里的项目环，按项目顺序轮流用 ---- */
+  --project-1: #b48cff;
+  --project-2: #3fbf7f;
+  --project-3: #f2a541;
+  --project-4: #e5534b;
+  --project-5: #4cc9f0;
+  --project-6: #ff7eb6;
+
+  /* ---- 图表（管理后台、插件里的图） ---- */
+  --chart-ok: #7a82f2;
+  --chart-fail: #e0605a;
+
+  /* ---- 文件类型图标 ---- */
+  --file-other: #8b93a1;
+  --file-doc: #4f7cff;
+  --file-sheet: #2fa36b;
+  --file-code: #e8913a;
+  --file-image: #b45cd6;
+
+  /* ---- 遮罩 ---- */
+  --on-color: #fff;  /* 饱和色块上的字（群组头像、文件图标） */
+  --scrim: rgba(15, 18, 30, .32);
+  --scrim-strong: rgba(10, 12, 18, .45);
+
+  /* ---- 字体 ---- */
+  --font-sans: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+
+  /* ---- 字号：只用这七级 ---- */
+  --fs-xs: 11px;    /* 角标、图例、计数 */
+  --fs-sm: 12px;    /* 次要信息、标签、提示 */
+  --fs-md: 13px;    /* 控件、列表、卡片正文 */
+  --fs-base: 14px;  /* 正文 */
+  --fs-lg: 16px;    /* 区块标题 */
+  --fs-xl: 20px;    /* 页面标题 */
+  --fs-2xl: 28px;   /* 大数字、介绍页小标题 */
+  --lh-tight: 1.3;
+  --lh: 1.5;
+  --lh-loose: 1.7;  /* 长段落、Markdown 正文 */
+
+  /* ---- 间距：4px 基准 ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+
+  /* ---- 圆角：按层级，不是一个值用到底 ---- */
+  --radius-xs: 4px;    /* 标签、kbd、行内代码 */
+  --radius-sm: 7px;    /* 按钮、输入框 */
+  --radius: 10px;      /* 卡片、面板 */
+  --radius-lg: 14px;   /* 弹窗、大容器 */
+  --radius-pill: 999px;
+
+  /* ---- 阴影：只有浮在上面的东西才有 ---- */
+  --shadow: 0 1px 0 rgba(255, 255, 255, .03) inset, 0 8px 24px rgba(0, 0, 0, .25);
+  --shadow-pop: 0 24px 64px rgba(0, 0, 0, .22), 0 2px 8px rgba(0, 0, 0, .08);  /* 弹窗、菜单 */
+
+  /* ---- 动效 ---- */
+  --dur-fast: .12s;
+  --dur: .2s;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+}
+
+:root[data-theme="light"], :root.light {
+  color-scheme: light;
+  --bg: #f4f5f7;
+  --surface: #fff;
+  --surface-2: #f8f9fb;
+  --surface-3: #eceef2;
+  --border: rgba(16, 20, 32, .09);
+  --border-strong: rgba(16, 20, 32, .16);
+  --text: #16181d;
+  --text-2: #3d424c;
+  --muted: #6a7080;
+
+  --accent: #5a62e0;
+  --accent-hover: #4850cf;
+  --accent-soft: rgba(90, 98, 224, .1);
+  --accent-line: rgba(90, 98, 224, .45);
+  --on-accent: #fff;
+
+  --agent: #5a62e0;
+  --human: #b26d17;
+  --on-human: #fff;
+  --running: #5a62e0;
+  --completed: #1d8a56;
+  --rejected: #d03c36;
+  --plugin: #0f8796;
+  --plugin-soft: rgba(15, 135, 150, .09);
+  --plugin-line: rgba(15, 135, 150, .45);
+  --release: #a8661a;
+  --release-soft: rgba(168, 102, 26, .1);
+  --peer: #1f9a74;
+
+  --edge: #c4c8d2;
+  --edge-strong: #9aa0ad;
+  --select: #16181d;
+  --ring: #8a5ce8;
+  --node-agent: #eef0ff;
+  --node-human: #fbf1e2;
+  --grid-dot: rgba(16, 20, 32, .08);
+  --glass: rgba(255, 255, 255, .8);
+
+  --chart-ok: #5a62e0;
+  --chart-fail: #d03c36;
+
+  --shadow: 0 1px 2px rgba(16, 20, 32, .05), 0 8px 24px rgba(16, 20, 32, .06);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0s; --dur: 0s; }
+}

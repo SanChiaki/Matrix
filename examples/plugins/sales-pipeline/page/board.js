@@ -95,7 +95,6 @@ matrix.on((event) => { if (event === "records.changed") load().catch(fail); });
 (async () => {
   try {
     ctx = await matrix.context();
-    if (ctx.theme === "light") document.documentElement.classList.add("light");
     table = ctx.tables.find((t) => t.key === "leads");
     members = await matrix.members();
     await load();

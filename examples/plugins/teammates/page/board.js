@@ -20,7 +20,6 @@ async function load() {
 
 matrix.on((event) => { if (event === "records.changed") load().catch((e) => { $("#err").textContent = e.message; }); });
 (async () => {
-  const ctx = await matrix.context();
-  if (ctx.theme === "light") document.documentElement.classList.add("light");
+  await matrix.context();  // SDK 顺带按看的人切换深浅
   await load();
 })().catch((e) => { $("#err").textContent = e.message; });

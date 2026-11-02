@@ -207,6 +207,8 @@ def test_plugin_frame_is_sandboxed_and_token_bound(tmp_path: Path):
     token = src.split("/")[2]
     assert anon.get(f"/plugin-frame/{token}/page/app.js").status_code == 200
     assert anon.get(f"/plugin-frame/{token}/_matrix/sdk.js").status_code == 200
+    css = anon.get(f"/plugin-frame/{token}/_matrix/tokens.css")  # 和主界面同一份设计变量（docs/design-system.md）
+    assert css.status_code == 200 and css.headers["content-type"].startswith("text/css") and "--accent" in css.text
     for bad in ("plugin.json", "skills/deal-intake/SKILL.md", "page/../plugin.json", "page/nope.js"):
         assert anon.get(f"/plugin-frame/{token}/{bad}").status_code == 404, bad
     assert anon.get(f"/plugin-frame/{token[:-2]}xx/page/index.html").status_code == 404  # 改过的令牌

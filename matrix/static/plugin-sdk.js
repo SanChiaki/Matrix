@@ -8,6 +8,7 @@
 //   const { sent } = await matrix.chat.post("@销售助理 …");   // 父页面弹确认卡，人点“发送”才发
 //   const text = await matrix.service.call("wiki_search", { query: "定价" });   // 插件服务的只读工具（申请 service.read）
 //   matrix.on((event, data) => { if (event === "records.changed") reload(); });
+// 样式：<link rel="stylesheet" href="../_matrix/tokens.css"> 拿到主界面的设计变量；深浅由 SDK 跟着看的人切换（<html class="light">）。
 (function () {
   const pending = new Map();
   const listeners = new Set();
@@ -16,6 +17,7 @@
     if (e.source !== parent) return;
     const d = e.data || {};
     if (d.matrix !== 1) return;
+    if (d.event === "theme") applyTheme(d.data && d.data.theme);  // 看的人切了深浅：页面跟着换，不用插件自己处理
     if (d.id && pending.has(d.id)) {
       const [ok, no] = pending.get(d.id);
       pending.delete(d.id);
@@ -24,6 +26,11 @@
       listeners.forEach((f) => { try { f(d.event, d.data); } catch (err) { console.error(err); } });
     }
   });
+  // 设计变量（../_matrix/tokens.css）按 <html class="light"> 切换浅色；context() 与 theme 事件都会调这里
+  function applyTheme(theme) {
+    document.documentElement.classList.toggle("light", theme === "light");
+    document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
+  }
   function call(op, args) {
     return new Promise((ok, no) => {
       const id = `c${++seq}`;
@@ -33,7 +40,7 @@
   }
   window.matrix = {
     call,
-    context: () => call("context"),
+    context: () => call("context").then((ctx) => { applyTheme(ctx && ctx.theme); return ctx; }),
     records: {
       list: (table, opts) => call("records.list", { table, ...(opts || {}) }),
       create: (table, fields) => call("records.create", { table, fields }),
