@@ -250,14 +250,16 @@ def test_approval_endpoint_and_api(tmp_path: Path):
 # ================= 工作台账 =================
 def test_ledger_tells_agent_about_parallel_work(tmp_path: Path):
     """内部：台账列出所有者自己的其他工作。"""
-    started, release = threading.Event(), threading.Event()
+    started, release, asked = threading.Event(), threading.Event(), threading.Event()
     prompts: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
         prompts[call.context_id] = call.prompt
         if "第一件" in call.prompt:
             started.set()
-            release.wait(5)
+            release.wait(10)
+        if "第二件" in call.prompt:
+            asked.set()
         return "ok"
 
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
@@ -271,7 +273,7 @@ def test_ledger_tells_agent_about_parallel_work(tmp_path: Path):
     assert net.board(alice)["ledger"] == {a.id: led}
     chat = net.project_chat(g.id, actor=alice)
     net.send_message(chat.id, "@A 第二件", actor=alice)
-    time.sleep(0.2)
+    assert asked.wait(10)  # 第二件的提示词已经拼好（台账在拼提示词时取）再放第一件结束，不靠固定的等待时间
     release.set()
     net.wait_quiet()
     second = next(p for p in prompts.values() if "第二件" in p)
@@ -283,14 +285,16 @@ def test_ledger_tells_agent_about_parallel_work(tmp_path: Path):
 
 def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
     """不变量 16：联合项目里的运行，台账只列同一项目的工作，其余只给数量——bob @ 它问不出 alice 在别处做什么。"""
-    started, release = threading.Event(), threading.Event()
+    started, release, asked = threading.Event(), threading.Event(), threading.Event()
     prompts: dict[str, str] = {}
 
     def handler(call: ScriptCall) -> str:
         prompts[call.context_id] = call.prompt
         if "机密收购案" in call.prompt:
             started.set()
-            release.wait(5)
+            release.wait(10)
+        if "你在忙什么" in call.prompt:
+            asked.set()
         return "ok"
 
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
@@ -299,9 +303,9 @@ def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
     inner = net.create_project("内部收购组", "", [a.id], actor=alice)
     g, chat = joint(net, alice, "bob@x.io", bob, [a.id])
     net.send_message(net.project_chat(inner.id, actor=alice).id, "@A 机密收购案", actor=alice)
-    started.wait(5)
+    assert started.wait(10)
     net.send_message(chat.id, "@A 你在忙什么", actor=bob)
-    time.sleep(0.2)
+    assert asked.wait(10)  # 同上：等第二轮拼好提示词再放第一轮结束（原来固定等 0.2 秒，Windows CI 上偶尔来不及）
     release.set()
     net.wait_quiet()
     p = next(v for v in prompts.values() if "你在忙什么" in v)
