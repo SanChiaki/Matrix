@@ -42,7 +42,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | --- | --- |
 | 模型字段、状态结构、权限词表 | [docs/reference/domain.md](docs/reference/domain.md) |
 | 群聊、项目会话、私聊、@ 唤醒、成员变动、共享项目与可见性 | [docs/reference/conversations.md](docs/reference/conversations.md) |
-| 委托、收件箱、失败与续接、看板与用户任务 | [docs/reference/execution.md](docs/reference/execution.md) |
+| 委托、收件箱、失败与续接、看板与用户任务、运行中提问（`ask_user_question`） | [docs/reference/execution.md](docs/reference/execution.md) |
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
@@ -70,6 +70,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
 | `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据 |
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
+| `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
@@ -80,7 +81,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
 | `matrix/releases.py` | 发布物的版本快照（`releases/<id>/v<N>/`：技能、文件、插件页面、`manifest.json`）的写入、清理与安全取文件；谁能发布、能看、订阅何时生效在 `engine.py`「发布与订阅」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
-| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载、配了抓取白名单时自带的 web_fetch 关得掉；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批） |
+| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载、配了抓取白名单时自带的 web_fetch 关得掉；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批、提问） |
 | `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
 | `matrix/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `MATRIX_CONNECTORS`），热加载；地址只来自这里 |
 | `matrix/vault.py` | 连接器凭证与模型供应商密钥的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |
@@ -104,7 +105,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -198,8 +199,8 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
-- `/internal/tools`、`/internal/approval`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
-- 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准；覆盖层要一直关掉 dsh 的默认技能根。
+- `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
+- 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准、提问应答者替人作答；覆盖层要一直关掉 dsh 的默认技能根。
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽；
   能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
 - IM 机器人的密钥只进 `vault/`；桥只放行绑定的人在单聊里说的话、只往他自己的单聊推，不要放宽；企业微信地址只由部署方经 `MATRIX_WECOM_URL` 改，不要做成用户可填（网络会被当跳板）。

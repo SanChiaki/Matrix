@@ -37,12 +37,12 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTAC
                      PROJECT_FILES, RELEASE_FEEDBACK, RELEASE_ITEMS, RELEASE_KINDS, RELEASE_READERS, RELEASES,
                      RELEASES_PER_PROJECT, REQUEST_TOOLS, SESSION_TOOLS, SKILLS, SUBSCRIPTIONS_PER_AGENT,
                      SKILLS_PER_AGENT, SKILLS_TOTAL, TOOL_AUTHORITY, AgentNode, Approval, Connection, ConnectorNeed,
-                     Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, Proposal, Release, ResourceRef,
+                     Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, Proposal, Question, Release, ResourceRef,
                      Schedule, Seat, Task, TaskStatus, UserRequest, attachment_rel, new_id, seat_id)
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
-                       format_note, format_proposal_notice, format_request_changes, format_rewrite, format_route,
+                       format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
@@ -56,7 +56,7 @@ from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
-from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, RunRequest, RunResult,
+from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
 from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
@@ -70,6 +70,7 @@ class Limits:
     tool_timeout_s: float = 900     # 一次网络工具调用最长等多久（委托的运行超时与次数上限在 Agent 设置里）
     approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
     connector_ask_timeout_s: float = 540  # 共享项目里用连接器前问所有者，最多等多久（短于连接器桥的回调超时）
+    question_timeout_s: float = 3600  # Agent 提的问题最多等多久没人回答就作废（dsh 那次调用拿到“没有得到回答”）
     max_schedules: int = 20         # 每个人最多几个定时
     schedule_daily: int = 24        # 每个定时每天最多触发几次
     max_drafts: int = 20            # 每个人最多几条等确认的草稿
@@ -110,6 +111,7 @@ class ExecContext:
     hidden: list[str] = field(default_factory=list)
     mixed_read: bool = False
     flow_narrowed: list[str] = field(default_factory=list)
+    questions: list[str] = field(default_factory=list)  # 这一轮送达、等它回答的问题（委托方）：一轮结束仍没回答就转给人
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -160,6 +162,7 @@ class Network:
         self.limits = limits or Limits()
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
+        self.question_url = tool_url.rsplit("/", 1)[0] + "/question"
         self.store = Store(data_dir, seed=seed)
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
@@ -197,6 +200,8 @@ class Network:
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
         self._stops: dict[str, threading.Event] = {}  # 正在跑的一轮 -> 人终止它的信号（stop_run）
         self._approval_waits: dict[str, threading.Event] = {}
+        self._question_waits: dict[str, threading.Event] = {}
+        self._question_holders: dict[str, str] = {}  # 问题 id → 送到的委托方上下文（席位 id 或上一级任务 id），只它能答
         self._home_locks: dict[str, threading.Lock] = {}
         self._lock = self.store.lock
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="matrix-round")
@@ -3404,6 +3409,7 @@ class Network:
             "review": sorted((r for r in self.store.requests.values() if r.status == "in_review"
                               and r.requester_id == user and self.can_see_request(r, user)), key=lambda r: r.created_at),
             "approvals": self.pending_approvals(user),
+            "questions": self.pending_questions(user),
             "proposals": [p for p in self.store.proposals.values()
                           if p.status == "pending" and self.can_review_proposal(p, user)],
             "invitations": [g for g in self.store.projects.values() if user is not None and user in g.invited],
@@ -3432,6 +3438,8 @@ class Network:
                 lines["joint"].append(f"- {asks} 次在共享项目里用你的连接器等你同意")
             if len(todo["approvals"]) - asks:
                 lines["internal"].append(f"- {len(todo['approvals']) - asks} 个工作目录以外的操作等你批准")
+        for q in todo["questions"]:  # 只说谁在等你回答、在哪，问题本身在那个对话的卡片上
+            lines[kind_of(q.project_id)].append(f"- {self._name(q.agent_id)} 有问题等你回答")
         for pr in todo["proposals"]:
             conv = self.store.conversations.get(pr.conversation_id)
             lines[kind_of(conv.project_id if conv else None)].append(f"- 提议新建 Agent「{pr.name}」等你审核")
@@ -4335,6 +4343,20 @@ class Network:
             targets = self.resolve_mentions(conv, text, mentions)
             msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets, user_id=actor,
                           attachments=files, via=via)
+            # 有 Agent 在这个对话里等这个人回答：直接回复就是回答（群聊里不 @ 任何人、或只 @ 它），
+            # 回答交给正在等的那次调用，不再排一轮新的（人不必另找卡片，也不会因为没 @ 而卡住）
+            answering = None
+            if msg.text and not via:
+                if conv.kind == "project" and not targets:
+                    answering = max((q for q in self.store.questions.values()
+                                     if q.status == "pending" and q.context_kind == "seat" and q.conversation_id == conv.id
+                                     and q.target_user_id == actor and actor is not None),
+                                    key=lambda q: q.created_at, default=None)
+                elif len(targets) == 1:
+                    answering = self._pending_question_for(conv, actor, targets[0])
+            if answering is not None:
+                msg.answers = answering.id
+                targets = [t for t in targets if t != answering.agent_id]
             conv.messages.append(msg)
             for aid in targets:
                 seat = self._seat(conv, aid)
@@ -4342,12 +4364,14 @@ class Network:
                     self._unblock(seat)
                 seat.delegations = 0  # 委托次数按“一次被 @ 引出的工作”计
                 seat.inbox.append({"kind": "mention", "message_id": msg.id, "cascade": msg.id})
-            routed = conv.kind == "project" and self._route_plugins(conv) != []
+            routed = conv.kind == "project" and answering is None and self._route_plugins(conv) != []
             if routed:  # 一条人发的消息开一串接力：预算满额，@ 到的成员已经在链上
                 self._new_cascade(msg.id, set(targets))
             conv.updated_at = time.time()
             self.store.save()
         self.bus.emit("message.added", conversation_id=conv.id, message=_msg(msg))
+        if answering is not None:
+            self._close_question(answering.id, "answered", answers=_free_answers(answering, msg.text), by=actor)
         for aid in targets:
             self._kick("seat", seat_id(conv.id, aid))
         if routed:
@@ -4739,6 +4763,8 @@ class Network:
             shared = [k for k in self.store.knowledge.values()
                       if sid in k.visible_to and k.key not in seat.known and k.owner_task_id not in self._own_tasks(sid)]
             fresh = [m for m in fresh if not m.audience or agent.owner_id in m.audience]  # 只给别人看的不送
+            mine = {q.id for q in self.store.questions.values() if q.agent_id == agent.id}
+            fresh = [m for m in fresh if m.answers not in mine or m.answers is None]  # 回答它提问的消息：那一轮已经拿到
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
             for it in items:  # 这一轮属于哪一串接力；route 分派给它认领的人的消息，算交代给它的（规则 4：下发人是原作者）
                 if it.get("cascade"):
@@ -4781,7 +4807,8 @@ class Network:
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
                                    home_writable="file.write" in ctx.authority, archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
-                                   home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent))
+                                   home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
+                                   ask=self.capabilities(agent).questions)
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
@@ -4871,7 +4898,8 @@ class Network:
             task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
                                             archive=archive, home=mount_home, plugins=ctx.plugins, services=ctx.services,
                                             home_hidden=hidden, home_mixed=mixed,
-                                            home_frozen=self._others(ctx, agent))
+                                            home_frozen=self._others(ctx, agent),
+                                            ask=self.capabilities(agent).questions)
             workdir = self._write_task_files(task, knowledge)
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
@@ -5091,6 +5119,14 @@ class Network:
                        self._email(src.user_id) if src.user_id else "有人")
                 blocks.append(format_route(it.get("plugin", ""), who, src.text, it.get("reason", ""), bool(it.get("claim"))))
                 wake.append(f"插件「{it.get('plugin', '')}」{'分派' if it.get('claim') else '请你看'}了一条消息")
+            elif kind == "question":
+                q = self.store.questions.get(it["question_id"])
+                if q is None or q.status != "pending" or q.target_agent_id != ctx.agent_id:
+                    continue
+                t = self.store.tasks.get(q.context_id)
+                blocks.append(format_question_notice(q, self._name(q.agent_id), t.delegation.mission if t else ""))
+                ctx.questions.append(q.id)
+                wake.append(f"{self._name(q.agent_id)} 问了一个问题")
             elif kind == "proposal":
                 p = self.store.proposals.get(it["proposal_id"])
                 if p is None:
@@ -5177,6 +5213,7 @@ class Network:
                     self.bus.emit("home.conflict", agent_id=agent.id, context_id=ctx.id, files=conflicts)
             else:
                 shutil.rmtree(workdir / HOME_DIR, ignore_errors=True)
+            self._escalate_unanswered(ctx)  # 送给它的问题这一轮没回答也没转：转给人，不让提问的一方一直等
         return res
 
     def _mount_project_files(self, ctx: ExecContext, workdir: Path) -> None:
@@ -5494,6 +5531,11 @@ class Network:
         approvals = ApprovalBridge(url=self.approval_url, token=token,
                                    handler=lambda tool, reason: self.request_approval(token, tool, reason),
                                    timeout_s=self.limits.approval_timeout_s)
+        # 提问通道：运行时能把 ask_user_question 转回来时挂载（席位里问人，委托里先问委托方）
+        questions = QuestionBridge(url=self.question_url, token=token,
+                                   handler=lambda items: self.request_question(token, items),
+                                   timeout_s=self.limits.question_timeout_s) \
+            if self.capabilities(agent).questions else None
         with self._lock:
             self._contexts[token] = ctx
             self._live[ctx.id] = []
@@ -5545,7 +5587,7 @@ class Network:
             res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
-                                              approvals=approvals, materials=materials, home=home,
+                                              approvals=approvals, questions=questions, materials=materials, home=home,
                                               harness=agent.harness, cancel=cancel, connectors=connectors,
                                               local_connectors=[c.connector_id for c in conns if c.where != "cloud"],
                                               llm_provider=llm_provider, env=llm_env,
@@ -5556,6 +5598,7 @@ class Network:
             with self._lock:
                 self._contexts.pop(token, None)
                 agent.active = max(0, agent.active - 1)
+            self._cancel_questions(ctx, "提问的那一轮已经结束")
             self.bus.emit("agent.updated", agent=agent.to_dict())
         if cancel is not None and cancel.is_set() and res.error_class != "stopped":
             # 人终止了这一轮：不管运行时最后报的是什么，都按终止处理（不自动续接，不当成交付）
@@ -5693,6 +5736,238 @@ class Network:
         with self._lock:
             return [a for a in self.store.approvals.values()
                     if a.status == "pending" and (actor is None or a.owner_id in (None, actor))]
+
+    # ================= Agent 提问（ask_user_question） =================
+    # dsh 的提问工具经应答插件（matrix/dsh_plugins/questions.mjs）转到这里，阻塞到有回答（research: deepseek-harness#user-questions）。
+    # 回答是那次工具调用的结果，不是一条消息：别人伪造不了，也不会被当成新任务。
+    # 席位里问这一轮交代事情的人；委托里先问委托方 Agent，它用 answer_question 回答或 escalate_question 转给人，
+    # 这一轮结束还没回答、或这时跑不起来，网络自动转给人（规则挪进代码：委托方不回也不会把执行者卡死）。
+    # 问题内容会给回答的人看：会话读过越界的来源时，只问提问 Agent 的所有者（不变量 22）。
+    def request_question(self, token: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """返回 {"answers": [...]}，或 {"error": "..."}（没人回答、作废）。阻塞到回答、作废或超时。"""
+        ctx = self._contexts.get(token)
+        if ctx is None:
+            return {"error": "执行上下文无效或已结束"}
+        clean = _question_items(items)
+        if not clean:
+            return {"error": "问题不能为空"}
+        agent = self.store.agents.get(ctx.agent_id)
+        if agent is None:
+            return {"error": "提问的 Agent 已不存在"}
+        q = Question(id=new_id("q"), agent_id=agent.id, owner_id=agent.owner_id, context_kind=ctx.kind,
+                     context_id=ctx.id, conversation_id=ctx.conversation_id, project_id=ctx.project_id, items=clean)
+        done = threading.Event()
+        kick: tuple[str, str] | None = None
+        with self._lock:
+            holder = self._holder(ctx.kind, ctx.id)
+            ctx.sources = list(holder.session_sources) if holder is not None else []
+            if ctx.kind == "task" and (task := self.store.tasks.get(ctx.id)) is not None:
+                q.conversation_id = task.conversation_id
+                kick = self._question_to_delegator(q, ctx, agent, task)
+            else:
+                conv = self.store.conversations.get(ctx.conversation_id)
+                who = self._requester(conv, agent, ctx.addressed) if conv is not None else agent.owner_id
+                self._question_to_human(q, ctx, agent, who, "")
+            self.store.questions[q.id] = q
+            self._question_waits[q.id] = done
+            self.store.save()
+        self._question_posted(q)
+        if kick is not None:
+            self._kick(*kick)
+        if not done.wait(self.limits.question_timeout_s):
+            self._close_question(q.id, "cancelled", note=f"{int(self.limits.question_timeout_s // 60)} 分钟内没有人回答")
+        with self._lock:
+            self._question_waits.pop(q.id, None)
+        if q.status == "answered":
+            return {"answers": [dict(a) for a in q.answers]}
+        return {"error": f"没有得到回答（{q.note or '问题已作废'}）：不要当成同意。按最稳妥的方式继续，"
+                         "在最终回复里写明还没定的事；或者结束这一轮，等对方回复。"}
+
+    def _requester(self, conv: Conversation, agent: AgentNode, addressed: list[str] | None = None) -> str | None:
+        """调用方持有锁。席位里该问谁：私聊、项目会话、助理对话是对话的主人；群聊是这一轮 @ 它的人
+        （没有就是最近一次 @ 它的人），都没有时是 Agent 的所有者。"""
+        if conv.kind != "project":
+            return conv.owner_id or agent.owner_id
+        msgs = {m.id: m for m in conv.messages}
+        for mid in reversed(addressed or []):
+            m = msgs.get(mid)
+            if m is not None and m.user_id:
+                return m.user_id
+        for m in reversed(conv.messages):
+            if m.role == "user" and m.user_id and agent.id in m.mentions:
+                return m.user_id
+        return agent.owner_id
+
+    def _task_human(self, task: Task) -> str | None:
+        """调用方持有锁。委托链起点那个席位该问的人（委托方决定不了时转给他）。"""
+        root, seen = task, set()
+        while root.parent_task_id and root.parent_task_id not in seen and root.parent_task_id in self.store.tasks:
+            seen.add(root.id)
+            root = self.store.tasks[root.parent_task_id]
+        conv = self.store.conversations.get(root.conversation_id)
+        top = self.store.agents.get(root.delegator_id)
+        if conv is None or top is None:
+            return None
+        return self._requester(conv, top)
+
+    def _question_to_human(self, q: Question, ctx: ExecContext | None, agent: AgentNode, who: str | None,
+                           reason: str) -> None:
+        """调用方持有锁。把问题交给一个人：会话读过越界的来源、对方看不到时，改问所有者（不变量 22）。"""
+        if who and ctx is not None and who not in self._owner_set(agent) and self._over(ctx, agent, {who}):
+            who, reason = agent.owner_id, "用到了别处的资料，只问所有者"
+        q.target_agent_id, q.target_user_id = None, who or agent.owner_id
+        q.escalated = reason
+
+    def _question_to_delegator(self, q: Question, ctx: ExecContext, agent: AgentNode, task: Task) -> tuple[str, str] | None:
+        """调用方持有锁。委托里的问题先给委托方；委托方这时跑不起来就直接转给人。返回要唤醒的收件箱。"""
+        if self._over(ctx, agent, self._reach(ctx, agent)):  # 和交付一样：问题会把别处的资料带进项目
+            self._question_to_human(q, ctx, agent, agent.owner_id, "用到了别处的资料，只问所有者")
+            return None
+        hk, hid = ("task", task.parent_task_id) if task.parent_task_id else \
+            ("seat", seat_id(task.conversation_id, task.delegator_id))
+        holder = self._holder(hk, hid)
+        delegator = self.store.agents.get(task.delegator_id)
+        if holder is None or delegator is None:
+            self._question_to_human(q, ctx, agent, self._task_human(task), "委托方已不在")
+            return None
+        if (isinstance(holder, Seat) and holder.blocked) or \
+                (isinstance(holder, Task) and holder.status not in (TaskStatus.RUNNING, TaskStatus.WAITING)) or \
+                self.runtime_for(delegator) is None:
+            self._question_to_human(q, ctx, agent, self._task_human(task), "委托方这时跑不起来")
+            return None
+        q.target_agent_id, q.target_user_id = delegator.id, None
+        q.escalated = ""
+        self._question_holders[q.id] = hid
+        holder.inbox.append({"kind": "question", "question_id": q.id})
+        return hk, hid
+
+    def _question_posted(self, q: Question) -> None:
+        """问题交给了一个人：对话里留一条只给他看的说明（卡片本身按待回答的问题渲染），推送事件。"""
+        self.bus.emit("question.updated", question=self.question_view(q))
+        if q.target_user_id is None:
+            return
+        conv = self.store.conversations.get(q.conversation_id)
+        if conv is None:
+            return
+        why = f"（{q.escalated}）" if q.escalated else ""
+        self._append(conv, Message(id=new_id("msg"), role="event", agent_id=q.agent_id,
+                                   text=f"{self._name(q.agent_id)} 有问题要问 {self._email(q.target_user_id)}{why}："
+                                        f"{_short(q.items[0]['question'], 200)}",
+                                   audience=[q.target_user_id]))
+
+    def question_view(self, q: Question) -> dict[str, Any]:
+        d = q.to_dict()
+        d["agent_name"] = self._name(q.agent_id)
+        d["target_agent_name"] = self._name(q.target_agent_id) if q.target_agent_id else None
+        return d
+
+    def answer_question(self, question_id: str, answers: list[dict[str, Any]] | None = None, actor: str | None = None,
+                        decline: bool = False, note: str = "") -> Question:
+        """人回答（或不回答）一个交给他的问题。只有问题现在交给的那个人能答（actor=None 为系统 / 测试）。"""
+        with self._lock:
+            q = self.store.questions.get(question_id)
+            self._check(q is not None and q.target_user_id is not None and (actor is None or q.target_user_id == actor),
+                        f"question {question_id}")
+            if q.status != "pending":
+                raise NetworkError("这个问题已经" + {"answered": "回答过了", "cancelled": "作废了"}.get(q.status, q.status))
+            clean = None if decline else _question_answers(q, answers or [])
+        if decline:
+            self._close_question(q.id, "cancelled", note=f"{self._email(actor)} 不回答" + (f"：{note.strip()[:500]}" if note.strip() else ""),
+                                 by=actor)
+        else:
+            self._close_question(q.id, "answered", answers=clean, by=actor)
+        return q
+
+    def _close_question(self, question_id: str, status: str, answers: list[dict[str, Any]] | None = None,
+                        note: str = "", by: str | None = None) -> None:
+        with self._lock:
+            q = self.store.questions.get(question_id)
+            if q is None or q.status != "pending":
+                return
+            q.status, q.answers, q.note = status, list(answers or []), note
+            q.answered_by, q.answered_at = by, time.time()
+            self._question_holders.pop(q.id, None)
+            self.store.save()
+            done = self._question_waits.get(q.id)
+            conv = self.store.conversations.get(q.conversation_id)
+            people = sorted({x for x in (q.target_user_id, q.owner_id, by if by in self.store.users else None) if x})
+        if done is not None:
+            done.set()
+        self.bus.emit("question.updated", question=self.question_view(q))
+        if conv is not None and (q.target_user_id or status == "answered"):
+            head = f"{self._name(q.agent_id)} 问：" + "；".join(_short(i["question"], 120) for i in q.items)
+            tail = ("回答：" + _answer_text(q) + (f"（{self._name(by)} 答）" if by and by not in self.store.users else "")
+                    if status == "answered" else f"没有得到回答：{q.note}")
+            self._append(conv, Message(id=new_id("msg"), role="event", agent_id=q.agent_id,
+                                       text=f"{head} · {tail}", audience=people))
+
+    def _escalate_question(self, q: Question, reason: str, note: str = "") -> None:
+        """委托方决定不了（或没回答、跑不起来）：转给委托链起点那个席位该问的人。"""
+        with self._lock:
+            if q.status != "pending" or q.target_agent_id is None:
+                return
+            task = self.store.tasks.get(q.context_id)
+            agent = self.store.agents.get(q.agent_id)
+            if task is None or agent is None:
+                return
+            ctx = next((c for c in self._contexts.values() if c.id == q.context_id), None)
+            if ctx is not None:
+                holder = self._holder(ctx.kind, ctx.id)
+                ctx.sources = list(holder.session_sources) if holder is not None else ctx.sources
+            self._question_holders.pop(q.id, None)
+            self._question_to_human(q, ctx, agent, self._task_human(task), reason)
+            if note.strip():
+                q.escalated = f"{q.escalated}；{self._name(task.delegator_id)} 补充：{note.strip()[:500]}"
+            self.store.save()
+        self._question_posted(q)
+
+    def _escalate_unanswered(self, ctx: ExecContext) -> None:
+        """委托方这一轮结束了，送给它的问题还没回答也没转：转给人。"""
+        for qid in ctx.questions:
+            q = self.store.questions.get(qid)
+            if q is not None and q.status == "pending" and q.target_agent_id == ctx.agent_id:
+                self._escalate_question(q, "委托方这一轮没有回答")
+
+    def _cancel_questions(self, ctx: ExecContext, note: str) -> None:
+        """提问的那一轮结束了（正常结束、出错、被停止）：还在等的问题作废。"""
+        pending = [q.id for q in list(self.store.questions.values()) if q.status == "pending" and q.context_id == ctx.id]
+        for qid in pending:
+            self._close_question(qid, "cancelled", note=note)
+
+    def _pending_question_for(self, conv: Conversation, user: str | None, agent_id: str) -> Question | None:
+        """调用方持有锁。这个人在这个对话里、正等他回答的、这个 Agent 在席位里提的问题。"""
+        return next((q for q in self.store.questions.values()
+                     if q.status == "pending" and q.context_kind == "seat" and q.conversation_id == conv.id
+                     and q.agent_id == agent_id and q.target_user_id == user and user is not None), None)
+
+    def pending_questions(self, actor: str | None) -> list[Question]:
+        with self._lock:
+            return [q for q in self.store.questions.values()
+                    if q.status == "pending" and q.target_user_id is not None and (actor is None or q.target_user_id == actor)]
+
+    def _tool_answer_question(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        q = self._question_for_delegator(ctx, str(args.get("question_id", "")).strip())
+        text = str(args.get("answer", "")).strip()
+        if not text:
+            raise NetworkError("answer 不能为空；决定不了就用 escalate_question 转给人")
+        self._close_question(q.id, "answered", answers=_free_answers(q, text[:4000]), by=ctx.agent_id)
+        return f"已回答 {self._name(q.agent_id)} 的问题 {q.id}，它会在原来的工作里接着做。", False
+
+    def _tool_escalate_question(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        q = self._question_for_delegator(ctx, str(args.get("question_id", "")).strip())
+        self._escalate_question(q, f"{self._name(ctx.agent_id)} 决定不了", str(args.get("note", "")))
+        return (f"已把问题 {q.id} 转给 {self._email(q.target_user_id)}，对方回答后直接交给 "
+                f"{self._name(q.agent_id)}。"), False
+
+    def _question_for_delegator(self, ctx: ExecContext, qid: str) -> Question:
+        """只有问题送到的那个委托方上下文能回答或转交（身份由令牌认定，不变量 10）。"""
+        with self._lock:
+            q = self.store.questions.get(qid)
+            if q is None or q.target_agent_id != ctx.agent_id or self._question_holders.get(q.id) != ctx.id:
+                raise NetworkError(f"没有等你回答的问题 {qid}")
+            if q.status != "pending":
+                raise NetworkError(f"问题 {qid} 已经{'回答过了' if q.status == 'answered' else '作废了'}")
+            return q
 
     def _require_project(self, ctx: ExecContext, delegate: bool = True) -> Project:
         if delegate and not ctx.can_delegate:
@@ -7284,6 +7559,7 @@ class Network:
                 "invitations": [self.invitation_view(g) for g in self.store.projects.values()
                                 if actor is not None and actor in g.invited],
                 "approvals": [ap.to_dict() for ap in self.pending_approvals(actor)],
+                "questions": [self.question_view(q) for q in self.pending_questions(actor)],
                 "drafts": [self.draft_view(d) for d in self.store.drafts.values()
                            if d.status == "pending" and (actor is None or d.owner_id == actor)],
                 "held": [self.held_view(h) for h in self.pending_held(actor)],
@@ -7302,6 +7578,7 @@ class Network:
             busy = {a.id: self.ledger(a.id) for a in self.store.agents.values()
                     if a.active and self.can_use_agent(a, actor)}
             return {"requests": cards, "approvals": [a.to_dict() for a in todo["approvals"]],
+                    "questions": [self.question_view(q) for q in todo["questions"]],
                     "proposals": [p.to_dict() for p in todo["proposals"]], "ledger": busy,
                     "invitations": [self.invitation_view(g) for g in todo["invitations"]],
                     "suggestions": [{"project_id": g.id, "project_name": g.name, **asdict(x)}
@@ -7332,6 +7609,10 @@ class Network:
                     "requests": [self.request_card(r, actor) for r in self.store.requests.values()
                                  if r.conversation_id == conv_id and self.can_see_request(r, actor)],
                     "approvals": approvals, "members": self._members(conv), "live": live, "running": running,
+                    "questions": [{**self.question_view(q), "can_answer": actor is None or q.target_user_id == actor}
+                                  for q in self.store.questions.values()
+                                  if q.conversation_id == conv_id and q.status == "pending" and q.target_user_id
+                                  and (actor is None or q.target_user_id == actor)],
                     "project_shared": bool(g and g.shared), "is_host": g is None or actor is None or g.owner_id in (None, actor),
                     "is_home": self._is_home(conv),
                     "drafts": {d.id: self.draft_view(d) for d in self.store.drafts.values()
@@ -7418,6 +7699,9 @@ class Network:
                 return data if r is not None and self.can_see_release(r, actor) else None
             if ev_type == "approval.updated":
                 return data if (data.get("approval") or {}).get("owner_id") in (None, actor) else None
+            if ev_type == "question.updated":  # 只给问题交给的那个人与提问 Agent 的所有者
+                q = data.get("question") or {}
+                return data if actor is None or actor in (q.get("target_user_id"), q.get("owner_id")) else None
             if ev_type in ("device.connected", "device.disconnected"):
                 d = self.store.devices.get(str(data.get("device_id", "")))
                 return data if d is not None and d.user_id == actor else None
@@ -7500,6 +7784,8 @@ TOOL_HANDLERS = {
     "accept_task": Network._tool_accept,
     "request_changes": Network._tool_request_changes,
     "retry_task": Network._tool_retry,
+    "answer_question": Network._tool_answer_question,
+    "escalate_question": Network._tool_escalate_question,
     "propose_agent": Network._tool_propose_agent,
     "record_decision": Network._tool_record_decision,
     "list_decisions": Network._tool_list_decisions,
@@ -7762,3 +8048,79 @@ def _clip_args(args: dict[str, Any], limit: int = 4000) -> dict[str, Any]:
 def _short(v: Any, n: int = 200) -> str:
     s = v if isinstance(v, str) else str(v)
     return s if len(s) <= n else s[:n] + "…"
+
+
+QUESTIONS_PER_ASK = 10   # 一次提问最多几个问题
+OPTIONS_PER_QUESTION = 12
+
+
+def _question_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """harness 交来的一批问题 → 网络存的形状：{id, question, header, detail, multi_select, options: [{label, description}]}。
+    空问题丢掉，id 缺失或重复时补成 q1、q2…，长度截断。"""
+    out: list[dict[str, Any]] = []
+    for raw in items[:QUESTIONS_PER_ASK]:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("question") or "").strip()
+        if not text:
+            continue
+        qid = str(raw.get("id") or "").strip()[:64]
+        if not qid or any(x["id"] == qid for x in out):
+            qid = f"q{len(out) + 1}"
+        opts, labels = [], set()
+        for o in (raw.get("options") or [])[:OPTIONS_PER_QUESTION]:
+            label = str((o or {}).get("label") or "").strip()[:200] if isinstance(o, dict) else ""
+            if label and label not in labels:
+                labels.add(label)
+                opts.append({"label": label, "description": str(o.get("description") or "").strip()[:500]})
+        out.append({"id": qid, "question": text[:2000], "header": str(raw.get("header") or "").strip()[:60],
+                    "detail": str(raw.get("detail") or "").strip()[:4000],
+                    "multi_select": bool(raw.get("multi_select") or raw.get("multiSelect")), "options": opts})
+    return out
+
+
+def _question_answers(q: Question, answers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """人在卡片上的回答 → 每个问题一项 {id, selected, custom?}。选项只认问题里有的，单选最多一个；
+    没答的项按“跳过”（selected 为空）。一项都没答时报错（不想答用“不回答”）。"""
+    given = {str(a.get("id")): a for a in answers if isinstance(a, dict)}
+    out, any_answer = [], False
+    for item in q.items:
+        a = given.get(item["id"]) or {}
+        labels = {o["label"] for o in item["options"]}
+        selected = [str(x) for x in (a.get("selected") or []) if str(x) in labels]
+        selected = list(dict.fromkeys(selected))
+        if not item["multi_select"]:
+            selected = selected[:1]
+        custom = str(a.get("custom") or "").strip()[:4000]
+        if custom and not item["multi_select"]:
+            selected = []  # 单选题：自己写的回答替代选项（与 dsh 的约定一致）
+        any_answer = any_answer or bool(selected or custom)
+        out.append({"id": item["id"], "selected": selected, **({"custom": custom} if custom else {})})
+    if not any_answer:
+        raise NetworkError("至少回答一个问题；不想回答就选“不回答”")
+    return out
+
+
+def _free_answers(q: Question, text: str) -> list[dict[str, Any]]:
+    """一段文字的回答（委托方的 answer_question、人直接在对话里回复）→ 每个问题一项。
+    只有一个问题、文字正好是某个选项时按选中它；否则整段作为自己写的回答。"""
+    if len(q.items) == 1:
+        item = q.items[0]
+        want = _option_key(text)
+        hit = next((o["label"] for o in item["options"] if _option_key(o["label"]) == want), None)
+        if hit is not None:
+            return [{"id": item["id"], "selected": [hit]}]
+    return [{"id": item["id"], "selected": [], "custom": text} for item in q.items]
+
+
+def _option_key(label: str) -> str:
+    return re.sub(r"\s*[（(]\s*recommended\s*[)）]\s*$", "", label.strip(), flags=re.I).strip().lower()
+
+
+def _answer_text(q: Question) -> str:
+    parts = []
+    for a in q.answers:
+        bits = list(a.get("selected") or []) + ([a["custom"]] if a.get("custom") else [])
+        if bits:
+            parts.append("、".join(_short(b, 300) for b in bits))
+    return "；".join(parts) or "（跳过）"

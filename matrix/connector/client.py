@@ -20,7 +20,7 @@ import base64
 
 from .. import homedir
 from ..workdir import safe_rel
-from ..device import (APPROVAL_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
+from ..device import (APPROVAL_REQUEST, QUESTION_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
 from ..models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES, SKILLS
 from .bridge import LocalBridge
@@ -52,6 +52,13 @@ class _Run:
                                            "call_id": self.connector.next_call_id(),
                                            "tool": tool, "reason": reason})
         return str(reply.get("outcome", "unavailable"))
+
+    def ask_question(self, questions: list[dict[str, Any]]) -> dict[str, Any]:
+        reply = self.connector.round_trip({"type": QUESTION_REQUEST, "run_id": self.run_id,
+                                           "call_id": self.connector.next_call_id(), "questions": questions})
+        if isinstance(reply.get("answers"), list):
+            return {"answers": reply["answers"]}
+        return {"error": str(reply.get("error") or "没有得到回答")}
 
 
 class Connector:
@@ -99,7 +106,8 @@ class Connector:
             c = d.capabilities()
             return {"name": c.name, "placement": c.placement, "enforcement": c.enforcement,
                     "session_resume": c.session_resume, "steer": c.steer,
-                    "approval": c.approval, "sandbox": c.sandbox, "skills": c.skills}
+                    "approval": c.approval, "sandbox": c.sandbox, "skills": c.skills,
+                    "questions": c.questions}
 
         def services_of(d: Driver) -> list[str]:
             """这个 AI 工具里用户配置的服务：只报名字（电脑上的连接器），配置与凭证留在本机。"""
@@ -209,7 +217,7 @@ class Connector:
         run_id = str(msg.get("run_id", ""))
         run = _Run(self, run_id)
         self._runs[run_id] = run
-        self.bridge.register(run_id, run.call_tool, run.ask_approval)
+        self.bridge.register(run_id, run.call_tool, run.ask_approval, run.ask_question)
         workdir = self.workdir_of(str(msg.get("workdir_ref", "")))
         self._write_materials(workdir, list(msg.get("materials") or []))
         spec = RunSpec(
@@ -220,7 +228,8 @@ class Connector:
             harness=str(msg["harness"]) if msg.get("harness") else None,
             timeout_s=_limit(msg.get("timeout_s")),
             connectors=[str(x) for x in msg["connectors"] if isinstance(x, str)]
-            if isinstance(msg.get("connectors"), list) else None)
+            if isinstance(msg.get("connectors"), list) else None,
+            questions=msg.get("questions") is True)
         run.workdir = workdir
         run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
