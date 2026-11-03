@@ -528,6 +528,11 @@ class ImBridge:
                 what = f"想用你的连接器（{ap.get('tool')}）" if ap.get("kind") == "connector" else \
                     f"想在工作目录以外操作（{ap.get('tool')}）"
                 self._notice(owner, ev_type, data, f"{name} {what}，等你批准：打开 Matrix 处理。")
+        elif ev_type == "question.updated":
+            q = data.get("question") or {}
+            if q.get("status") == "pending" and q.get("target_user_id"):
+                self._notice(q["target_user_id"], ev_type, data,
+                             f"{q.get('agent_name') or 'Agent'} 有问题等你回答，它停在那里等：打开 Matrix 回答，或在那个对话里直接回复。")
 
     def _home_conv(self, conv_id: str) -> Any:
         c = self.net.store.conversations.get(conv_id or "")

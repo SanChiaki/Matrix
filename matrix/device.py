@@ -49,10 +49,11 @@ RUN_EVENT = "run.event"            # {run_id, event}  —— 与 RunRequest.on_e
 RUN_RESULT = "run.result"          # {run_id, session_id, final_text, tool_calls, usage, ok, error}
 TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
 APPROVAL_REQUEST = "approval.request"  # {run_id, call_id, tool, reason}
+QUESTION_REQUEST = "question.request"  # {run_id, call_id, questions} —— Agent 提问（ask_user_question），回执 {answers} 或 {error}
 FILE_FETCH = "file.fetch"          # {run_id, call_id, path} —— 服务器要读端侧工作目录里的文件（publish_file）
 
 PROTOCOL = 1
-BLOCKING = (TOOL_CALL, APPROVAL_REQUEST)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
+BLOCKING = (TOOL_CALL, APPROVAL_REQUEST, QUESTION_REQUEST)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
 
 
 class DeviceError(RuntimeError):
@@ -139,6 +140,7 @@ class DeviceRuntime:
             "home": getattr(req, "home", None), "harness": req.harness,
             "timeout_s": req.timeout_s,
             "connectors": list(getattr(req, "local_connectors", None) or []),
+            "questions": req.questions is not None,  # 这一轮能不能提问：不能时驱动不挂提问工具
         }
         try:
             self.link.send(payload)
@@ -202,6 +204,7 @@ class DeviceRuntime:
     # ---- 连接器发来的消息（由传输层投递）----
     def on_message(self, msg: dict[str, Any], *, on_tool: Callable[[str, dict[str, Any]], tuple[str, bool]] | None = None,
                    on_approval: Callable[[str, str], str] | None = None,
+                   on_question: Callable[[list[dict[str, Any]]], dict[str, Any]] | None = None,
                    on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any] | None:
         """处理一条来自连接器的消息；需要回执时返回回执。
 
@@ -216,6 +219,7 @@ class DeviceRuntime:
         if req is not None:
             on_tool = on_tool or (req.tools.handler if req.tools else None)
             on_approval = on_approval or (req.approvals.handler if req.approvals else None)
+            on_question = on_question or (req.questions.handler if req.questions else None)
             on_event = on_event or req.on_event
         if kind == RUN_EVENT:
             if on_event is not None:
@@ -228,6 +232,11 @@ class DeviceRuntime:
             outcome = "unavailable" if on_approval is None else on_approval(
                 str(msg.get("tool", "")), str(msg.get("reason", "")))
             return {"reply_to": msg.get("call_id"), "outcome": outcome}
+        elif kind == QUESTION_REQUEST:
+            raw = msg.get("questions")
+            out = {"error": "这一轮不能提问"} if on_question is None or not isinstance(raw, list) else \
+                on_question([q for q in raw if isinstance(q, dict)])
+            return {"reply_to": msg.get("call_id"), **out}
         elif kind == RUN_RESULT:
             with self._lock:
                 self._results[run_id] = msg
@@ -357,7 +366,9 @@ def _caps(name: str, raw: dict[str, Any]) -> RuntimeCapabilities:
                                approval=str(raw.get("approval") or "none"),
                                sandbox=str(raw.get("sandbox") or "none"),
                                # 旧客户端不报告：技能当文件下发，在提示词里列出（它的 harness 不一定会去找）
-                               skills="native" if raw.get("skills") == "native" else "prompt")
+                               skills="native" if raw.get("skills") == "native" else "prompt",
+                               # 旧客户端不报告：它的驱动不会把提问转回来，当成不能提问
+                               questions=bool(raw.get("questions", False)))
 
 
 @dataclass

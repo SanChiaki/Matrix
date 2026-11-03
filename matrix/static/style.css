@@ -374,6 +374,13 @@ button.link:hover { background: none; text-decoration: underline; }
 .todo-item.approval { flex-direction: column; align-items: stretch; }
 .todo-item .who, .approval-card .who { display: flex; align-items: center; gap: 8px; }
 .reason { margin: 0; font-size: var(--fs-md); color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
+.question-card .q-items, .todo-item .q-items { display: flex; flex-direction: column; gap: 12px; }
+.q-item { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.q-item legend { padding: 0; margin-bottom: 4px; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
+.q-opt { display: flex; align-items: flex-start; gap: 8px; font-size: var(--fs-md); cursor: pointer; }
+.q-opt input[type="radio"], .q-opt input[type="checkbox"] { width: 15px; height: 15px; padding: 0; margin: 4px 0 0; flex: none;
+  accent-color: var(--accent); box-shadow: none; }
+.q-custom { width: 100%; resize: vertical; }
 .board-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; }
 .board-col { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-height: 120px; }
 .board-col h3 { display: flex; align-items: center; justify-content: space-between; font-size: var(--fs-md); margin: 0 0 12px; color: var(--text-2); }

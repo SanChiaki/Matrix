@@ -67,7 +67,8 @@ class ClaudeDriver:
         enforcement["connector.use"] = ENFORCED  # --strict-mcp-config：只加载网络允许的服务
         # 没有审批上行：越过工作目录的写不会被转给所有者
         return RuntimeCapabilities(name="claude-code", placement="device", enforcement=enforcement,
-                                   session_resume=True, steer=False, approval="none", sandbox="none")
+                                   session_resume=True, steer=False, approval="none", sandbox="none",
+                                   questions=False)
 
     def available(self) -> bool:
         return shutil.which(self.claude_bin) is not None

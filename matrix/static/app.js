@@ -268,7 +268,7 @@ function render() {
   if (!S.linkLost) $("#live").textContent = busy ? `${busy} 个 Agent 运行中` : "全部空闲";
   $("#live").classList.toggle("busy", busy > 0);
   renderConvList();
-  const todo = (S.snap.approvals || []).length + (S.snap.proposals || []).filter((p) => p.status === "pending").length
+  const todo = (S.snap.approvals || []).length + (S.snap.questions || []).length + (S.snap.proposals || []).filter((p) => p.status === "pending").length
     + (S.snap.invitations || []).length + (S.snap.drafts || []).length + (S.snap.held || []).length
     + S.snap.projects.filter(isHost).reduce((n, g) => n + (g.suggestions || []).filter((x) => x.status === "pending").length, 0);
   $("#todo-count").hidden = !todo;
@@ -316,6 +316,7 @@ function renderBoard() {
 
   // 待我处理：工作区外溢申请、共享项目里用我的连接器（我是 Agent 所有者）+ 我对话里的 Agent 提议
   const todo = [
+    ...(b.questions || []).map((q) => `<li class="todo-item approval">${questionBody(q, true, true)}</li>`),
     ...b.approvals.map((ap) => `<li class="todo-item approval">${approvalBody(ap, true, true)}</li>`),
     ...b.proposals.map((p) => `<li class="todo-item">${avatar(aname(p.proposer_id), "sm")}<span><b>${esc(aname(p.proposer_id))}</b> ${p.kind === "plugin" ? "提议装插件" : "提议新建"}
       「${esc(p.plugin?.title || p.name)}」</span><a class="button sm" href="#${esc(p.conversation_id)}">去审核</a></li>`),
@@ -334,7 +335,7 @@ function renderBoard() {
       <a class="button sm" href="#project-${esc(x.project_id)}" data-pagetab="${x.kind === "skill" ? "skills" : "brief"}">去看看</a></li>`),
   ];
   $("#todo").hidden = !todo.length;
-  const editing = $("#todo-list").contains(document.activeElement) && document.activeElement.matches("textarea");
+  const editing = $("#todo-list").contains(document.activeElement) && document.activeElement.matches("textarea, input");
   if (!editing) $("#todo-list").innerHTML = todo.join("");
   if (!editing) $("#todo-list").querySelectorAll("[data-inv]").forEach((btn) => btn.addEventListener("click", async () => {
     btn.parentElement.querySelectorAll("button").forEach((x) => { x.disabled = true; });
@@ -344,6 +345,7 @@ function renderBoard() {
   }));
   if (!editing) bindHeld($("#todo-list"), async () => { await loadBoard(); await reload(); });
   if (!editing) bindApprovals($("#todo-list"), loadBoard);
+  if (!editing) bindQuestions($("#todo-list"), loadBoard);
 
   const card = (r) => `<li><button type="button" class="task-card ${S.reqSel === r.id ? "selected" : ""}" data-id="${esc(r.id)}">
       <span class="route">${avatar(r.agent_name, "xs")}<span class="name">${esc(r.agent_name)}</span></span>
@@ -493,6 +495,7 @@ function onEvent(ev) {
   if (ev.type === "schedule.updated") { loadSchedules(); return; }
   if (ev.type === "im.updated") { loadIm(); return; }
   if (ev.type === "draft.updated" && S.view === "board") loadBoard();
+  if (ev.type === "question.updated" && S.view === "board") loadBoard();  // 有问题等我回答 / 问题答了：待我处理刷新
   if (ev.type === "held.updated") {
     if (S.view === "board") loadBoard();
     if (S.view === "chats" && d.held?.conversation_id === S.convId) scheduleConv();
@@ -2877,6 +2880,8 @@ function renderThread() {
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
     ${approvalBody(ap, ap.can_decide)}</div></div></li>`));
+  (c.questions || []).forEach((q) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card question-card">
+    ${questionBody(q, q.can_answer)}</div></div></li>`));
   if (c.status === "waiting") {
     const open = c.tasks.filter((t) => t.status === "running" && !t.parent_task_id);
     items.push(`<li class="msg system"><div class="content"><div class="body">等 ${open.length} 个委托回报：
@@ -2917,6 +2922,7 @@ function renderThread() {
   bindHeld(th);
   th.querySelectorAll("[data-req]").forEach((a) => a.addEventListener("click", () => { S.reqSel = a.dataset.req; S.taskSel = null; }));
   bindApprovals(th);
+  bindQuestions(th);
   th.querySelectorAll(".resume").forEach((b) => b.addEventListener("click", async () => {
     b.disabled = true;
     try { await api(`/api/conversations/${c.id}/resume`, { method: "POST", body: { agent_id: b.dataset.agent } }); await reload(); }
@@ -2972,6 +2978,57 @@ function bindApprovals(root, after) {
     if (after) await after();
     await reload();
   }));
+}
+
+// Agent 在做事时提的问题（ask_user_question）：它一直在等，回答直接交给那次调用（不是一条消息）。
+// 有选项的选（多选题可以多选），也可以自己写；不想答就“不回答”，它会按没得到回答处理。直接在对话里回复也算回答。
+function questionBody(q, canAnswer, board = false) {
+  const id = esc(q.id);
+  const head = `<div class="who">${board ? avatar(q.agent_name, "sm") : ""}<b>${esc(q.agent_name)}</b> 有问题要问你
+    <span class="pill status pending">等你回答</span>${board ? `<span class="muted">${time(q.created_at)}</span>` : ""}</div>
+    ${q.escalated ? `<p class="hint">${esc(q.escalated)}</p>` : ""}`;
+  const items = q.items.map((it, n) => {
+    const name = `qa-${id}-${n}`, kind = it.multi_select ? "checkbox" : "radio";
+    const opts = it.options.map((o, k) => `<label class="q-opt"><input type="${kind}" name="${name}" value="${esc(o.label)}" ${canAnswer ? "" : "disabled"}>
+      <span><b>${esc(o.label)}</b>${o.description ? `<span class="muted"> · ${esc(o.description)}</span>` : ""}</span></label>`).join("");
+    return `<fieldset class="q-item" data-qitem="${esc(it.id)}"><legend>${it.header ? `<span class="tag">${esc(it.header)}</span> ` : ""}${esc(it.question)}</legend>
+      ${it.detail ? `<p class="reason">${esc(it.detail)}</p>` : ""}${opts}
+      ${canAnswer ? `<label class="sr-only" for="${name}-c">自己写</label>
+      <textarea id="${name}-c" class="q-custom" rows="2" maxlength="4000" placeholder="${it.options.length ? "或者自己写（单选题写了就以这里为准）" : "你的回答"}"></textarea>` : ""}</fieldset>`;
+  }).join("");
+  if (!canAnswer) return `${head}${items}<p class="hint">等对方回答。</p>`;
+  const look = board ? `<a href="#${esc(q.conversation_id)}" class="muted">查看对话</a>` : "";
+  return `${head}<div class="q-items" data-qid="${id}">${items}</div>
+    <div class="actions"><button type="button" data-qanswer="${id}">回答</button>
+      <button type="button" class="ghost" data-qdecline="${id}">不回答</button>${look}</div>
+    <p class="error" role="alert"></p>
+    <p class="hint">${esc(q.agent_name)} 停在这里等你；回答直接交给它，在原来的工作里接着做。也可以直接在对话里回复。</p>`;
+}
+
+function bindQuestions(root, after) {
+  const send = async (btn, qid, body) => {
+    const box = btn.closest(".actions");
+    box.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+    try { await api(`/api/questions/${qid}`, { method: "POST", body }); }
+    catch (err) {
+      box.querySelectorAll("button").forEach((x) => { x.disabled = false; });
+      const e = box.parentElement.querySelector(".error");
+      if (e) e.textContent = err.message; else alert(err.message);
+      return;
+    }
+    if (after) await after();
+    await reload();
+  };
+  root.querySelectorAll("[data-qanswer]").forEach((btn) => btn.addEventListener("click", () => {
+    const qid = btn.dataset.qanswer, wrap = root.querySelector(`.q-items[data-qid="${CSS.escape(qid)}"]`);
+    const answers = [...(wrap?.querySelectorAll(".q-item") || [])].map((f) => ({
+      id: f.dataset.qitem,
+      selected: [...f.querySelectorAll("input:checked")].map((i) => i.value),
+      custom: f.querySelector(".q-custom")?.value.trim() || "",
+    }));
+    send(btn, qid, { answers });
+  }));
+  root.querySelectorAll("[data-qdecline]").forEach((btn) => btn.addEventListener("click", () => send(btn, btn.dataset.qdecline, { decline: true })));
 }
 
 function draftCard(d) {

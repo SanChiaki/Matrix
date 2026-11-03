@@ -18,7 +18,8 @@ from dataclasses import asdict, fields
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
-                     KnowledgeItem, Message, Project, Proposal, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User, UserRequest,
+                     KnowledgeItem, Message, Project, Proposal, Question, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User,
+                     UserRequest,
                      new_id, seat_id)
 
 
@@ -206,6 +207,7 @@ class Store:
         self.users: dict[str, User] = {}
         self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
         self.approvals: dict[str, Approval] = {}
+        self.questions: dict[str, Question] = {}  # Agent 在运行中提的问题（等人或委托方回答）
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
         self.devices: dict[str, Device] = {}   # 端侧连接器（令牌只存 sha256）
         self.connections: dict[str, Connection] = {}  # 我的连接器（凭证不在这里，见 vault.py）
@@ -310,6 +312,7 @@ class Store:
                 "users": [asdict(u) for u in self.users.values()],
                 "sessions": self.sessions,
                 "approvals": [a.to_dict() for a in self.approvals.values()],
+                "questions": [q.to_dict() for q in self.questions.values()],
                 "requests": [r.to_dict() for r in self.requests.values()],
                 "devices": [asdict(d) for d in self.devices.values()],
                 "connections": [asdict(c) for c in self.connections.values()],
@@ -400,6 +403,11 @@ class Store:
             if ap.status == "pending":  # 等审批的那次运行已随重启结束
                 ap.status, ap.note = "cancelled", "服务重启，申请作废"
             self.approvals[ap.id] = ap
+        for x in raw.get("questions", []):  # 旧数据没有：缺省为空
+            q = Question(**_known(Question, x))
+            if q.status == "pending":  # 等回答的那次运行已随重启结束
+                q.status, q.note = "cancelled", "服务重启，问题作废"
+            self.questions[q.id] = q
         # UserRequest 新增审计字段缺失时由 dataclass 默认 None，旧状态无需迁移。
         for d in raw.get("devices", []):
             self.devices[d["id"]] = Device(**_known(Device, d))

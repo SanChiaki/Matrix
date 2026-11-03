@@ -41,7 +41,8 @@ class CodexDriver:
             name="codex", placement="device",
             enforcement={"web.research": ADVISORY, "file.write": ENFORCED, "shell.exec": ENFORCED,
                          "delegate": ENFORCED, "connector.use": ENFORCED},
-            session_resume=True, steer=False, approval="none", sandbox="workspace-write", skills="prompt")
+            session_resume=True, steer=False, approval="none", sandbox="workspace-write", skills="prompt",
+            questions=False)
 
     def available(self) -> bool:
         return shutil.which(self.codex_bin) is not None

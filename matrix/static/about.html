@@ -524,6 +524,7 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>委托与验收</h4><p><code>delegate</code> 立即返回；有效权限 = 自身 ∩ 授予 ∩ 可强制；约束沿链累加；防环、限深（默认 3）；只有直接委托方验收</p></div>
             <div class="part"><h4>失败与续接</h4><p>运行时错误分类；格式错、空回复、超时自动续接一次，仍失败只阻塞这一个席位，人点“继续”从中断处接着做</p></div>
             <div class="part"><h4>治理与审批</h4><p>网络不自动建 Agent，只接受提议、由人批准；工作区外溢由所有者逐次批准；每次越权都留痕</p></div>
+            <div class="part"><h4>运行中提问</h4><p>Agent 拿不准时停下来问：席位里问交代事情的人，委托里先问委托方 Agent，它决定不了、没回答或跑不起来才转给人；回答是那次调用的结果，人直接在对话里回复也算</p></div>
             <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（说明、资料、技能）按版本推送给成员</p></div>
             <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经项目；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
             <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；按 MCP 工具标注会对外产生影响的写操作，每次先给授权人确认、参数照原样列出；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
@@ -535,7 +536,7 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>用量台账</h4><p>每次调用运行时追加一行：谁的 Agent、在哪种场合、跑在哪、用的模型、成败、耗时与 token；不记提示词与回复，供管理后台统计</p></div>
             <div class="part"><h4>事件总线</h4><p>每次状态变化发一个带序号的事件，前端经 SSE、CLI 直接订阅，断线按序号补齐</p></div>
           </div>
-          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/api/drafts</code><code>/api/held</code><code>/api/schedules</code><code>/api/me/im</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/connectors</code><code>/api/devices/connect</code><code>/plugin-frame</code><code>/api/releases</code><code>/release-frame</code><code>/hooks</code></div>
+          <div class="ends"><span>接口</span><code>/api/*</code><code>/api/events</code><code>/api/board</code><code>/api/drafts</code><code>/api/held</code><code>/api/schedules</code><code>/api/me/im</code><code>/internal/tools</code><code>/internal/approval</code><code>/internal/question</code><code>/internal/connectors</code><code>/api/devices/connect</code><code>/plugin-frame</code><code>/api/releases</code><code>/release-frame</code><code>/hooks</code></div>
         </div></div>
       </div>
 
@@ -577,6 +578,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>连接器桥</h4><p>外部服务的工具也回调网络（<code>/internal/connectors</code>），网络查这一轮能用哪些，带上凭证代为调用并记录</p></div>
           <div class="part"><h4>白名单抓取</h4><p>部署方配了 <code>fetch.json</code> 时，替代 dsh 自带的 <code>web_fetch</code>：公网照抓，内网只抓白名单里的域名与网段，每一跳重定向都重新校验</p></div>
           <div class="part"><h4>审批应答</h4><p>沙箱升权申请转给 Agent 所有者决定，从不自动批准</p></div>
+          <div class="part"><h4>提问应答</h4><p>覆盖层挂上 dsh 的 <code>ask_user_question</code>，问题转给网络，阻塞到有人（或委托方）回答；没回答时是错误，不当成同意</p></div>
           <div class="part"><h4>私有目录</h4><p>每轮挂载进工作目录，写回时按文件三方合并，冲突另存副本</p></div>
         </div></div></div>
       </div>
