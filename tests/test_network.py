@@ -1101,7 +1101,8 @@ def test_dsh_patch_reflects_authority_and_mounts_mcp():
     assert "id: tool-bash" in y and "id: tool-web" not in y
     assert "id: tool-pwsh" in y  # Windows 上的 shell：没有 shell.exec 也要禁用
     assert "id: tool-plugin-manager" in y and "tool-subagent" not in y and "tool-workflow" not in y
-    assert "insert" not in y
+    assert "dsh-mcp-client" not in y  # 没有网络工具桥就不挂 MCP 服务；插入的只有后台任务守护
+    assert [line.strip() for line in y.splitlines() if line.strip().startswith("- id:") and "matrix" in line] == ["- id: matrix-jobs"]
     y2 = build_patch_yaml(["web.research", "shell.exec", "delegate"],
                           ToolBridge(url="http://127.0.0.1:1/internal/tools", token="t", handler=lambda n, a: ("", False)))
     assert "id: tool-bash" not in y2 and "id: tool-pwsh" not in y2

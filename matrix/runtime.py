@@ -36,9 +36,13 @@ CONNECTOR_SCRIPT = Path(__file__).parent / "mcp_connectors.py"
 FETCH_SCRIPT = Path(__file__).parent / "web_fetch.py"
 APPROVAL_PLUGIN = Path(__file__).parent / "dsh_plugins" / "approval.mjs"
 QUESTION_PLUGIN = Path(__file__).parent / "dsh_plugins" / "questions.mjs"
+# 后台任务守护：headless 在 Agent 空闲时就退出、连带结束后台任务；它在 Agent 要收尾时还有任务在跑就提醒它先收完
+JOBS_PLUGIN = Path(__file__).parent / "dsh_plugins" / "jobs.mjs"
 # dsh 的提问工具（ask_user_question）：headless 默认不加载，问题服务（user-questions）在但没有应答者。
 # 有提问通道时覆盖层把它插进来，阻塞式（legacy）：等多久由网络决定（research: deepseek-harness#user-questions）
 ASK_USER_PLUGIN = "@deepseek-ai/dsh-tool-ask-user"
+JOBS_NUDGES = 3  # 一次运行里最多提醒几次“后台任务还没收完”
+GOAL_TOOLS = ("create_goal", "update_goal", "get_goal")  # dsh 的长期目标工具（结果里带目标的状态）
 
 # 权限 -> 允许后才启用的 DSH 插件 id
 AUTHORITY_PLUGINS: dict[str, list[str]] = {
@@ -268,11 +272,13 @@ class RuntimeCapabilities:
     # 技能怎么送到：native = 运行时自己从工作目录发现；prompt = 网络在提示词里列出名字与路径，正文让它自己读
     skills: str = "native"
     questions: bool = False                         # 运行中能否向人 / 委托方提问（ask_user_question 转给网络）
+    goals: bool = False                             # 有没有长期目标工具（dsh 的 create_goal）：网络据此在同一会话里续跑
 
     @classmethod
     def all_enforced(cls, name: str, **kw: Any) -> "RuntimeCapabilities":
         """dsh（云侧与端侧驱动）与脚本运行时：权限都能强制，也能把提问转回网络。"""
         kw.setdefault("questions", True)
+        kw.setdefault("goals", True)
         return cls(name=name, enforcement={a: ENFORCED for a in AUTHORITIES}, **kw)
 
     def level(self, authority: str) -> str:
@@ -411,6 +417,9 @@ def build_patch_yaml(authority: list[str], tools: ToolBridge | None = None,
             f"        token: {j(questions.token)}",
             f"        timeoutMs: {int(questions.timeout_s * 1000)}",
         ]
+    # 后台任务守护：总是挂载（没有后台任务时什么也不做）
+    lines += ["- insert:", "    - id: matrix-jobs", f"      name: {j(str(JOBS_PLUGIN))}",
+              "      config:", f"        maxNudges: {JOBS_NUDGES}"]
     for pid in dict.fromkeys(disabled_plugins(authority) + list(extra_disabled or [])):
         lines += [f"- id: {pid}", "  disabled: true"]
     return "\n".join(lines) + "\n"
@@ -425,7 +434,8 @@ def _accumulate(ev: dict[str, Any], tool_calls: list[dict[str, Any]], usage: dic
         for c in reversed(tool_calls):
             if c["call_id"] == ev.get("callId"):
                 c["status"] = ev.get("status")
-                c["result"] = _clip(ev.get("result"), 1200)
+                # 长期目标工具的结果不截：网络要从里面读目标的状态（engine._goal_track）
+                c["result"] = ev.get("result") if c["tool"] in GOAL_TOOLS else _clip(ev.get("result"), 1200)
                 break
     elif t == "status" and ev.get("usage"):
         for k, v in ev["usage"].items():

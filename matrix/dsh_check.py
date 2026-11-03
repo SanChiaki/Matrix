@@ -127,14 +127,14 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
     problems += [line.strip() for line in full.stderr.splitlines()
                  if "not found" in line and not any(f'"{p}"' in line for p in extra)]
     # tool-ask-user：dsh 自带的提问工具（headless 默认不加载）；改了包名或去掉了，覆盖层会在这里报 not found
-    inserted = ["mcp-matrix_net", "mcp-connectors", "matrix-approval", "tool-ask-user", "matrix-questions"]
+    inserted = ["mcp-matrix_net", "mcp-connectors", "matrix-approval", "tool-ask-user", "matrix-questions", "matrix-jobs"]
     problems += [f"没装上 {p}" for p in inserted if p not in plugin_ids(full.stdout)]
     problems += [f"{p} 没被禁用" for p in [*ALWAYS_DISABLED, *(p for ps in AUTHORITY_PLUGINS.values() for p in ps)]
                  if p in ids and not disabled_in(full.stdout, p)]
     if "includeDefaultRoots: false" not in full.stdout:
         problems.append("skill-filesystem 的 includeDefaultRoots: false 没生效（会读部署机器上的技能目录）")
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
-               else "没有权限的覆盖层：网络工具、连接器桥、审批与提问应答者都装上，按权限禁用的插件都关了")
+               else "没有权限的覆盖层：网络工具、连接器桥、审批与提问应答者、后台任务守护都装上，按权限禁用的插件都关了")
     fetch_check(rt, report, workdir)
     return not missing
 

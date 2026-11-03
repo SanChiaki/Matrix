@@ -368,7 +368,8 @@ def _caps(name: str, raw: dict[str, Any]) -> RuntimeCapabilities:
                                # 旧客户端不报告：技能当文件下发，在提示词里列出（它的 harness 不一定会去找）
                                skills="native" if raw.get("skills") == "native" else "prompt",
                                # 旧客户端不报告：它的驱动不会把提问转回来，当成不能提问
-                               questions=bool(raw.get("questions", False)))
+                               questions=bool(raw.get("questions", False)),
+                               goals=bool(raw.get("goals", False)))
 
 
 @dataclass

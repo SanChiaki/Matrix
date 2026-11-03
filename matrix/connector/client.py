@@ -107,7 +107,7 @@ class Connector:
             return {"name": c.name, "placement": c.placement, "enforcement": c.enforcement,
                     "session_resume": c.session_resume, "steer": c.steer,
                     "approval": c.approval, "sandbox": c.sandbox, "skills": c.skills,
-                    "questions": c.questions}
+                    "questions": c.questions, "goals": c.goals}
 
         def services_of(d: Driver) -> list[str]:
             """这个 AI 工具里用户配置的服务：只报名字（电脑上的连接器），配置与凭证留在本机。"""

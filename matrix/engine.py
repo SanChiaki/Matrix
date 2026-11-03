@@ -42,7 +42,7 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTAC
 from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
-                       format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
+                       format_goal_limit, format_goal_round, format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
@@ -56,7 +56,7 @@ from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
-from .runtime import (STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
+from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
 from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
@@ -4808,7 +4808,7 @@ class Network:
                                    home_writable="file.write" in ctx.authority, archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
-                                   ask=self.capabilities(agent).questions)
+                                   ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals)
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
@@ -4821,6 +4821,10 @@ class Network:
                 if home:
                     seat.joint_seen = joint_key
             self._auto_accept(ctx)
+            self._goal_track(seat, res.tool_calls)
+            if self._goal_continue(seat) == "limit":  # 续到上限还没完成：停下，告诉所有者
+                self._append(conv, Message(id=new_id("msg"), role="event", agent_id=agent.id,
+                                           text=format_goal_limit(agent.name, seat.goal), audience=owner_only))
             if scheduled_only and res.final_text.strip().rstrip("。.") == NOTHING_NEW:
                 return  # 定时到点、没有新情况：不打扰主人
             if route_only and res.final_text.strip().strip("。.") == ROUTE_PASS:
@@ -4899,7 +4903,8 @@ class Network:
                                             archive=archive, home=mount_home, plugins=ctx.plugins, services=ctx.services,
                                             home_hidden=hidden, home_mixed=mixed,
                                             home_frozen=self._others(ctx, agent),
-                                            ask=self.capabilities(agent).questions)
+                                            ask=self.capabilities(agent).questions,
+                                            goals=self.capabilities(agent).goals)
             workdir = self._write_task_files(task, knowledge)
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
@@ -4925,6 +4930,7 @@ class Network:
             return
         self._auto_accept(ctx)
         text = res.final_text.strip()
+        self._goal_track(task, res.tool_calls)
         if self._waiting_on(task):
             # 还有子任务或提议没有回音：这一轮只是进展，等回报唤醒后再交付
             with self._lock:
@@ -4932,6 +4938,15 @@ class Network:
                     task.notes.append(text)
             self._save_task(task)
             return
+        goal = self._goal_continue(task)
+        if goal == "continue":  # 长期目标还没完成：这一轮只算进展，网络在同一会话里接着唤醒它
+            with self._lock:
+                if text:
+                    task.notes.append(text)
+            self._save_task(task)
+            return
+        if goal == "limit":
+            text = f"{text}\n\n（{format_goal_limit(agent.name, task.goal)}上面是到目前为止的结果。）".strip()
         if not text:
             self._fail_task(task, "执行者没有交回任何内容")
             return
@@ -5119,6 +5134,13 @@ class Network:
                        self._email(src.user_id) if src.user_id else "有人")
                 blocks.append(format_route(it.get("plugin", ""), who, src.text, it.get("reason", ""), bool(it.get("claim"))))
                 wake.append(f"插件「{it.get('plugin', '')}」{'分派' if it.get('claim') else '请你看'}了一条消息")
+            elif kind == "goal":
+                holder = self._holder(ctx.kind, ctx.id)
+                g = holder.goal if holder is not None else {}
+                if not g or g.get("id") != it.get("goal_id") or g.get("phase") != "active":
+                    continue
+                blocks.append(format_goal_round(g, int(it.get("round", 0)), _goal_cap(g)))
+                wake.append(f"目标续行 第 {it.get('round')}/{_goal_cap(g)} 轮")
             elif kind == "question":
                 q = self.store.questions.get(it["question_id"])
                 if q is None or q.status != "pending" or q.target_agent_id != ctx.agent_id:
@@ -5736,6 +5758,41 @@ class Network:
         with self._lock:
             return [a for a in self.store.approvals.values()
                     if a.status == "pending" and (actor is None or a.owner_id in (None, actor))]
+
+    # ================= 长期目标（dsh 的 create_goal） =================
+    # dsh headless 每轮结束就退出，自己的续行驱动（goal-round-driver）跑不起来；会话续接后目标还在，只是“停用”。
+    # 网络从 create_goal / update_goal / get_goal 的结果跟踪目标状态：还是 active 就在同一会话里排下一轮，
+    # 直到模型标记 complete / blocked（或人让它 pause），或者到轮数上限（research: deepseek-harness#headless-tools）。
+    # 每一轮都是普通的一轮：席位的回复照常发出、委托里只记进展；人随时可以停止或插话，失败、被停止就不再续。
+    def _goal_track(self, holder: Seat | Task, tool_calls: list[dict[str, Any]]) -> None:
+        latest: dict[str, Any] | None = None
+        for c in tool_calls:
+            if str(c.get("tool") or "") in GOAL_TOOLS and c.get("status") != "failed":
+                g = _goal_of(c.get("result"))
+                if g is not None:
+                    latest = g
+        if latest is None:
+            return
+        with self._lock:
+            old = holder.goal
+            holder.goal = {} if not latest else \
+                {**latest, "rounds": old.get("rounds", 0) if old.get("id") == latest["id"] else 0}
+            self.store.save()
+
+    def _goal_continue(self, holder: Seat | Task) -> str:
+        """目标还在进行：排下一轮（"continue"）；到上限（"limit"）；没有进行中的目标（""）。"""
+        with self._lock:
+            g = holder.goal
+            if not g or g.get("phase") != "active":
+                return ""
+            if g.get("rounds", 0) >= _goal_cap(g):
+                g["phase"] = "limit"
+                self.store.save()
+                return "limit"
+            g["rounds"] = g.get("rounds", 0) + 1
+            holder.inbox.append({"kind": "goal", "goal_id": g.get("id"), "round": g["rounds"]})
+            self.store.save()
+        return "continue"
 
     # ================= Agent 提问（ask_user_question） =================
     # dsh 的提问工具经应答插件（matrix/dsh_plugins/questions.mjs）转到这里，阻塞到有回答（research: deepseek-harness#user-questions）。
@@ -8048,6 +8105,44 @@ def _clip_args(args: dict[str, Any], limit: int = 4000) -> dict[str, Any]:
 def _short(v: Any, n: int = 200) -> str:
     s = v if isinstance(v, str) else str(v)
     return s if len(s) <= n else s[:n] + "…"
+
+
+GOAL_ROUNDS_DEFAULT = 10  # 目标没写轮数上限时，网络最多续几轮
+GOAL_ROUNDS_CAP = 30      # 无论目标写多少，网络最多续几轮
+
+
+def _goal_cap(g: dict[str, Any]) -> int:
+    try:
+        n = int(g.get("max") or GOAL_ROUNDS_DEFAULT)
+    except (TypeError, ValueError):
+        n = GOAL_ROUNDS_DEFAULT
+    return max(1, min(n, GOAL_ROUNDS_CAP))
+
+
+def _goal_of(result: Any) -> dict[str, Any] | None:
+    """create_goal / update_goal / get_goal 的结果 → {id, objective, phase, max}；{"goal": null} → {}；看不出来 → None。
+    结果可能被截断（事件里每个字符串最多 8 KiB，网络记录时再截），读不成 JSON 时按字段名取。"""
+    data = result
+    if isinstance(result, str):
+        try:
+            data = json.loads(result)
+        except ValueError:
+            data = None
+    if isinstance(data, dict) and "goal" in data:
+        g = data["goal"]
+        if g is None:
+            return {}
+        if isinstance(g, dict) and g.get("id"):
+            return {"id": str(g["id"]), "objective": str(g.get("objective") or "")[:500],
+                    "phase": str(g.get("phase") or ""), "max": g.get("maxGoalRounds")}
+        return None
+    text = result if isinstance(result, str) else ""
+    m = {k: re.search(rf'"{k}":\s*("([^"]*)"|\d+)', text) for k in ("id", "phase", "maxGoalRounds")}
+    if not (m["id"] and m["phase"]):
+        return None
+    obj = re.search(r'"objective":\s*"((?:[^"\\]|\\.)*)', text)
+    return {"id": m["id"].group(2), "objective": (obj.group(1) if obj else "")[:500], "phase": m["phase"].group(2),
+            "max": int(m["maxGoalRounds"].group(1)) if m["maxGoalRounds"] else None}
 
 
 QUESTIONS_PER_ASK = 10   # 一次提问最多几个问题
