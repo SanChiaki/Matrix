@@ -19,6 +19,12 @@ const tags = (xs, cls = "") => (xs || []).map((x) => `<span class="tag ${cls}">$
 const agent = (id) => S.snap?.agents.find((a) => a.id === id);
 const proj = (id) => S.snap?.projects.find((g) => g.id === id);
 const aname = (id) => agent(id)?.name || id || "（未知）";
+// 项目的对话（群聊、自己的项目会话）开在项目页的“对话”标签里；私聊、助理和归档的对话在对话视图
+const convOf = (id) => !id ? null : S.snap?.conversations.find((x) => x.id === id) || (S.conv && S.conv.id === id && !S.conv.loading ? S.conv : null);
+const inProject = (c) => !!c && (c.kind === "project" || c.kind === "session") && !!c.project_id && !c.archived && !!proj(c.project_id);
+// 对话现在看得见吗：对话视图，或者项目页的“对话”标签
+const chatShown = () => S.view === "chats"
+  || (S.view === "projects" && !!S.convId && S.assets?.pid === S.projectSel && S.assets?.tab === "chat");
 const gcolor = (id) => PROJECT_COLORS[Math.max(0, S.snap.projects.findIndex((g) => g.id === id)) % PROJECT_COLORS.length];
 
 // 错误带上 HTTP 状态码（断网、超时为 0）：调用方据此区分“确实不存在”（404）和“这次没拿到”。
@@ -171,7 +177,6 @@ async function start() {
   $("#tab-members").addEventListener("click", () => sideTab("members"));
   initTheme();
   $("#tab-task").addEventListener("click", () => sideTab("task"));
-  $("#tab-archive").addEventListener("click", () => sideTab("archive"));
   bindComposer();
   bindAttachments();
   $("#msg-form").addEventListener("submit", sendMsg);
@@ -214,7 +219,11 @@ function route() {
     const body = m[1] === "p" ? { project_id: m[2] } : { agent_id: m[2] };
     const still = () => location.hash === `#${hash}`;
     api("/api/conversations", { method: "POST", body })
-      .then((c) => { if (still()) location.replace(`#${c.id}`); })
+      .then((c) => {
+        if (!still()) return;
+        if (S.snap && !S.snap.conversations.some((x) => x.id === c.id)) S.snap.conversations.push(c);  // 下面的路由要知道它属于哪个项目
+        location.replace(`#${c.id}`);
+      })
       .catch((err) => { if (still()) { alert(err.message); location.replace("#network"); } });
     return;
   }
@@ -222,12 +231,18 @@ function route() {
     // 先定下 convId 再切视图：hashchange 事件可能晚于哈希变化抵达，
     // 若让 show() 在这里改 URL，会与后续事件撞车并回退到别的视图。
     S.convId = hash;
-    show("chats");
+    const cv = convOf(hash);
+    if (inProject(cv)) {  // 项目的群聊和项目会话：项目页的“对话”标签
+      S.projectSel = cv.project_id; S.projectEdit = false; S.pendingTab = "chat";
+      show("projects");
+    } else show("chats");
     if (S.conv?.id !== hash) openConv(hash);
   } else {
     // 切到普通视图时清掉选中的对话，否则 URL 与画面会不一致。
     // #project-<项目> 打开项目页（可收藏、刷新、前进后退）；#projects 是项目列表
-    const page = hash.match(/^project-(.+)$/), rel = hash.match(/^release-(.+)$/), bp = hash.match(/^blueprint-(.+)$/);
+    // #project-<项目>/<标签> 打开项目页的某个标签（刷新还在原处）；不带标签就是“对话”
+    const page = hash.match(/^project-([^/]+)(?:\/(.+))?$/), rel = hash.match(/^release-(.+)$/), bp = hash.match(/^blueprint-(.+)$/);
+    if (page?.[2]) S.pendingTab = decodeURIComponent(page[2]);
     S.convId = null; S.conv = null;
     S.projectSel = page ? page[1] : null; S.projectEdit = false;
     S.releaseSel = rel ? rel[1] : null;
@@ -247,7 +262,7 @@ function show(view) {
   $("#nav-more").setAttribute("aria-pressed", String(!!inMore));
   $("#more-cur").textContent = inMore ? inMore.textContent.trim() : "";
   document.querySelectorAll(".view").forEach((v) => { v.hidden = v.id !== `view-${view}`; });
-  if (view !== "chats") history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}`
+  if (view !== "chats" && !(view === "projects" && S.convId)) history.replaceState(null, "", view === "projects" && proj(S.projectSel) ? `#project-${S.projectSel}`
     : view === "releases" && S.releaseSel ? `#release-${S.releaseSel}`
     : view === "blueprints" && S.blueprintSel ? `#blueprint-${S.blueprintSel}` : `#${view}`);
   if (view === "agents") loadModels();
@@ -457,13 +472,13 @@ function onEvent(ev) {
     else S.running.delete(d.task.id);
   }
   if (ev.type === "run.progress") {
-    if (S.view === "chats" && d.conversation_id === S.convId) scheduleConv();
+    if (chatShown() && d.conversation_id === S.convId) scheduleConv();
     if (d.context === "task" && d.context_id === S.taskSel) scheduleTask();
     return;
   }
   if (ev.type === "request.updated") {
     if (S.view === "board") loadBoard();
-    if (S.view === "chats" && d.conversation_id === S.convId) scheduleConv();
+    if (chatShown() && d.conversation_id === S.convId) scheduleConv();
     return;
   }
   if (ev.type === "tool.call" || ev.type === "runtime.invoke") return;  // 已由 run.progress 覆盖
@@ -495,7 +510,7 @@ function onEvent(ev) {
   if (ev.type === "draft.updated" && S.view === "board") loadBoard();
   if (ev.type === "held.updated") {
     if (S.view === "board") loadBoard();
-    if (S.view === "chats" && d.held?.conversation_id === S.convId) scheduleConv();
+    if (chatShown() && d.held?.conversation_id === S.convId) scheduleConv();
   }
   if (ev.type === "skills.updated" || ev.type === "connection.updated") { loadMine(true).then(schedule); return; }
   if (ev.type === "project.invited" && S.view === "board") loadBoard();
@@ -869,6 +884,7 @@ function renderProjectsView() {
   renderProjects();
   renderProjectEditor(S.newProject);
   renderProjectPage();
+  if (chatShown()) renderThread();
   if (S.newProject) { S.newProject = false; $("#gf-name")?.focus(); }
 }
 
@@ -886,7 +902,7 @@ function renderProjects() {
         <p class="card-desc">${esc(g.description || "没有描述")}</p>
         <div class="card-meta">${tags(g.member_ids.map(aname))}</div>
       </button>
-      <div class="card-foot"><span class="muted">${g.member_ids.length} 名成员${g.participants.length ? ` · ${g.participants.length + 1} 人参与` : ""}</span>${chatBtn(`p-${g.id}`, `进入 ${g.name} 的群聊`)}</div>
+      <div class="card-foot"><span class="muted">${g.member_ids.length} 名成员${g.participants.length ? ` · ${g.participants.length + 1} 人参与` : ""}</span></div>
     </div></li>`).join("") || '<li class="empty">还没有项目。</li>';
   $("#project-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { location.hash = `project-${b.dataset.id}`; }));
@@ -914,7 +930,7 @@ function renderProjectEditor(isNew = false) {
       ${theirs.length ? `<p class="hint">另有 ${theirs.length} 个别人的 Agent：${theirs.map((id) => esc(aname(id))).join("、")}（在群聊侧栏里移出）。</p>` : ""}
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${g ? "保存" : "创建"}</button>
-        ${g ? '<button type="button" class="ghost" id="gf-chat">进入群聊</button><button type="button" class="danger" id="gf-del">删除项目</button>' : ""}</div>
+        ${g ? '<button type="button" class="danger" id="gf-del">删除项目</button>' : ""}</div>
     </form>
     ${g ? '<div id="gf-people"></div>' : ""}`;
   const f = $("#project-form");
@@ -928,7 +944,6 @@ function renderProjectEditor(isNew = false) {
       if (!g) location.hash = `project-${r.id}`;  // 新建后直接进它的项目页
     } catch (err) { $(".error", f).textContent = err.message; }
   });
-  $("#gf-chat")?.addEventListener("click", () => { location.hash = `p-${g.id}`; });
   $("#gf-del")?.addEventListener("click", async () => {
     if (!confirm(`删除项目 ${g.name}？群聊归档为只读（只有你看得到），不再能委托。`)) return;
     try { await api(`/api/projects/${g.id}`, { method: "DELETE" }); location.hash = "projects"; await reload(); }
@@ -982,7 +997,7 @@ async function renderProjectPage(force = false) {
   const d = await api(`/api/projects/${g.id}`).catch(() => null);
   if (!d || S.projectSel !== g.id) return;
   const st = S.assets = S.assets?.pid === g.id ? S.assets
-    : { pid: g.id, tab: "brief", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
+    : { pid: g.id, tab: "chat", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
   if (S.pendingTab) { st.tab = S.pendingTab; S.pendingTab = null; }
   st.tab = { refs: "files", needs: "connectors" }[st.tab] || st.tab;  // 旧的标签名（资源引用并进资料，需要的连接器换成连接器面板）
   // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
@@ -992,20 +1007,31 @@ async function renderProjectPage(force = false) {
   const embeds = d.embed_tabs || [];  // 外部页面标签：资料里主持人设成标签、部署方允许嵌入的链接
   if (st.tab.startsWith("embed:") && !embeds.some((x) => `embed:${x.ref_id}` === st.tab)) st.tab = "files";
   // 插件标签里是沙箱 iframe：记录变化不重绘（会重新加载插件页面），由事件转给页面自己刷新；只有插件结构变了才重绘
-  const sig = JSON.stringify(st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
+  const asks = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill").length;
+  const n = { brief: asks || null, files: d.files.length + d.refs.length, skills: (d.skill_list || []).length,
+    connectors: d.connector_panel.services.length, plugins: plugins.length,
+    releases: (d.release_list || []).filter((r) => r.status === "active").length };
+  const sig = JSON.stringify(st.tab === "chat" ? [g.name, g.description, g.shared, st.tab, n, plugins.map((p) => [p.name, p.tabs]), embeds]
+    : st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
     ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
     : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.rolesEdit, st.bpDraft, g.roles, g.setup_steps, g.blueprint, st.needKind, st.editNeed,
        st.relForm, st.relEdit]);
-  if (page.dataset.sig === sig) return;
+  if (page.dataset.sig === sig) {  // 页头没变：对话标签照样要确认对话栏挂着、开的是对的对话（可能刚从别的视图回来）
+    if (st.tab === "chat") showProjectChat(g, $("#pp-panel", page));
+    return;
+  }
   page.dataset.sig = sig;
+  // 地址记下当前标签（对话标签的地址是对话本身，由 openConv 写）
+  const here = `#project-${g.id}/${encodeURIComponent(st.tab)}`;
+  if (st.tab !== "chat" && S.view === "projects" && location.hash !== here) history.replaceState(null, "", here);
   const tab = (key, label, n) => `<button type="button" role="tab" id="pt-${key}" data-tab="${key}" aria-selected="${st.tab === key}"
     aria-controls="pp-panel">${label}${n == null ? "" : `<span class="count">${n}</span>`}</button>`;
-  const asks = d.suggestions.filter((x) => x.status === "pending" && x.kind !== "skill").length;
+  parkChat();  // 重绘会清掉面板：对话栏先放回原处，下面再挂回来
   page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#projects">项目</a><span aria-hidden="true">/</span>
       <span class="here">${esc(g.name)}</span>${kindTag(g)}<span class="grow"></span>
-      <button type="button" class="ghost sm" id="pp-config">项目配置</button><a class="button ghost sm" href="#p-${esc(g.id)}">进入群聊</a></nav>
+      <button type="button" class="ghost sm" id="pp-config">项目配置</button></nav>
     ${g.description ? `<p class="page-desc">${esc(g.description)}</p>` : ""}
-    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("brief", "说明", asks || null)}${tab("files", "资料", d.files.length + d.refs.length)}${tab("skills", "技能", (d.skill_list || []).length)}${tab("connectors", "连接器", d.connector_panel.services.length)}${tab("plugins", "插件", plugins.length)}${tab("releases", "对外", (d.release_list || []).filter((r) => r.status === "active").length)}${
+    <div class="page-tabs" role="tablist" aria-label="项目内容">${tab("chat", "对话")}${tab("brief", "说明", n.brief)}${tab("files", "资料", n.files)}${tab("skills", "技能", n.skills)}${tab("connectors", "连接器", n.connectors)}${tab("plugins", "插件", n.plugins)}${tab("releases", "对外", n.releases)}${
       plugins.flatMap((p) => (p.tabs || []).map((t) => `<button type="button" role="tab" class="plugin-tab" id="pt-plugin-${esc(p.name)}-${esc(t.key)}"
         data-tab="plugin:${esc(p.name)}:${esc(t.key)}" aria-selected="${st.tab === `plugin:${p.name}:${t.key}`}" aria-controls="pp-panel"
         title="插件「${esc(p.title)}」的页面"><span class="plugin-dot" aria-hidden="true"></span>${esc(t.label)}<span class="count" data-badge="${esc(p.name)}:${esc(t.key)}">${esc(S.pluginBadges?.[`${d.id}:${p.name}:${t.key}`] || "")}</span></button>`)).join("")}${
@@ -1014,14 +1040,51 @@ async function renderProjectPage(force = false) {
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
   $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
+    if (st.tab === "chat" && b.dataset.tab !== "chat") {  // 离开对话：地址回到项目页，收起成员面板
+      S.convId = null; $(".chat-side").classList.remove("open");
+    }
     st.tab = b.dataset.tab; st.note = ""; renderProjectPage(true).then(() => page.querySelector(`[data-tab="${CSS.escape(st.tab)}"]`)?.focus());
   }));
+  page.classList.toggle("chat-on", st.tab === "chat");
+  if (st.tab === "chat") { S.pluginFrame = null; showProjectChat(g, $("#pp-panel", page)); return; }
   if (st.tab.startsWith("plugin:")) { renderPluginFrame($("#pp-panel", page), d, st); return; }
   if (st.tab.startsWith("embed:")) { S.pluginFrame = null; renderEmbedTab($("#pp-panel", page), embeds.find((x) => `embed:${x.ref_id}` === st.tab)); return; }
   S.pluginFrame = null;
   ({ brief: renderBriefTab, files: renderFilesTab, skills: renderSkillsTab, connectors: renderConnectorsTab, plugins: renderPluginsTab,
      releases: renderReleasesTab }[st.tab]
     || renderBriefTab)($("#pp-panel", page), d, st);
+}
+
+// 项目页的“对话”标签：就是对话视图里那一栏（消息、输入框、成员面板）挪过来，对话的代码不用分两份。
+// 显示哪个对话：地址上的那个，否则这个项目上次看的，否则群聊；还没有群聊就建一个。
+function hostChat(where) {
+  const col = $(".thread-col"), side = $(".chat-side"), th = $("#thread"), top = th.scrollTop;
+  if (col.parentElement === where) return;
+  where.append(col, side);
+  th.scrollTop = top;  // 挪动节点会丢滚动位置
+}
+function parkChat(close = false) {
+  if (close) $(".chat-side").classList.remove("open");
+  hostChat($("#view-chats"));
+}
+function projectConvId(g) {
+  const ok = (id) => { const c = convOf(id); return inProject(c) && c.project_id === g.id ? id : null; };
+  return ok(S.convId) || ok(S.lastConv?.[g.id])
+    || S.snap.conversations.find((x) => x.kind === "project" && x.project_id === g.id && !x.archived)?.id || null;
+}
+function showProjectChat(g, panel) {
+  hostChat(panel);
+  const id = projectConvId(g);
+  if (id) { if (S.convId !== id || S.conv?.id !== id) openConv(id); return; }  // 已经开着：重绘由 renderProjectsView 做
+  if (S.creatingConv === g.id) return;
+  S.creatingConv = g.id;  // 第一次打开这个项目：建群聊（服务端是幂等的，这里只防止事件刷新连发）
+  api("/api/conversations", { method: "POST", body: { project_id: g.id } })
+    .then((c) => {
+      if (!S.snap.conversations.some((x) => x.id === c.id)) S.snap.conversations.push(c);
+      if (S.view === "projects" && S.projectSel === g.id && S.assets?.tab === "chat") openConv(c.id);
+    })
+    .catch((err) => { panel.innerHTML = `<p class="error">${esc(err.message)}</p>`; })
+    .finally(() => { S.creatingConv = null; });
 }
 
 // 说明：纲要（主持人写，别人建议修改）+ 已定的事（谁都能记、能撤销）。每一轮都推送给所有成员（不变量 17）
@@ -2328,7 +2391,7 @@ function renderProjectGuest(box, g) {
       </fieldset>
       <p class="hint">它们只为你工作：别的参与者可以 @、委托它们，但它们以你的名义、用你的资源运行，工作区外的操作由你审批。私有目录默认不挂载，可以在群聊侧栏里按 Agent 打开。</p>
       <p class="error" role="alert"></p>
-      <div class="actions"><button type="submit">保存</button><button type="button" class="ghost" id="gg-chat">进入群聊</button>
+      <div class="actions"><button type="submit">保存</button>
         <button type="button" class="danger" id="gg-leave">退出项目</button></div>
     </form>`;
   const f = $("#guest-form");
@@ -2339,7 +2402,6 @@ function renderProjectGuest(box, g) {
     try { await api(`/api/projects/${g.id}`, { method: "PATCH", body: { member_ids: [...others, ...want] } }); await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });
-  $("#gg-chat").addEventListener("click", () => { location.hash = `p-${g.id}`; });
   $("#gg-leave").addEventListener("click", async () => {
     if (!confirm(`退出 ${g.name}？你的 Agent 会一并移出，之后看不到这个项目和群聊。`)) return;
     try { await api(`/api/projects/${g.id}/leave`, { method: "POST", body: {} }); S.projectSel = null; location.hash = "projects"; await reload(); }
@@ -2362,7 +2424,7 @@ function renderConvList() {
       ${icon}<span class="c-body"><span class="t"><span class="n">${esc(name)}</span>${dot(c)}
         ${c && pending.has(c.id) ? '<span class="pill pending" title="有待审核的 Agent 提议">待审核</span>' : ""}</span>
         <span class="s">${esc(sub)}</span></span></a></li>`;
-  const opened = (c) => S.view === "chats" && S.convId === c?.id;
+  const opened = (c) => chatShown() && S.convId === c?.id;
 
   const home = homeConv();
   const helper = agent(S.me?.assistant_id);
@@ -2455,6 +2517,7 @@ function setupAccount() {
 }
 
 function renderChats() {
+  parkChat(true);
   $("#view-chats").classList.remove("start");
   renderThread();
 }
@@ -2467,12 +2530,15 @@ async function openConv(id) {
   // 新对话的数据到之前先显示“加载中”：否则慢网下屏幕上还是上一个对话，@ 列表也是它的成员
   if (S.conv?.id !== id) { S.conv = { id, loading: true }; render(); }
   await loadConv(id);
-  if (S.convId === id) render();
+  if (S.convId !== id) return;
+  if (inProject(S.conv)) (S.lastConv ||= {})[S.conv.project_id] = id;
+  if (S.view === "chats" && inProject(S.conv)) { route(); return; }
+  render();
 }
 
 async function refreshConv() {
   const id = S.convId;
-  if (!id || S.view !== "chats") return;
+  if (!id || !chatShown()) return;
   await loadConv(id);
   if (S.convId === id) renderThread();
 }
@@ -2512,7 +2578,7 @@ function retryConv(id) {
   S.convRetry = setTimeout(async () => {
     if (S.convId !== id || !S.convError) return;
     await loadConv(id);
-    if (S.convId === id && S.view === "chats") render();
+    if (S.convId === id && chatShown()) render();
   }, wait);
 }
 
@@ -2623,40 +2689,10 @@ function sideTab(which, open = true) {
   S.sideTab = which;
   if (open) $(".chat-side").classList.add("open");
   $("#tab-members").setAttribute("aria-selected", String(which === "members"));
-  $("#tab-archive").setAttribute("aria-selected", String(which === "archive"));
   $("#tab-task").setAttribute("aria-selected", String(which === "task"));
   $("#members-panel").hidden = which !== "members";
-  $("#archive-panel").hidden = which !== "archive";
   $("#task-detail").hidden = which !== "task";
   if (which === "task") renderTask();
-  if (which === "archive") renderArchive();
-}
-
-// ---------- 群聊旁的项目概览：纲要与已定的事（只读）+ 去项目页的入口 ----------
-// 编辑都在项目页（说明 / 资料 / 技能 / 连接器），这里只给聊天时顺手看一眼。
-async function renderArchive() {
-  const box = $("#archive-panel"), c = S.conv;
-  const has = !!c && (c.kind === "project" || c.kind === "session") && !!c.project_id && !c.archived && !!proj(c.project_id);
-  $("#tab-archive").hidden = !has;
-  if (!has && S.sideTab === "archive") { sideTab("members", false); return; }
-  if (!has || box.hidden) return;
-  const d = await api(`/api/projects/${c.project_id}`).catch(() => null);
-  if (!d || S.conv?.project_id !== c.project_id) return;
-  const active = d.decisions.filter((x) => x.status === "active").reverse();
-  const pend = d.suggestions.filter((x) => x.status === "pending").length;
-  const go = (tab, label, n) => `<li><a href="#project-${esc(d.id)}" data-pagetab="${tab}">${label}</a><span class="muted">${n}</span></li>`;
-  box.innerHTML = `<section class="archive-sec" aria-labelledby="ar-brief"><h3 id="ar-brief">纲要
-      <a class="h3-link" href="#project-${esc(d.id)}" data-pagetab="brief">${d.is_host ? "编辑" : "查看"}</a></h3>
-      <div class="md brief">${d.brief ? renderMarkdown(d.brief) : '<span class="muted">还没写纲要。</span>'}</div>
-      ${pend ? `<p class="hint">${pend} 条建议等${d.is_host ? "你" : "主持人"}决定，<a href="#project-${esc(d.id)}" data-pagetab="brief">去看看</a>。</p>` : ""}
-    </section>
-    <section class="archive-sec" aria-labelledby="ar-dec"><h3 id="ar-dec">已定的事 · ${active.length}</h3>
-      <ul class="decisions">${active.slice(0, 8).map((x) => `<li><div>${esc(x.text)}</div></li>`).join("") || '<li class="empty">还没有</li>'}</ul>
-      ${active.length > 8 ? `<a href="#project-${esc(d.id)}" data-pagetab="brief">全部 ${active.length} 条</a>` : ""}
-    </section>
-    <section class="archive-sec" aria-labelledby="ar-more"><h3 id="ar-more">项目页</h3>
-      <ul class="files">${go("files", "资料", `${d.files.length} 个文件 · ${d.refs.length} 个链接`)}${go("skills", "技能", (d.skill_list || []).length)}${go("connectors", "连接器", d.connector_panel.services.length)}</ul>
-    </section>`;
 }
 
 // 群成员随时加减：在这里加人、移人，变动会作为一条事件出现在群聊里。私聊显示对方。
@@ -2799,12 +2835,26 @@ function renderThread() {
     : c.is_host === false ? ""  // 共享项目的群聊只有主持人能清空
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
   const stale = S.convError ? `<span class="net-warn" role="status" title="${esc(S.convError)}">网络不稳定，显示的可能不是最新内容，正在重试…</span>` : "";
-  const pageBtn = g && !c.archived && (c.kind === "project" || sess)
-    ? `<a class="button ghost" href="#project-${esc(g.id)}" title="说明、资料、技能、连接器与项目配置">项目页</a>` : "";
   const sideBtn = c.missing ? "" : c.is_home ? `<button type="button" class="ghost" id="side-open" title="你的助理与定时">助理与定时</button>`
-    : `<button type="button" class="ghost" id="side-open" title="成员、项目档案与委托详情">成员与档案</button>`;
+    : `<button type="button" class="ghost" id="side-open" title="成员与委托详情">成员</button>`;
   $("#tab-members").textContent = c.is_home ? "助理与定时" : "成员";
-  $("#thread-head").innerHTML = head + stale + pageBtn + sideBtn + actions;
+  if (S.view === "projects" && inProject(c)) {
+    // 在项目页的“对话”标签里：项目名、描述、头像页头上都有了，这里只留一行——
+    // 左边切换这个项目里的对话（群聊、自己的项目会话、新会话），右边是当前对话的状态和操作
+    const live = S.snap.conversations.filter((x) => x.project_id === g.id && !x.archived);
+    const group = live.find((x) => x.kind === "project");
+    const mine = live.filter((x) => x.kind === "session" && (x.message_count || x.id === c.id));
+    const sw = (x, label, title) => `<a href="#${esc(x.id)}" ${x.id === c.id ? 'aria-current="page"' : ""} title="${esc(title)}">${esc(label)}</a>`;
+    const switcher = `<nav class="conv-switch" aria-label="这个项目里的对话">
+      ${group ? sw(group, "群聊", `${c.members.length} 名成员 · @ 谁，谁接任务`) : ""}
+      ${mine.map((x) => sw(x, x.title, `项目会话：和 ${aname(x.agent_id) || "助理"} 单独聊，只有你看得到`)).join("")}
+      <button type="button" class="ghost sm" id="sess-new" title="和你的助理单独聊这个项目，不打扰群聊；只有你看得到">＋ 新会话</button></nav>`;
+    const note = sess ? '<span class="muted sess-note">只有你看得到</span>' : "";
+    const small = (html) => html.replaceAll('class="ghost"', 'class="ghost sm"');
+    $("#thread-head").innerHTML = switcher + stale + note + pill(c.status) + small(sideBtn + actions.replace(/<button[^>]*id="sess-new"[^>]*>[^<]*<\/button>/, ""));
+  } else {
+    $("#thread-head").innerHTML = head + stale + sideBtn + actions;
+  }
   $("#side-open")?.addEventListener("click", () => sideTab(S.sideTab === "task" || !S.sideTab ? "members" : S.sideTab));
   $("#conv-del")?.addEventListener("click", async () => {
     if (!confirm("删除这个已归档的对话？")) return;
@@ -2830,7 +2880,6 @@ function renderThread() {
     catch (err) { alert(err.message); }
   });
   renderMembers();
-  renderArchive();
 
   const byParent = {};
   c.tasks.forEach((t) => (byParent[t.parent_task_id || "root"] ||= []).push(t));
@@ -3265,7 +3314,7 @@ function bindAttachments() {
     if (files.length) { e.preventDefault(); addFiles(files); }
   });
   // 拖放：只在对话页、能发消息时接；目录不接（拿不到内容）
-  const accepts = (e) => S.view === "chats" && !$("#msg-form").hidden && [...(e.dataTransfer?.types || [])].includes("Files");
+  const accepts = (e) => chatShown() && !$("#msg-form").hidden && [...(e.dataTransfer?.types || [])].includes("Files");
   let depth = 0;
   $("#drop-limit").textContent = `单个文件不超过 ${attachLimit() / 1e6} MB，一条消息最多 10 个`;
   document.addEventListener("dragenter", (e) => { if (accepts(e)) { depth++; overlay.hidden = false; } });
