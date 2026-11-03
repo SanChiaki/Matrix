@@ -46,6 +46,11 @@ def python_dirs(exe: str | None = None) -> list[Path]:
                                                              for s in _SYSTEM_DIRS))
 
 
+def _under_system_dir(path: str) -> bool:
+    """这个路径在不在整块只读挂进来的系统目录里（/usr、/bin 等）。"""
+    return any(path == d or path.startswith(d + "/") for d in _SYSTEM_DIRS)
+
+
 def _symlink_hops(path: str) -> list[tuple[str, str]]:
     """解释器常是一串符号链接（虚拟环境 → uv 的“3.14”目录 → 具体版本）：沿途每个是链接的路径前缀都要在沙箱里重建，
     返回 [(链接内容, 链接路径)]。"""
@@ -91,6 +96,11 @@ def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = Fal
             seen.add(str(p))
             cmd += ["--ro-bind", str(p), str(p)]
     for target, link in _symlink_hops(argv[0]):
+        # 系统目录整块只读挂进来了（或本身就是上面重建过的链接），里面的链接原样存在：再 --symlink 会撞上已存在的路径。
+        # bwrap 0.6 之类的旧版本直接报 “Can't make symlink ... File exists”，解释器是 /usr/bin/python3、
+        # /usr/local/bin/python3 这种链接（Debian/Ubuntu、官方 python 镜像）时沙箱就起不来。
+        if _under_system_dir(link):
+            continue
         if not any(link == str(p) or link.startswith(str(p) + "/") for p in ro):  # 已经整个挂进来的目录里的链接不用重建
             cmd += ["--symlink", target, link]
     for p in rw:
