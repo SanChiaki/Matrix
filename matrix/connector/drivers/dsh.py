@@ -14,7 +14,8 @@ import threading
 from pathlib import Path
 
 from ...models import CONNECTOR_SERVER, MCP_SERVER
-from ...runtime import DshRuntime, RunRequest, RuntimeCapabilities, ToolBridge, ApprovalBridge, argv, no_window
+from ...runtime import (ApprovalBridge, DshRuntime, QuestionBridge, RunRequest, RuntimeCapabilities, ToolBridge, argv,
+                        no_window)
 from .base import RunOutcome, RunSpec
 
 
@@ -64,6 +65,9 @@ class DshDriver:
                            names=list(spec.tool_names) or None) if spec.tool_names else None
         approvals = ApprovalBridge(url=f"{self.bridge_url}/internal/approval", token=spec.run_id,
                                    handler=ctx.ask_approval, timeout_s=3600)
+        # 提问：等多久由网络决定（席位里等人、委托里先等委托方），这里给一个足够长的上限
+        questions = QuestionBridge(url=f"{self.bridge_url}/internal/question", token=spec.run_id,
+                                   handler=ctx.ask_question, timeout_s=4 * 3600) if spec.questions else None
         # 电脑上的连接器：网络没允许的 MCP 服务，在覆盖层里按插件 id 关掉（只开这一轮允许的）
         disabled = [pid for name, pid in self.mcp_plugins().items() if name not in spec.connectors] \
             if spec.connectors is not None else []
@@ -71,7 +75,7 @@ class DshDriver:
                          cwd=Path(spec.workdir), authority=list(spec.authority),
                          session_id=spec.session_id, tools=tools, on_event=ctx.emit,
                          timeout_s=spec.timeout_s, model=spec.model, approvals=approvals, cancel=cancel,
-                         disabled_plugins=disabled)
+                         disabled_plugins=disabled, questions=questions)
         # 超时与取消（人终止）都由 DshRuntime 结束进程；返回值里保留 session，下一轮可以续接，不会丢上下文。
         res = self._runtime.run(req)
         return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,

@@ -493,6 +493,23 @@ class ApprovalIn(BaseModel):
     reason: str = ""
 
 
+class QuestionIn(BaseModel):
+    token: str
+    questions: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
+
+
+class AnswerItemIn(BaseModel):
+    id: str = Field(max_length=64)
+    selected: list[str] = Field(default_factory=list, max_length=20)
+    custom: str = Field("", max_length=4000)
+
+
+class AnswerIn(BaseModel):
+    answers: list[AnswerItemIn] = Field(default_factory=list, max_length=20)
+    decline: bool = False                     # 不回答：提问的 Agent 拿到“没有得到回答”
+    note: str = Field("", max_length=500)
+
+
 class ToolCallIn(BaseModel):
     token: str
     tool: str
@@ -1423,6 +1440,12 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def decide(approval_id: str, body: DecisionIn, user: Me) -> dict:
         return network.decide_approval(approval_id, body.allow, actor=user.id, note=body.note, scope=body.scope).to_dict()
 
+    @app.post("/api/questions/{question_id}")
+    def answer(question_id: str, body: AnswerIn, user: Me) -> dict:
+        q = network.answer_question(question_id, [a.model_dump() for a in body.answers], actor=user.id,
+                                    decline=body.decline, note=body.note)
+        return network.question_view(q)
+
     # ---- 事件流（按用户过滤） ----
     @app.get("/api/events")
     async def events(request: Request, user: Me, since: int = 0) -> StreamingResponse:
@@ -1577,6 +1600,11 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         # 阻塞到 Agent 所有者决定或超时；dsh 那头的应答插件一直等着
         outcome = await asyncio.to_thread(network.request_approval, body.token, body.tool, body.reason)
         return {"outcome": outcome}
+
+    @app.post("/internal/question")
+    async def question(body: QuestionIn) -> dict:
+        # Agent 提问（ask_user_question）：阻塞到有人（或委托方）回答、问题作废或超时；dsh 那头的应答插件一直等着
+        return await asyncio.to_thread(network.request_question, body.token, body.questions)
 
     return app
 class MatrixServer(uvicorn.Server):

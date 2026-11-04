@@ -8,6 +8,9 @@
   设备令牌（只存 sha256，可单独吊销），连接器用令牌连 `GET /api/devices/connect`
   （WebSocket，令牌走 query）。网络工具经连接器回传，身份仍由执行上下文令牌认定；
   审批上行进入现有 Approval 记录，由 Agent 的所有者决定。
+  提问（dsh 的 `ask_user_question`）同样上行：本机桥 `/internal/question` → `question.request {run_id, call_id, questions}` →
+  `Network.request_question`，回执 `{answers}` 或 `{error}`。`run.request.questions` 告诉驱动这一轮能不能提问，握手里的
+  `capabilities.questions` 声明驱动能不能把提问转回来（旧连接器不报告 = 不能；见 [execution.md](execution.md)“运行中提问”）。
 - **一台电脑一个连接器，一机多 harness**（参照 Raft Computer，research: local-harness-integration#raft）：
   握手报告本机全部 harness（`hello.ok.runtimes`），Agent 绑定“设备 + harness”（`Agent.harness`，取
   `models.HARNESSES` 的键，`None` = 设备默认）。有效权限按绑定的 harness 计算；设备上没有那个 harness 时按不可达等待，

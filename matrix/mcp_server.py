@@ -105,6 +105,35 @@ TOOLS = [
         },
     },
     {
+        "name": "answer_question",
+        "description": ("回答你委托的成员在做事时问你的问题（网络通知里给了 question_id）。它一直在等，你答了它就在原来的工作里"
+                        "接着做。只回答你能替人决定的事；需要人拍板的用 escalate_question 转给人。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string", "description": "问题 id（来自网络通知）"},
+                "answer": {"type": "string",
+                           "description": "你的回答。只有一个问题、选一个选项时写那个选项的原文；有几个问题时逐个写清楚"},
+            },
+            "required": ["question_id", "answer"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "escalate_question",
+        "description": ("你决定不了成员问你的问题时，转给人（这项工作起点的那个人）：对方回答后直接交给提问的成员。"
+                        "这一轮结束时还没回答也没转的问题，网络会自动转给人。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question_id": {"type": "string", "description": "问题 id（来自网络通知）"},
+                "note": {"type": "string", "description": "可选：给回答的人的补充说明（为什么你定不了、你倾向什么）"},
+            },
+            "required": ["question_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_agent",
         "description": ("项目里没有合适的成员时，提议新建一个 Agent。网络不会直接创建：人审核（可修改）后批准，"
                         "新 Agent 加入当前项目；结果会作为通知送给你。提议的权限不能超出你当前的有效权限。"),

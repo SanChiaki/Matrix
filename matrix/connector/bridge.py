@@ -1,4 +1,4 @@
-"""连接器本地小桥：给本机 harness 提供与云侧同形的 `/internal/tools` 与 `/internal/approval`。
+"""连接器本地小桥：给本机 harness 提供与云侧同形的 `/internal/tools`、`/internal/approval` 与 `/internal/question`。
 
 云侧这两个端点在 Caddy 后面只对容器内开放；端侧 harness 在本机，直接连网络不可达，
 所以连接器在 127.0.0.1 上起一个小 HTTP 服务，收到请求后经出站连接转给服务器：
@@ -17,10 +17,11 @@ from typing import Any, Callable
 
 ToolFn = Callable[[str, dict[str, Any]], tuple[str, bool]]
 ApprovalFn = Callable[[str, str], str]
+QuestionFn = Callable[[list[dict[str, Any]]], dict[str, Any]]
 
 
 class _Handler(BaseHTTPRequestHandler):
-    runs: dict[str, tuple[ToolFn | None, ApprovalFn | None]] = {}
+    runs: dict[str, tuple[ToolFn | None, ApprovalFn | None, QuestionFn | None]] = {}
 
     def do_POST(self) -> None:  # noqa: N802 —— http.server 的接口
         length = int(self.headers.get("Content-Length") or 0)
@@ -29,7 +30,7 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return self._json({"text": "invalid json", "is_error": True}, 400)
         token = str(body.get("token") or "")
-        tools, approvals = self.runs.get(token, (None, None))
+        tools, approvals, questions = self.runs.get(token, (None, None, None))
         if self.path == "/internal/tools":
             if tools is None:
                 return self._json({"text": "execution context not found", "is_error": True}, 403)
@@ -42,6 +43,14 @@ class _Handler(BaseHTTPRequestHandler):
             if approvals is None:
                 return self._json({"outcome": "unavailable"})
             return self._json({"outcome": approvals(str(body.get("tool") or ""), str(body.get("reason") or ""))})
+        if self.path == "/internal/question":
+            raw = body.get("questions")
+            if questions is None or not isinstance(raw, list):
+                return self._json({"error": "这一轮不能提问"})
+            try:
+                return self._json(questions([q for q in raw if isinstance(q, dict)]))
+            except Exception as e:  # noqa: BLE001 —— 连不上服务器：提问当作没得到回答
+                return self._json({"error": f"没有得到回答：{e}"})
         return self._json({"detail": "not found"}, 404)
 
     def _json(self, data: dict[str, Any], status: int = 200) -> None:
@@ -70,8 +79,9 @@ class LocalBridge:
         host, port = self._server.server_address[:2]
         return f"http://{host}:{port}"
 
-    def register(self, run_id: str, tools: ToolFn | None, approvals: ApprovalFn | None) -> None:
-        _Handler.runs[run_id] = (tools, approvals)
+    def register(self, run_id: str, tools: ToolFn | None, approvals: ApprovalFn | None,
+                 questions: QuestionFn | None = None) -> None:
+        _Handler.runs[run_id] = (tools, approvals, questions)
 
     def unregister(self, run_id: str) -> None:
         _Handler.runs.pop(run_id, None)

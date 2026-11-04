@@ -135,8 +135,8 @@ NOTE_TOOLS = ("open_note",)
 # 会让别人看到内容的网络工具：会话读过越界的来源时一律不放行（不变量 22）。群聊回复与任务交付另外拦下等所有者确认
 OUTBOUND_TOOLS = ("record_decision", "publish_file", "add_link", "propose_brief", "propose_skill", "propose_plugin",
                   "plugin_write", "delegate",
-                  "share_knowledge", "request_changes", "retry_task", "open_request", "deliver_request", "accept_request",
-                  "reopen_request")
+                  "share_knowledge", "request_changes", "retry_task", "answer_question", "open_request", "deliver_request",
+                  "accept_request", "reopen_request")
 
 
 class TaskStatus(StrEnum):
@@ -338,6 +338,7 @@ class Message:
     draft_id: str | None = None          # event：助理对话里起草的一条消息（前端渲染成确认卡）
     held_id: str | None = None           # event：一条等所有者确认的输出（所有者看到确认卡，别人只看到“等确认”）
     claimed_by: str | None = None        # user：被插件的 route 分派给哪个成员认领（Agent id），每条只能认领一次
+    answers: str | None = None           # user：这条消息回答了哪个问题（Question id）；提问的那一轮已经拿到，不再作为新消息送给它
     ts: float = field(default_factory=time.time)
 
 
@@ -721,6 +722,37 @@ class Approval:
     args: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     decided_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Question:
+    """Agent 在运行中向人或委托方提的一批问题（dsh 的 ask_user_question，research: deepseek-harness#user-questions）。
+
+    提问的那次工具调用一直等着，直到有人回答、问题作废或等待超时：回答就是工具结果，不是一条消息，别人伪造不了。
+    席位里问的是这一轮交代事情的人；委托里先问委托方 Agent（answer_question / escalate_question），
+    它决定不了、没有回答或这时跑不起来，才转给人。"""
+
+    id: str
+    agent_id: str                        # 提问的 Agent
+    owner_id: str | None                 # 提问的 Agent 的所有者
+    context_kind: str                    # seat | task
+    context_id: str                      # 席位 id 或任务 id
+    conversation_id: str                 # 问题卡片出现在哪个对话（委托里是委托链起点的对话）
+    project_id: str | None = None
+    # 一批问题，原样来自 harness：{id, question, header?, detail?, options: [{label, description?}], multi_select}
+    items: list[dict[str, Any]] = field(default_factory=list)
+    target_agent_id: str | None = None   # 现在等谁回答：委托方 Agent
+    target_user_id: str | None = None    # 或者一个人
+    escalated: str = ""                  # 转给人的原因（委托方转的、委托方这一轮没回答、委托方跑不起来、用到了别处的资料）
+    status: str = "pending"              # pending | answered | cancelled
+    answers: list[dict[str, Any]] = field(default_factory=list)  # [{id, selected: [label…], custom?}]
+    answered_by: str | None = None       # 人的 id 或 Agent 的 id
+    note: str = ""                       # 作废原因
+    created_at: float = field(default_factory=time.time)
+    answered_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -14,7 +14,7 @@ from typing import Callable
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
                      HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
-                     Proposal, Task, UserRequest, attachment_rel)
+                     Proposal, Question, Task, UserRequest, attachment_rel)
 
 
 def authority_lines(authority: list[str]) -> str:
@@ -122,6 +122,10 @@ TOOL_GUIDE: dict[str, str] = {
     "accept_task": "接受一个已交付（in_review）的委托。",
     "request_changes": "退回一个已交付的委托并写明要改什么，对方会在原会话里修改后重新交付。",
     "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
+    "answer_question": ("回答你委托的成员问你的问题（question_id 来自网络通知）。它一直在等：能替人决定的就直接答，"
+                        "一个选项时写那个选项的原文。"),
+    "escalate_question": ("成员问的事你决定不了（要人拍板、你没有依据）时转给人，可在 note 里写你的看法；"
+                          "这一轮结束时没答也没转的问题网络会自动转给人。"),
     "share_knowledge": "把你可见的知识显式共享给某个成员；默认任何知识都不会自动共享。",
     "propose_agent": "项目里没有合适的成员时，提议新建一个 Agent（权限不超出你的有效权限），由人审核；批准后才能委托它。",
     "record_decision": "把项目里定下来的事记进项目档案（内容、理由；可写 supersedes 取代旧决定）。所有成员此后都会看到。",
@@ -341,7 +345,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
                       home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
-                      home_frozen: bool = False) -> str:
+                      home_frozen: bool = False, ask: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
@@ -400,6 +404,8 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in HOME_TOOLS)]
     parts += _requests()
     parts += _abilities()
+    if ask:
+        parts += _asking(task=False)
     parts += [*_attachments_note(), *_home(home_writable, home, home_hidden, home_mixed, home_frozen), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
@@ -552,7 +558,7 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, project: Project, can_delegate: bool,
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
                       home: bool = True, plugins: bool = False, home_hidden: list[str] = (), services: bool = False,
-                      home_mixed: list[str] = (), home_frozen: bool = False) -> str:
+                      home_mixed: list[str] = (), home_frozen: bool = False, ask: bool = False) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -573,6 +579,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *_abilities(),
         *_knowledge(knowledge),
         *_home(home_writable, home, home_hidden, home_mixed, home_frozen),
+        *(_asking(task=True) if ask else []),
         *_writing(),
         "", "## 交付",
         "- 第一行写一句话结论：做成了什么、没做成什么。然后说明交付了什么、在哪里（工作目录里的文件，"
@@ -605,6 +612,33 @@ def retry_prompt(note: str | None, error: str | None) -> str:
     if note:
         lines += ["", f"补充说明：{note}"]
     return "\n".join(lines)
+
+
+def format_question_notice(q: Question, agent_name: str, mission: str) -> str:
+    """委托方收到的提问：执行者在做你委托的事时问你，它一直在等。"""
+    lines = [f"## 网络通知：{agent_name} 在做你委托的任务 {q.context_id} 时问你（question_id: {q.id}）"]
+    if mission:
+        lines.append(f"任务目标：{mission[:300]}")
+    for i, item in enumerate(q.items, 1):
+        head = f"{i}. " + (f"[{item['header']}] " if item.get("header") else "") + item["question"]
+        lines.append(head + ("（可多选）" if item.get("multi_select") and item.get("options") else ""))
+        if item.get("detail"):
+            lines.append(f"   说明：{item['detail'][:1000]}")
+        for o in item.get("options") or []:
+            lines.append(f"   - {o['label']}" + (f"：{o['description']}" if o.get("description") else ""))
+    lines += ["", f"{agent_name} 停在这里等你：能替人决定的就用 answer_question 直接回答；"
+              "需要人拍板、或你没有依据的，用 escalate_question 转给人。这一轮结束时还没回答也没转，网络会自动转给人。"]
+    return "\n".join(lines)
+
+
+def _asking(task: bool) -> list[str]:
+    """运行时能提问（ask_user_question 转给网络）时：什么时候该问、没得到回答怎么办。"""
+    who = "先问委托方，它决定不了会转给人" if task else "问的是这一轮交代事情的人"
+    return ["", "## 拿不准时提问",
+            f"- 缺关键信息、有几种做法而选错代价大、或只有人能定的事，用 `ask_user_question` 问（{who}）。"
+            "它会一直等到有回答，回答就是这次调用的结果；问题写成对方不看过程也能看懂的样子，给出选项时把推荐的放第一个。",
+            "- 能自己查到的事不要问；也不要为了绕开一个该问的问题而自己猜着做、换一条奇怪的路去做。",
+            "- 没得到回答（报错）时不要当成同意：按最稳妥的方式继续，在" + ("交付" if task else "回复") + "里写明还没定的事。"]
 
 
 def format_task_result(task: Task, agent_name: str) -> str:

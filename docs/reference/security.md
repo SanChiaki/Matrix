@@ -5,7 +5,7 @@
 - `/api/*` 要求登录（邮箱 + 密码，`auth.py`，HttpOnly + SameSite=Lax cookie），按用户做归属与可见性检查。
   这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
-- `/internal/tools`、`/internal/approval` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
+- `/internal/tools`、`/internal/approval`、`/internal/question` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
 - **网络管关系，不管 Agent 在自己环境里能碰什么**。云侧 Agent 的读隔离目前做不到（见下一条）；端侧 Agent
   读的是所有者自己的机器，不在网络管辖范围，网络只对经过它的协作工具负责。共享项目里端侧 Agent 会把群聊内容
   带到成员的机器上——这是已接受的披露（与"档案对所有参与方可见"同一逻辑），UI 要标出成员所在位置。
@@ -34,7 +34,8 @@
 - 项目档案文件经 `/api/projects/<id>/files/<name>` 一律以附件下载（`nosniff`），不在本站点内渲染；文件名经 `_safe_filename` 只取最后一段。
   对话附件（`/api/conversations/<id>/attachments/<sha>`）同样以附件下载，上传、下载都先查对话可见性；上传的内容按大小上限流式截断（413）。
 - 没有 `file.write` 的 Agent 运行在只读沙箱；有则只能写自己的工作目录。不要绕过 `build_patch_yaml` 生成的限制，
-  也不要让审批应答者自动批准：工作目录以外的写只能由 Agent 所有者逐次批准。
+  也不要让审批应答者自动批准：工作目录以外的写只能由 Agent 所有者逐次批准。提问应答者同理：回答只来自问题交给的那个人
+  或委托方上下文，网络不替人作答；没得到回答时给模型的是错误，不是默认选项。
 - **连接器凭证**（不变量 19，[connectors-skills.md](connectors-skills.md)）：只存在 `vault/<连接 id>.bin`（Fernet 加密，0600），
   主密钥取 `MATRIX_VAULT_KEY`，没有就用 `<data>/vault.key`（0600）。密钥和数据在同一台机器上时只防“数据目录被拷走 / 误提交”，
   防不了能读这台机器的人；而沙箱只管写不管读，云端 Agent 的运行时理论上能读到 `vault.key` 与 `vault/`——

@@ -18,6 +18,31 @@
 - 任务提示词里的交付要求是通用的（结论、交付了什么、在哪里、怎么确认）；篇幅、形式、依据由委托的输出要求与约束决定，本体不写死领域约束。
 - 失败语义：运行时错误按类别处理（`runtime.classify_error`）；`MALFORMED_RESPONSE`、`EMPTY_RESPONSE`、`TIMEOUT` 用同一会话自动续接一次（超时的续接提示收尾）。仍失败时这个**席位**进入 `blocked`（其他席位不受影响），失败消息列出它已完成的委托与已入库知识；人点“继续”或再 @ 它，同一会话从中断处接着做。失败的任务由委托方 `retry_task` 或人在 UI 上续接。
 
+## 运行中提问：ask_user_question
+
+Agent 拿不准时能停下来问，而不是自己猜着做、换一条奇怪的路去做（research: deepseek-harness#user-questions）。
+
+- **运行时**：dsh headless 默认不加载提问工具，问题服务（`user-questions`）在但没有应答者。网络给每一轮挂上提问通道（`runtime.QuestionBridge`）时，
+  覆盖层插入 dsh 的 `dsh-tool-ask-user`（阻塞式）和 Matrix 的应答插件 `matrix/dsh_plugins/questions.mjs`（与审批应答者同形）：
+  插件把问题 POST 给 `/internal/question`，阻塞到网络给出回答或“没有得到回答”。回答是那次工具调用的结果，不是一条消息（参照 reason-network 的 `ask_user`，
+  research: reason-network#ask-user；也是 xmatrix 的“harness 原生提问转卡片”，research: xmatrix#human-in-loop，不另造提问工具）。
+  运行时能力 `RuntimeCapabilities.questions` 为真时才挂（云侧 dsh、端侧 dsh 驱动、脚本运行时）；Claude Code / Codex 驱动、没报告的旧连接器不挂，提示词也不提。
+- **问谁**（`Network.request_question`）：
+  - 席位里问这一轮交代事情的人：私聊、项目会话、助理对话是对话的主人；群聊是这一轮 @ 它的人（没有就是最近一次 @ 它的人），都没有时是所有者。
+  - 委托里先问**委托方 Agent**：问题进委托方的收件箱（席位或上一级任务），那一轮的通知列出问题与选项（`protocol.format_question_notice`）。
+    委托方用 `answer_question` 回答（一个问题、文字正好是某个选项时按选中），或用 `escalate_question` 转给人（可附 note）。
+  - 委托方决定不了才给人：转给委托链起点那个席位该问的人（`Network._task_human`）。委托方**这一轮结束时没回答也没转**、或者这时**跑不起来**
+    （席位上一轮失败停着、任务不在进行中、端侧不在线），网络自动转（规则挪进代码，委托方不回也不会把执行者卡死）。
+  - 只有问题送到的那个委托方上下文能答或转（按令牌认定，不变量 10）；人只能答交给自己的问题，别人看到的是 404（不变量 13）。
+  - 会话读过越界的来源时（不变量 22），问题不给所有者以外的人看：只问提问 Agent 的所有者；委托里同交付一样按项目全部参与者判断。
+- **人怎么答**：对话里出现一张只给他看的卡片（选项、多选、自己写），“待我处理”与助理对话的总览也列出来，IM 绑定推一条提醒（不带问题内容）。
+  **直接在对话里回复也算回答**：私聊、项目会话里的下一条消息，群聊里不 @ 任何人或只 @ 提问的 Agent 的消息，交给正在等的问题（`Message.answers`），
+  不再为它排一轮，下一轮的新消息里也不再送这一条（原来没 @ 就不会唤醒，Agent 在群聊里卡住）。也可以“不回答”。
+- **没得到回答**：等待超过 `Limits.question_timeout_s`（默认 60 分钟）、人选“不回答”、提问的那一轮结束（停止、出错）或服务重启，问题作废，
+  模型拿到“没有得到回答……不要当成同意”的错误。问答结束后对话里留一条只给回答人与所有者看的记录。
+- **限制**：等回答期间提问的那一轮一直占着（和审批一样）；迟到的回答不送回（dsh 的 timed 模式在 headless 里没有送回的路）；
+  dsh 的子 Agent（`subagent`）不能提问，问题要写进它的结果。
+
 ## 看板：只有人交代的任务
 
 - 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。

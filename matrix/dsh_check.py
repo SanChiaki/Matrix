@@ -7,7 +7,7 @@
   配了抓取白名单时，自带的 web_fetch 关得掉、web_search 还在、白名单抓取服务装得上。
 - 平台配的模型供应商（不调真模型：本机起一个假的 OpenAI 兼容服务）：覆盖层里的供应商生效、密钥经环境变量带上，
   而 Agent 的命令看不到这个密钥（printenv、各进程的 /proc/*/environ、ps eww）。research: deepseek-harness#model-providers
-- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批。
+- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批、提问。
 
     uv run matrix-dsh-check [--dsh-bin dsh] [--live] [--model provider/model] [--only resume,approval] [--keep]
     docker compose exec matrix matrix-dsh-check --live
@@ -33,8 +33,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .model_catalog import ModelPreset, Provider, llm_config
-from .runtime import (ALWAYS_DISABLED, AUTHORITY_PLUGINS, ApprovalBridge, ConnectorBridge, DshRuntime, RunRequest,
-                      ToolBridge, argv, build_patch_yaml)
+from .runtime import (ALWAYS_DISABLED, AUTHORITY_PLUGINS, ApprovalBridge, ConnectorBridge, DshRuntime, QuestionBridge,
+                      RunRequest, ToolBridge, argv, build_patch_yaml)
 from .web_fetch import FetchPolicy
 
 # 覆盖层按 id 配置的插件（不是 insert 进去的）：必须在 dsh 的组合配置里
@@ -118,21 +118,23 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
         [], ToolBridge("http://127.0.0.1:9/internal/tools", "t", noop, 60, ["record_decision"]), model,
         ApprovalBridge("http://127.0.0.1:9/internal/approval", "t", lambda *a: "cancelled", 60),
         skill_dirs=[str(workdir / "skills")],
-        connectors=ConnectorBridge("http://127.0.0.1:9/internal/connectors", "t", list, noop)), encoding="utf-8")
+        connectors=ConnectorBridge("http://127.0.0.1:9/internal/connectors", "t", list, noop),
+        questions=QuestionBridge("http://127.0.0.1:9/internal/question", "t", lambda q: {}, 60)), encoding="utf-8")
     full = _run([rt.dsh_bin, rt.profile, "--patch", str(patch), "--dump-config"])
     problems = []
     if full.returncode != 0:
         problems.append(f"退出码 {full.returncode}：{full.stderr.strip()[-300:]}")
     problems += [line.strip() for line in full.stderr.splitlines()
                  if "not found" in line and not any(f'"{p}"' in line for p in extra)]
-    inserted = ["mcp-matrix_net", "mcp-connectors", "matrix-approval"]
+    # tool-ask-user：dsh 自带的提问工具（headless 默认不加载）；改了包名或去掉了，覆盖层会在这里报 not found
+    inserted = ["mcp-matrix_net", "mcp-connectors", "matrix-approval", "tool-ask-user", "matrix-questions"]
     problems += [f"没装上 {p}" for p in inserted if p not in plugin_ids(full.stdout)]
     problems += [f"{p} 没被禁用" for p in [*ALWAYS_DISABLED, *(p for ps in AUTHORITY_PLUGINS.values() for p in ps)]
                  if p in ids and not disabled_in(full.stdout, p)]
     if "includeDefaultRoots: false" not in full.stdout:
         problems.append("skill-filesystem 的 includeDefaultRoots: false 没生效（会读部署机器上的技能目录）")
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
-               else "没有权限的覆盖层：网络工具、连接器桥、审批应答者都装上，按权限禁用的插件都关了")
+               else "没有权限的覆盖层：网络工具、连接器桥、审批与提问应答者都装上，按权限禁用的插件都关了")
     fetch_check(rt, report, workdir)
     return not missing
 
@@ -348,6 +350,12 @@ class Live:
                 if ap.id not in seen:
                     seen[ap.id] = ap
                     self.net.decide_approval(ap.id, approve, note="冒烟检查")
+            for q in self.net.pending_questions(None):  # 提问：有选项选最后一个，没有就写一句
+                if q.id not in seen:
+                    seen[q.id] = q
+                    self.net.answer_question(q.id, [{"id": i["id"], "selected": [i["options"][-1]["label"]]}
+                                                    if i["options"] else {"id": i["id"], "custom": "冒烟检查"}
+                                                    for i in q.items])
             with self.net.store.lock:
                 idle = not self.net._running and self.chat.status == "idle"
             quiet = quiet + 1 if idle else 0
@@ -421,8 +429,18 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return (OK, f"沙箱拦住了工作目录以外的写，升权申请转到网络，批准后写成（{asked[0].tool}）") if target.exists() \
             else (FAIL, "申请批准了，但文件没写出来")
 
+    def question() -> tuple[str, str]:
+        a, b = f"甲-{nonce()}", f"乙-{nonce()}"
+        text, asked = live.ask(f"冒烟检查：用 ask_user_question 问我一个问题“选哪个？”，两个选项分别是 {a} 和 {b}；"
+                               "拿到回答后只回复我选的那个选项的原文。")
+        questions = [x for x in asked if type(x).__name__ == "Question"]
+        if not questions:
+            return FAIL, f"没有出现提问（提问工具或应答者没装上）：{text[:120]!r}"
+        return (OK, "提问工具、应答者、网络转给人、回答回到原来的调用都通") if b in text \
+            else (FAIL, f"问了，但回答没回到模型：{text[:120]!r}")
+
     return [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
-            ("connector", connector), ("approval", approval)]
+            ("connector", connector), ("approval", approval), ("question", question)]
 
 
 def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, only: set[str],
@@ -456,7 +474,7 @@ def main() -> None:
     p.add_argument("--dsh-bin", default="dsh")
     p.add_argument("--profile", default="headless")
     p.add_argument("--live", action="store_true", help="实际跑几轮（要调模型）")
-    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval")
+    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question")
     p.add_argument("--model", default="", help="实际检查的 Agent 用这个模型，provider/model（默认用 dsh 的默认模型），"
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
