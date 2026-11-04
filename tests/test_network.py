@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -107,15 +109,19 @@ def test_conversation_delegates_within_project(scenario):
 def test_delegate_returns_immediately(tmp_path: Path):
     """delegate 不等待执行：返回时任务还在 running，委托方这一轮先结束。"""
     seen: dict[str, str] = {}
+    read = threading.Event()  # 委托方读完状态，执行者才交付：不然快的执行者会在读之前就交付（时序不稳）
 
     def handler(call: ScriptCall) -> str:
         if is_task(call):
+            # delegate 若是等执行完才返回，这里永远等不到，状态也就不会是 running
+            read.wait(10)
             seen["task_ran_after"] = seen.get("returned", "no")
             return "B done"
         if call.turn == 1:
             r = call.tool("delegate", agent="B", mission="m", expected_outcome="o")
             seen["returned"] = r
             seen["status_at_return"] = net.store.tasks[tid(r)].status.value
+            read.set()
             return "委托了"
         return "收到"
 
@@ -449,9 +455,12 @@ def test_message_without_mention_wakes_nobody(tmp_path: Path):
 
 def test_mention_several_members_runs_in_parallel_seats(tmp_path: Path):
     """一条消息 @ 两个成员：各自一个席位并行处理，各自回复；第二次唤醒只送新消息。"""
-    rt = ScriptedRuntime(lambda call: f"{'A' if '**A**' in call.prompt else 'B'} 回复 {call.turn}")
+    # 谁在回复按席位（对话/Agent）认，不看提示词：并行时 B 的提示词里可能已经有 A 的回复“**A**：…”
+    names: dict[str, str] = {}
+    rt = ScriptedRuntime(lambda call: f"{names[call.context_id.partition('/')[2]]} 回复 {call.turn}")
     net = Network(rt, tmp_path)
     a, b, g = pair(net)
+    names.update({a.id: "A", b.id: "B"})
     conv = net.create_conversation(g.id)
     net.send_message(conv.id, "@A @B 各说一句", background=False)
     assert set(conv.messages[0].mentions) == {a.id, b.id}
@@ -635,6 +644,35 @@ def test_request_changes_reworks_in_same_session(tmp_path: Path):
     b_calls = [c for c in rt.calls if c.context_id == t.id]
     assert len(b_calls) == 2 and b_calls[1].resumed and b_calls[1].session_id == b_calls[0].session_id
     assert "补上数据来源" in b_calls[1].prompt and "你收到一份委托" not in b_calls[1].prompt
+    assert [m.text for m in conv.messages if m.role == "agent"] == ["等", "退回了", "收下了"]
+
+
+def test_redelivery_during_review_round_is_not_auto_accepted(tmp_path: Path):
+    """委托方这一轮退回后、这一轮还没结束，执行者就重新交付了：新版委托方还没看到，不能被“送达那一轮结束视为接受”吞掉。
+    下一轮委托方收到新版的交付通知，自己验收。（慢机器上原来会自动接受，委托方下一轮只看到“没有新消息”）"""
+    def handler(call: ScriptCall) -> str:
+        if is_task(call):
+            return "v2 修改版" if "委托方要求修改" in call.prompt else "v1 初稿"
+        if call.turn == 1:
+            call.tool("delegate", agent="B", mission="写摘要", expected_outcome="摘要")
+            return "等"
+        t = tid(call.prompt)
+        if "v1 初稿" in call.prompt:
+            call.tool("request_changes", task_id=t, feedback="补上数据来源")
+            deadline = time.time() + 10  # 等执行者在这一轮结束前就交付新版：慢机器上的时序，这里确定地造出来
+            while net.store.tasks[t].status != TaskStatus.IN_REVIEW and time.time() < deadline:
+                time.sleep(0.01)
+            assert net.store.tasks[t].status == TaskStatus.IN_REVIEW
+            return "退回了"
+        assert "v2 修改版" in call.prompt  # 下一轮看到的是新版的交付
+        call.tool("accept_task", task_id=t)
+        return "收下了"
+
+    net = Network(ScriptedRuntime(handler), tmp_path)
+    a, b, g = pair(net)
+    conv = talk(net, a, g, "go")
+    t = tasks(net)[0]
+    assert t.status == TaskStatus.COMPLETED and not t.auto_accepted and t.result["report"] == "v2 修改版"
     assert [m.text for m in conv.messages if m.role == "agent"] == ["等", "退回了", "收下了"]
 
 

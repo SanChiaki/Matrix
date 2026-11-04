@@ -210,8 +210,16 @@ def test_media_decrypt_round_trip_and_file_names(monkeypatch):
     key = base64.b64encode(os.urandom(32)).decode().rstrip("=")
     png = b"\x89PNG\r\n\x1a\n" + os.urandom(100)
     assert decrypt_media(encrypt_media(png, key), key) == png
-    with pytest.raises(DriverError):
-        decrypt_media(os.urandom(64), key)
+    # 填充不对一定报错。不用随机字节：随机密文解出来末字节是 0x01 的概率是 1/256，会恰好像合法填充（偶发不报错）
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    raw = base64.b64decode(key + "=" * (-len(key) % 4))
+
+    def cipher_of(plain: bytes) -> bytes:  # 不加填充直接加密：解出来就是 plain
+        e = Cipher(algorithms.AES(raw), modes.CBC(raw[:16])).encryptor()
+        return e.update(plain) + e.finalize()
+    for tail in (b"\x00", b"\x21", b"\x01\x02"):  # 填充长度 0、超过块长 32、填充字节不一致
+        with pytest.raises(DriverError):
+            decrypt_media(cipher_of(b"x" * (64 - len(tail)) + tail), key)
     import matrix.mcp_client as mc
     monkeypatch.setattr(mc, "fetch_public", lambda url, limit, timeout=30: (encrypt_media(png, key), ""))
     d = WecomDriver({"bot_id": "b"}, {"secret": "s"}, Sink())
