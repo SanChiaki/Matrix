@@ -261,8 +261,8 @@ button.icon svg { width: 14px; height: 14px; }
 .side-tabs { display: flex; gap: 4px; padding: 16px 20px 0; border-bottom: 1px solid var(--border); }
 .side-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; color: var(--muted); font-size: var(--fs-md); }
 .side-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-#members-panel, #task-detail, #archive-panel { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
-#members-panel[hidden], #task-detail[hidden], #archive-panel[hidden] { display: none; }
+#members-panel, #task-detail { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
+#members-panel[hidden], #task-detail[hidden] { display: none; }
 #members-panel > h3:first-child { margin-top: 0; }
 .member-list { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .member-list li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-radius: var(--radius-sm); }
@@ -278,6 +278,21 @@ button.icon.sm { width: 22px; height: 22px; padding: 4px; }
 .msg.event { align-self: center; width: fit-content; max-width: 100%; display: flex; gap: 8px; font-size: var(--fs-sm); color: var(--muted); padding: 2px 12px;
   border-radius: var(--radius-pill); background: var(--surface-2); }
 .thread-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+/* 项目页的“对话”标签：页面不整体滚动，页头和标签在上，消息列表自己滚，输入框贴底；左右边距用页面的 */
+#project-page.chat-on { overflow: hidden; padding-bottom: 0; gap: 12px; }
+#project-page.chat-on #pp-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+#project-page.chat-on .thread-col { flex: 1; }
+#project-page.chat-on #thread-head { padding: 0 0 12px; min-height: 0; }
+#project-page.chat-on #thread { padding: 20px 0; }
+#project-page.chat-on .composer { padding: 0 0 24px; }
+/* 项目里的对话切换：群聊、自己的项目会话、新会话。比页面标签低一级，用药丸，不用下划线 */
+.conv-switch { flex: 1; min-width: 0; display: flex; align-items: center; gap: 4px; overflow-x: auto; }
+.conv-switch a { padding: 4px 12px; border-radius: var(--radius-pill); color: var(--text-2); text-decoration: none; font-size: var(--fs-md); white-space: nowrap; }
+.conv-switch a:hover { background: var(--surface-2); color: var(--text); }
+.conv-switch a[aria-current] { background: var(--surface-3); color: var(--text); font-weight: 500; }
+.conv-switch #sess-new { margin-left: 4px; border-color: transparent; color: var(--muted); }
+.conv-switch #sess-new:hover { color: var(--text); }
+#thread-head .sess-note { font-size: var(--fs-sm); white-space: nowrap; }
 #thread-head { display: flex; align-items: center; gap: 12px; padding: 16px 32px; border-bottom: 1px solid var(--border); min-height: 69px; }
 #thread-head:empty { display: none; }
 #thread-head .info { flex: 1; min-width: 0; }
@@ -562,6 +577,9 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .rail-convs { flex: 0 1 auto; min-width: 0; flex-direction: row; align-items: center; gap: 6px; margin: 0; padding: 0 0 0 12px; border-top: 0; border-left: 1px solid var(--border); }
   .rail-convs-head { padding: 0; }
   .rail-convs-head h2 { display: none; }
+  /* 横着的顶栏：每组对话的“+”和列表排成一行；空列表的提示不占高度（否则顶栏有两百多像素高） */
+  .rail-convs > section { display: flex; align-items: center; gap: 4px; min-width: 0; }
+  .rail-convs .conv-list > .empty { display: none; }
   .conv-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding: 0; gap: 4px; }
   .conv-list a { padding: 6px 8px; }
   .conv-list .s { display: none; }
@@ -590,6 +608,8 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .tab svg { display: none; }
   .rail-foot { width: 100%; margin: 0; font-size: var(--fs-sm); justify-content: space-between; }
   .rail-convs { order: 3; width: 100%; padding: 0; border-left: 0; }
+  #project-page.chat-on #thread-head { flex-wrap: wrap; row-gap: 8px; }
+  .conv-switch { flex-basis: 100%; }  /* 手机宽度：对话切换单独一行，操作换到下一行 */
   /* 窄屏：委托路线放不下“A → B”，名称单行省略，状态换到下一行 */
   .deleg .route { flex-wrap: wrap; row-gap: 4px; }
   .deleg .route .name { max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -701,8 +721,6 @@ label.button.ghost:hover, a.button.ghost:hover { background: var(--surface-3); c
 label.button svg { width: 14px; height: 14px; flex: none; }
 a.button.sm, label.button.sm { padding: 6px 12px; font-size: var(--fs-md); }
 #thread-head a.button.ghost { padding: 8px 16px; font-size: var(--fs-md); }
-.h3-link { margin-left: 8px; font-size: var(--fs-sm); font-weight: 500; text-transform: none; letter-spacing: 0; color: var(--accent); text-decoration: none; }
-.h3-link:hover { text-decoration: underline; }
 
 #project-page { gap: 16px; }
 /* 详情页的页头：路径的最后一段就是页面标题，和列表页的 .view-head 同一个字号与布局 */
