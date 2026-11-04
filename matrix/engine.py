@@ -92,6 +92,7 @@ class ExecContext:
     started_at: float = field(default_factory=time.time)
     created: list[str] = field(default_factory=list)  # 这一轮发起的委托
     wake: list[str] = field(default_factory=list)     # 这一轮送达的交付（本轮结束仍未处理即视为接受）
+    wake_rev: dict[str, int] = field(default_factory=dict)  # 送达时是第几版（退回次数）：只自动接受委托方看到的那一版
     addressed: list[str] = field(default_factory=list)  # 席位：这一轮送达的、@ 它的人的消息（open_request 的来源）
     session: bool = False           # 项目会话里的助理：有读项目现状的工具
     home: bool = False              # 助理对话（人和自己助理的私聊）：读主人参与的任一项目、起草、定时
@@ -5068,10 +5069,12 @@ class Network:
         self._notify_delegator(task, "failed")
 
     def _auto_accept(self, ctx: ExecContext) -> None:
-        """这一轮送达、委托方却既没接受也没退回的交付：一轮正常结束即视为接受（提示词里写明了）。"""
+        """这一轮送达、委托方却既没接受也没退回的交付：一轮正常结束即视为接受（提示词里写明了）。
+        只认送达时的那一版：委托方这一轮里退回了、执行者又在这一轮结束前重新交付的（任务又回到 in_review，
+        但退回次数变了），委托方还没看到新版，留给下一轮——它的交付通知已经在收件箱里。"""
         for tid in ctx.wake:
             t = self.store.tasks.get(tid)
-            if t is not None and t.status == TaskStatus.IN_REVIEW:
+            if t is not None and t.status == TaskStatus.IN_REVIEW and t.revisions == ctx.wake_rev.get(tid, t.revisions):
                 self._complete(t, auto=True)
 
     def _complete(self, task: Task, auto: bool = False) -> None:
@@ -5100,6 +5103,7 @@ class Network:
                 if kind == "delivered" and t.status == TaskStatus.IN_REVIEW:
                     blocks.append(format_delivery(t, name))
                     ctx.wake.append(t.id)
+                    ctx.wake_rev[t.id] = t.revisions
                     wake.append(f"{name} 交付了 {t.id}")
                 elif kind == "failed" and t.status == TaskStatus.FAILED:
                     blocks.append(format_failure_notice(t, name, self.limits.max_retries))
