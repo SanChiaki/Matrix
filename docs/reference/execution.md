@@ -43,6 +43,24 @@ Agent 拿不准时能停下来问，而不是自己猜着做、换一条奇怪�
 - **限制**：等回答期间提问的那一轮一直占着（和审批一样）；迟到的回答不送回（dsh 的 timed 模式在 headless 里没有送回的路）；
   dsh 的子 Agent（`subagent`）不能提问，问题要写进它的结果。
 
+## 一轮做不完的事：长期目标与后台任务
+
+dsh headless 每轮结束就退出（research: deepseek-harness#headless-tools）：它自己的目标续行驱动跑不起来，后台任务也随进程一起结束。
+
+- **长期目标**（`create_goal` / `update_goal` / `get_goal`）：网络从这三个工具的结果跟踪目标（`Seat.goal` / `Task.goal`：id、目标、phase、上限、
+  网络已经续了几轮；`engine._goal_track`，这几个工具的结果在 `RunResult.tool_calls` 里不截断）。这一轮正常结束、目标还是 `active`，
+  就往同一个收件箱放一条 `goal` 通知，在**同一会话**里接着跑下一轮（`protocol.format_goal_round`，回复上的唤醒摘要是“目标续行 第 n/m 轮”）。
+  dsh 把网络发的消息当作人的直接请求，所以模型可以在续行那一轮直接 `update_goal complete / blocked`（会话续接后目标是“停用”的，不需要 resume）。
+  - 停止：模型标记 complete / blocked / paused（人让它停时用 pause）；到上限（目标的 `max_goal_rounds`，没写按 10，最多 30：
+    `GOAL_ROUNDS_DEFAULT` / `GOAL_ROUNDS_CAP`），席位里给所有者留一条说明；这一轮失败或被人停止也不再续（席位停着、任务失败，同原来的规则）。
+  - 席位里每一轮的回复照常发进对话，人可以随时插话（和下一轮续行一起送达）；委托里中间几轮只记进展（`task.notes`），目标结束那一轮才交付，
+    到上限时交付里写明没标记完成。
+  - 运行时能力 `RuntimeCapabilities.goals` 为真时提示词才说明（云侧 dsh、端侧 dsh 驱动）；Claude Code / Codex 没有这几个工具。
+- **后台任务**：覆盖层总是挂上 `matrix/dsh_plugins/jobs.mjs`。Agent 转为空闲时名下还有在跑的后台任务（`bash` 的 `run_in_background`，
+  或超过 60 秒自动转后台的命令），插件追加一条 `<background_jobs>` 消息，让它用 `job_output`（wait: true）收完或 `job_kill`；
+  Agent 重新忙起来，headless 的收尾检查就不会退出。每次运行最多提醒 3 次（`runtime.JOBS_NUDGES`），之后照常结束（剩下的任务随进程结束）。
+- **限制**：跨轮的后台任务仍不支持（任务只活在一轮里，要等就在这一轮里等完）；目标超过 8 KiB 时事件里的结果会被截断，可能读不出状态而不再续。
+
 ## 看板：只有人交代的任务
 
 - 看板（`/api/board`）只列 UserRequest，不列 Agent 之间的委托（委托在任务详情里看）。

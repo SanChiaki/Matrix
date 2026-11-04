@@ -345,7 +345,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
                       home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
-                      home_frozen: bool = False, ask: bool = False) -> str:
+                      home_frozen: bool = False, ask: bool = False, goals: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
@@ -406,6 +406,8 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
     parts += _abilities()
     if ask:
         parts += _asking(task=False)
+    if goals:
+        parts += _goals(task=False)
     parts += [*_attachments_note(), *_home(home_writable, home, home_hidden, home_mixed, home_frozen), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
@@ -558,7 +560,8 @@ def format_shared_knowledge(items: list[KnowledgeItem]) -> str:
 def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, project: Project, can_delegate: bool,
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
                       home: bool = True, plugins: bool = False, home_hidden: list[str] = (), services: bool = False,
-                      home_mixed: list[str] = (), home_frozen: bool = False, ask: bool = False) -> str:
+                      home_mixed: list[str] = (), home_frozen: bool = False, ask: bool = False,
+                      goals: bool = False) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -580,6 +583,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *_knowledge(knowledge),
         *_home(home_writable, home, home_hidden, home_mixed, home_frozen),
         *(_asking(task=True) if ask else []),
+        *(_goals(task=True) if goals else []),
         *_writing(),
         "", "## 交付",
         "- 第一行写一句话结论：做成了什么、没做成什么。然后说明交付了什么、在哪里（工作目录里的文件，"
@@ -629,6 +633,30 @@ def format_question_notice(q: Question, agent_name: str, mission: str) -> str:
     lines += ["", f"{agent_name} 停在这里等你：能替人决定的就用 answer_question 直接回答；"
               "需要人拍板、或你没有依据的，用 escalate_question 转给人。这一轮结束时还没回答也没转，网络会自动转给人。"]
     return "\n".join(lines)
+
+
+def _goals(task: bool) -> list[str]:
+    """运行时有长期目标工具（dsh 的 create_goal）时：网络怎么续跑。"""
+    out = "委托里中间几轮只算进展，目标结束后最后一轮的回复才作为交付" if task else "每一轮的回复照常发进对话"
+    return ["", "## 一轮做不完的事",
+            "- 要分好几步、要反复验证、一轮做不完的事，可以用 `create_goal` 定下目标（写清怎样算完成，`max_goal_rounds` 给个上限）。"
+            f"这一轮结束后，网络会在同一会话里接着唤醒你继续做（{out}），直到你用 `update_goal` 标记 complete（真的做完了）"
+            "或 blocked（同一个阻碍连续几轮过不去），或者到轮数上限。",
+            "- 续跑时不用 `update_goal` 的 resume；每一轮都要有实际进展，做完就标 complete，不要空转。",
+            "- 人可以随时停止或插话；人让你停下时用 `update_goal` 的 pause。"]
+
+
+def format_goal_round(g: dict, n: int, cap: int) -> str:
+    """网络续跑长期目标时送达的一轮（同一会话）。"""
+    return (f"## 网络通知：接着推进你的目标（第 {n}/{cap} 轮）\n目标：{g.get('objective') or '（见 get_goal）'}\n\n"
+            "以工作目录、工具结果和目标的当前状态为准，不要只凭之前的叙述。这一轮要有实际进展并验证结果。"
+            "整个目标真的做完了：先 get_goal 拿 id 与 revision，再 update_goal 标记 complete；"
+            "同一个阻碍连续几轮都过不去：标记 blocked 并写明原因；还没做完就继续，下一轮网络会再唤醒你。"
+            "不用 update_goal 的 resume。")
+
+
+def format_goal_limit(agent_name: str, g: dict) -> str:
+    return (f"{agent_name} 的目标「{(g.get('objective') or '')[:80]}」已经续跑到 {g.get('rounds', 0)} 轮上限，还没标记完成，停下了。")
 
 
 def _asking(task: bool) -> list[str]:

@@ -365,6 +365,9 @@ class Seat:
     joint_seen: str = ""                 # 助理对话：已经送达过的共享项目总览的指纹（送了新的，这一轮就不能用连接器）
     # 这个模型会话读过的别处来源（场合，matrix/flow.py）：会话续接时一直有效，换新会话才清空（不变量 22）
     session_sources: list[str] = field(default_factory=list)
+    # dsh 的长期目标（create_goal）：网络跟踪它的状态，active 时在同一会话里一轮接一轮地唤醒（research: deepseek-harness#headless-tools）。
+    # {id, objective, phase: active|complete|blocked|paused|limit, max: 轮数上限, rounds: 网络已经续了几轮}；没有目标时为空
+    goal: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
 
     def public(self) -> dict[str, Any]:
@@ -447,6 +450,9 @@ class Task:
     prompt: str = ""
     inbox: list[dict[str, Any]] = field(default_factory=list)  # 还没送达执行者的通知与验收意见
     notes: list[str] = field(default_factory=list)  # 等待子任务时的中间说明（不算交付）
+    # dsh 的长期目标（create_goal）：网络跟踪它的状态，active 时在同一会话里一轮接一轮地唤醒（research: deepseek-harness#headless-tools）。
+    # {id, objective, phase: active|complete|blocked|paused|limit, max: 轮数上限, rounds: 网络已经续了几轮}；没有目标时为空
+    goal: dict[str, Any] = field(default_factory=dict)
     revisions: int = 0                   # 被委托方退回修改的次数
     auto_accepted: bool = False          # 委托方没有显式验收：送达的那一轮结束后视为接受
     retries: int = 0                     # 失败后被续接的次数
