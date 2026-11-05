@@ -83,7 +83,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .view { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .view[hidden], .pane[hidden] { display: none; }
-.pane { display: flex; flex-direction: column; gap: 20px; min-height: 0; padding: 32px 32px; overflow: auto; }
+.pane { display: flex; flex-direction: column; gap: 20px; min-height: 0; padding: 32px var(--gutter); overflow: auto; }  /* 左右边距随版心：宽屏居中 */
 .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .view-head p { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-md); max-width: 620px; }
 /* 次级信息用弹出框，不占常驻侧栏 */
@@ -295,12 +295,12 @@ button.icon.sm { width: 22px; height: 22px; padding: 4px; }
 .conv-switch #sess-new { margin-left: 4px; border-color: transparent; color: var(--muted); }
 .conv-switch #sess-new:hover { color: var(--text); }
 #thread-head .sess-note { font-size: var(--fs-sm); white-space: nowrap; }
-#thread-head { display: flex; align-items: center; gap: 12px; padding: 16px 32px; border-bottom: 1px solid var(--border); min-height: 69px; }
+#thread-head { display: flex; align-items: center; gap: 12px; padding: 16px var(--gutter); border-bottom: 1px solid var(--border); min-height: 69px; }
 #thread-head:empty { display: none; }
 #thread-head .info { flex: 1; min-width: 0; }
 #thread-head .net-warn { flex: none; font-size: var(--fs-sm); color: var(--human); padding: 4px 8px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--human) 8%, transparent); }
 #thread-head .info .muted { font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#thread { list-style: none; margin: 0; padding: 32px; flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 20px; }
+#thread { list-style: none; margin: 0; padding: 32px var(--gutter); flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 20px; }
 .msg { display: flex; gap: 12px; max-width: 760px; width: 100%; }
 .msg .content { min-width: 0; flex: 1; }
 .msg .who { font-size: var(--fs-sm); color: var(--muted); margin-bottom: 4px; display: flex; gap: 8px; align-items: baseline; }
@@ -499,7 +499,7 @@ button.link:hover { background: none; text-decoration: underline; }
 .msg .body.md { white-space: normal; }
 .msg.user .md code { background: var(--bg); }  /* 人的气泡本身是 --surface-3，代码块换深一层才看得出来 */
 
-.composer { padding: 0 32px 24px; }
+.composer { padding: 0 var(--gutter) 24px; }
 #msg-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); transition: border-color .15s, box-shadow .15s; }
 #msg-form:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 #msg-form[hidden] { display: none; }
@@ -547,6 +547,16 @@ button.link:hover { background: none; text-decoration: underline; }
 .drop-overlay span { font-size: var(--fs-sm); color: var(--muted); }
 kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(--radius-xs); border: 1px solid var(--border-strong); color: var(--text-2); }
 
+/* 矮屏（如 1280×720）：竖向留白收紧，对话标签里多出两三条消息的位置。所有页面一起收，切标签时页头不跳 */
+@media (max-height: 800px) and (min-width: 981px) {
+  .pane { padding-top: 20px; padding-bottom: 20px; gap: 16px; }
+  #thread-head { padding-top: 12px; padding-bottom: 12px; min-height: 0; }
+  #thread { padding-top: 20px; padding-bottom: 20px; }
+  .composer { padding-bottom: 16px; }
+  #project-page.chat-on .composer { padding-bottom: 16px; }
+  #msg-form { padding: 8px 12px; gap: 4px; }
+  #msg-form textarea { height: calc(3em + 8px); }  /* 两行：输入框原来是三行 */
+}
 @media (max-width: 1280px) {
 }
 
@@ -961,7 +971,7 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .sandbox.embed { border-style: solid; border-color: var(--border); }
 
 /* 蓝图（docs/blueprints.md） */
-.bp-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); gap: 24px; max-width: 1200px; align-items: start; }
+.bp-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); gap: 24px; align-items: start; }
 @media (max-width: 960px) { .bp-grid { grid-template-columns: 1fr; } }
 .bp-readme { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; }
 ul.bp-checks, ul.bp-steps, ul.bp-role-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-md); }

@@ -8,7 +8,7 @@ body.admin { display: block; overflow: auto; height: auto; min-height: 100%; }
 .admin-top .grow { flex: 1; }
 .admin-top a.back, .admin-denied a { color: var(--accent); text-decoration: none; font-size: var(--fs-md); }
 .admin-top a.back:hover, .admin-denied a:hover { text-decoration: underline; }
-.admin-main { max-width: 1200px; margin: 0 auto; padding: 32px 32px 64px; }
+.admin-main { max-width: calc(var(--page-max) + 64px); margin: 0 auto; padding: 32px 32px 64px; }  /* 和主界面同一个版心 */
 .admin-denied { padding: 64px 0; text-align: center; }
 .admin-denied h1 { margin-bottom: 8px; }
 #dash > .view-head { margin-bottom: 8px; }
