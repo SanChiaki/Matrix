@@ -80,7 +80,7 @@ def test_delivery_dashboard_end_to_end(tmp_path: Path, data_service: str):
                               follow=True, actor=zhang)
     kit = net.publish_blueprint(g.id, {**net.blueprint_draft(g.id, actor=zhang), "name": "delivery-dashboard-kit",
                                        "title": "做交付看板", "plugins": ["delivery-dashboard"], "public": True},
-                                confirm=True, actor=zhang)  # 原来的“技能包”：做法随插件与蓝图走
+                                confirm=True, actor=zhang)  # 原来的“技能包”：做法随插件与模板走
     assert kit["manifest"]["files"] == [] and kit["manifest"]["plugins"][0]["name"] == "delivery-dashboard"  # 不带看板数据
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)

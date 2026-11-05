@@ -1,4 +1,4 @@
-"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；对外页面（交付件）只给读者；技能包并进了蓝图；
+"""发布与订阅（docs/project-publishing.md，不变量 23）：只有主持人发布、按版本固定；对外页面（交付件）只给读者；技能包并进了模板；
 订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效；跟随档案；撤回；发布物里的插件视图只读快照；反馈回流。"""
 
 from __future__ import annotations
@@ -36,13 +36,13 @@ def assistant(net: Network, user: str):
 
 # ================= 发布：只经主持人 =================
 def test_only_host_publishes_and_contents_are_checked(tmp_path: Path):
-    """不变量 23：只有主持人能发布；对外页面只带档案文件；技能包不能再发布（并进了蓝图）；名字、读者都要对得上。"""
+    """不变量 23：只有主持人能发布；对外页面只带档案文件；技能包不能再发布（并进了模板）；名字、读者都要对得上。"""
     net, _, host, reader, other, _, g = setup(tmp_path)
     net.invite(g.id, "other@x.io", actor=host)
     net.respond_invitation(g.id, True, actor=other)
     with pytest.raises(NetworkError, match="只有主持人"):
         net.create_release(g.id, "weekly", "fact", "周报", files=["weekly.json"], actor=other)
-    with pytest.raises(NetworkError, match="并进蓝图"):
+    with pytest.raises(NetworkError, match="并进模板"):
         net.create_release(g.id, "x", "method", "x", skills=["delivery-query"], actor=host)
     with pytest.raises(NetworkError, match="没有这些文件"):
         net.create_release(g.id, "x", "fact", "x", files=["nope.json"], actor=host)
@@ -260,7 +260,7 @@ def test_release_api(tmp_path: Path):
 
 
 def test_old_skill_packs_become_blueprints(tmp_path: Path):
-    """技能包并进蓝图：启动时还在发布中的技能包各转成一份只有技能的蓝图（同样的读者与公开），技能包撤回、订阅去掉，
+    """技能包并进模板：启动时还在发布中的技能包各转成一份只有技能的模板（同样的读者与公开），技能包撤回、订阅去掉，
     群聊里说明去哪里找；用的人把它装进自己的项目。"""
     from matrix.models import Release, new_id
     net, _, host, reader, _, _, g = setup(tmp_path)
@@ -276,7 +276,7 @@ def test_old_skill_packs_become_blueprints(tmp_path: Path):
     assert old.status == "withdrawn" and old.migrated_to and not net2.store.agents[assistant(net, reader).id].subscriptions
     b = net2.blueprint_detail(old.migrated_to, actor=reader)
     assert b["title"] == "查数口径" and b["public"] and [x["name"] for x in b["skills"]] == ["delivery-query"]
-    assert "技能包「查数口径」并进了蓝图" in net2.project_chat(g.id).messages[-1].text
+    assert "技能包「查数口径」并进了模板" in net2.project_chat(g.id).messages[-1].text
     mine = net2.create_project("我的", "", [], actor=reader)
     with pytest.raises(Exception):
         net2.create_project_from_blueprint(b["id"], "", {}, actor=reader, project_id=mine.id)

@@ -471,11 +471,11 @@ async function loadBlueprints() {
   try {
     const list = (await api("/api/blueprints")).filter((b) => b.source === "catalog");
     table("#t-blueprints", [
-      { label: "蓝图", html: (b) => `<b>${esc(b.title)}</b> <span class="muted">${esc(b.version)} · 第 ${b.rev} 版</span><div class="muted">${esc(b.description)}</div>` },
-      { label: "岗位", html: (b) => esc(b.roles.join("、")) },
+      { label: "模板", html: (b) => `<b>${esc(b.title)}</b> <span class="muted">${esc(b.version)} · 第 ${b.rev} 版</span><div class="muted">${esc(b.description)}</div>` },
+      { label: "角色", html: (b) => esc(b.roles.join("、")) },
       { label: "用过", num: true, html: (b) => num(b.uses) },
       { label: "", html: (b) => b.status === "active" ? `<button type="button" class="link danger" data-bp-withdraw="${esc(b.id)}">撤回</button>` : '<span class="muted">已撤回</span>' },
-    ], list, "目录里还没有蓝图");
+    ], list, "目录里还没有模板");
   } catch (e) { $("#pl-error").textContent = e.message; }
 }
 

@@ -101,7 +101,7 @@ def main() -> None:
                               files=[rec["fields"]["file"]], view={"plugin": "delivery-dashboard", "tab": "board"},
                               readers=["li@demo.local"], follow=True, actor=zhang)
     net.write_plugin_record(g.id, "delivery-dashboard", "dashboards", {"status": "已发布"}, rec["id"], actor=zhang)
-    step("张工把做法发布成公开的蓝图「做交付看板」，把给李总的看板发布成对外页面（带看板视图，跟随档案）")
+    step("张工把做法发布成公开的模板「做交付看板」，把给李总的看板发布成对外页面（带看板视图，跟随档案）")
 
     li_bot = net.assistant_of(li)
     net.set_subscription(fact.id, li_bot.id, True, actor=li)
@@ -114,7 +114,7 @@ def main() -> None:
         net.create_project_from_blueprint(kit["id"], "", {}, actor=wang, project_id=south.id)
     except NeedsConfirm as e:
         net.create_project_from_blueprint(kit["id"], "", {}, actor=wang, project_id=south.id, confirm=True, digest=e.digest)
-    step("王工把蓝图「做交付看板」装进了自己的项目「华南交付」（看板插件与它带的技能）")
+    step("王工把模板「做交付看板」装进了自己的项目「华南交付」（看板插件与它带的技能）")
 
     net.store.save()
     server.shutdown()

@@ -89,7 +89,7 @@ def test_route_passive_delivery(tmp_path: Path):
 
 
 def test_done_hands_off_to_the_next_stage(tmp_path: Path):
-    """人说“#N 完成”：叫引用了 #N 的后续任务的负责人；没人认领的，按标题前缀（“方案：…”）叫对应岗位的成员。
+    """人说“#N 完成”：叫引用了 #N 的后续任务的负责人；没人认领的，按标题前缀（“方案：…”）叫对应角色的成员。
     这样上一棒由人确认、下一棒自动接上（真实模型实测里方案没被叫醒，交棒卡住）。"""
     c = engine(tmp_path)
     members = [{"name": "小方", "roles": ["方案"]}, {"name": "小编", "roles": ["编码"]}, {"name": "小反", "roles": ["反馈"]}]

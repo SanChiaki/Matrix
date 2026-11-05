@@ -182,7 +182,7 @@ class Network:
         # 插件目录（部署方维护的 plugins.json，热加载）；插件页面的帧令牌密钥只在内存，重启后旧令牌作废
         # 加上管理后台加进目录的（plugin_sources.ManagedCatalog）；主持人自己装的按部署方的策略放行（docs/plugin-install.md）
         self.plugin_policy = sources.PolicyStore(self.store.root)
-        self.blueprints = bps.BlueprintStore(self.store.root)   # 蓝图（docs/blueprints.md）
+        self.blueprints = bps.BlueprintStore(self.store.root)   # 模板（docs/blueprints.md）
         self.plugin_submissions = sources.Submissions(self.store.root)
         self.plugin_dir_catalog = sources.CombinedCatalog(
             plugins or pluginfs.PluginCatalog(self.store.root / "plugins.json"), sources.ManagedCatalog(self.store.root))
@@ -2045,9 +2045,9 @@ class Network:
                         "trigger_state": trig})
         return out
 
-    # ---- 岗位与插件设置（docs/blueprints.md 第 9 节） ----
+    # ---- 角色与插件设置（docs/blueprints.md 第 9 节） ----
     def set_project_roles(self, project_id: str, roles: dict[str, Any], actor: str | None = None) -> Project:
-        """主持人整份设置岗位：{key: {name, description, members: [成员 id 或名字]}}。插件设置引用的岗位不能删。"""
+        """主持人整份设置角色：{key: {name, description, members: [成员 id 或名字]}}。插件设置引用的角色不能删。"""
         with self._lock:
             g = self.hosted_project(project_id, actor)
             clean = self._clean_roles(g, roles)
@@ -2055,27 +2055,27 @@ class Network:
                     if isinstance(v, str) and v.startswith("role:")}
             gone = [v[5:] for v in used if v[5:] not in clean]
             if gone:
-                raise NetworkError(f"插件设置还在用岗位 {'、'.join(gone)}：先改插件设置")
+                raise NetworkError(f"插件设置还在用角色 {'、'.join(gone)}：先改插件设置")
             g.roles = clean
             self._archive_changed(g, "project.roles", by_user=actor, roles=sorted(clean))
-        self._archive_saved(g, "主持人更新了岗位：" + ("；".join(
-            f"{r['name']}（{'、'.join(self._name(x) for x in r['members']) or '没人'}）" for r in clean.values()) or "没有岗位"))
+        self._archive_saved(g, "主持人更新了角色：" + ("；".join(
+            f"{r['name']}（{'、'.join(self._name(x) for x in r['members']) or '没人'}）" for r in clean.values()) or "没有角色"))
         return g
 
     def _clean_roles(self, g: Project, roles: Any) -> dict[str, dict[str, Any]]:
         """调用方持有锁。"""
         if not isinstance(roles, dict) or len(roles) > 20:
-            raise NetworkError("岗位最多 20 个")
+            raise NetworkError("角色最多 20 个")
         out: dict[str, dict[str, Any]] = {}
         for key, r in roles.items():
             if not pluginfs.KEY.match(str(key)) or not isinstance(r, dict):
-                raise NetworkError(f"岗位标识无效：{key!r}（小写字母开头，小写字母、数字、下划线）")
+                raise NetworkError(f"角色标识无效：{key!r}（小写字母开头，小写字母、数字、下划线）")
             name = " ".join(str(r.get("name") or key).split())[:40]
             members = []
             for x in r.get("members") or []:
                 aid = x if x in g.member_ids else next((m for m in g.member_ids if self._name(m) == x), None)
                 if aid is None:
-                    raise NetworkError(f"岗位「{name}」里的 {x} 不是项目成员")
+                    raise NetworkError(f"角色「{name}」里的 {x} 不是项目成员")
                 members.append(aid)
             out[str(key)] = {"name": name, "description": " ".join(str(r.get("description") or "").split())[:500],
                              "members": list(dict.fromkeys(members))}
@@ -2096,7 +2096,7 @@ class Network:
             if st.type == "role":
                 key = v.removeprefix("role:")
                 if key not in g.roles:
-                    raise NetworkError(f"设置「{st.label}」：项目里没有岗位 {key}")
+                    raise NetworkError(f"设置「{st.label}」：项目里没有角色 {key}")
                 out[st.key] = f"role:{key}"
             elif st.type == "member":
                 aid = v if v in g.member_ids else next((x for x in g.member_ids if self._name(x) == v), None)
@@ -2124,7 +2124,7 @@ class Network:
             return next(p for p in self.project_plugins(g) if p["name"] == name)
 
     def _plugin_targets(self, g: Project, name: str, m: pluginfs.Manifest, to: str) -> list[str]:
-        """调用方持有锁。触发 / after 的 @ 对象 → 成员 id：成员名，或 {setting:x}（岗位的当前成员，或设置的那个成员）。"""
+        """调用方持有锁。触发 / after 的 @ 对象 → 成员 id：成员名，或 {setting:x}（角色的当前成员，或设置的那个成员）。"""
         ref = pluginfs.SETTING_REF.match(to or "")
         if ref is None:
             return [x for x in g.member_ids if self._name(x) == to][:1]
@@ -2140,13 +2140,13 @@ class Network:
         st = m.setting(ref.group(1))
         v = ((g.plugins.get(name) or {}).get("settings") or {}).get(ref.group(1))
         if isinstance(v, str) and v.startswith("role:"):
-            return f"岗位「{(g.roles.get(v[5:]) or {}).get('name', v[5:])}」里的人"
+            return f"角色「{(g.roles.get(v[5:]) or {}).get('name', v[5:])}」里的人"
         if v in self.store.agents:
             return self._name(v)
         return f"设置「{st.label if st else ref.group(1)}」{'（没填）' if not v else ''}"
 
     def _plugin_meta_settings(self, g: Project, name: str, m: pluginfs.Manifest) -> dict[str, Any]:
-        """给插件服务的 _meta：这个安装的设置（role 类带岗位名与成员名）与项目的岗位。"""
+        """给插件服务的 _meta：这个安装的设置（role 类带角色名与成员名）与项目的角色。"""
         with self._lock:
             vals = (g.plugins.get(name) or {}).get("settings") or {}
             settings: dict[str, Any] = {}
@@ -3625,7 +3625,7 @@ class Network:
                        public: bool = False, follow: bool = False, actor: str | None = None) -> Release:
         """主持人发布（不变量 23）：技能包给读者或所有人，交付件只给点名的读者。发布是档案变化，群聊里公开记录。"""
         if kind == "method":
-            raise NetworkError("技能包已经并进蓝图：在项目的“对外”里发布为蓝图，只勾技能；用的人装进自己的项目")
+            raise NetworkError("技能包已经并进模板：在项目的“对外”里发布为模板，只勾技能；用的人装进自己的项目")
         if kind not in RELEASE_KINDS:
             raise NetworkError(f"kind 只能是 {'/'.join(RELEASE_KINDS)}")
         title = " ".join(str(title or "").split())[:80]
@@ -3705,8 +3705,8 @@ class Network:
         return r
 
     def _migrate_skill_packs(self) -> None:
-        """技能包并进蓝图（docs/blueprints.md 第 7 节）：启动时把还在发布中的技能包各转成一份只有技能的蓝图（同样的读者与公开），
-        技能包撤回、订阅去掉，群聊里说明去哪里找。要用这些技能的人在“蓝图”里打开它、装进自己的项目。"""
+        """技能包并进模板（docs/blueprints.md 第 7 节）：启动时把还在发布中的技能包各转成一份只有技能的模板（同样的读者与公开），
+        技能包撤回、订阅去掉，群聊里说明去哪里找。要用这些技能的人在“模板”里打开它、装进自己的项目。"""
         with self._lock:
             olds = [r for r in self.store.releases.values() if r.kind == "method" and r.status == "active"]
         for r in olds:
@@ -3724,7 +3724,7 @@ class Network:
                 meta = self.blueprints.save(files, {"source": "project", "project_id": r.project_id, "readers": list(r.readers),
                                                     "public": r.public}, r.published_by)
             except bps.BlueprintError as e:
-                print(f"[matrix] 技能包 {r.id} 没能转成蓝图：{e}", flush=True)
+                print(f"[matrix] 技能包 {r.id} 没能转成模板：{e}", flush=True)
                 continue
             with self._lock:
                 r.status, r.follow, r.migrated_to = "withdrawn", False, meta["id"]
@@ -3733,7 +3733,7 @@ class Network:
                         a.subscriptions.remove(r.id)
                 g = self.store.projects.get(r.project_id)
                 if g is not None:
-                    self._people_event(g, f"技能包「{r.title}」并进了蓝图「{meta['title']}」：要用这些技能，在“蓝图”里打开它，"
+                    self._people_event(g, f"技能包「{r.title}」并进了模板「{meta['title']}」：要用这些技能，在“模板”里打开它，"
                                           "装进自己的项目（只勾技能）")
                 self.store.save()
             shutil.rmtree(self.store.release_dir(r.id), ignore_errors=True)
@@ -6827,9 +6827,9 @@ class Network:
                                    "chat_enabled")}
         return d
 
-    # ================= 蓝图（docs/blueprints.md） =================
-    # 蓝图是项目去掉数据、人和凭证之后的配方。发布只经主持人（从项目生成，过可移植检查）或管理员（上传进部署方目录）；
-    # 用蓝图建项目只由人在总确认卡上确认，建出来的一切归建项目的人（候选不变量 25）。
+    # ================= 模板（docs/blueprints.md） =================
+    # 模板是项目去掉数据、人和凭证之后的配方。发布只经主持人（从项目生成，过可移植检查）或管理员（上传进部署方目录）；
+    # 用模板建项目只由人在总确认卡上确认，建出来的一切归建项目的人（候选不变量 25）。
     def _bp_visible(self, meta: dict[str, Any], actor: str | None) -> bool:
         """调用方持有锁。发布它的项目的参与者总看得到；其余人只看得到在发布中的、目录里的、公开的或点了名的。"""
         if actor is None:
@@ -6875,7 +6875,7 @@ class Network:
             return out
 
     def _bp_plugin_rows(self, files: dict[Path, bytes], bp: bps.Blueprint) -> list[dict[str, Any]]:
-        """蓝图要装的插件：目录里有没有、打包的在这里会怎么跑、确认卡上的条目。调用方不持有锁。"""
+        """模板要装的插件：目录里有没有、打包的在这里会怎么跑、确认卡上的条目。调用方不持有锁。"""
         rows = []
         for p in bp.plugins:
             row: dict[str, Any] = {"name": p.name, "version": p.version, "source": p.source, "settings": dict(p.settings)}
@@ -6917,7 +6917,7 @@ class Network:
 
     # ---- 发布 ----
     def blueprint_draft(self, project_id: str, actor: str | None = None) -> dict[str, Any]:
-        """“发布为蓝图”的初稿：从项目现在的样子推出岗位、技能、插件、文件、连接器槽位。"""
+        """“发布为模板”的初稿：从项目现在的样子推出角色、技能、插件、文件、连接器槽位。"""
         with self._lock:
             g = self.hosted_project(project_id, actor)
             agents = [self.store.agents[x] for x in g.member_ids if x in self.store.agents]
@@ -6946,11 +6946,11 @@ class Network:
 
     def publish_blueprint(self, project_id: str, spec: dict[str, Any], confirm: bool = False,
                           digest: str | None = None, actor: str | None = None) -> dict[str, Any]:
-        """主持人把项目发布成蓝图（spec 见 blueprint_draft）。有可移植问题时先要确认（NeedsConfirm，带包的指纹）。"""
+        """主持人把项目发布成模板（spec 见 blueprint_draft）。有可移植问题时先要确认（NeedsConfirm，带包的指纹）。"""
         files, warnings, meta = self._bp_build(project_id, spec, actor)
         sha = sources.package_hash(files)
         if (digest and digest != sha) or (warnings and not confirm):
-            raise NeedsConfirm("发布蓝图前请确认", warnings or ["蓝图内容和确认时看到的不一样了"], sha)
+            raise NeedsConfirm("发布模板前请确认", warnings or ["模板内容和确认时看到的不一样了"], sha)
         try:
             saved = self.blueprints.save(files, meta, actor)
         except bps.BlueprintError as e:
@@ -6959,13 +6959,13 @@ class Network:
             g = self.hosted_project(project_id, actor)
             self._archive_changed(g, "blueprint.publish", by_user=actor, blueprint=saved["id"], rev=saved["rev"])
             who = "所有登录用户" if saved.get("public") else f"{len(saved.get('readers', []))} 位读者和项目参与者"
-        self._archive_saved(g, f"主持人把项目发布成蓝图「{saved['title']}」第 {saved['rev']} 版（{who}可用）")
+        self._archive_saved(g, f"主持人把项目发布成模板「{saved['title']}」第 {saved['rev']} 版（{who}可用）")
         self.bus.emit("blueprint.updated", blueprint_id=saved["id"])
         return self.blueprint_detail(saved["id"], actor)
 
     def _bp_build(self, project_id: str, spec: dict[str, Any], actor: str | None
                   ) -> tuple[dict[Path, bytes], list[str], dict[str, Any]]:
-        """按 spec 从项目生成蓝图包。返回（文件, 可移植提示, 存储用的 meta）。"""
+        """按 spec 从项目生成模板包。返回（文件, 可移植提示, 存储用的 meta）。"""
         if not isinstance(spec, dict):
             raise NetworkError("spec 要是对象")
         warnings: list[str] = []
@@ -6975,7 +6975,7 @@ class Network:
             if bid:
                 old = self.blueprints.get(str(bid))
                 if old is None or old.get("project_id") != g.id:
-                    raise NetworkError(f"蓝图 {bid} 不是从这个项目发布的")
+                    raise NetworkError(f"模板 {bid} 不是从这个项目发布的")
             roles_in = spec.get("roles") or []
             roles, member_role, mentions = [], {}, {}
             for r in roles_in if isinstance(roles_in, list) else []:
@@ -7037,18 +7037,18 @@ class Network:
                 for k, v in (meta.get("settings") or {}).items():
                     if isinstance(v, str) and v.startswith("role:"):
                         key = next((rk for rk in (r["key"] for r in roles) if rk == v[5:]), None)
-                        if key is None:  # 项目岗位的标识和蓝图里的不同：按成员对上
+                        if key is None:  # 项目角色的标识和模板里的不同：按成员对上
                             ms = (g.roles.get(v[5:]) or {}).get("members", [])
                             key = next((member_role[x] for x in ms if x in member_role), None)
                         if key is None:
-                            warnings.append(f"插件「{m.title}」的设置「{k}」用的岗位没进蓝图，建出来要重新选")
+                            warnings.append(f"插件「{m.title}」的设置「{k}」用的角色没进模板，建出来要重新选")
                             continue
                         settings[k] = f"{{role:{key}}}"
                     elif v in self.store.agents:
                         if v in member_role:
                             settings[k] = f"{{role:{member_role[v]}}}"
                         else:
-                            warnings.append(f"插件「{m.title}」的设置「{k}」指定了不在任何岗位里的成员，蓝图里留空")
+                            warnings.append(f"插件「{m.title}」的设置「{k}」指定了不在任何角色里的成员，模板里留空")
                     else:
                         settings[k] = gen(Path("x.txt"), str(v).encode()).decode()
                 for t in m.triggers:
@@ -7059,7 +7059,7 @@ class Network:
                     for rel, b in pluginfs.dir_files(src).items():
                         files[Path(bps.PLUGINS) / name / rel] = b
                     if meta.get("source") != "catalog":
-                        warnings.append(f"插件「{m.title}」不是部署方目录里的：会打包进蓝图，用的人装的时候会看到插件确认卡")
+                        warnings.append(f"插件「{m.title}」不是部署方目录里的：会打包进模板，用的人装的时候会看到插件确认卡")
                 prefs.append({"name": name, "version": m.version, "source": "catalog" if catalog else "bundled",
                               "settings": settings})
             manifest = {"name": spec.get("name"), "version": spec.get("version") or "1.0.0",
@@ -7070,7 +7070,7 @@ class Network:
                         "roles": roles, "connectors": spec.get("connectors") or [], "plugins": prefs,
                         "checkpoints": spec.get("checkpoints") or [], "files": tmpl}
             files[Path(bps.MANIFEST)] = json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
-            # 担任岗位、名字就是岗位名的成员：正文里提到这个名字说的是岗位，不提示
+            # 担任角色、名字就是角色名的成员：正文里提到这个名字说的是角色，不提示
             same = {self._name(aid) for aid, k in member_role.items()
                     if self._name(aid) == next((r["name"] for r in roles if r["key"] == k), None)}
             names = [n for n in (self._name(x) for x in g.member_ids) if n not in same] + [self._email(u) for u in g.people]
@@ -7096,13 +7096,13 @@ class Network:
             self._check(ok, f"blueprint {bid}")
         meta = self.blueprints.update(bid, status="withdrawn")
         if g is not None:
-            self._archive_saved(g, f"主持人撤回了蓝图「{meta['title']}」：不能再用它建项目，已经建的不受影响")
+            self._archive_saved(g, f"主持人撤回了模板「{meta['title']}」：不能再用它建项目，已经建的不受影响")
         self.bus.emit("blueprint.updated", blueprint_id=bid)
         with self._lock:
             return self._bp_view(meta, actor)
 
     def admin_blueprint_upload(self, actor: str | None, entries: list[tuple[str, bytes]]) -> dict[str, Any]:
-        """管理员把蓝图放进部署方目录：所有登录用户都能用。"""
+        """管理员把模板放进部署方目录：所有登录用户都能用。"""
         self._check(actor is None or self.is_admin(actor), "admin")
         try:
             files = bps.package_files(entries)
@@ -7113,20 +7113,20 @@ class Network:
         with self._lock:
             return self._bp_view(meta, actor)
 
-    # ---- 用蓝图：建新项目，或装进我主持的已有项目；部件可勾选，默认全选 ----
+    # ---- 用模板：建新项目，或装进我主持的已有项目；部件可勾选，默认全选 ----
     def create_project_from_blueprint(self, bid: str, name: str, params: dict[str, Any] | None = None,
                                       roles: dict[str, Any] | None = None, confirm: bool = False,
                                       digest: str | None = None, actor: str | None = None,
                                       parts: dict[str, Any] | None = None, project_id: str | None = None) -> dict[str, Any]:
-        """一个操作：岗位与 Agent、纲要、模板、技能、插件（带设置）、连接器槽位、剩下的手工步骤。
-        先出总确认卡（NeedsConfirm，指纹是这一版蓝图的），确认后照做。建新项目时中途失败整体回滚；装进已有项目时
+        """一个操作：角色与 Agent、纲要、模板文件、技能、插件（带设置）、连接器槽位、剩下的手工步骤。
+        先出总确认卡（NeedsConfirm，指纹是这一版模板的），确认后照做。建新项目时中途失败整体回滚；装进已有项目时
         回滚新建的 Agent，已经装上的部件留着并在错误里说明。
         parts：{brief: bool, roles / skills / plugins / files / connectors: [要的]}，没写的那一类全要。
-        roles：{岗位: {"agent": 我的 Agent 或项目成员的 id} | {"name"}}，没写的按蓝图新建（已有项目里已有同名岗位的沿用）。"""
+        roles：{角色: {"agent": 我的 Agent 或项目成员的 id} | {"name"}}，没写的按模板新建（已有项目里已有同名角色的沿用）。"""
         uid = self._need_user(actor)
         meta = self._bp_meta(bid, actor)
         if meta.get("status") != "active":
-            raise NetworkError("这个蓝图已经撤回")
+            raise NetworkError("这个模板已经撤回")
         files = self.blueprints.files(bid)
         bp = bps.check_package(files)
         sel = parts or {}
@@ -7162,21 +7162,21 @@ class Network:
                 if choice.get("agent"):
                     a = self.store.agents.get(str(choice["agent"]))
                     if a is None or not (a.owner_id == uid or (target and a.id in target.member_ids)):
-                        raise NetworkError(f"岗位「{r.name}」：只能选你自己的 Agent 或项目里的成员")
+                        raise NetworkError(f"角色「{r.name}」：只能选你自己的 Agent 或项目里的成员")
                     plan.append((r, {"agent": a.id}))
-                    items.append(f"岗位「{r.name}」由「{a.name}」担任")
+                    items.append(f"角色「{r.name}」由「{a.name}」担任")
                 elif have and not choice.get("name"):
                     plan.append((r, {"keep": True}))
-                    items.append(f"岗位「{r.name}」沿用项目里已有的（{'、'.join(self._name(x) for x in have)}）")
+                    items.append(f"角色「{r.name}」沿用项目里已有的（{'、'.join(self._name(x) for x in have)}）")
                 else:
                     aname = self._free_agent_name(" ".join(str(choice.get("name") or r.name).split())[:40], name,
                                                   {c.get("name") for _, c in plan})
                     plan.append((r, {"name": aname, "authority": [x for x in r.authority if x in AUTHORITIES],
                                      "model_preset": r.model if r.model and self.models.get(r.model) else None}))
-                    items.append(f"岗位「{r.name}」：新建 Agent「{aname}」，归你所有，权限 {'、'.join(r.authority) or '无'}")
+                    items.append(f"角色「{r.name}」：新建 Agent「{aname}」，归你所有，权限 {'、'.join(r.authority) or '无'}")
             if target is not None:
                 if use_brief and target.brief.strip():
-                    items.append("纲要：会换成蓝图里的纲要（原来的写进日志，找得回来）")
+                    items.append("纲要：会换成模板里的纲要（原来的写进日志，找得回来）")
                 same = [x for x in skill_list if x in target.skills]
                 if same:
                     items.append(f"技能 {'、'.join(same)}：会覆盖项目里的同名技能")
@@ -7184,24 +7184,24 @@ class Network:
                 if same_files:
                     items.append(f"文件 {'、'.join(same_files)}：会覆盖项目里的同名文件")
         items[:0] = [f"{'装进项目「' + name + '」' if target else '建新项目「' + name + '」'}：" + "、".join(
-            x for x in ["纲要" if use_brief else "", f"{len(role_keys)} 个岗位" if role_keys else "",
+            x for x in ["纲要" if use_brief else "", f"{len(role_keys)} 个角色" if role_keys else "",
                         f"技能 {'、'.join(skill_list)}" if skill_list else "", f"{len(plugin_list)} 个插件" if plugin_list else "",
                         f"{len(file_list)} 个模板文件" if file_list else "", f"{len(slot_list)} 个连接器" if slot_list else ""] if x)]
         all_rows = self._bp_plugin_rows(files, bp)
         rows = [row for row in all_rows if row["name"] in plugin_list]
         problems = [p["problem"] for p in rows if p.get("problem")]
         if problems:
-            raise NetworkError("这个蓝图在这里装不上：" + "；".join(problems))
+            raise NetworkError("这个模板在这里装不上：" + "；".join(problems))
         for p in rows:
-            items.append(f"装插件「{p['title']}」{p['version'] or ''}（{'部署方目录' if p['source'] == 'catalog' else '蓝图里打包的'}）")
+            items.append(f"装插件「{p['title']}」{p['version'] or ''}（{'部署方目录' if p['source'] == 'catalog' else '模板里打包的'}）")
             items += [f"　{x}" for x in p.get("disclosure") or []]
             items += [f"　插件「{p['title']}」有外部回调「{w}」：建好后在插件页启用、生成回调地址，配到外部系统" for w in p["webhooks"]]
         writers = [p["title"] for p in rows if p.get("write_tools")]
-        if writers:  # 插件的写类工具要 file.write（不变量 24）：缺的岗位认领、交棒都做不了，先说清楚
+        if writers:  # 插件的写类工具要 file.write（不变量 24）：缺的角色认领、交棒都做不了，先说清楚
             for r, choice in plan:
                 auth = choice.get("authority")
                 if auth is not None and "file.write" not in auth:
-                    items.append(f"注意：岗位「{r.name}」没有 file.write，用不了插件「{'、'.join(writers)}」的写工具（建任务、认领、交棒）")
+                    items.append(f"注意：角色「{r.name}」没有 file.write，用不了插件「{'、'.join(writers)}」的写工具（建任务、认领、交棒）")
         for c in bp.connectors:
             if c.slot not in slot_list:
                 continue
@@ -7212,8 +7212,8 @@ class Network:
             items.append(f"人在这里介入 · {c.at}（{bps.CHECKPOINT_KINDS[c.kind]}）" + (f"：{c.note}" if c.note else ""))
         sha = meta.get("sha256", "")
         if not confirm or (digest and digest != sha):
-            head = f"用蓝图「{bp.title}」{'装进项目' if target else '建项目'}前请确认"
-            raise NeedsConfirm(head + ("（蓝图有了新版本）" if digest and digest != sha else ""), items, sha)
+            head = f"用模板「{bp.title}」{'装进项目' if target else '建项目'}前请确认"
+            raise NeedsConfirm(head + ("（模板有了新版本）" if digest and digest != sha else ""), items, sha)
 
         created: list[str] = []
         g: Project | None = target
@@ -7238,7 +7238,7 @@ class Network:
                 if add:
                     self.update_project(target.id, member_ids=target.member_ids + add, actor=uid)
             assert g is not None
-            role_names = {r.key: r.name for r in bp.roles}  # 没选的岗位：占位符换成岗位名
+            role_names = {r.key: r.name for r in bp.roles}  # 没选的角色：占位符换成角色名
             role_names.update({k: "、".join(self._name(x) for x in ms) for k, ms in members.items() if ms})
             with self._lock:
                 for r in bp.roles:
@@ -7278,7 +7278,7 @@ class Network:
                         if v[6:-1] in g.roles:
                             settings[k] = f"role:{v[6:-1]}"
                         else:
-                            steps.append(f"插件「{row['title']}」：设置「{k}」要选一个岗位（蓝图里用的岗位没装）")
+                            steps.append(f"插件「{row['title']}」：设置「{k}」要选一个角色（模板里用的角色没装）")
                     else:
                         settings[k] = bps.fill(v, params, role_names)
                 if ref.source == "catalog":
@@ -7310,11 +7310,11 @@ class Network:
                 self._archive_changed(g, "blueprint.create" if target is None else "blueprint.apply", by_user=uid,
                                       blueprint=bid, rev=meta["rev"])
             took = "、".join(x for x in ["纲要" if use_brief else "",
-                                          "岗位 " + "、".join(f"{r.name}（{role_names[r.key]}）" for r in bp.roles if r.key in members)
+                                          "角色 " + "、".join(f"{r.name}（{role_names[r.key]}）" for r in bp.roles if r.key in members)
                                           if members else "", f"技能 {'、'.join(skill_list)}" if skill_list else "",
                                           f"插件 {'、'.join(x['title'] for x in rows)}" if rows else ""] if x)
-            self._archive_saved(g, (f"由蓝图「{bp.title}」{bp.version} 建立：" if target is None
-                                    else f"主持人从蓝图「{bp.title}」{bp.version} 装了：") + took)
+            self._archive_saved(g, (f"由模板「{bp.title}」{bp.version} 建立：" if target is None
+                                    else f"主持人从模板「{bp.title}」{bp.version} 装了：") + took)
         except (NetworkError, bps.BlueprintError, OSError) as e:
             if target is None and g is not None:
                 try:
@@ -7333,8 +7333,8 @@ class Network:
                 except NetworkError:
                     pass
             if target is None:
-                raise NetworkError(f"用蓝图建项目失败，已撤回：{e}") from e
-            raise NetworkError(f"从蓝图装到一半失败（新建的 Agent 已删掉，已经装上的部件留着）：{e}") from e
+                raise NetworkError(f"用模板建项目失败，已撤回：{e}") from e
+            raise NetworkError(f"从模板装到一半失败（新建的 Agent 已删掉，已经装上的部件留着）：{e}") from e
         self.blueprints.update(bid, uses=(self.blueprints.get(bid) or {}).get("uses", 0) + 1)
         with self._lock:
             return {"project": self.project_view(g, uid), "secrets": secrets_out}
@@ -7344,7 +7344,7 @@ class Network:
         for cand in [base, f"{base}·{project}"[:40], *(f"{base}·{project}"[:36] + f" {i}" for i in range(2, 50))]:
             if cand not in taken and self.store.agent_by_name(cand) is None:
                 return cand
-        raise NetworkError(f"岗位「{base}」起不出不重名的 Agent 名字：请自己填一个")
+        raise NetworkError(f"角色「{base}」起不出不重名的 Agent 名字：请自己填一个")
 
     def set_setup_step(self, project_id: str, step_id: str, done: bool, actor: str | None = None) -> Project:
         with self._lock:

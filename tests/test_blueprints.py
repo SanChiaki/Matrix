@@ -1,4 +1,4 @@
-"""蓝图（docs/blueprints.md）：项目岗位与插件设置、蓝图格式、从项目发布、用蓝图建项目。"""
+"""模板（docs/blueprints.md）：项目角色与插件设置、模板格式、从项目发布、用模板建项目。"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def test_example_blueprint_is_valid():
 
 @pytest.mark.parametrize("change, why", [
     (lambda m, f: f.__setitem__(Path("brief.md"), b"{param:nope}"), "param:nope"),
-    (lambda m, f: m["connectors"][0].__setitem__("roles", ["ghost"]), "没有的岗位"),
+    (lambda m, f: m["connectors"][0].__setitem__("roles", ["ghost"]), "没有的角色"),
     (lambda m, f: m["roles"][0].__setitem__("authority", ["root"]), "不认识"),
     (lambda m, f: m["checkpoints"][0].__setitem__("kind", "vote"), "kind"),
     (lambda m, f: m.__setitem__("files", ["files/没有.md"]), "不在包里"),
@@ -63,15 +63,15 @@ def test_bad_blueprints_rejected(change, why):
         bps.check_package(files)
 
 
-# ================= 岗位与插件设置 =================
+# ================= 角色与插件设置 =================
 def test_plugin_settings_route_triggers_by_role(tmp_path: Path):
-    """插件触发写 @{setting:x}，设置选的是岗位：发消息时找这个岗位当时的成员；换人不用改插件。插件设置还在用的岗位不能删。"""
+    """插件触发写 @{setting:x}，设置选的是角色：发消息时找这个角色当时的成员；换人不用改插件。插件设置还在用的角色不能删。"""
     net, _, wang, _ = make_net(tmp_path)
     a = net.create_agent("小甲", "分析需求", [], [], actor=wang)
     b = net.create_agent("小乙", "分析需求", [], [], actor=wang)
     g = net.create_project("P", "", [a.id, b.id], actor=wang)
     net.install_plugin(g.id, "teammates", actor=wang)
-    with pytest.raises(NetworkError, match="没有岗位"):
+    with pytest.raises(NetworkError, match="没有角色"):
         net.set_plugin_settings(g.id, "teammates", {"intake": "role:triage"}, actor=wang)
     net.set_project_roles(g.id, {"triage": {"name": "需求分析", "members": ["小甲"]}}, actor=wang)
     out = net.set_plugin_settings(g.id, "teammates", {"intake": "role:triage"}, actor=wang)
@@ -85,17 +85,17 @@ def test_plugin_settings_route_triggers_by_role(tmp_path: Path):
     net.set_project_roles(g.id, {"triage": {"name": "需求分析", "members": [b.id]}}, actor=wang)
     r = net.plugin_webhook(token, {"title": "二", "url": ""})
     assert next(m for m in chat.messages if m.id == r["message"]).mentions == [b.id]
-    with pytest.raises(NetworkError, match="插件设置还在用岗位"):
+    with pytest.raises(NetworkError, match="插件设置还在用角色"):
         net.set_project_roles(g.id, {}, actor=wang)
     with pytest.raises(pluginfs.PluginError, match="settings 里 role 或 member"):
         pluginfs.parse_manifest({"name": "x", "version": "1.0.0", "description": "x", "tables": {"t": {"fields": [{"key": "a"}]}},
                                  "triggers": [{"key": "k", "type": "webhook", "notify": {"to": "{setting:who}", "text": "t"}}]})
 
 
-# ================= 用蓝图建项目 =================
+# ================= 用模板建项目 =================
 def test_create_project_from_blueprint(tmp_path: Path):
-    """用蓝图建项目：先出总确认卡（岗位与权限、插件、连接器、外部回调、人在哪里介入），确认后一次建好：
-    岗位各新建一个归建项目的人的 Agent，纲要、模板、技能里的占位符换成填的值与岗位上的人，插件带设置，
+    """用模板建项目：先出总确认卡（角色与权限、插件、连接器、外部回调、人在哪里介入），确认后一次建好：
+    角色各新建一个归建项目的人的 Agent，纲要、模板文件、技能里的占位符换成填的值与角色上的人，插件带设置，
     连接器槽位进连接器面板，剩下的手工步骤列在项目上。再用一次时 Agent 名字不冲突。"""
     net, ops, wang, li = make_net(tmp_path)
     bp = net.admin_blueprint_upload(ops, entries(DEV_TEAM))
@@ -116,14 +116,14 @@ def test_create_project_from_blueprint(tmp_path: Path):
     assert g.plugins["teammates"]["settings"] == {"intake": "role:feedback"}
     assert [n.connector_id for n in g.connector_needs] == ["github"]
     assert any("回调地址" in s["text"] for s in g.setup_steps) and g.blueprint["id"] == bp["id"]
-    assert "由蓝图「研发小队」" in "\n".join(m.text for m in net.project_chat(g.id).messages)
+    assert "由模板「研发小队」" in "\n".join(m.text for m in net.project_chat(g.id).messages)
     g2, _, _ = use(net, bp["id"], wang, "第二个")
     assert net.store.agents[g2.roles["coder"]["members"][0]].name == "编码·第二个"
     assert net.blueprints.get(bp["id"])["uses"] == 2
 
 
 def test_confirm_warns_roles_without_write(tmp_path: Path):
-    """插件的写类工具要 file.write：蓝图里没给的岗位用不了建任务、认领、交棒，确认卡上先说清楚（实测里踩过）。"""
+    """插件的写类工具要 file.write：模板里没给的角色用不了建任务、认领、交棒，确认卡上先说清楚（实测里踩过）。"""
     import shutil
     net, ops, wang, _ = make_net(tmp_path)
     src = tmp_path / "bp"
@@ -134,12 +134,12 @@ def test_confirm_warns_roles_without_write(tmp_path: Path):
     bp = net.admin_blueprint_upload(ops, entries(src))
     with pytest.raises(NeedsConfirm) as e:
         net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, actor=wang)
-    assert any("岗位「反馈」没有 file.write" in x for x in e.value.items)
-    assert not any("岗位「编码」没有 file.write" in x for x in e.value.items)
+    assert any("角色「反馈」没有 file.write" in x for x in e.value.items)
+    assert not any("角色「编码」没有 file.write" in x for x in e.value.items)
 
 
 def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monkeypatch):
-    """岗位可以由自己已有的 Agent 担任，别人的不行；建到一半失败整体撤回：不留项目，也不留新建的 Agent。"""
+    """角色可以由自己已有的 Agent 担任，别人的不行；建到一半失败整体撤回：不留项目，也不留新建的 Agent。"""
     net, ops, wang, li = make_net(tmp_path)
     bp = net.admin_blueprint_upload(ops, entries(DEV_TEAM))
     mine = net.create_agent("老开发", "写代码", [], ["file.write"], actor=wang)
@@ -147,7 +147,7 @@ def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monke
     with pytest.raises(NetworkError, match="只能选你自己的 Agent 或项目里的成员"):
         net.create_project_from_blueprint(bp["id"], "x", {"product": "p"}, {"coder": {"agent": theirs.id}}, actor=wang)
     g, items, _ = use(net, bp["id"], wang, roles={"coder": {"agent": mine.id}})
-    assert "岗位「编码」由「老开发」担任" in items and g.roles["coder"]["members"] == [mine.id]
+    assert "角色「编码」由「老开发」担任" in items and g.roles["coder"]["members"] == [mine.id]
     before_projects, before_agents = set(net.store.projects), set(net.store.agents)
 
     def boom(*a, **k):
@@ -159,8 +159,8 @@ def test_blueprint_roles_use_own_agents_only_and_roll_back(tmp_path: Path, monke
 
 
 def test_pick_parts_into_existing_project(tmp_path: Path):
-    """用蓝图时勾选要的部件（默认全选）；也可以装进自己主持的已有项目——只勾技能，就是以前的“订阅技能包”：
-    技能复制进项目，占位符里没选的岗位换成岗位名；已有的同名岗位沿用，不新建 Agent。"""
+    """用模板时勾选要的部件（默认全选）；也可以装进自己主持的已有项目——只勾技能，就是以前的“订阅技能包”：
+    技能复制进项目，占位符里没选的角色换成角色名；已有的同名角色沿用，不新建 Agent。"""
     net, ops, wang, li = make_net(tmp_path)
     bp = net.admin_blueprint_upload(ops, entries(DEV_TEAM))
     a = net.create_agent("老测试", "测试", [], [], actor=wang)
@@ -185,12 +185,12 @@ def test_pick_parts_into_existing_project(tmp_path: Path):
         net.create_project_from_blueprint(bp["id"], "", {"product": "白板"}, parts={"roles": ["reviewer"], "brief": True},
                                           project_id=g.id, actor=wang)
     told = "\n".join(e.value.items)
-    assert "岗位「审查」沿用项目里已有的（老测试）" in told and "纲要：会换成蓝图里的纲要" in told and "覆盖项目里的同名技能" in told
+    assert "角色「审查」沿用项目里已有的（老测试）" in told and "纲要：会换成模板里的纲要" in told and "覆盖项目里的同名技能" in told
 
 
 # ================= 从项目发布 =================
 def test_publish_from_project_and_reuse(tmp_path: Path):
-    """主持人把跑通的项目发布成蓝图：@成员 换成岗位占位，参数的值换成参数占位，插件设置里的岗位照带；
+    """主持人把跑通的项目发布成模板：@成员 换成角色占位，参数的值换成参数占位，插件设置里的角色照带；
     像是写死了人、带了项目事实的地方先要确认。读者之外的人看不到；用的人建出来的项目里换成了他的值。"""
     net, ops, wang, li = make_net(tmp_path)
     a = net.create_agent("前端小王", "页面", ["前端"], ["file.write"], actor=wang)
@@ -224,7 +224,7 @@ def test_publish_from_project_and_reuse(tmp_path: Path):
 
 
 def test_uploaded_plugins_are_bundled(tmp_path: Path):
-    """项目里上传的插件不在部署方目录：发布时打包进蓝图，并提示；用蓝图建项目时按“主持人自己装”装上。"""
+    """项目里上传的插件不在部署方目录：发布时打包进模板，并提示；用模板建项目时按“主持人自己装”装上。"""
     net, _, wang, li = make_net(tmp_path)
     g = net.create_project("P", "", [], actor=wang)
     manifest = {"name": "notes", "version": "1.0.0", "title": "便签", "description": "记一点东西",
@@ -233,7 +233,7 @@ def test_uploaded_plugins_are_bundled(tmp_path: Path):
     spec = {**net.blueprint_draft(g.id, actor=wang), "name": "notes-kit", "plugins": ["notes"], "public": True}
     with pytest.raises(NeedsConfirm) as e:
         net.publish_blueprint(g.id, spec, actor=wang)
-    assert any("会打包进蓝图" in x for x in e.value.items)
+    assert any("会打包进模板" in x for x in e.value.items)
     b = net.publish_blueprint(g.id, spec, confirm=True, actor=wang)
     assert b["manifest"]["plugins"][0]["source"] == "bundled"
     g2, _, _ = use(net, b["id"], li, "我的", params={})
