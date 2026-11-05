@@ -94,6 +94,10 @@ PLUGIN_PAGE_CAPS: dict[str, str] = {
     "service.read": "调插件服务的只读工具",
 }
 PLUGIN_AGENT_CAPS = ("records.read", "records.write")
+# 插件服务经 MCP sampling 请网络调模型（docs/plugin-hooks.md 第 14 节）：清单里的上限不能超过这些
+PLUGIN_MODEL_MAX_TOKENS = 8000    # 一次最多生成多少 token（清单默认 2000）
+PLUGIN_MODEL_DAILY = 1000         # 一个安装一天最多调多少次（清单默认 100）
+PLUGIN_MODEL_INPUT = 200_000      # 一次请求的系统提示词 + 消息合计最多多少字符
 
 # 发布与订阅（docs/project-publishing.md）：项目的内容离开项目只经发布物（不变量 23）
 RELEASES = "releases"      # 订阅的交付件在工作目录里的挂载名（只读副本，运行后丢弃）

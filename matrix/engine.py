@@ -32,7 +32,7 @@ from typing import Any, Callable, Iterable
 from .events import EventBus
 from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
                      ATTACHMENTS_PER_MESSAGE, AUTHORITIES, BRIEF_LIMIT, CONNECTOR_PREFIX, DESCRIPTION_LIMIT, FILE_LIMIT,
-                     GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
+                     GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MODEL_INPUT, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
                      LIST_TOOLS,
                      PROJECT_FILES, RELEASE_FEEDBACK, RELEASE_ITEMS, RELEASE_KINDS, RELEASE_READERS, RELEASES,
                      RELEASES_PER_PROJECT, REQUEST_TOOLS, SESSION_TOOLS, SKILLS, SUBSCRIPTIONS_PER_AGENT,
@@ -46,7 +46,8 @@ from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt
                        format_shared_knowledge, format_subscriptions, format_task_result, format_transcript, retry_prompt)
 from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills as skillfs, workdir
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
-from .plugin_service import ServiceError, ServiceHost, build_env, resolve_command, venv_python
+from .plugin_service import Refused, ServiceError, ServiceHost, build_env, resolve_command, venv_python
+from .llm import LlmError, complete as llm_complete
 from . import blueprints as bps, plugin_sources as sources, sandbox
 from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
@@ -59,7 +60,7 @@ from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
-from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
+from .usage import MAX_DAYS, UsageLog, day_of, summarize as summarize_usage, tokens as usage_tokens
 
 
 @dataclass
@@ -187,6 +188,7 @@ class Network:
         self.plugin_dir_catalog = sources.CombinedCatalog(
             plugins or pluginfs.PluginCatalog(self.store.root / "plugins.json"), sources.ManagedCatalog(self.store.root))
         self._manifests: dict[str, tuple[float, pluginfs.Manifest]] = {}
+        self._plugin_model_calls: dict[tuple[str, str, str], int] = {}  # (项目, 插件, 日期) → 今天调了几次模型
         self._drafts: dict[str, dict[str, Any]] = {}      # 插件页面要以人名义发的消息，等确认卡
         self.services = ServiceHost()                     # 插件服务进程（不变量 24），一个安装一个
         # route 挂点的接力（docs/plugin-hooks.md 第 8 节）：一条人发的消息开一串，带自动唤醒预算与已经出现过的成员；
@@ -2285,7 +2287,7 @@ class Network:
                     changes = pluginfs.schema_changes(self._manifest(g, m.name, active=False), m)
                 except NetworkError:
                     changes = []
-            told = sources.disclosure(m, runs) if source != "catalog" else []
+            told = (sources.disclosure(m, runs) if source != "catalog" else []) + sources.model_disclosure(m)
             stale = bool(digest) and digest != sha
             if stale or ((changes or told) and not confirm):
                 if changes and not told and not stale:
@@ -2316,8 +2318,10 @@ class Network:
         verb = f"把插件「{m.title}」升级到 {m.version}" if old else f"安装了插件「{m.title}」{m.version}"
         where = {"remote": f"；插件服务在 {sources.service_host(m)}，项目内容会按挂点发到那里（主持人确认过）",
                  "sandbox": "；插件服务在本部署的沙箱里运行，不能联网"}.get(runs or "", "") if source != "catalog" else ""
+        model = (f"；插件服务会用模型（{m.service.model.why}），每天最多 {m.service.model.daily_calls} 次，记在主持人的用量里"
+                 if m.service and m.service.model else "")
         self._archive_saved(g, f"主持人{verb}。页面申请的能力：{caps}"
-                               + (f"；Agent 可用记录工具（{'、'.join(m.agent_tools)}）" if m.agent_tools else "") + where)
+                               + (f"；Agent 可用记录工具（{'、'.join(m.agent_tools)}）" if m.agent_tools else "") + where + model)
         with self._lock:
             out = next(p for p in self.project_plugins(g) if p["name"] == m.name)
         return {**out, "secret": secret} if secret else out
@@ -2864,9 +2868,114 @@ class Network:
                     raise ServiceError(f"沙箱不可用（{why}），自己装的托管插件不能运行")
                 argv = sandbox.wrap(argv, ro=[pkg, *sandbox.python_dirs(py), *([env] if env else [])], rw=[data],
                                     network=m.service.network and source == "catalog")
-            return self.services.client(g.id, name, m.version, argv, data, sandbox.limits if boxed else None)
+            sampler = self._plugin_sampler(g.id, name) if m.service.model else None
+            return self.services.client(g.id, name, m.version, argv, data, sandbox.limits if boxed else None, sampler)
         except ServiceError as e:
             raise NetworkError(f"插件「{m.title}」的服务不可用：{e}") from e
+
+    # ---------- 插件用模型（docs/plugin-hooks.md 第 14 节）----------
+    def _plugin_sampler(self, project_id: str, name: str) -> Any:
+        def on_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+            return self._plugin_sample(project_id, name, params)
+        return on_request
+
+    @staticmethod
+    def _sampling_messages(params: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+        """MCP sampling 的请求 → (系统提示词, [{role, text}])。只收文本；图片、音频、includeContext 不支持。"""
+        raw = params.get("messages")
+        if not isinstance(raw, list) or not raw:
+            raise Refused("sampling 请求要有 messages")
+        out: list[dict[str, str]] = []
+        for m in raw:
+            if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
+                raise Refused("messages 里每一条要有 role（user / assistant）")
+            content = m.get("content")
+            blocks = content if isinstance(content, list) else [content]
+            if not all(isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str) for b in blocks):
+                raise Refused("插件用模型只支持文本内容（content.type = text）")
+            out.append({"role": m["role"], "text": "".join(b["text"] for b in blocks)})
+        if params.get("includeContext") not in (None, "none"):
+            raise Refused("includeContext 只支持 none：网络不把任何对话交给插件")
+        system = params.get("systemPrompt") or ""
+        if not isinstance(system, str):
+            raise Refused("systemPrompt 要是文本")
+        if len(system) + sum(len(m["text"]) for m in out) > PLUGIN_MODEL_INPUT:
+            raise Refused(f"这次请求太长：系统提示词加消息最多 {PLUGIN_MODEL_INPUT} 个字符")
+        return system, out
+
+    def _plugin_model_used(self, project_id: str, name: str, day: str) -> int:
+        """调用方持有锁。今天这个安装已经调了几次模型：第一次问时从用量台账数（进程重启后不清零）。"""
+        key = (project_id, name, day)
+        if key not in self._plugin_model_calls:
+            for k in [k for k in self._plugin_model_calls if k[2] != day]:
+                del self._plugin_model_calls[k]
+            since = time.mktime(time.strptime(day, "%Y-%m-%d"))
+            self._plugin_model_calls[key] = sum(
+                1 for e in self.usage.read(since) if e.get("venue") == "plugin" and e.get("project") == project_id
+                and e.get("runtime") == f"plugin:{name}" and day_of(float(e.get("ts") or 0)) == day)
+        return self._plugin_model_calls[key]
+
+    def _plugin_sample(self, project_id: str, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        """插件服务请网络调一次模型（调用方不持有锁；在服务的一次工具调用或资源读取当中）。
+        用部署方模型目录的默认模型（只能是平台配的供应商：网络要知道地址和密钥），记在项目主持人的用量里；
+        清单没声明 service.model、插件已停用、超过清单里的每日次数时拒绝。服务进程本身仍然不拿密钥、不联网。"""
+        system, messages = self._sampling_messages(params)
+        want = params.get("maxTokens")
+        if isinstance(want, bool) or not isinstance(want, int) or want <= 0:
+            raise Refused("sampling 请求要有正整数 maxTokens")
+        temp = params.get("temperature")
+        temp = float(temp) if isinstance(temp, (int, float)) and not isinstance(temp, bool) and 0 <= temp <= 2 else None
+        stop = [str(x) for x in params.get("stopSequences") or [] if isinstance(x, str)][:4] or None
+        with self._lock:
+            g = self.store.projects.get(project_id)
+            if g is None or name not in g.plugins:
+                raise Refused("插件已经不在这个项目里")
+            try:
+                m = self._manifest(g, name)
+            except NetworkError as e:
+                raise Refused(str(e)) from e
+            use = m.service.model if m.service else None
+            if use is None:
+                raise Refused("这个插件没有在清单里声明 service.model，不能请网络调模型")
+            preset = self.models.default()
+            prov = self.models.provider(preset.provider) if preset else None
+            if preset is None or prov is None:
+                raise Refused("部署方还没有给插件可用的模型：模型目录要有默认模型，且它的供应商是平台配的（管理后台“模型”）")
+            started = time.time()
+            day = day_of(started)
+            if self._plugin_model_used(project_id, name, day) >= use.daily_calls:
+                raise Refused(f"插件「{m.title}」今天已经调了 {use.daily_calls} 次模型（清单里的上限），明天再试")
+            self._plugin_model_calls[(project_id, name, day)] += 1  # 先占一次：并发的请求不会一起越过上限
+            payer = g.owner_id
+        try:
+            key = self.vault.get(_provider_vault(prov.id)).get("api_key")
+        except VaultError:
+            key = None
+        cap = min(want, use.max_tokens, preset.max_tokens or use.max_tokens)
+        try:
+            out = llm_complete(prov, preset, key, system=system, messages=messages, max_tokens=cap,
+                               temperature=temp, stop=stop)
+            ok, error = True, None
+        except LlmError as e:
+            out, ok, error = None, False, str(e)
+        usage = out.usage if out else {}
+        try:  # 用量台账：和 Agent 的运行记在同一本账上，场合是 plugin，不记提示词与回复
+            self.usage.record({
+                "ts": started, "ms": int((time.time() - started) * 1000), "user": payer, "agent": None,
+                "project": project_id, "venue": "plugin", "where": "cloud", "runtime": f"plugin:{name}",
+                "model": f"{preset.provider} / {preset.model}", "ok": ok, "error": None if ok else "plugin_model",
+                "tools": 0, "usage": usage})
+        except OSError as e:
+            print(f"[matrix] 用量台账写不进去：{e}", file=sys.stderr)
+        with self._lock:
+            g = self.store.projects.get(project_id)
+            if g is not None:
+                self._plugin_log(g, "plugin.model.call", plugin=name, model=preset.id, ok=ok,
+                                 tokens=usage_tokens(usage)["total"])
+        if out is None:
+            raise Refused(f"模型调用失败：{error}")
+        return {"role": "assistant", "content": {"type": "text", "text": out.text}, "model": preset.model,
+                "stopReason": out.stop_reason}
 
     def _service_call(self, g: Project, name: str, m: pluginfs.Manifest, tool: str, args: dict[str, Any],
                       **by: Any) -> tuple[str, bool]:

@@ -409,7 +409,8 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
   签名是 HMAC-SHA256(密钥, `v1.<项目>.<插件名>.<过期>`)；服务要验签、检查过期，再按项目切分数据。放进部署方目录时，密钥由部署方在两边配同一个值
   （Matrix 这边是环境变量 `MATRIX_PLUGIN_SECRET_<插件名>`，大写，`-` 换成 `_`）；主持人按地址自己装时，每个安装一把密钥，
   装好后只显示一次，主持人连同项目 id 交给你，服务按令牌里的项目 id 找密钥再验签。示例引擎的 `check_token`、`secrets_file` 可以照抄。
-- 进程环境里没有任何凭证：要连外部服务请走连接器。服务**不要调模型**：要模型做的事写进技能，交给项目里的 Agent。
+- 进程环境里没有任何凭证：要连外部服务请走连接器。要用模型，在清单里声明 `service.model`，经 MCP sampling 请网络调（见下）；
+  需要项目上下文、要人验收的工作仍然写进技能，交给项目里的 Agent。
 - `tools` 是白名单和读写分级：只有列出来的工具出现在 Agent 那里，名字是 `<插件名>__<工具名>`（合起来 ≤64 个字符），带服务自己的
   schema 与说明；页面只能调 `read` 类。`write` 类要 Agent 有写权限，且会被信息流检查拦下（读过私下对话的会话不能写进项目数据）。
   每次调用都记日志，但不记参数和结果。
@@ -418,6 +419,31 @@ curl -X POST http://127.0.0.1:8765/hooks/h_xxxxxxxx -H 'content-type: applicatio
   远程服务可以给主持人一个地址（`.zip` 插件包或 `plugin.json`），服务必须和这个地址在同一个主机上，安装前主持人会看到你的服务会收到什么。
 - 依赖：写 `"requirements": "service/requirements.txt"`，一个每个包都带 `--hash` 的锁文件（`uv pip compile --generate-hashes`），要列全
   （安装时 `--no-deps`、只装 wheel）。只用标准库最省事。
+
+**用模型**（[plugin-hooks.md](plugin-hooks.md) 第 14 节）：只给托管服务。清单里声明
+
+```json
+"service": {
+  "command": "python", "args": ["{plugin}/service/engine.py"], "tools": {"remember": "write"},
+  "model": {"why": "把验收过的交付说明提炼成记忆条目", "max_tokens": 1000, "daily_calls": 200}
+}
+```
+
+服务在处理一次工具调用（或资源读取）时，往 stdout 发一个请求，再从 stdin 读回应，然后照常回这次工具调用：
+
+```python
+send({"jsonrpc": "2.0", "id": "s1", "method": "sampling/createMessage", "params": {
+    "systemPrompt": "从交付说明里抽出可复用的做法，每行一条",
+    "messages": [{"role": "user", "content": {"type": "text", "text": summary}}],
+    "maxTokens": 800}})
+reply = json.loads(sys.stdin.readline())   # {"result": {"content": {"type": "text", "text": …}, "model": …, "stopReason": …}}
+                                           # 或 {"error": {"message": "今天已经调了 200 次模型…"}}：要能处理
+```
+
+- 用的是部署方的默认模型，记在项目主持人的用量里；安装时主持人在确认卡上看到 `why` 和上限。`modelPreferences` 会被忽略。
+- 只收文本；`includeContext` 只能是 `none`（网络不给你对话）。生成长度取 `maxTokens`、清单 `max_tokens`、模型上限里最小的。
+- 拒绝（没声明、停用、超过每天次数、部署方没配可用的模型）和模型出错都以 JSON-RPC 错误回给你，不会卡住；工具结果里写清楚原因即可。
+- `matrix-plugin check` 会提醒：代码里有 `sampling/createMessage` 却没声明，或者声明了没用到。
 
 **设置**（安装时主持人填，模板建项目时自动填好）：
 

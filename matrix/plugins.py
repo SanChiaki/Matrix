@@ -25,8 +25,9 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from . import skills as skillfs
-from .models import (PLUGIN_AGENT_CAPS, PLUGIN_FIELDS, PLUGIN_FILES, PLUGIN_LIMIT, PLUGIN_PAGE_CAPS, PLUGIN_RECORD_LIMIT,
-                     PLUGIN_TABLES, PLUGIN_TABS, PLUGIN_TRIGGERS, new_id)
+from .models import (PLUGIN_AGENT_CAPS, PLUGIN_FIELDS, PLUGIN_FILES, PLUGIN_LIMIT, PLUGIN_MODEL_DAILY,
+                     PLUGIN_MODEL_MAX_TOKENS, PLUGIN_PAGE_CAPS, PLUGIN_RECORD_LIMIT, PLUGIN_TABLES, PLUGIN_TABS,
+                     PLUGIN_TRIGGERS, new_id)
 from .workdir import safe_rel
 
 MANIFEST = "plugin.json"
@@ -114,6 +115,15 @@ SETTING_REF = re.compile(r"^\{setting:([a-z][a-z0-9_]{0,39})\}$")
 
 
 @dataclass(frozen=True)
+class ModelUse:
+    """插件服务要用模型（docs/plugin-hooks.md 第 14 节）：服务经 MCP sampling 请网络调，网络用部署方的模型、记在主持人的用量里。
+    why 写进安装确认卡；max_tokens 是一次最多生成多少，daily_calls 是一个安装一天最多调几次。"""
+    why: str
+    max_tokens: int = 2000
+    daily_calls: int = 100
+
+
+@dataclass(frozen=True)
 class Service:
     """插件服务：一个标准 MCP 服务（不变量 24），两种来源二选一：
     - command：网络托管的 stdio 进程。`python` 是网络自己的解释器；args 里 `{plugin}` 换成装进项目的包目录，`{data}` 换成这个安装的数据目录。
@@ -125,6 +135,7 @@ class Service:
     network: bool = False                # 要不要联网：只有部署方目录里的托管插件能联网（沙箱按它开网络）
     url: str | None = None
     requirements: str | None = None      # 依赖锁文件（包里的路径，每行带 --hash）：安装时建一个独立的 Python 环境
+    model: ModelUse | None = None        # 要不要经网络用模型（MCP sampling）；没声明的 sampling 请求一律拒绝
 
     def tool_class(self, name: str) -> str | None:
         return next((c for n, c in self.tools if n == name), None)
@@ -219,7 +230,10 @@ class Manifest:
             "service": ({"tools": [{"name": n, "class": c} for n, c in self.service.tools],
                          "network": self.service.network, "hosted": self.service.url is None,
                          "host": urlsplit(self.service.url).hostname if self.service.url else None,
-                         "requirements": self.service.requirements} if self.service else None),
+                         "requirements": self.service.requirements,
+                         "model": ({"why": self.service.model.why, "max_tokens": self.service.model.max_tokens,
+                                    "daily_calls": self.service.model.daily_calls} if self.service.model else None)}
+                        if self.service else None),
             "hooks": {"mount": [{"resources": m.resources, "as": m.as_} for m in self.mounts],
                       "context": [{"label": c.label, "resource": c.resource, "tool": c.tool, "budget": c.budget}
                                   for c in self.contexts],
@@ -443,7 +457,24 @@ def _service(v: Any) -> Service | None:
         if url or rel is None or rel.suffix != ".txt":
             raise PluginError("service.requirements 是包里的一个 .txt 锁文件（只给 command 用）")
         req = rel.as_posix()
-    return Service(command, args_t, tuple(out), bool(v.get("network")), url, req)
+    return Service(command, args_t, tuple(out), bool(v.get("network")), url, req, _model_use(v.get("model"), url))
+
+
+def _model_use(v: Any, url: str | None) -> ModelUse | None:
+    if v is None:
+        return None
+    if url:
+        raise PluginError("service.model 只给托管服务（command）用：远程服务在作者那边运行，网络不替它调模型")
+    if not isinstance(v, dict):
+        raise PluginError("service.model 必须是对象：{\"why\": 用模型做什么, \"max_tokens\": …, \"daily_calls\": …}")
+
+    def bound(key: str, default: int, top: int) -> int:
+        n = v.get(key, default)
+        if isinstance(n, bool) or not isinstance(n, int) or not 0 < n <= top:
+            raise PluginError(f"service.model.{key} 是 1–{top} 的整数")
+        return n
+    return ModelUse(_s(v.get("why"), "service.model.why（用模型做什么，写进安装确认卡）", 200),
+                    bound("max_tokens", 2000, PLUGIN_MODEL_MAX_TOKENS), bound("daily_calls", 100, PLUGIN_MODEL_DAILY))
 
 
 def _uri(v: Any, what: str) -> str:

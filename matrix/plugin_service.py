@@ -7,6 +7,9 @@
 - 远程 MCP（`RemoteService`）：网络每次调用带一个只对这个项目、这个插件有效的签名令牌（`sign_token`），服务按它切分数据。
   部署方目录里的，密钥由部署方放在环境变量 `MATRIX_PLUGIN_SECRET_<插件名>` 里；主持人自己装的，每个安装一把，存在保管库。
 网络是 MCP 客户端：列工具、调工具、列资源、读资源。工具调用的身份、权限、留痕都在 engine，服务看到的是参数和网络认定的调用者（_meta）。
+托管的服务在一次请求进行中可以反过来请网络调模型（MCP sampling，`sampling/createMessage`）：清单声明了 `service.model` 的，
+网络在 initialize 时声明 sampling 能力，收到请求交给 engine 的回调（用哪个模型、记谁的账、限额都在那里）；
+没声明的一律回错误。远程服务不走这条路（它在作者那边运行，网络不替它调模型）。
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 PROTO = "2025-06-18"
 CALL_TIMEOUT = 60.0       # 一次工具调用最多等多久（秒）
@@ -39,6 +42,14 @@ _KEEP_ENV = ("PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP"
 
 class ServiceError(RuntimeError):
     pass
+
+
+class Refused(RuntimeError):
+    """服务反过来发给网络的请求被拒绝（没声明、超限、模型不可用）：作为 JSON-RPC 错误回给服务，不当成网络这边的故障。"""
+
+
+# 服务发给网络的请求的处理函数：(method, params) → result；拒绝时抛 Refused
+OnRequest = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
 def service_env(data: Path) -> dict[str, str]:
@@ -146,6 +157,7 @@ class StdioClient:
     last_used: float = field(default_factory=time.time)
     tools: list[dict[str, Any]] = field(default_factory=list)
     stderr_tail: list[str] = field(default_factory=list)
+    on_request: OnRequest | None = None  # 声明了 service.model 的：处理 sampling/createMessage
 
     def start(self) -> None:
         self.cwd.mkdir(parents=True, exist_ok=True)
@@ -158,7 +170,8 @@ class StdioClient:
             raise ServiceError(f"插件服务起不来：{e}") from e
         threading.Thread(target=self._pump, args=(self.proc.stdout, self._lines), daemon=True).start()
         threading.Thread(target=self._drain_err, daemon=True).start()
-        self._request("initialize", {"protocolVersion": PROTO, "capabilities": {},
+        caps: dict[str, Any] = {"sampling": {}} if self.on_request else {}
+        self._request("initialize", {"protocolVersion": PROTO, "capabilities": caps,
                                      "clientInfo": {"name": "matrix", "version": "0.2.0"}}, START_TIMEOUT)
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
         self.tools = list((self._request("tools/list", {}, START_TIMEOUT) or {}).get("tools") or [])
@@ -207,12 +220,36 @@ class StdioClient:
                 msg = json.loads(line)
             except json.JSONDecodeError:
                 continue  # 服务往 stdout 打了别的东西：跳过
-            if not isinstance(msg, dict) or msg.get("id") != mid:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("method") and msg.get("id") is not None:  # 服务反过来发给网络的请求（sampling、ping）
+                self._answer(msg)
+                deadline = max(deadline, time.time() + timeout)  # 等模型的时间不算服务的：回完后再给它完整的时限
+                continue
+            if msg.get("id") != mid:
                 continue  # 通知或别的回应
             if "error" in msg:
                 err = msg["error"] or {}
                 raise ServiceError(f"插件服务报错：{err.get('message', err)}")
             return msg.get("result")
+
+    def _answer(self, msg: dict[str, Any]) -> None:
+        """回服务发来的请求。只认 ping 与（声明过的）sampling/createMessage；处理函数出错也回错误，不让服务一直等。"""
+        method, params = str(msg["method"]), msg.get("params")
+        reply: dict[str, Any] = {"jsonrpc": "2.0", "id": msg["id"]}
+        if method == "ping":
+            reply["result"] = {}
+        elif method == "sampling/createMessage" and self.on_request is not None:
+            try:
+                reply["result"] = self.on_request(method, params if isinstance(params, dict) else {})
+            except Refused as e:
+                reply["error"] = {"code": -1, "message": str(e)}
+            except Exception as e:  # noqa: BLE001 —— 网络这边的意外也要回给服务，否则它会一直等
+                reply["error"] = {"code": -32603, "message": f"网络处理请求时出错：{type(e).__name__}"}
+        else:
+            reply["error"] = {"code": -32601, "message": (f"网络不接受 {method}" if method != "sampling/createMessage"
+                                                          else "这个插件没有在清单里声明 service.model，不能请网络调模型")}
+        self._send(reply)
 
     def call(self, name: str, args: dict[str, Any], timeout: float = CALL_TIMEOUT,
              meta: dict[str, Any] | None = None) -> tuple[str, bool]:
@@ -326,7 +363,7 @@ class ServiceHost:
             return c
 
     def client(self, project_id: str, plugin: str, version: str, argv: list[str], cwd: Path,
-               preexec: Any = None) -> StdioClient:
+               preexec: Any = None, on_request: OnRequest | None = None) -> StdioClient:
         key = (project_id, plugin)
         with self._lock:
             hit = self._procs.get(key)
@@ -337,7 +374,7 @@ class ServiceHost:
                 self._procs.pop(key, None)
             if self._failures.get(key, 0) >= START_FAILURES:
                 raise ServiceError(f"插件服务连续 {START_FAILURES} 次没起来，已暂停：请主持人停用再启用插件")
-            c = StdioClient(argv, cwd, preexec)
+            c = StdioClient(argv, cwd, preexec, on_request=on_request)
             try:
                 c.start()
             except ServiceError:

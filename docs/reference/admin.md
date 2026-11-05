@@ -65,13 +65,13 @@
 
 ## 用量台账
 
-每次调用运行时（`Network._invoke`，自动续接的那一次也算一次），追加一行到 `<data>/usage.jsonl`：
+每次调用运行时（`Network._invoke`，自动续接的那一次也算一次）、每次插件服务经网络调模型（`Network._plugin_sample`），追加一行到 `<data>/usage.jsonl`：
 
 | 字段 | 含义 |
 | --- | --- |
 | `ts` / `ms` | 开始时间、耗时 |
 | `user` / `agent` / `project` | Agent 的所有者、Agent id、所在项目 id |
-| `venue` | `project`（群聊）· `session`（项目会话）· `dm`（私聊）· `home`（助理对话）· `task`（委托） |
+| `venue` | `project`（群聊）· `session`（项目会话）· `dm`（私聊）· `home`（助理对话）· `task`（委托）· `plugin`（插件服务经网络调模型：`user` 是项目主持人、`agent` 为空、`runtime` 是 `plugin:<插件>`） |
 | `where` / `runtime` | `cloud` + 运行时名，或 `device` + harness |
 | `model` | `provider / model`；`null` = 运行时默认 |
 | `ok` / `error` | 成没成；失败的错误类别（`runtime.ERROR_CLASSES`），端侧不在线记 `device_offline` |

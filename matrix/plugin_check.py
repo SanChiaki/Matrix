@@ -115,6 +115,13 @@ def lint(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
         for a in m.service.args:
             if a.startswith("{plugin}/") and Path(a[len("{plugin}/"):]) not in files:
                 out.append(f"service.args 里的 {a} 不在包里")
+        # 服务代码请网络调模型（MCP sampling）却没声明，或者声明了没用到（docs/plugin-hooks.md 第 14 节）
+        code = "\n".join(_text(b) for rel, b in files.items() if rel.parts[0] == "service")
+        asks = "sampling/createMessage" in code
+        if asks and m.service.model is None and not m.service.url:
+            out.append("服务代码里有 sampling/createMessage，但清单没有 service.model：网络会拒绝这些请求")
+        elif m.service.model is not None and not asks:
+            out.append("清单声明了 service.model，服务代码里没看到 sampling/createMessage：不用模型就去掉，安装确认卡会少一项")
     for h in m.afters:
         for n in PLACEHOLDER.findall(h.text or "") + [n for _, t in h.args for n in PLACEHOLDER.findall(t)]:
             if n not in ("title", "summary", "agent"):
@@ -136,6 +143,9 @@ def summary(files: dict[Path, bytes], m: pluginfs.Manifest) -> list[str]:
     size = sum(len(b) for b in files.values())
     skills = sorted({rel.parts[1] for rel in files if rel.parts[0] == pluginfs.SKILLS_DIR and len(rel.parts) >= 3})
     lines = [f"✓ {m.name} {m.version}「{m.title}」 {len(files)} 个文件，{size / 1000:.1f} KB"]
+    if m.service is not None and m.service.model is not None:
+        u = m.service.model
+        lines.append(f"  用模型：{u.why}（一次最多 {u.max_tokens} token，每天最多 {u.daily_calls} 次，记在主持人的用量里）")
     if m.tabs:
         lines.append("  标签页：" + "、".join(f"{t.label}（{t.entry}）" for t in m.tabs))
     if m.release_views:  # 发布物里打开时只能读快照（docs/project-publishing.md 第 7 节）

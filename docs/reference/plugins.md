@@ -121,7 +121,8 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
 - **清单**：`service`：`command`（网络托管：`python` 是网络自己的解释器（有 `requirements` 时是按锁文件建的环境的），或部署机器上的程序名；
   `args` 里 `{plugin}` 换成装进项目的包目录、`{data}` 换成数据目录）或 `url`（远程 MCP；http 只在部署方白名单里放行），二选一；
   `tools`：工具名 → `read` / `write` / `hook`，只有这里列的开给 Agent 与页面，`<插件名>__<工具名>` 最长 64；`network`：托管服务要不要联网
-  （沙箱据此开网络，只有目录里的能是 true）；`requirements`：包里的依赖锁文件（每个包带 `--hash`）。
+  （沙箱据此开网络，只有目录里的能是 true）；`requirements`：包里的依赖锁文件（每个包带 `--hash`）；`model`：经网络用模型（只给 `command`，
+  `why` 必填，`max_tokens` 1–8000 默认 2000，`daily_calls` 1–1000 默认 100，`plugins._model_use`）。
   `hooks`：`mount`（`resources`：一个 MCP 资源 URI 前缀 → 工作目录 `plugins/<插件>/<as>/`，去掉前缀是相对路径）、`context`（`resource` 或 `tool`
   二选一，`label`、`budget` ≤4000；`tool` 只能是 read 类，`args` 模板可用 `{latest}`、`{mission}`）、`after`（`on` 第一期只有 `request.accepted`；
   `notify.to` 写成员名或 `{agent}` ＝接任务的 Agent，`text` 可用 `{title}`、`{summary}`、`{agent}`；或 `tool` + `args`）。校验在 `plugins._service` / `_hooks`。
@@ -150,6 +151,14 @@ skills/<名字>/SKILL.md  技能，和项目技能同一种格式
   结果放在 `ExecContext.plugin_files`：云侧写进工作目录、运行后丢弃，端侧随 `run.request` 的材料下发。`after` 在 `review_request` 与
   `accept_request` 验收之后调用（`_after_accepted`），只接项目群聊里的任务；`notify` 以验收的人的身份、`via` 插件标题发进群聊。
   失败写 `plugin.after.failed` 进日志。
+- **用模型**（设计见 [plugin-hooks.md](../plugin-hooks.md) 第 14 节）：声明了 `service.model` 的托管服务，`StdioClient` 在 `initialize` 时声明
+  `sampling` 能力，并在等一次请求的回应时处理服务发来的 `sampling/createMessage`（`_answer`；等模型的时间不算服务的 60 秒）；没声明的回
+  `-32601`。处理在 `Network._plugin_sample`：只收文本、`includeContext` 只能是 `none`、合计 ≤20 万字符（`PLUGIN_MODEL_INPUT`）；模型是
+  模型目录的默认模型，供应商必须在 `providers` 里（密钥从保管库 `model-provider-<id>` 解开，只在网络进程里用）；`max_tokens` 取请求、清单、
+  模型上限的最小值；每天次数按 (项目, 插件, 日期) 计，第一次从用量台账数（`_plugin_model_used`），先占一次再调，被拒的不算。调模型在
+  `matrix/llm.py`（`openai-completions`、`anthropic-messages`，非流式）。每次调用写一行用量台账（`user` = 项目主持人，`agent` 空，
+  `venue: plugin`，`runtime: plugin:<插件>`）和一行 `plugin.model.call` 进项目 `log.jsonl`（模型、成败、token），不记内容。拒绝与模型出错
+  以 JSON-RPC 错误回给服务（`plugin_service.Refused`）。安装确认卡加一条（`plugin_sources.model_disclosure`），目录里的插件也出。
 - **页面**：桥的 `service.call` 要申请 `service.read`，只能调 read 类工具；SDK 是 `matrix.service.call(tool, args)`。发布物里的页面没有服务。
 - **工具分级 `hook`**：只给挂点（`context`、`route`）调，不出现在 Agent 的工具里，页面也调不到。
 - **route 挂点**（设计见 [plugin-hooks.md](../plugin-hooks.md) 第 8 节）：`hooks.route` 最多一个，`on` 只有 `message.posted`，`tool` 是 read 或 hook 类，

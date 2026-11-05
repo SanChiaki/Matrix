@@ -215,6 +215,16 @@ def disclosure(m: pluginfs.Manifest, runs: str | None) -> list[str]:
     return out
 
 
+def model_disclosure(m: pluginfs.Manifest) -> list[str]:
+    """插件服务要用模型（docs/plugin-hooks.md 第 14 节）：确认卡上写明用来做什么、上限、记谁的账。部署方目录里的也要确认——
+    花的是主持人的用量，不是部署方审核能替主持人决定的。"""
+    use = m.service.model if m.service else None
+    if use is None:
+        return []
+    return [f"插件服务会请网络调模型（{use.why}）：用部署方的默认模型，一次最多生成 {use.max_tokens} token、"
+            f"每天最多 {use.daily_calls} 次，记在主持人（你）的用量里；交给模型的是插件服务自己的数据与它收到的内容"]
+
+
 # ================= 后台管理的目录 =================
 @dataclass
 class ManagedCatalog:
