@@ -83,7 +83,7 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .view { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
 .view[hidden], .pane[hidden] { display: none; }
-.pane { display: flex; flex-direction: column; gap: 20px; min-height: 0; padding: 32px 32px; overflow: auto; }
+.pane { display: flex; flex-direction: column; gap: 20px; min-height: 0; padding: 32px var(--gutter); overflow: auto; }  /* 左右边距随版心：宽屏居中 */
 .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .view-head p { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-md); max-width: 620px; }
 /* 次级信息用弹出框，不占常驻侧栏 */
@@ -180,6 +180,8 @@ form.editor { display: flex; flex-direction: column; gap: 16px; margin-top: 20px
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > label, .field-label { font-size: var(--fs-md); font-weight: 500; color: var(--text-2); }
 .hint { font-size: var(--fs-sm); color: var(--muted); margin: 0; }
+/* 勾选框 + 文字：一行，对齐。没有这条时各处的 label.check 只在个别容器里有样式，别处勾选框会跑到文字上面 */
+label.check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-md); cursor: pointer; }
 .checks { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; margin: 0; padding: 0; }
 .checks legend { float: left; width: 100%; margin: 0; padding: 8px 12px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-2);
   background: var(--surface-2); border-bottom: 1px solid var(--border); }  /* 列表框的表头：标题在框里，不压在边框上 */
@@ -279,7 +281,7 @@ button.icon.sm { width: 22px; height: 22px; padding: 4px; }
   border-radius: var(--radius-pill); background: var(--surface-2); }
 .thread-col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 /* 项目页的“对话”标签：页面不整体滚动，页头和标签在上，消息列表自己滚，输入框贴底；左右边距用页面的 */
-#project-page.chat-on { overflow: hidden; padding-bottom: 0; gap: 12px; }
+#project-page.chat-on { overflow: hidden; padding-bottom: 0; }  /* 间距和别的标签一样：切标签时页头、标签不跳 */
 #project-page.chat-on #pp-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 #project-page.chat-on .thread-col { flex: 1; }
 #project-page.chat-on #thread-head { padding: 0 0 12px; min-height: 0; }
@@ -293,12 +295,12 @@ button.icon.sm { width: 22px; height: 22px; padding: 4px; }
 .conv-switch #sess-new { margin-left: 4px; border-color: transparent; color: var(--muted); }
 .conv-switch #sess-new:hover { color: var(--text); }
 #thread-head .sess-note { font-size: var(--fs-sm); white-space: nowrap; }
-#thread-head { display: flex; align-items: center; gap: 12px; padding: 16px 32px; border-bottom: 1px solid var(--border); min-height: 69px; }
+#thread-head { display: flex; align-items: center; gap: 12px; padding: 16px var(--gutter); border-bottom: 1px solid var(--border); min-height: 69px; }
 #thread-head:empty { display: none; }
 #thread-head .info { flex: 1; min-width: 0; }
 #thread-head .net-warn { flex: none; font-size: var(--fs-sm); color: var(--human); padding: 4px 8px; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--human) 8%, transparent); }
 #thread-head .info .muted { font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#thread { list-style: none; margin: 0; padding: 32px; flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 20px; }
+#thread { list-style: none; margin: 0; padding: 32px var(--gutter); flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 20px; }
 .msg { display: flex; gap: 12px; max-width: 760px; width: 100%; }
 .msg .content { min-width: 0; flex: 1; }
 .msg .who { font-size: var(--fs-sm); color: var(--muted); margin-bottom: 4px; display: flex; gap: 8px; align-items: baseline; }
@@ -497,7 +499,7 @@ button.link:hover { background: none; text-decoration: underline; }
 .msg .body.md { white-space: normal; }
 .msg.user .md code { background: var(--bg); }  /* 人的气泡本身是 --surface-3，代码块换深一层才看得出来 */
 
-.composer { padding: 0 32px 24px; }
+.composer { padding: 0 var(--gutter) 24px; }
 #msg-form { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--surface); transition: border-color .15s, box-shadow .15s; }
 #msg-form:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-soft); }
 #msg-form[hidden] { display: none; }
@@ -545,6 +547,16 @@ button.link:hover { background: none; text-decoration: underline; }
 .drop-overlay span { font-size: var(--fs-sm); color: var(--muted); }
 kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(--radius-xs); border: 1px solid var(--border-strong); color: var(--text-2); }
 
+/* 矮屏（如 1280×720）：竖向留白收紧，对话标签里多出两三条消息的位置。所有页面一起收，切标签时页头不跳 */
+@media (max-height: 800px) and (min-width: 981px) {
+  .pane { padding-top: 20px; padding-bottom: 20px; gap: 16px; }
+  #thread-head { padding-top: 12px; padding-bottom: 12px; min-height: 0; }
+  #thread { padding-top: 20px; padding-bottom: 20px; }
+  .composer { padding-bottom: 16px; }
+  #project-page.chat-on .composer { padding-bottom: 16px; }
+  #msg-form { padding: 8px 12px; gap: 4px; }
+  #msg-form textarea { height: calc(3em + 8px); }  /* 两行：输入框原来是三行 */
+}
 @media (max-width: 1280px) {
 }
 
@@ -644,7 +656,7 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
 /* ---------- 群组档案 ---------- */
 .archive-sec { margin-bottom: 20px; }
 .archive-sec h3 { margin-bottom: 8px; }
-.archive-sec textarea, .archive-sec input, .archive-sec select { width: 100%; }
+.archive-sec textarea, .archive-sec input:where(:not([type="checkbox"], [type="radio"])), .archive-sec select { width: 100%; }  /* 勾选框保持原尺寸；:where 不加权重，具体表单里的宽度规则照样生效 */
 .archive-sec .bar { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
 .archive-sec form.stack { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .archive-sec form.stack button { align-self: flex-end; }
@@ -936,7 +948,7 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .rel-sub { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin: 0 0 16px; background: var(--surface); }
 .rel-sub h3 { margin-top: 0; }
 .rel-agents { display: flex; flex-wrap: wrap; gap: 6px 20px; }
-.rel-agents label, .rel-form label.check, .rel-form fieldset label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-md); cursor: pointer; }
+.rel-agents label, .rel-form fieldset:not(.checks) label { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-md); cursor: pointer; }
 .rel-view .sandbox { margin-top: 0; }
 .rel-skills { list-style: none; padding: 0; margin: 0 0 12px; display: grid; gap: 8px; }
 .rel-skills li { display: flex; gap: 12px; align-items: flex-start; }
@@ -945,8 +957,9 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .rel-fb textarea { flex: 1; }
 .rel-form { display: grid; gap: 12px; max-width: 640px; margin-top: 12px; }
 .rel-form > label:not(.check) { display: grid; gap: 4px; font-size: var(--fs-md); color: var(--text-2); }
-.rel-form fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; }
-.rel-form legend { font-size: var(--fs-md); color: var(--text-2); padding: 0 4px; }
+/* 列表框（.checks）不吃这几条：发布为蓝图里的“带上 / 技能 / 插件 / 模板文件 / 岗位”和别处的列表框一个样子 */
+.rel-form fieldset:not(.checks) { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; }
+.rel-form fieldset:not(.checks) legend { font-size: var(--fs-md); color: var(--text-2); padding: 0 4px; }
 .rel-form .seg { display: flex; gap: 20px; }
 @media (max-width: 640px) { .rel-facts { grid-template-columns: 1fr; } .rel-fb { flex-direction: column; align-items: stretch; } }
 #release-page { gap: 12px; }
@@ -958,7 +971,7 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .sandbox.embed { border-style: solid; border-color: var(--border); }
 
 /* 蓝图（docs/blueprints.md） */
-.bp-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); gap: 24px; max-width: 1200px; align-items: start; }
+.bp-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); gap: 24px; align-items: start; }
 @media (max-width: 960px) { .bp-grid { grid-template-columns: 1fr; } }
 .bp-readme { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; }
 ul.bp-checks, ul.bp-steps, ul.bp-role-list { list-style: none; margin: 0; padding: 0; font-size: var(--fs-md); }
@@ -968,18 +981,35 @@ ul.bp-role-list li { display: block; }
 .bp-use { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 16px; display: grid; gap: 8px; }
 .bp-use h3 { margin-top: 0; }
 .bp-use h4 { margin: 8px 0 0; font-size: var(--fs-md); }
-.bp-roles td { white-space: normal; vertical-align: top; }
-.bp-roles select, .bp-roles input { width: 100%; margin-top: 2px; }
+/* 蓝图“岗位由谁担任”：和上面“要哪些”同一种列表框，一个岗位一行 */
+.bp-roles { margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.bp-roles legend { float: left; width: 100%; margin: 0; padding: 8px 12px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-2);
+  background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.bp-role { clear: both; display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-top: 1px solid var(--border); }
+.bp-roles legend + .bp-role { border-top: 0; }
+.bp-role > input[type="checkbox"] { margin-top: 2px; }
+.bp-role-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.bp-role-name { font-weight: 600; font-size: var(--fs-md); cursor: pointer; }
+.bp-role-body p { margin: 0; }
+.bp-role-auth { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.bp-role-auth .tag { margin: 0; font-family: var(--font-mono); }
+.bp-role-who { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+.bp-role-who select { flex: 1 1 160px; width: auto; min-width: 0; }  /* 选项里的 Agent 名字长也不撑宽 */
+.bp-role-who input { flex: 1 1 120px; width: auto; min-width: 0; }
 .bp-banner { background: var(--plugin-soft); border: 1px solid color-mix(in srgb, var(--plugin) 30%, transparent); border-radius: var(--radius);
   padding: 12px 16px; margin-bottom: 12px; display: grid; gap: 6px; font-size: var(--fs-md); }
 ul.bp-steps li { padding: 2px 0; }
 ul.bp-steps .done { text-decoration: line-through; color: var(--muted); }
 .roles-form { display: grid; gap: 8px; }
-.role-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border: 0; padding: 0; margin: 0; }
+.role-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 0; padding: 12px 0 0; margin: 0; border-top: 1px solid var(--border); }
+.role-row:first-child { border-top: 0; padding-top: 0; }
+.checks .role-row { padding: 8px 12px; }  /* 列表框里的一行：和勾选行一样的内边距 */
+.checks legend + .role-row { border-top: 0; }
+.checks .role-row label.check { padding: 0; border: 0; }
 .role-row input[name="key"], .role-row input[name^="role-key"] { width: 110px; }
 .role-row input[name="name"], .role-row input[name^="role-name"] { width: 120px; }
 .role-row input[name="description"] { flex: 1; min-width: 160px; }
-.role-members { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-md); }
+.role-members { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--fs-md); }  /* 谁担任：单独一行，在名称、职责下面 */
 form.plugin-settings { display: grid; gap: 8px; max-width: 520px; font-size: var(--fs-md); }
 .bp-publish { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; margin-bottom: 16px; }
 .bp-publish h3 { margin-top: 0; }

@@ -1960,10 +1960,17 @@ async function renderBlueprintPage(force = false) {
   const m = b.manifest, mine = (S.snap?.agents || []).filter((a) => a.mine);
   const target = proj(S.bpTarget?.[bid] || "");
   const pool = [...mine, ...(target ? target.member_ids.filter((x) => !mine.some((a) => a.id === x)).map((x) => ({ id: x, name: aname(x) })) : [])];
-  const roleRow = (r) => `<tr><td><label class="check"><input type="checkbox" name="part-roles" value="${esc(r.key)}" checked><b>${esc(r.name)}</b></label><div class="muted small">${esc(r.description || "")}</div></td>
-    <td>${(r.authority || []).map((x) => `<code>${esc(x)}</code>`).join(" ") || '<span class="muted">无</span>'}</td>
-    <td><select name="role-${esc(r.key)}" data-role="${esc(r.key)}">${target?.roles?.[r.key] ? '<option value="keep">沿用项目里已有的</option>' : ""}<option value="">新建 Agent</option>${pool.map((a) => `<option value="${esc(a.id)}">用「${esc(a.name)}」</option>`).join("")}</select>
-      <input name="rname-${esc(r.key)}" value="${esc(r.name)}" maxlength="40" aria-label="新 Agent 的名字"></td></tr>`;
+  // 一个岗位一行：勾选 + 名字、说明、建议权限，下面是谁来（选已有的 Agent，或新建并起名）。原来是三列表格，挤在右栏里会错位
+  const roleRow = (r) => `<div class="bp-role">
+      <input type="checkbox" id="pr-${esc(r.key)}" name="part-roles" value="${esc(r.key)}" checked>
+      <div class="bp-role-body">
+        <label for="pr-${esc(r.key)}" class="bp-role-name">${esc(r.name)}</label>
+        ${r.description ? `<p class="muted small">${esc(r.description)}</p>` : ""}
+        <p class="bp-role-auth"><span class="muted small">建议权限</span>${(r.authority || []).map((x) => `<span class="tag">${esc(x)}</span>`).join("") || '<span class="muted small">无</span>'}</p>
+        <div class="bp-role-who"><label class="sr-only" for="role-${esc(r.key)}">谁来担任${esc(r.name)}</label>
+          <select id="role-${esc(r.key)}" name="role-${esc(r.key)}" data-role="${esc(r.key)}">${target?.roles?.[r.key] ? '<option value="keep">沿用项目里已有的</option>' : ""}<option value="">新建 Agent</option>${pool.map((a) => `<option value="${esc(a.id)}">用「${esc(a.name)}」</option>`).join("")}</select>
+          <input name="rname-${esc(r.key)}" value="${esc(r.name)}" maxlength="40" aria-label="新 Agent 的名字"></div>
+      </div></div>`;
   const active = b.status === "active";
   page.innerHTML = `<nav class="crumbs" aria-label="位置"><a href="#blueprints">蓝图</a><span aria-hidden="true">/</span><span class="here">${esc(b.title)}</span>
       <span class="pill">${esc(b.version)}</span>${active ? "" : '<span class="pill bad">已撤回</span>'}<span class="grow"></span>
@@ -1998,8 +2005,7 @@ async function renderBlueprintPage(force = false) {
           ${(m.files || []).map((x) => `<label class="check"><input type="checkbox" name="part-files" value="${esc(x)}" checked>文件 ${esc(x.replace(/^files\//, ""))}</label>`).join("")}
           ${(m.connectors || []).map((c) => `<label class="check"><input type="checkbox" name="part-connectors" value="${esc(c.slot)}" checked>连接器 ${esc(c.connector)}</label>`).join("")}
         </fieldset>
-        <h4>岗位由谁担任</h4>
-        <div class="table-wrap"><table class="bp-roles"><thead><tr><th>岗位</th><th>建议权限</th><th>谁来</th></tr></thead><tbody>${m.roles.map(roleRow).join("")}</tbody></table></div>
+        ${m.roles.length ? `<fieldset class="bp-roles"><legend>岗位由谁担任</legend>${m.roles.map(roleRow).join("")}</fieldset>` : ""}
         <p class="muted small">新建的 Agent 归你、用你的模型；下一步会列出要装的插件、要连的系统和人在哪里介入，确认后一次建好。</p>
         <p class="error" role="alert">${esc(b.problems.join("；"))}</p>
         <div class="actions"><button type="submit" ${b.problems.length ? "disabled" : ""}>下一步</button></div>
