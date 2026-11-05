@@ -3,7 +3,7 @@
 body.admin { display: block; overflow: auto; height: auto; min-height: 100%; }
 .admin-top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; padding: 12px 32px;
   background: var(--glass); backdrop-filter: blur(8px); border-bottom: 1px solid var(--border); }
-.admin-top .brand { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); text-decoration: none; }
+.admin-top .brand { padding: 0; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); text-decoration: none; }
 .admin-title { color: var(--text-2); padding-left: 12px; border-left: 1px solid var(--border-strong); }
 .admin-top .grow { flex: 1; }
 .admin-top a.back, .admin-denied a { color: var(--accent); text-decoration: none; font-size: var(--fs-md); }
