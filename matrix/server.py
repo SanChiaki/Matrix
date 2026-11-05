@@ -549,7 +549,7 @@ async def skill_package(request: Request) -> list[tuple[str, bytes]]:
 
 
 async def plugin_package(request: Request, limit: int | None = None) -> list[tuple[str, bytes]]:
-    """插件包（蓝图同样）：请求体是 zip，或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
+    """插件包（模板同样）：请求体是 zip，或上传文件夹时的 JSON `{files: [{path, data(base64)}]}`。"""
     import base64
     from .models import PLUGIN_FILES, PLUGIN_LIMIT
     from .plugins import PluginError, unzip
@@ -1025,7 +1025,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def admin_decide_submission(sid: str, body: DecideIn, user: Me) -> dict:
         return network.admin_decide_submission(user.id, sid, body.approve, body.note)
 
-    # ---- 岗位、插件设置与蓝图（docs/blueprints.md） ----
+    # ---- 角色、插件设置与模板（docs/blueprints.md） ----
     @app.put("/api/projects/{project_id}/roles")
     def set_roles(project_id: str, body: RolesIn, user: Me) -> dict:
         return network.project_view(network.set_project_roles(project_id, body.roles, actor=user.id), user.id)

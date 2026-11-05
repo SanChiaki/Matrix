@@ -100,7 +100,7 @@ class Trigger:
 
 @dataclass(frozen=True)
 class Setting:
-    """安装时主持人填的一项设置（docs/blueprints.md 第 9 节）。role：项目里的一个岗位；member：一个成员；text / select：文本。
+    """安装时主持人填的一项设置（docs/blueprints.md 第 9 节）。role：项目里的一个角色；member：一个成员；text / select：文本。
     触发与 after 的 notify.to 可以写 {setting:<key>}（role / member 类），发消息时解析成当时的成员。"""
     key: str
     label: str

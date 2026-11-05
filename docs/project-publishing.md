@@ -4,7 +4,7 @@
 > 插件见 [project-plugins.md](project-plugins.md)，不变量见 [reference/invariants.md](reference/invariants.md)。
 > 调研：research: project-publishing#three-faces 及文中各处引用。
 
-> 2026-10-31：技能包并进**蓝图**（用蓝图时只勾技能、装进自己的项目；不再订阅，旧的技能包启动时转成蓝图），交付件改叫**对外页面**，“发布物”入口并进“项目”。见 [blueprints.md](blueprints.md) 第 7、17 节。下文保留原设计。
+> 2026-10-31：技能包并进**模板**（用模板时只勾技能、装进自己的项目；不再订阅，旧的技能包启动时转成模板），交付件改叫**对外页面**，“发布物”入口并进“项目”。见 [blueprints.md](blueprints.md) 第 7、17 节。下文保留原设计。
 
 ## 1. 要解决什么
 

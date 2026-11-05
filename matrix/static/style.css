@@ -957,7 +957,7 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .rel-fb textarea { flex: 1; }
 .rel-form { display: grid; gap: 12px; max-width: 640px; margin-top: 12px; }
 .rel-form > label:not(.check) { display: grid; gap: 4px; font-size: var(--fs-md); color: var(--text-2); }
-/* 列表框（.checks）不吃这几条：发布为蓝图里的“带上 / 技能 / 插件 / 模板文件 / 岗位”和别处的列表框一个样子 */
+/* 列表框（.checks）不吃这几条：发布为模板时的“带上 / 技能 / 插件 / 模板文件 / 角色”和别处的列表框一个样子 */
 .rel-form fieldset:not(.checks) { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 0; }
 .rel-form fieldset:not(.checks) legend { font-size: var(--fs-md); color: var(--text-2); padding: 0 4px; }
 .rel-form .seg { display: flex; gap: 20px; }
@@ -970,7 +970,7 @@ pre.mcp-config { margin: 8px 0 6px; max-height: 260px; }
 .embed-tab svg { width: 13px; height: 13px; margin-right: 4px; vertical-align: -2px; }
 .sandbox.embed { border-style: solid; border-color: var(--border); }
 
-/* 蓝图（docs/blueprints.md） */
+/* 模板（docs/blueprints.md） */
 .bp-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 1fr); gap: 24px; align-items: start; }
 @media (max-width: 960px) { .bp-grid { grid-template-columns: 1fr; } }
 .bp-readme { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px; }
@@ -981,7 +981,7 @@ ul.bp-role-list li { display: block; }
 .bp-use { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 16px; display: grid; gap: 8px; }
 .bp-use h3 { margin-top: 0; }
 .bp-use h4 { margin: 8px 0 0; font-size: var(--fs-md); }
-/* 蓝图“岗位由谁担任”：和上面“要哪些”同一种列表框，一个岗位一行 */
+/* 模板“角色由谁担任”：和上面“要哪些”同一种列表框，一个角色一行 */
 .bp-roles { margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .bp-roles legend { float: left; width: 100%; margin: 0; padding: 8px 12px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-2);
   background: var(--surface-2); border-bottom: 1px solid var(--border); }

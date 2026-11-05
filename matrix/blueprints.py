@@ -1,11 +1,11 @@
-"""蓝图（docs/blueprints.md）：项目去掉数据、人和凭证之后的配方。本模块只做格式、占位符、可移植检查与存储；
-发布、建项目、可见性在 engine「蓝图」一节。
+"""模板（docs/blueprints.md）：项目去掉数据、人和凭证之后的配方。本模块只做格式、占位符、可移植检查与存储；
+发布、建项目、可见性在 engine「模板」一节。
 
-一个蓝图是一个目录（上传、导出时打成 zip）::
+一个模板是一个目录（上传、导出时打成 zip）::
 
     blueprint.json          清单
     README.md               给人看的说明
-    brief.md                纲要模板
+    brief.md                纲要
     skills/<名字>/SKILL.md   项目技能
     files/...               模板文件（建项目时放进项目档案）
     plugins/<名字>/...       打包进来的插件包
@@ -34,7 +34,7 @@ BRIEF = "brief.md"
 SKILLS = "skills"
 FILES = "files"
 PLUGINS = "plugins"
-LIMIT = 10_000_000               # 一个蓝图包最大字节数（含打包的插件）
+LIMIT = 10_000_000               # 一个模板包最大字节数（含打包的插件）
 FILES_MAX = 1000
 ROLES_MAX = 20
 KEEP_VERSIONS = 3
@@ -155,7 +155,7 @@ def parse(data: Any) -> Blueprint:
     try:
         name = skillfs.check_name(str(data.get("name") or ""))
     except skillfs.SkillError as e:
-        raise BlueprintError(str(e).replace("技能名", "蓝图名")) from e
+        raise BlueprintError(str(e).replace("技能名", "模板名")) from e
     version = str(data.get("version") or "").strip()
     if not pluginfs.VERSION.match(version):
         raise BlueprintError(f"version 无效：{version!r}（如 1.0.0）")
@@ -174,14 +174,14 @@ def parse(data: Any) -> Blueprint:
             raise BlueprintError(f"roles[{i}] 必须是对象")
         k = _key(r.get("key"), f"roles[{i}].key")
         if any(x.key == k for x in roles):
-            raise BlueprintError(f"岗位 {k} 重复")
-        auth = tuple(dict.fromkeys(str(a) for a in _list(r.get("authority"), f"岗位 {k} 的 authority", 10)))
+            raise BlueprintError(f"角色 {k} 重复")
+        auth = tuple(dict.fromkeys(str(a) for a in _list(r.get("authority"), f"角色 {k} 的 authority", 10)))
         bad = [a for a in auth if a not in AUTHORITIES]
         if bad:
-            raise BlueprintError(f"岗位 {k} 的权限不认识：{'、'.join(bad)}")
-        roles.append(Role(k, _s(r.get("name") or k, f"岗位 {k} 的 name", 40),
-                          _s(r.get("description"), f"岗位 {k} 的 description", 1000, False),
-                          tuple(_s(c, f"岗位 {k} 的能力", 40) for c in _list(r.get("capabilities"), f"岗位 {k} 的 capabilities", 20)),
+            raise BlueprintError(f"角色 {k} 的权限不认识：{'、'.join(bad)}")
+        roles.append(Role(k, _s(r.get("name") or k, f"角色 {k} 的 name", 40),
+                          _s(r.get("description"), f"角色 {k} 的 description", 1000, False),
+                          tuple(_s(c, f"角色 {k} 的能力", 40) for c in _list(r.get("capabilities"), f"角色 {k} 的 capabilities", 20)),
                           auth, (str(r["model"]).strip()[:64] or None) if r.get("model") else None))
     role_keys = {r.key for r in roles}
     slots: list[Slot] = []
@@ -194,7 +194,7 @@ def parse(data: Any) -> Blueprint:
             raise BlueprintError(f"连接器槽位 {slot} 的 access 要是 {'/'.join(ACCESS)}")
         rs = tuple(str(x) for x in _list(c.get("roles"), f"连接器槽位 {slot} 的 roles", ROLES_MAX))
         if set(rs) - role_keys:
-            raise BlueprintError(f"连接器槽位 {slot} 引用了没有的岗位：{'、'.join(sorted(set(rs) - role_keys))}")
+            raise BlueprintError(f"连接器槽位 {slot} 引用了没有的角色：{'、'.join(sorted(set(rs) - role_keys))}")
         slots.append(Slot(slot, _s(c.get("connector"), f"连接器槽位 {slot} 的 connector", 80), access, rs,
                           _s(c.get("purpose"), f"连接器槽位 {slot} 的 purpose", 300, False)))
     plugins: list[PluginRef] = []
@@ -224,7 +224,7 @@ def parse(data: Any) -> Blueprint:
             raise BlueprintError(f"checkpoints[{i}].kind 要是 {'/'.join(CHECKPOINT_KINDS)}")
         role = str(c["role"]) if c.get("role") else None
         if role is not None and role not in role_keys:
-            raise BlueprintError(f"checkpoints[{i}] 引用了没有的岗位 {role}")
+            raise BlueprintError(f"checkpoints[{i}] 引用了没有的角色 {role}")
         checkpoints.append(Checkpoint(_s(c.get("at"), f"checkpoints[{i}].at", 40), kind,
                                       _s(c.get("note"), f"checkpoints[{i}].note", 300, False), role,
                                       str(c["plugin"]) if c.get("plugin") else None))
@@ -255,19 +255,19 @@ def text(files: dict[Path, bytes], rel: str) -> str:
 
 
 def check_package(files: dict[Path, bytes]) -> Blueprint:
-    """校验整个蓝图包：清单、技能、模板文件、打包的插件、占位符都对得上。"""
+    """校验整个模板包：清单、技能、模板文件、打包的插件、占位符都对得上。"""
     if len(files) > FILES_MAX or sum(len(b) for b in files.values()) > LIMIT:
-        raise BlueprintError(f"蓝图超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
+        raise BlueprintError(f"模板超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
     head = files.get(Path(MANIFEST))
     if head is None:
-        raise BlueprintError(f"蓝图里没有 {MANIFEST}")
+        raise BlueprintError(f"模板里没有 {MANIFEST}")
     try:
         bp = parse(json.loads(head.decode("utf-8")))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise BlueprintError(f"{MANIFEST} 不是合法的 UTF-8 JSON：{e}") from e
     for rel in files:
         if rel.parts[0] not in (MANIFEST, README, BRIEF, SKILLS, FILES, PLUGINS):
-            raise BlueprintError(f"蓝图里不认识的文件：{rel.as_posix()}（只能有 {MANIFEST}、{README}、{BRIEF}、{SKILLS}/、{FILES}/、{PLUGINS}/）")
+            raise BlueprintError(f"模板里不认识的文件：{rel.as_posix()}（只能有 {MANIFEST}、{README}、{BRIEF}、{SKILLS}/、{FILES}/、{PLUGINS}/）")
     for f in bp.files:
         if Path(f) not in files:
             raise BlueprintError(f"清单里的模板文件 {f} 不在包里")
@@ -301,7 +301,7 @@ def check_package(files: dict[Path, bytes]) -> Blueprint:
 
 
 def fill(s: str, params: dict[str, str], roles: dict[str, str]) -> str:
-    """占位符换成建项目时的值：{param:x} → 填的值，{role:x} → 担任这个岗位的成员名（多个用顿号）。"""
+    """占位符换成建项目时的值：{param:x} → 填的值，{role:x} → 担任这个角色的成员名（多个用顿号）。"""
     return PLACEHOLDER.sub(lambda m: (params if m.group(1) == "param" else roles).get(m.group(2), m.group(0)), s)
 
 
@@ -323,7 +323,7 @@ FACT_PATTERNS = (
 
 
 def portability(files: dict[Path, bytes], names: list[str], project_files: list[str]) -> list[str]:
-    """蓝图里像是写死了人、引用了没带上的文件、带了项目事实的地方。只提示，主持人确认后照样能发布。"""
+    """模板里像是写死了人、引用了没带上的文件、带了项目事实的地方。只提示，主持人确认后照样能发布。"""
     out: list[str] = []
     included = {rel.as_posix()[len(FILES) + 1:] for rel in files if rel.parts[0] == FILES}
     for rel, b in sorted(files.items(), key=lambda x: x[0].as_posix()):
@@ -333,27 +333,27 @@ def portability(files: dict[Path, bytes], names: list[str], project_files: list[
         where = rel.as_posix()
         hit = sorted({n for n in names if n and n in s})
         if hit:
-            out.append(f"{where} 里还写着成员名「{'、'.join(hit)}」：要换成岗位就写 {{role:岗位标识}}")
+            out.append(f"{where} 里还写着成员名「{'、'.join(hit)}」：要换成角色就写 {{role:角色标识}}")
         missing = sorted({f for f in re.findall(r"project/([^\s)`'\"]+)", s) if f in project_files and f not in included})
         if missing:
             out.append(f"{where} 引用了没带上的项目文件：{'、'.join(missing)}")
         for pat, what in FACT_PATTERNS:
             m = pat.search(s)
             if m:
-                out.append(f"{where} 里有像是项目事实的{what}「{m.group(0)}」：蓝图不带数据，确认这是方法不是事实")
+                out.append(f"{where} 里有像是项目事实的{what}「{m.group(0)}」：模板不带数据，确认这是方法不是事实")
                 break
     return out
 
 
 def dir_files(src: Path) -> dict[Path, bytes]:
-    """一个蓝图目录读成 {相对路径: 内容}（不跟符号链接，跳过点开头的）。"""
+    """一个模板目录读成 {相对路径: 内容}（不跟符号链接，跳过点开头的）。"""
     out: dict[Path, bytes] = {}
     for f in sorted(src.rglob("*")):
         rel = f.relative_to(src)
         if f.is_file() and not f.is_symlink() and not any(x.startswith(".") or x == "__pycache__" for x in rel.parts):
             out[rel] = f.read_bytes()
             if len(out) > FILES_MAX or sum(len(b) for b in out.values()) > LIMIT:
-                raise BlueprintError(f"蓝图超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
+                raise BlueprintError(f"模板超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
     return out
 
 
@@ -363,7 +363,7 @@ def package_files(entries: list[tuple[str, bytes]]) -> dict[Path, bytes]:
     entries = [(p, b) for p, b in entries if not any(x in ("__MACOSX", ".DS_Store", "__pycache__") for x in p.split("/"))]
     heads = [p.split("/") for p, _ in entries if p.split("/")[-1] == MANIFEST]
     if not heads:
-        raise BlueprintError(f"蓝图里没有 {MANIFEST}")
+        raise BlueprintError(f"模板里没有 {MANIFEST}")
     prefix = min(heads, key=len)[:-1]
     if len(prefix) > 1:
         raise BlueprintError(f"{MANIFEST} 要在根目录（或唯一的顶层文件夹）里")
@@ -371,20 +371,20 @@ def package_files(entries: list[tuple[str, bytes]]) -> dict[Path, bytes]:
     for p, b in entries:
         parts = p.split("/")
         if parts[:len(prefix)] != prefix:
-            raise BlueprintError("包里只能有一个蓝图")
+            raise BlueprintError("包里只能有一个模板")
         rel = safe_rel("/".join(parts[len(prefix):]))
         if rel is None or any(x.startswith(".") for x in rel.parts):
             raise BlueprintError(f"非法的文件名：{p!r}")
         out[rel] = b
     if len(out) > FILES_MAX or sum(len(b) for b in out.values()) > LIMIT:
-        raise BlueprintError(f"蓝图超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
+        raise BlueprintError(f"模板超过 {LIMIT // 1_000_000} MB 或 {FILES_MAX} 个文件")
     return out
 
 
 # ================= 存储 =================
 @dataclass
 class BlueprintStore:
-    """`<data>/blueprints/<id>/meta.json` + `v<N>/`（一份蓝图的每个版本，保留最近 3 个）。
+    """`<data>/blueprints/<id>/meta.json` + `v<N>/`（一份模板的每个版本，保留最近 3 个）。
 
     meta：id、name、title、description、version（清单里的）、rev（第几版）、source（project | catalog）、project_id、
     readers（用户 id）、public、published_by、published_at、status（active | withdrawn）、uses、sha256。"""
