@@ -1,4 +1,6 @@
 """端侧连接器令牌与 /api/devices/connect（docs/device-runtimes.md 第 2 节）。"""
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -85,6 +87,14 @@ def test_connect_without_valid_token_is_refused(tmp_path):
     assert net._runtimes == {}
 
 
+def _until(cond, timeout=5.0):
+    """服务端在自己的线程里处理握手、注册和注销，处理完不回消息：轮询到成立为止（慢的 CI 机器上要一会儿）。"""
+    end = time.monotonic() + timeout
+    while not cond() and time.monotonic() < end:
+        time.sleep(0.01)
+    return cond()
+
+
 def test_connect_registers_the_runtime(tmp_path):
     net = build(tmp_path)
     c = client(net, "alice@x.io")
@@ -93,11 +103,11 @@ def test_connect_registers_the_runtime(tmp_path):
         assert ws.receive_json()["type"] == HELLO
         ws.send_json(hello())
         dev = auth.device_of(net.store, token)
+        assert _until(lambda: dev.id in net._runtimes)
         assert net.runtime_for(_agent_for(net, "alice@x.io")) is None  # 还没绑定到 Agent
-        assert dev.id in net._runtimes
         rt = net._runtimes[dev.id]
         assert rt.capabilities().placement == "device" and rt.capabilities().enforces("web.research")
-    assert net._runtimes == {}  # 断开后注销
+    assert _until(lambda: net._runtimes == {})  # 断开后注销
 
 
 def test_connect_rejects_bad_handshake(tmp_path):
@@ -149,7 +159,6 @@ def test_agent_binds_only_to_own_device(tmp_path):
 def test_connected_device_can_use_network_tools_events_and_approvals(tmp_path):
     """真实 /api/devices/connect：连接器发来的工具调用、过程事件、审批申请都要交给这一轮的执行上下文处理
     （不变量 10：身份按执行上下文认定）。审批等人决定期间，同一条连接上的其他消息照常处理。"""
-    import time
     net = build(tmp_path)
     alice = next(u.id for u in net.store.users.values() if u.email == "alice@x.io")
     c = client(net, "alice@x.io")
@@ -158,10 +167,7 @@ def test_connected_device_can_use_network_tools_events_and_approvals(tmp_path):
         ws.receive_json()
         ws.send_json(hello())
         dev = auth.device_of(net.store, token)
-        for _ in range(100):
-            if dev.id in net._runtimes:
-                break
-            time.sleep(0.01)
+        assert _until(lambda: dev.id in net._runtimes)
         a = net.create_agent("L", "端侧", [], ["web.research"], actor=alice, device_runtime=dev.id)
         dm = net.direct_chat(a.id, actor=alice)
         net.send_message(dm.id, "整理一份周报", actor=alice)  # 后台运行：run.request 发到这条连接上
@@ -175,12 +181,9 @@ def test_connected_device_can_use_network_tools_events_and_approvals(tmp_path):
         reply = ws.receive_json()  # 审批还没决定，工具回执先到
         assert reply["reply_to"] == "c1" and reply["is_error"] is False, reply
         assert any(r.title == "周报" for r in net.store.requests.values())
-        for _ in range(100):
-            pending = [ap for ap in net.store.approvals.values() if ap.status == "pending"]
-            if pending:
-                break
-            time.sleep(0.01)
-        net.decide_approval(pending[0].id, False, actor=alice)
+        pending = lambda: [ap for ap in net.store.approvals.values() if ap.status == "pending"]  # noqa: E731
+        assert _until(pending)
+        net.decide_approval(pending()[0].id, False, actor=alice)
         assert ws.receive_json() == {"reply_to": "a1", "outcome": "rejected"}
         ws.send_json({"type": "tool.call", "run_id": "run-nope", "call_id": "c2", "name": "open_request", "args": {}})
         assert ws.receive_json()["is_error"] is True  # 不是这台设备上正在跑的一轮：拒绝
