@@ -56,7 +56,7 @@ from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
-from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
+from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
 from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
@@ -1175,7 +1175,7 @@ class Network:
                           skills=[{"name": n, "from": src, "by": chosen[n][0]} for n, src in shadowed])
         return chosen
 
-    def _skill_materials(self, chosen: dict[str, tuple[str, Path]]) -> list[dict[str, Any]]:
+    def _skill_materials(self, chosen: dict[str, tuple[str, Path]]) -> list[Material]:
         """端侧：技能随材料下发（skills/<名字>/...），合计不超过 SKILLS_TOTAL，超了的整个跳过。"""
         out, total = [], 0
         for name, (_, src) in chosen.items():
@@ -1184,8 +1184,7 @@ class Network:
             if total + size > SKILLS_TOTAL:
                 continue
             total += size
-            out += [{"path": f"{SKILLS}/{name}/{f.relative_to(src).as_posix()}",
-                     "data": base64.b64encode(f.read_bytes()).decode()} for f in files]
+            out += [material_file(f"{SKILLS}/{name}/{f.relative_to(src).as_posix()}", f) for f in files]
         return out
 
     # ---- 我的连接器 ----
@@ -5202,7 +5201,7 @@ class Network:
             abilities_key = f"{abilities_key}+{sub_key}"
         if abilities_key != holder.abilities_seen:  # 本轮可用的连接器 / 技能变了才说一次
             prompt = f"{prompt}\n\n{note}" if note else prompt
-        skill_files: list[dict[str, Any]] = []
+        skill_files: list[Material] = []
         if agent.device_runtime:  # 工作目录在用户电脑上：项目文件随 run.request 下发，服务器这边不挂载
             if mount_home:
                 home = "rw" if "file.write" in ctx.authority else "ro"
@@ -5532,26 +5531,27 @@ class Network:
                 out.append(item)
         return out
 
-    def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
-        """端侧运行时每轮要收到的只读材料（base64）：项目档案文件、对话附件、订阅的交付件（运行时当只读副本用）。
-        私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
-        out: list[tuple[str, Path]] = []
+    def _materials(self, ctx: ExecContext) -> list[Material]:
+        """端侧运行时每轮要收到的只读材料：项目档案文件、对话附件、订阅的交付件、插件挂载（运行时当只读副本用）。
+        这里只列清单（路径、sha256、大小），内容留在服务器上：支持缓存的连接器缺哪份才来取（material.fetch），
+        旧连接器由 DeviceRuntime 整份内联下发。私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
+        out: list[Material] = []
         p = self.store.projects.get(ctx.project_id or "")
         if p is not None:
-            out += [(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
+            out += [material_file(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
                     if f.is_file() and f.stat().st_size <= 2_000_000]
         src = self.store.attachment_dir(ctx.conversation_id)
-        out += [(attachment_rel(a), src / a["sha"]) for a in self._attachments_for(ctx) if (src / a["sha"]).is_file()]
+        out += [material_file(attachment_rel(a), src / a["sha"], sha=a["sha"]) for a in self._attachments_for(ctx)
+                if (src / a["sha"]).is_file()]  # 附件按内容寻址：文件名就是 sha，不用再算
         agent = self.store.agents.get(ctx.agent_id)
         if agent is not None:  # 订阅的交付件（不变量 23）：和云侧一样只在能到达的人都是读者时下发
-            out += self._release_materials(ctx, agent)
-        return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out] + \
-            [{"path": rel, "data": base64.b64encode(data).decode()} for rel, data in ctx.plugin_files]  # 插件的 mount 挂点
+            out += [material_file(rel, f) for rel, f in self._release_materials(ctx, agent)]
+        return out + [material_bytes(rel, data) for rel, data in ctx.plugin_files]  # 插件的 mount 挂点
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float | None, on_session: Any = None, home: str | None = None,
                 cancel: threading.Event | None = None, conns: list[Connection] | None = None,
-                skill_files: list[dict[str, Any]] | None = None) -> RunResult:
+                skill_files: list[Material] | None = None) -> RunResult:
         token = secrets.token_urlsafe(18)
         conns = conns or []
         ctx.connections = [c.id for c in conns]

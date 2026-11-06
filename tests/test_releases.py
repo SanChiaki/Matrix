@@ -164,7 +164,7 @@ def test_device_materials_include_reachable_facts(tmp_path: Path):
     ctx = ExecContext(kind="seat", id=f"{dm.id}/{me.id}", agent_id=me.id, conversation_id=dm.id, project_id=None,
                       authority=[], constraints=[], depth=0, chain=[me.id])
     with net._lock:
-        paths = [m["path"] for m in net._materials(ctx)]
+        paths = [m.path for m in net._materials(ctx)]
     assert f"{RELEASES}/weekly/weekly.json" in paths
 
 
