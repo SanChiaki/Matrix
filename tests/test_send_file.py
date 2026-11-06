@@ -52,7 +52,7 @@ def test_directory_is_zipped_and_paths_are_checked(tmp_path: Path):
 
     def handler(call: ScriptCall) -> str:
         (call.cwd / "charts").mkdir(exist_ok=True)
-        (call.cwd / "charts" / "a.csv").write_text("x,y\n1,2", encoding="utf-8")
+        (call.cwd / "charts" / "a.csv").write_bytes(b"x,y\n1,2")  # 按字节写：Windows 上 write_text 会改换行符
         out["dir"] = call.tool("send_file", path="charts")
         for bad in ("agent-home/notes.md", "project/brief.md", "skills/x/SKILL.md", "../outside.txt", "nope.txt"):
             out[bad] = call.tool("send_file", path=bad)
