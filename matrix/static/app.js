@@ -2419,7 +2419,6 @@ function renderProjectGuest(box, g) {
 }
 
 // ================= 对话 =================
-const plain = (s) => String(s || "").replace(/[#*_`>|~]+/g, "").replace(/\s+/g, " ").trim();
 
 function renderConvList() {
   // 参照 Raft 的侧栏：群聊（每个项目一个）和私聊（每个可私聊的 Agent 一个），点进去就能聊。
@@ -2429,10 +2428,10 @@ function renderConvList() {
   const dot = (c) => !c ? "" : c.status === "thinking" ? '<span class="dot-live" title="运行中"></span>'
     : c.status === "waiting" ? '<span class="dot-live waiting" title="等委托回报"></span>'
     : c.blocked ? '<span class="dot-live blocked" title="有成员上一轮中断"></span>' : "";
-  const item = (href, sel, icon, name, sub, c, cls = "") => `<li class="${sel ? "selected" : ""} ${cls}"><a href="#${esc(href)}"${sel ? ' aria-current="page"' : ""}>
+  // 每个对话只占一行：名字 + 状态点 / 待审核（不再显示最后一条消息，省出垂直空间）
+  const item = (href, sel, icon, name, c, cls = "") => `<li class="${sel ? "selected" : ""} ${cls}"><a href="#${esc(href)}" title="${esc(name)}"${sel ? ' aria-current="page"' : ""}>
       ${icon}<span class="c-body"><span class="t"><span class="n">${esc(name)}</span>${dot(c)}
-        ${c && pending.has(c.id) ? '<span class="pill pending" title="有待审核的 Agent 提议">待审核</span>' : ""}</span>
-        <span class="s">${esc(sub)}</span></span></a></li>`;
+        ${c && pending.has(c.id) ? '<span class="pill pending" title="有待审核的 Agent 提议">待审核</span>' : ""}</span></span></a></li>`;
   const opened = (c) => chatShown() && S.convId === c?.id;
 
   const home = homeConv();
@@ -2443,30 +2442,26 @@ function renderConvList() {
   $("#home-dot").innerHTML = dot(home);
   $("#project-chat-list").innerHTML = S.snap.projects.map((g) => {
     const c = live.find((x) => x.kind === "project" && x.project_id === g.id);
-    const icon = `<span class="avatar sm group" aria-hidden="true" style="background:${gcolor(g.id)}">#</span>`;
     // 自己在这个项目里的会话挂在项目下面（只有自己看得到）；发第一条消息之前不列出，打开着时项目这一行保持选中
     const sess = live.filter((x) => x.kind === "session" && x.project_id === g.id);
     const mine = sess.filter((x) => x.message_count).sort((a, b) => b.updated_at - a.updated_at);
     const blank = sess.some((x) => !x.message_count && opened(x));
-    return item(c ? c.id : `p-${g.id}`, opened(c) || blank, icon, g.name,
-      plain(c?.last_message) || `${g.member_ids.length} 名成员`, c)
-      + mine.map((x) => item(x.id, opened(x), '<span class="avatar sm session" aria-hidden="true">›</span>', x.title,
-        plain(x.last_message) || "还没有消息", x, "nested")).join("");
+    // 侧栏里项目和项目会话不带头像（省出宽度）；私聊仍带 Agent 头像，认人
+    return item(c ? c.id : `p-${g.id}`, opened(c) || blank, "", g.name, c)
+      + mine.map((x) => item(x.id, opened(x), "", x.title, x, "nested")).join("");
   }).join("") || '<li class="empty">还没有项目</li>';
 
   // 只列出聊过的私聊（以及当前打开的那个）；要和新的 Agent 私聊，在 Agent 卡片上点“对话”
   $("#dm-list").innerHTML = live.filter((c) => c.kind === "dm" && c !== home && (c.message_count || opened(c)))
     .sort((a, b) => b.updated_at - a.updated_at)
-    .map((c) => item(c.id, opened(c), avatar(aname(c.agent_id), "sm"), aname(c.agent_id),
-      plain(c.last_message) || "还没有消息", c)).join("")
+    .map((c) => item(c.id, opened(c), avatar(aname(c.agent_id), "sm"), aname(c.agent_id), c)).join("")
     || '<li class="empty">还没有私聊。在 Agent 卡片上点“对话”开始。</li>';
 
   const archived = convs.filter((c) => c.archived);
   $("#archived").hidden = !archived.length;
   const day = (ts) => new Date(ts * 1000).toLocaleDateString([], { month: "numeric", day: "numeric" });
   $("#archived-list").innerHTML = archived.sort((a, b) => b.updated_at - a.updated_at).map((c) => item(c.id, opened(c),
-    '<span class="avatar sm" aria-hidden="true">·</span>', `${c.title} · ${day(c.updated_at)}`,
-    plain(c.last_message) || "（空）", c)).join("");
+    "", `${c.title} · ${day(c.updated_at)}`, c)).join("");
   if (archived.some(opened)) $("#archived").open = true;
 }
 
@@ -2474,6 +2469,60 @@ function renderConvList() {
 const homeConv = () => S.snap?.conversations.find((c) => c.kind === "dm" && !c.archived && c.agent_id === S.me?.assistant_id);
 
 // 侧栏里的弹出菜单（“更多”、账号）：点按钮开关，点外面、按 Esc、焦点离开就关，上下键在项之间移动
+// 左侧栏宽度可拖动：拖右边缘的竖条，或聚焦后用左右键；双击恢复默认。宽度记在本机（localStorage）
+function setupRailResize() {
+  const MIN = 200, MAX = 420, DEF = 224, KEY = "rail-width";
+  const rail = $(".rail"), root = document.body;
+  const clamp = (w) => Math.round(Math.min(MAX, Math.max(MIN, w)));
+  const apply = (w, save = true) => {
+    w = clamp(w);
+    root.style.setProperty("--rail-w", `${w}px`);
+    bar.setAttribute("aria-valuenow", String(w));
+    if (save) try { localStorage.setItem(KEY, String(w)); } catch {}
+    return w;
+  };
+  const bar = Object.assign(document.createElement("div"), { className: "rail-resize", tabIndex: 0, title: "拖动调整侧栏宽度，双击恢复" });
+  bar.setAttribute("role", "separator");
+  bar.setAttribute("aria-orientation", "vertical");
+  bar.setAttribute("aria-label", "侧栏宽度");
+  bar.setAttribute("aria-valuemin", String(MIN));
+  bar.setAttribute("aria-valuemax", String(MAX));
+  rail.append(bar);
+  let saved = DEF;
+  try { saved = Number(localStorage.getItem(KEY)) || DEF; } catch {}
+  apply(saved, false);
+  bar.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    bar.setPointerCapture(e.pointerId);
+    const left = rail.getBoundingClientRect().left;
+    root.classList.add("resizing");
+    const move = (ev) => apply(ev.clientX - left, false);
+    const up = (ev) => {
+      apply(ev.clientX - left);
+      root.classList.remove("resizing");
+      bar.removeEventListener("pointermove", move);
+      bar.removeEventListener("pointerup", up);
+      bar.removeEventListener("pointercancel", up);
+    };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+    bar.addEventListener("pointercancel", up);
+  });
+  bar.addEventListener("dblclick", () => apply(DEF));
+  bar.addEventListener("keydown", (e) => {
+    const now = rail.getBoundingClientRect().width;
+    const step = e.shiftKey ? 40 : 16;
+    if (e.key === "ArrowLeft") apply(now - step);
+    else if (e.key === "ArrowRight") apply(now + step);
+    else if (e.key === "Home") apply(MIN);
+    else if (e.key === "End") apply(MAX);
+    else return;
+    e.preventDefault();
+  });
+}
+setupRailResize();
+
 function setupPopover(wrap, btn, menu, place, first = (items) => items[0]) {
   const items = () => [...menu.querySelectorAll("button, a[href]")].filter((x) => !x.hidden);
   const close = (focus) => {
