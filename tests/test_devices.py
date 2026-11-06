@@ -191,3 +191,34 @@ def test_connected_device_can_use_network_tools_events_and_approvals(tmp_path):
         net.wait_quiet()
     msg = net.store.conversations[dm.id].messages[-1]
     assert msg.text == "好的" and any(s.get("tool") == "Read" for s in msg.steps), msg.steps
+
+
+def test_materials_over_the_real_connection_are_a_manifest_plus_fetch(tmp_path):
+    """真实连接上：声明了 materials-cache 的连接器收到的是清单，内容按 sha 用 material.fetch 取；
+    清单以外的 sha 取不到（附件只给这一轮看得到它的席位）。"""
+    import base64
+    import hashlib
+    net = build(tmp_path)
+    alice = next(u.id for u in net.store.users.values() if u.email == "alice@x.io")
+    c = client(net, "alice@x.io")
+    token = c.post("/api/devices", json={"name": "笔记本"}).json()["token"]
+    with c.websocket_connect(f"/api/devices/connect?token={token}") as ws:
+        ws.receive_json()
+        ws.send_json({**hello(), "features": ["materials-cache"]})
+        dev = auth.device_of(net.store, token)
+        assert _until(lambda: dev.id in net._runtimes)
+        a = net.create_agent("L", "端侧", [], ["web.research"], actor=alice, device_runtime=dev.id)
+        dm = net.direct_chat(a.id, actor=alice)
+        att = net.upload_attachment(dm.id, "data.csv", b"x,y\n1,2\n", actor=alice)
+        net.send_message(dm.id, "看看", attachments=[att], actor=alice)
+        run = ws.receive_json()
+        assert "materials" not in run
+        assert run["manifest"] == [{"path": f"attachments/{att['sha'][:8]}/data.csv", "sha": att["sha"], "size": 8}]
+        ws.send_json({"type": "material.fetch", "run_id": run["run_id"], "call_id": "m1", "sha": att["sha"], "offset": 0})
+        got = ws.receive_json()
+        assert got["reply_to"] == "m1" and base64.b64decode(got["data"]) == b"x,y\n1,2\n" and got["total"] == 8
+        other = hashlib.sha256(b"not in this run").hexdigest()
+        ws.send_json({"type": "material.fetch", "run_id": run["run_id"], "call_id": "m2", "sha": other, "offset": 0})
+        assert ws.receive_json() == {"reply_to": "m2", "error": "这一轮没有这份材料"}
+        ws.send_json({"type": "run.result", "run_id": run["run_id"], "session_id": "s", "final_text": "看完了"})
+        net.wait_quiet()

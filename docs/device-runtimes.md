@@ -228,11 +228,13 @@ matrix-connect setup <服务器>
 
 ```
 席位 / 任务开始一轮
-  ├─ 项目档案文件（只读副本）→ run.request.materials → 端侧工作目录的 project/
+  ├─ 只读材料（档案文件、附件、订阅、技能、插件挂载）→ run.request.manifest（清单）
+  │     → 连接器本机缓存里没有的才 material.fetch → 拷进端侧工作目录的 project/、attachments/ …
   └─ 私有目录（agent-home）   不离开端侧，也不经过网络
 ```
 
-（已实现：项目档案文件随 `run.request.materials` 下发，连接器写入并先清掉上一轮的副本；
+（已实现：材料只给清单，连接器按 sha256 缓存、缺的才取，旧连接器仍整份内联（`run.request.materials`），见
+[reference/device-runtimes.md](reference/device-runtimes.md)“材料”；连接器每轮先清掉上一轮的副本；
 `publish_file` 在端侧由服务器发 `file.fetch` 向连接器取文件，路径越界由连接器拒绝。
 委托附带的共享知识仍写在服务器上的 `shared/`，端侧暂不单独下发。）
 

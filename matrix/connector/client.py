@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
+import os
+import re
 import shutil
 import sys
 import threading
@@ -20,13 +23,23 @@ import base64
 
 from .. import homedir
 from ..workdir import safe_rel
-from ..device import (APPROVAL_REQUEST, QUESTION_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
+from ..device import (APPROVAL_REQUEST, FEATURE_MATERIALS_CACHE, MATERIAL_FETCH, QUESTION_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
-from ..models import AGENT_HOME, ATTACHMENTS, PROJECT_FILES, SKILLS
+from ..models import AGENT_HOME, ATTACHMENTS, PLUGIN_MOUNT, PROJECT_FILES, RELEASES, SKILLS
 from .bridge import LocalBridge
 from .drivers.base import Driver, RunOutcome, RunSpec
 
 HOMES = ".homes"   # 私有目录在根目录下的位置：<root>/.homes/<agent>/。工作目录引用不能以 . 开头，碰不到这里
+
+
+SHA_RE = re.compile(r"[0-9a-f]{64}")
+MANIFEST_MAX = 5000                  # 一轮最多多少份材料
+MATERIAL_MAX = 500_000_000           # 单份材料最大多少字节（服务端的附件上限是 20 MB，这里只防异常值）
+CACHE_LIMIT = 2_000_000_000          # 本机材料缓存的上限（字节），超了按最近使用时间清最旧的
+
+
+class MaterialsError(Exception):
+    pass
 
 
 class _Run:
@@ -38,6 +51,7 @@ class _Run:
         self.cancel = threading.Event()
         self.workdir: Path | None = None
         self.home: str | None = None      # run.request 的 home："rw" | "ro" | None
+        self.manifest: list[dict[str, Any]] | None = None  # run.request 的 manifest：材料清单，运行前按它从本机缓存补齐
 
     def emit(self, event: dict[str, Any]) -> None:
         self.connector.send({"type": RUN_EVENT, "run_id": self.run_id, "event": event})
@@ -117,6 +131,7 @@ class Connector:
             except Exception:  # noqa: BLE001 —— 读不出来就当没有，不影响上线
                 return []
         return {"type": HELLO_OK, "protocol": PROTOCOL, "runtime": self.driver.name,
+                "features": [FEATURE_MATERIALS_CACHE],
                 "capabilities": caps_of(self.driver),
                 "runtimes": [{"runtime": name, "capabilities": caps_of(d), "connectors": services_of(d)}
                              for name, d in self.drivers.items()]}
@@ -219,7 +234,10 @@ class Connector:
         self._runs[run_id] = run
         self.bridge.register(run_id, run.call_tool, run.ask_approval, run.ask_question)
         workdir = self.workdir_of(str(msg.get("workdir_ref", "")))
-        self._write_materials(workdir, list(msg.get("materials") or []))
+        if isinstance(msg.get("manifest"), list):  # 新服务端：只给清单，运行线程里按缓存补齐（要等回执，不能占着接收循环）
+            run.manifest = list(msg["manifest"])
+        else:
+            self._write_materials(workdir, list(msg.get("materials") or []))
         spec = RunSpec(
             run_id=run_id, agent_id=str(msg.get("agent_id", "")), context_id=str(msg.get("context_id", "")),
             prompt=str(msg.get("prompt", "")), workdir=workdir,
@@ -235,14 +253,99 @@ class Connector:
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
 
     @staticmethod
-    def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
-        """每轮下发的只读材料：先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        for top in ("group", PROJECT_FILES, ATTACHMENTS, SKILLS, "materials"):  # group/：旧版下发的
+    def _clear_materials(workdir: Path) -> None:
+        """上一轮下发的只读副本先清掉（改过的也不保留）。"""
+        for top in ("group", PROJECT_FILES, ATTACHMENTS, SKILLS, RELEASES, PLUGIN_MOUNT, "materials"):  # group/：旧版下发的
             shutil.rmtree(workdir / top, ignore_errors=True)
+
+    @staticmethod
+    def _material_path(workdir: Path, rel: str) -> Path:
+        """材料路径来自网络：只认工作目录里的相对路径，私有目录除外。"""
+        if safe_rel(rel) is None or Path(rel).parts[0] == AGENT_HOME:
+            raise DeviceError(f"非法的材料路径：{rel!r}")
+        return workdir / rel
+
+    # ---- 材料：清单 + 本机缓存（只传缺的） ----
+    # 服务端每轮只给清单 {path, sha, size}；内容按 sha256 存在 <工作根目录>/.cache/materials/<sha>，
+    # 没有的才用 material.fetch 分块取，取完校验 sha 再放进缓存。没变的档案文件、附件第二轮起一个字节都不传。
+    # 工作目录引用不能以 . 开头（workdir_of），所以缓存不会落进任何工作目录。
+    @property
+    def cache_dir(self) -> Path:
+        return self.workroot / ".cache" / "materials"
+
+    def _sync_materials(self, run: _Run, workdir: Path, manifest: list[dict[str, Any]]) -> dict[str, int]:
+        """按清单把材料放进工作目录：缓存里有的直接拷，没有的取。返回 {fetched, cached, bytes}（取了几份、几份命中、传了多少字节）。"""
+        if len(manifest) > MANIFEST_MAX:
+            raise DeviceError(f"材料清单太长：{len(manifest)} 份")
+        items: list[tuple[Path, str, int]] = []
+        for it in manifest:
+            sha, size = str((it or {}).get("sha", "")), (it or {}).get("size")
+            if not SHA_RE.fullmatch(sha) or not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= MATERIAL_MAX:
+                raise DeviceError(f"非法的材料：{it!r}"[:200])
+            items.append((self._material_path(workdir, str(it.get("path", ""))), sha, size))
+        self._clear_materials(workdir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        stats = {"fetched": 0, "cached": 0, "bytes": 0}
+        for dest, sha, size in items:
+            src = self.cache_dir / sha
+            if src.is_file() and src.stat().st_size == size:
+                stats["cached"] += 1
+                os.utime(src)  # 最近用过：清理缓存时最后才清它
+            else:
+                stats["bytes"] += self._fetch_material(run, sha, size)
+                stats["fetched"] += 1
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)  # 拷贝而不是硬链接：Agent 改了工作目录里的副本，缓存不跟着坏
+        self._prune_cache(keep={sha for _, sha, _ in items})
+        return stats
+
+    def _fetch_material(self, run: _Run, sha: str, size: int) -> int:
+        """向服务器分块取一份材料，校验 sha256 后放进缓存。返回传了多少字节。"""
+        tmp = self.cache_dir / f".{sha}.{uuid.uuid4().hex[:8]}"
+        h, off = hashlib.sha256(), 0
+        try:
+            with tmp.open("wb") as f:
+                while True:
+                    reply = self.round_trip({"type": MATERIAL_FETCH, "run_id": run.run_id, "call_id": self.next_call_id(),
+                                             "sha": sha, "offset": off}, timeout_s=120)
+                    if reply.get("error"):
+                        raise DeviceError(f"取材料失败：{reply['error']}")
+                    chunk = base64.b64decode(reply.get("data") or "")
+                    f.write(chunk)
+                    h.update(chunk)
+                    off += len(chunk)
+                    if not chunk or off >= int(reply.get("total", 0)):
+                        break
+            if off != size or h.hexdigest() != sha:
+                raise DeviceError("取到的材料和清单对不上（大小或 sha256 不一致）")
+            os.replace(tmp, self.cache_dir / sha)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return off
+
+    def _prune_cache(self, keep: set[str]) -> None:
+        """缓存超过上限时按最近使用时间清掉最旧的（这一轮刚用的不清）。"""
+        try:
+            files = [(f.stat().st_mtime, f.stat().st_size, f) for f in self.cache_dir.iterdir()
+                     if f.is_file() and SHA_RE.fullmatch(f.name)]
+        except OSError:
+            return
+        total = sum(size for _, size, _ in files)
+        for _, size, f in sorted(files, key=lambda x: x[0]):
+            if total <= CACHE_LIMIT:
+                break
+            if f.name in keep:
+                continue
+            f.unlink(missing_ok=True)
+            total -= size
+
+    @staticmethod
+    def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
+        """旧服务端：每轮整份下发的只读材料。先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
+        Connector._clear_materials(workdir)
         for item in materials:
             rel = str(item.get("path", ""))
-            if safe_rel(rel) is None or Path(rel).parts[0] == AGENT_HOME:
-                raise DeviceError(f"非法的材料路径：{rel!r}")
+            Connector._material_path(workdir, rel)
             dest = workdir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(base64.b64decode(item.get("data") or ""))
@@ -296,8 +399,15 @@ class Connector:
                                                      f"（有 {'、'.join(self.drivers)}）")
             else:
                 spec.workdir.mkdir(parents=True, exist_ok=True)
+                if run.manifest is not None:
+                    try:
+                        self._sync_materials(run, spec.workdir, run.manifest)
+                    except Exception as e:  # noqa: BLE001 —— 材料没齐：不跑这一轮（Agent 会以为档案就是空的）
+                        raise MaterialsError(str(e)) from e
                 before = self._mount_home(run, spec)
                 outcome = driver.run(spec, run, run.cancel)
+        except MaterialsError as e:  # 连接断了或内容对不上：按传输错误处理，任务回到等待、上线后重来
+            outcome = RunOutcome(ok=False, error=f"TRANSPORT 材料没取到：{e}")
         except Exception as e:  # noqa: BLE001 —— 驱动异常等价于运行时失败
             outcome = RunOutcome(ok=False, error=f"runtime error: {e!r}")
         finally:

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
+from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
                      ATTACHMENTS_PER_MESSAGE, AUTHORITIES, BRIEF_LIMIT, CONNECTOR_PREFIX, DESCRIPTION_LIMIT, FILE_LIMIT,
                      GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
                      LIST_TOOLS,
@@ -56,7 +56,7 @@ from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
-from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
+from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
 from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
@@ -113,6 +113,7 @@ class ExecContext:
     mixed_read: bool = False
     flow_narrowed: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)  # 这一轮送达、等它回答的问题（委托方）：一轮结束仍没回答就转给人
+    sent: list[dict[str, Any]] = field(default_factory=list)  # 这一轮 send_file 发出的文件（对话附件），附在这一轮的回复上
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -1198,7 +1199,7 @@ class Network:
                           skills=[{"name": n, "from": src, "by": chosen[n][0]} for n, src in shadowed])
         return chosen
 
-    def _skill_materials(self, chosen: dict[str, tuple[str, Path]]) -> list[dict[str, Any]]:
+    def _skill_materials(self, chosen: dict[str, tuple[str, Path]]) -> list[Material]:
         """端侧：技能随材料下发（skills/<名字>/...），合计不超过 SKILLS_TOTAL，超了的整个跳过。"""
         out, total = [], 0
         for name, (_, src) in chosen.items():
@@ -1207,8 +1208,7 @@ class Network:
             if total + size > SKILLS_TOTAL:
                 continue
             total += size
-            out += [{"path": f"{SKILLS}/{name}/{f.relative_to(src).as_posix()}",
-                     "data": base64.b64encode(f.read_bytes()).decode()} for f in files]
+            out += [material_file(f"{SKILLS}/{name}/{f.relative_to(src).as_posix()}", f) for f in files]
         return out
 
     # ---- 我的连接器 ----
@@ -4423,11 +4423,15 @@ class Network:
             conv = self.visible_conv(conv_id, actor)
             if conv.archived:
                 raise NetworkError("这个对话已归档，只读")
+        return self._store_attachment(conv.id, name, data, mime)
+
+    def _store_attachment(self, conv_id: str, name: str, data: bytes, mime: str = "") -> dict[str, Any]:
+        """存进对话的附件区（按内容寻址、只读），返回附件说明。人上传与 Agent 的 send_file 共用。"""
         if len(data) > ATTACHMENT_LIMIT:
             raise NetworkError(f"附件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB")
         fname = _safe_filename(name)
         sha = hashlib.sha256(data).hexdigest()
-        dest = self.store.attachment_dir(conv.id) / sha
+        dest = self.store.attachment_dir(conv_id) / sha
         if not dest.exists():
             tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
             tmp.write_bytes(data)
@@ -4857,23 +4861,24 @@ class Network:
             if self._goal_continue(seat) == "limit":  # 续到上限还没完成：停下，告诉所有者
                 self._append(conv, Message(id=new_id("msg"), role="event", agent_id=agent.id,
                                            text=format_goal_limit(agent.name, seat.goal), audience=owner_only))
-            if scheduled_only and res.final_text.strip().rstrip("。.") == NOTHING_NEW:
+            files = list(ctx.sent)  # send_file 发出的文件：附在这一轮的回复上（发了文件就不算“没话说”）
+            if scheduled_only and res.final_text.strip().rstrip("。.") == NOTHING_NEW and not files:
                 return  # 定时到点、没有新情况：不打扰主人
-            if route_only and res.final_text.strip().strip("。.") == ROUTE_PASS:
+            if route_only and res.final_text.strip().strip("。.") == ROUTE_PASS and not files:
                 return  # 被叫来看、不是自己的事：不发言，这一串接力也到此为止
-            text = res.final_text.strip() or "（空回复）"
+            text = res.final_text.strip() or ("发来文件" if files else "（空回复）")
             with self._lock:
                 ctx.sources = list(seat.session_sources)
                 audience = self._conv_audience(conv, agent)
                 over = self._over(ctx, agent, audience)
             if over:  # 用到了别处的资料、这里有当时不在场的人：先给所有者确认（不变量 22）
                 h = self._hold("reply", ctx, agent, text, over, audience,
-                               {"task_ids": ctx.created, "steps": steps, "wake": wake})
+                               {"task_ids": ctx.created, "steps": steps, "wake": wake, "attachments": files})
                 self._append(conv, Message(id=new_id("msg"), role="event", agent_id=agent.id,
                                            text=f"{agent.name} 的回复要先给它的所有者确认", held_id=h.id))
                 return
             reply = Message(id=new_id("msg"), role="agent", agent_id=agent.id, text=text, task_ids=ctx.created,
-                            steps=steps, wake=wake, private_to=owner_only)
+                            steps=steps, wake=wake, private_to=owner_only, attachments=files)
             self._append(conv, reply)
             cascade = self._seat_cascade.get(sid)
             if conv.kind == "project" and cascade in self._cascades:  # 回复也交给 route，沿用这一串的预算与链
@@ -4891,6 +4896,10 @@ class Network:
         self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, text=text,
                                    task_ids=ctx.created, steps=steps, wake=wake, audience=owner_only,
                                    private_to=owner_only))
+        if ctx.sent:  # 中断前已经发出的文件不丢：单独一条带上（发的时候已经按信息流检查过）
+            self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id,
+                                       text=f"（{agent.name} 这一轮没有正常结束，中断前发出的文件在这里）",
+                                       attachments=list(ctx.sent), private_to=owner_only))
 
     def _own_tasks(self, sid: str) -> set[str]:
         """调用方持有锁。这个席位直接发起的任务：它们的结果是委托回报，不算“别人共享的知识”。"""
@@ -5223,7 +5232,7 @@ class Network:
             abilities_key = f"{abilities_key}+{sub_key}"
         if abilities_key != holder.abilities_seen:  # 本轮可用的连接器 / 技能变了才说一次
             prompt = f"{prompt}\n\n{note}" if note else prompt
-        skill_files: list[dict[str, Any]] = []
+        skill_files: list[Material] = []
         if agent.device_runtime:  # 工作目录在用户电脑上：项目文件随 run.request 下发，服务器这边不挂载
             if mount_home:
                 home = "rw" if "file.write" in ctx.authority else "ro"
@@ -5467,7 +5476,8 @@ class Network:
         return {**d, "agent_name": self._name(h.agent_id), "project_name": g.name if g else "",
                 "source_names": [self._venue_name(v, for_owner=True) for v in h.sources],
                 "audience_emails": [self._email(u) for u in h.audience],
-                "conversation_id": h.context_id.partition("/")[0] if h.context_kind == "seat" else None}
+                "conversation_id": h.context_id.partition("/")[0] if h.context_kind == "seat" else None,
+                "file_names": [a.get("name", "") for a in h.extra.get("attachments", [])]}
 
     def pending_held(self, actor: str | None) -> list[Held]:
         """调用方持有锁。"""
@@ -5511,7 +5521,8 @@ class Network:
             if conv is not None:
                 self._append(conv, Message(id=new_id("msg"), role="agent", agent_id=agent.id, text=h.text,
                                            task_ids=list(h.extra.get("task_ids", [])), steps=list(h.extra.get("steps", [])),
-                                           wake=list(h.extra.get("wake", [])), private_to=sorted(self._owner_set(agent))))
+                                           wake=list(h.extra.get("wake", [])), private_to=sorted(self._owner_set(agent)),
+                                           attachments=list(h.extra.get("attachments", []))))
         elif h.kind == "delivery" and agent is not None and g is not None:
             task = self.store.tasks.get(h.context_id)
             if task is not None and task.status == TaskStatus.RUNNING:
@@ -5551,26 +5562,27 @@ class Network:
                 out.append(item)
         return out
 
-    def _materials(self, ctx: ExecContext) -> list[dict[str, Any]]:
-        """端侧运行时每轮要收到的只读材料（base64）：项目档案文件、对话附件、订阅的交付件（运行时当只读副本用）。
-        私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
-        out: list[tuple[str, Path]] = []
+    def _materials(self, ctx: ExecContext) -> list[Material]:
+        """端侧运行时每轮要收到的只读材料：项目档案文件、对话附件、订阅的交付件、插件挂载（运行时当只读副本用）。
+        这里只列清单（路径、sha256、大小），内容留在服务器上：支持缓存的连接器缺哪份才来取（material.fetch），
+        旧连接器由 DeviceRuntime 整份内联下发。私有目录不在此列——它在所有者自己的机器上（第 4 节）。调用方持有锁。"""
+        out: list[Material] = []
         p = self.store.projects.get(ctx.project_id or "")
         if p is not None:
-            out += [(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
+            out += [material_file(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
                     if f.is_file() and f.stat().st_size <= 2_000_000]
         src = self.store.attachment_dir(ctx.conversation_id)
-        out += [(attachment_rel(a), src / a["sha"]) for a in self._attachments_for(ctx) if (src / a["sha"]).is_file()]
+        out += [material_file(attachment_rel(a), src / a["sha"], sha=a["sha"]) for a in self._attachments_for(ctx)
+                if (src / a["sha"]).is_file()]  # 附件按内容寻址：文件名就是 sha，不用再算
         agent = self.store.agents.get(ctx.agent_id)
         if agent is not None:  # 订阅的交付件（不变量 23）：和云侧一样只在能到达的人都是读者时下发
-            out += self._release_materials(ctx, agent)
-        return [{"path": rel, "data": base64.b64encode(f.read_bytes()).decode()} for rel, f in out] + \
-            [{"path": rel, "data": base64.b64encode(data).decode()} for rel, data in ctx.plugin_files]  # 插件的 mount 挂点
+            out += [material_file(rel, f) for rel, f in self._release_materials(ctx, agent)]
+        return out + [material_bytes(rel, data) for rel, data in ctx.plugin_files]  # 插件的 mount 挂点
 
     def _invoke(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, session_id: str | None,
                 timeout_s: float | None, on_session: Any = None, home: str | None = None,
                 cancel: threading.Event | None = None, conns: list[Connection] | None = None,
-                skill_files: list[dict[str, Any]] | None = None) -> RunResult:
+                skill_files: list[Material] | None = None) -> RunResult:
         token = secrets.token_urlsafe(18)
         conns = conns or []
         ctx.connections = [c.id for c in conns]
@@ -5698,7 +5710,7 @@ class Network:
                 return str(e), True
             return res if res is not None else (f"未知工具 {name}", True)
         if name not in ctx.tools:
-            return (f"{name} 只能在对话里使用" if name in REQUEST_TOOLS else
+            return (f"{name} 只能在对话里使用" if name in REQUEST_TOOLS + CHAT_TOOLS else
                     f"{name} 只能在助理对话里使用" if name in HOME_TOOLS else
                     f"{name} 只能在项目会话与助理对话里使用" if name in SESSION_TOOLS else
                     f"{name} 只在装了开放记录工具的插件的项目里有" if name in PLUGIN_TOOLS else
@@ -6114,6 +6126,43 @@ class Network:
             name = str(args.get("name", "")).strip() or f"{src.name}.zip"
             return publish(name if name.endswith(".zip") else f"{name}.zip", workdir.pack(src)), False
         return publish(str(args.get("name", "")).strip() or src.name, src.read_bytes()), False
+
+    def _tool_send_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        """把工作目录里的一个文件（目录打成 zip）存进对话的附件区，附在这一轮的回复上发给对话里的人。
+        只读挂载（项目档案、私有目录、技能、订阅的发布物、插件挂载）不能发：它们各有自己的去向规则（不变量 8、17、23、24）。"""
+        rel = str(args.get("path", "")).strip()
+        top = Path(rel).parts[0] if Path(rel).parts else ""
+        where = f"只能发当前工作目录里的文件（不含 {PROJECT_FILES}/、{HOME_DIR}/、{SKILLS}/、{RELEASES}/、{PLUGIN_MOUNT}/）"
+        if top in (PROJECT_FILES, HOME_DIR, SKILLS, RELEASES, PLUGIN_MOUNT) or workdir.safe_rel(rel) is None:
+            return f"找不到 {rel}：{where}", True
+        if len(ctx.sent) >= ATTACHMENTS_PER_MESSAGE:
+            return f"一轮回复最多附 {ATTACHMENTS_PER_MESSAGE} 个文件：多的打包成一个目录再发（目录会打成 zip）", True
+        name = str(args.get("name", "")).strip()
+        agent = self.store.agents.get(ctx.agent_id)
+        if agent is not None and agent.device_runtime:
+            # 端侧：工作目录在用户电脑上，向连接器要文件（越界由连接器再挡一次）
+            dev = self._device_of_context(ctx.id)
+            data = dev.fetch_file(ctx.id, rel) if dev is not None else None
+            if data is None:
+                return f"找不到 {rel}：端侧运行时未连接，或不是工作目录里的文件（端侧不能发目录）", True
+            name = name or Path(rel).name
+        else:
+            holder = self._holder(ctx.kind, ctx.id)
+            root = (self.store.root / holder.workdir).resolve()
+            src = (root / rel).resolve()
+            if root not in src.parents or not (src.is_file() or src.is_dir()):
+                return f"找不到 {rel}：{where}", True
+            if src.is_dir():  # 多个文件：打成一个 zip（缓存、依赖目录不打进去）
+                name = name or src.name
+                name, data = (name if name.endswith(".zip") else f"{name}.zip"), workdir.pack(src)
+            else:
+                name, data = name or src.name, src.read_bytes()
+        a = self._store_attachment(ctx.conversation_id, name, data)
+        with ctx.lock:
+            ctx.sent = [x for x in ctx.sent if attachment_rel(x) != attachment_rel(a)] + [a]
+        size = f"{a['size'] / 1_000_000:.1f} MB" if a["size"] >= 1_000_000 else f"{max(1, a['size'] // 1000)} KB"
+        return (f"已附上 {a['name']}（{size}），会随你这一轮的回复一起发给对话里的人，他们直接下载。"
+                "回复里简单说明这是什么就行，不用把内容贴进回复。"), False
 
     def _tool_add_link(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_project(ctx, delegate=False)
@@ -7883,6 +7932,7 @@ TOOL_HANDLERS = {
     "list_decisions": Network._tool_list_decisions,
     "publish_file": Network._tool_publish_file,
     "add_link": Network._tool_add_link,
+    "send_file": Network._tool_send_file,
     "propose_brief": Network._tool_propose_brief,
     "propose_skill": Network._tool_propose_skill,
     "propose_plugin": Network._tool_propose_plugin,
@@ -7913,7 +7963,7 @@ def network_tools_for(kind: str, in_project: bool, can_delegate: bool, session: 
             return notes
         if n in PLUGIN_TOOLS:
             return in_project and plugins
-        if n in REQUEST_TOOLS:
+        if n in REQUEST_TOOLS or n in CHAT_TOOLS:
             return kind == "seat"
         if n in HOME_TOOLS:
             return kind == "seat" and home

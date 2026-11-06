@@ -26,14 +26,16 @@ from typing import Any, Callable, Protocol
 
 from .compat import current_call
 from .models import AUTHORITIES
-from .runtime import (ENFORCED, STOPPED_ERROR, RunRequest, RunResult, RuntimeCapabilities)
+from .runtime import (ENFORCED, STOPPED_ERROR, Material, RunRequest, RunResult, RuntimeCapabilities)
 
 # ---- 消息（服务器 → 连接器）----
 HELLO = "hello"                    # {protocol, token, runtime}
 RUN_REQUEST = "run.request"        # {run_id, agent_id, context_id, conversation_id, session_id, workdir_ref,
                                    #  prompt, authority, tool_names, model, materials, home, harness}
                                    #  harness: 用设备上的哪个 harness；null = 默认（握手里的第一个）
-                                   #  materials: [{path, data(base64)}] —— 项目文件与委托材料的只读副本
+                                   #  materials: [{path, data(base64)}] —— 项目文件与委托材料的只读副本（旧连接器：整份内联）
+                                   #  manifest: [{path, sha, size}] —— 同上，只给清单（连接器声明了 materials-cache）：
+                                   #    本机缓存里没有的，再用 material.fetch 按 sha 分块取
                                    #  home: "rw" | "ro" | null —— 私有目录怎么挂载；目录本身在连接器本机，不经过网络
                                    #  connectors: [服务名] —— 这一轮允许用的、那个 AI 工具里配置的服务；驱动只开这些，
                                    #  其余一律关掉（空 = 全关）。旧服务端不发这个字段
@@ -49,11 +51,15 @@ RUN_EVENT = "run.event"            # {run_id, event}  —— 与 RunRequest.on_e
 RUN_RESULT = "run.result"          # {run_id, session_id, final_text, tool_calls, usage, ok, error}
 TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
 APPROVAL_REQUEST = "approval.request"  # {run_id, call_id, tool, reason}
+MATERIAL_FETCH = "material.fetch"  # {run_id, call_id, sha, offset} —— 取这一轮清单里的一份材料，回执 {data(base64), total} 或 {error}
 QUESTION_REQUEST = "question.request"  # {run_id, call_id, questions} —— Agent 提问（ask_user_question），回执 {answers} 或 {error}
 FILE_FETCH = "file.fetch"          # {run_id, call_id, path} —— 服务器要读端侧工作目录里的文件（publish_file）
 
 PROTOCOL = 1
-BLOCKING = (TOOL_CALL, APPROVAL_REQUEST, QUESTION_REQUEST)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
+# 连接器在握手（hello.ok.features）里声明的可选能力；不认识的忽略
+FEATURE_MATERIALS_CACHE = "materials-cache"  # 材料只收清单、按 sha 缓存、缺的再取
+MATERIAL_CHUNK = 1 << 20                     # material.fetch 一次最多回多少字节（base64 前）
+BLOCKING = (TOOL_CALL, APPROVAL_REQUEST, QUESTION_REQUEST, MATERIAL_FETCH)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
 
 
 class DeviceError(RuntimeError):
@@ -84,6 +90,7 @@ class DeviceInfo:
     runtimes: dict[str, RuntimeCapabilities] = field(default_factory=dict)
     # 各 harness 里配置的服务名（电脑上的连接器）；None = 旧客户端，没有报告
     connectors: dict[str, list[str]] | None = None
+    features: list[str] = field(default_factory=list)  # 连接器的可选能力（FEATURE_*）；旧客户端为空
 
     def __post_init__(self) -> None:
         if not self.runtimes:
@@ -110,6 +117,7 @@ class DeviceRuntime:
         self._results: dict[str, dict[str, Any]] = {}
         self._by_context: dict[str, str] = {}          # 执行上下文 id -> 正在跑的 run_id
         self._reqs: dict[str, RunRequest] = {}         # run_id -> 这一轮的请求（工具 / 审批 / 事件回调都按它找）
+        self._blobs: dict[str, dict[str, Material]] = {}  # run_id -> 这一轮清单里的材料（sha -> 内容），material.fetch 只认这些
         self._fetches: dict[str, tuple[threading.Event, dict[str, Any]]] = {}
         self._lock = threading.Lock()
         self._seq = 0
@@ -126,17 +134,23 @@ class DeviceRuntime:
     def run(self, req: RunRequest) -> RunResult:
         run_id = self._next_run_id()
         done = threading.Event()
+        mats = list(getattr(req, "materials", None) or [])
+        cached = FEATURE_MATERIALS_CACHE in self.info.features
         with self._lock:
             self._runs[run_id] = done
             self._reqs[run_id] = req
             self._by_context[req.context_id] = run_id
+            if cached:  # 这一轮能取的只有清单里的这些（按 sha），轮次结束就不能再取
+                self._blobs[run_id] = {m.sha: m for m in mats}
         payload = {
             "type": RUN_REQUEST, "run_id": run_id,
             "agent_id": req.agent_id, "context_id": req.context_id,
             "session_id": req.session_id, "workdir_ref": self.workdir_ref(req),
             "prompt": req.prompt, "authority": list(req.authority),
             "tool_names": list(req.tools.names or []) if req.tools else [],
-            "model": req.model, "materials": list(getattr(req, "materials", None) or []),
+            "model": req.model,
+            **({"manifest": [{"path": m.path, "sha": m.sha, "size": m.size} for m in mats]} if cached
+               else {"materials": [{"path": m.path, "data": m.b64()} for m in mats]}),
             "home": getattr(req, "home", None), "harness": req.harness,
             "timeout_s": req.timeout_s,
             "connectors": list(getattr(req, "local_connectors", None) or []),
@@ -151,6 +165,7 @@ class DeviceRuntime:
             with self._lock:
                 self._runs.pop(run_id, None)
                 self._reqs.pop(run_id, None)
+                self._blobs.pop(run_id, None)
                 if self._by_context.get(req.context_id) == run_id:
                     self._by_context.pop(req.context_id, None)
         if req.cancel is not None and req.cancel.is_set() and not replied:
@@ -232,6 +247,17 @@ class DeviceRuntime:
             outcome = "unavailable" if on_approval is None else on_approval(
                 str(msg.get("tool", "")), str(msg.get("reason", "")))
             return {"reply_to": msg.get("call_id"), "outcome": outcome}
+        elif kind == MATERIAL_FETCH:
+            with self._lock:
+                m = self._blobs.get(run_id, {}).get(str(msg.get("sha", "")))
+            off = msg.get("offset", 0)
+            if m is None or not isinstance(off, int) or isinstance(off, bool) or not 0 <= off <= m.size:
+                return {"reply_to": msg.get("call_id"), "error": "这一轮没有这份材料"}
+            try:
+                chunk = m.read(off, MATERIAL_CHUNK)
+            except OSError as e:  # 文件在这一轮里被删了（主持人删了档案文件）
+                return {"reply_to": msg.get("call_id"), "error": f"读不到：{e.strerror or e}"}
+            return {"reply_to": msg.get("call_id"), "data": base64.b64encode(chunk).decode(), "total": m.size}
         elif kind == QUESTION_REQUEST:
             raw = msg.get("questions")
             out = {"error": "这一轮不能提问"} if on_question is None or not isinstance(raw, list) else \
@@ -342,8 +368,9 @@ def capabilities_from_hello(msg: dict[str, Any]) -> DeviceInfo:
         runtimes = {default.name: default, **runtimes}
     elif runtimes:
         default = next(iter(runtimes.values()))
+    features = [str(x)[:40] for x in (msg.get("features") or [])[:16] if isinstance(x, str)]
     return DeviceInfo(runtime=default.name, capabilities=default, protocol=proto, runtimes=runtimes,
-                      connectors=connectors)
+                      connectors=connectors, features=features)
 
 
 def _service_names(raw: list[Any]) -> list[str]:

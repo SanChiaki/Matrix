@@ -468,6 +468,7 @@ footer a { color: var(--text-2); }
         <ul>
           <li>Matrix 客户端只出站，不开任何入站端口；设备授权可单独吊销</li>
           <li>私有目录留在你的电脑上，网络不读、不注入</li>
+          <li>档案文件与附件按内容缓存在本机，每轮只传新增或改过的</li>
           <li>离线是等待，不是失败：上线后消费积压的任务</li>
           <li>你本机 AI 工具里配好的服务，每一轮只开网络允许的那几个</li>
         </ul></article>
@@ -519,7 +520,7 @@ footer a { color: var(--text-2); }
         </button>
         <div class="node-detail" id="d-net"><div>
           <div class="parts">
-            <div class="part"><h4>对话与席位</h4><p>群聊里被 @ 的成员接任务；项目会话只属于开它的人；每个 Agent 一个私聊。席位 = Agent 在一个对话里的执行上下文</p></div>
+            <div class="part"><h4>对话与席位</h4><p>群聊里被 @ 的成员接任务；项目会话只属于开它的人；每个 Agent 一个私聊。席位 = Agent 在一个对话里的执行上下文；人随消息上传附件，Agent 用 <code>send_file</code> 把工作目录里的文件附在回复上发给人</p></div>
             <div class="part"><h4>收件箱调度</h4><p>每个席位、每个委托各有收件箱；有内容且没在跑，就续接它的会话跑一轮。同一上下文同时只跑一轮</p></div>
             <div class="part"><h4>委托与验收</h4><p><code>delegate</code> 立即返回；有效权限 = 自身 ∩ 授予 ∩ 可强制；约束沿链累加；防环、限深（默认 3）；只有直接委托方验收</p></div>
             <div class="part"><h4>失败与续接</h4><p>运行时错误分类；格式错、空回复、超时自动续接一次，仍失败只阻塞这一个席位，人点“继续”从中断处接着做</p></div>
@@ -598,6 +599,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>设备码配对</h4><p>在浏览器里批准；令牌只存哈希，可单独吊销；可装成后台服务</p></div>
           <div class="part"><h4>只开允许的服务</h4><p>上线时只报本机 AI 工具里配了哪些服务（名字）；每一轮只开网络允许的，技能随任务下发</p></div>
           <div class="part"><h4>私有目录留在本机</h4><p>网络不读、不注入；离线时任务排队，上线后接着消费</p></div>
+          <div class="part"><h4>材料只传缺的</h4><p>每轮只收清单（路径、sha256、大小），档案文件、附件按内容缓存在本机，缺的才经 <code>material.fetch</code> 分块取、校验后入缓存</p></div>
         </div></div></div>
       </div>
     </div>
