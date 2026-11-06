@@ -558,11 +558,14 @@ class ImBridge:
             return
         if m["role"] not in ("agent", "system") or not m.get("text", "").strip():
             return
+        text = m["text"]
+        if m.get("attachments"):  # IM 驱动不发文件：列出文件名，到 Matrix 里下载
+            text += "\n\n附件：" + "、".join(a.get("name", "") for a in m["attachments"]) + "（打开 Matrix 的这个对话下载）"
         pending, bindings = self._route(conv, mid)
         if pending is not None:
-            self._finish(pending, m["text"])
+            self._finish(pending, text)
         for b in bindings:
-            self._push(b, m["text"])
+            self._push(b, text)
 
     def _route(self, conv: Any, mid: str) -> tuple[_Pending | None, list[ImBinding]]:
         """这条助理消息回到哪里：看它前面最近的那条人的消息（或上一条助理消息）。"""

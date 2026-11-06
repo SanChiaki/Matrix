@@ -116,6 +116,9 @@ ARCHIVE_TOOLS = ("record_decision", "list_decisions", "publish_file", "add_link"
                  "propose_plugin")
 # 用户任务工具：席位（项目群聊、项目会话、私聊）都有。人交代的事有交付目标时，接任务的 Agent 自己认定、自己交付。
 REQUEST_TOOLS = ("open_request", "deliver_request", "accept_request", "reopen_request")
+# 对话工具：席位（项目群聊、项目会话、私聊、助理对话）都有：把工作目录里的文件附在这一轮的回复上发给对话里的人。
+# 委托任务里没有（产物在交付时整体拷给委托方）。
+CHAT_TOOLS = ("send_file",)
 # 读项目现状的工具：项目会话里的助理（读这个项目）与助理对话（读主人参与的任一项目）有，按主人的可见性过滤。
 SESSION_TOOLS = ("read_chat", "read_request")
 # 助理对话工具：只有助理对话（人和自己助理的私聊）里有：起草要以主人名义发进项目群聊的消息、主人的定时（不变量 21）。
@@ -136,7 +139,7 @@ NOTE_TOOLS = ("open_note",)
 OUTBOUND_TOOLS = ("record_decision", "publish_file", "add_link", "propose_brief", "propose_skill", "propose_plugin",
                   "plugin_write", "delegate",
                   "share_knowledge", "request_changes", "retry_task", "answer_question", "open_request", "deliver_request",
-                  "accept_request", "reopen_request")
+                  "accept_request", "reopen_request", "send_file")
 
 
 class TaskStatus(StrEnum):

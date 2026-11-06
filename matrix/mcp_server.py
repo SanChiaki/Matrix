@@ -105,6 +105,20 @@ TOOLS = [
         },
     },
     {
+        "name": "send_file",
+        "description": ("把你当前工作目录里的一个文件（或一个目录，打成 zip）发给对话里的人：附在你这一轮的回复上，"
+                        "人在对话里直接下载。回复里说明这是什么就行，不用把内容贴进回复。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "工作目录里的相对路径，如 report.md 或 out/charts"},
+                "name": {"type": "string", "description": "可选：给人看的文件名（默认用原文件名，目录是 <目录名>.zip）"},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "answer_question",
         "description": ("回答你委托的成员在做事时问你的问题（网络通知里给了 question_id）。它一直在等，你答了它就在原来的工作里"
                         "接着做。只回答你能替人决定的事；需要人拍板的用 escalate_question 转给人。"),

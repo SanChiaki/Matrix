@@ -46,6 +46,10 @@ class Home:
             return "慢慢做完了"
         if last == "长":
             return "长" * 150  # 450 字节：假驱动一条最多 200
+        if last == "文件":
+            (call.cwd / "日报.md").write_text("今天一切正常", encoding="utf-8")
+            call.tool("send_file", path="日报.md")
+            return "日报在附件里"
         return f"回复：{last}"
 
 
@@ -214,6 +218,17 @@ def test_reply_goes_back_to_the_im_it_came_from_and_web_messages_stay_on_the_web
     net.send_message(net.home_of(alice).id, "在网页里问的", actor=alice, background=False)
     b.flush()
     assert drv.sent == before
+
+
+def test_files_sent_in_the_reply_are_listed_in_the_im(make):
+    """IM 驱动不发文件：回复里列出文件名，提示到 Matrix 里下载；文件本身在对话里。"""
+    net, b = make()
+    alice, = users(net, "alice@x.io")
+    drv, _ = personal(net, b, alice)
+    drv.say("u-alice", "文件")
+    b.flush()
+    assert drv.texts("finish") == ["日报在附件里\n\n附件：日报.md（打开 Matrix 的这个对话下载）"]
+    assert [a["name"] for a in net.home_of(alice).messages[-1].attachments] == ["日报.md"]
 
 
 def test_long_replies_are_split_and_slow_ones_are_finished_then_pushed(make):
