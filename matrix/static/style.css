@@ -508,6 +508,16 @@ button.link:hover { background: none; text-decoration: underline; }
 .md table { border-collapse: collapse; font-size: .92em; min-width: 60%; }
 .md th, .md td { border: 1px solid var(--border-strong); padding: 6px 12px; text-align: left; vertical-align: top; }
 .md th { background: var(--surface-2); font-weight: 600; color: var(--text); }
+/* Markdown 里写的 HTML（md.js 的白名单）：折叠块、高亮、图片、定义列表 */
+.md details { margin: 0 0 .75em; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.md summary { cursor: pointer; color: var(--text); font-weight: 500; font-size: inherit; margin: 0; }  /* 盖掉全局 summary 的小字与下边距 */
+.md details[open] > summary { margin-bottom: .5em; }
+.md mark { background: var(--accent-soft); color: var(--text); padding: 0 2px; border-radius: var(--radius-xs); }
+.md img { max-width: 100%; height: auto; vertical-align: middle; }
+.md dl { margin: 0 0 .75em; }
+.md dt { font-weight: 600; color: var(--text); }
+.md dd { margin: 0 0 .4em 1.4em; }
+.md sub, .md sup { line-height: 0; }
 .md.report { font-size: var(--fs-md); padding: 16px 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); max-height: 520px; overflow: auto; }
 .msg .body.md { white-space: normal; }
 .msg.user .md code { background: var(--bg); }  /* 人的气泡本身是 --surface-3，代码块换深一层才看得出来 */
