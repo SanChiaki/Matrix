@@ -1,5 +1,6 @@
-// 轻量 Markdown 渲染：先整体转义再识别语法，输出里不会出现模型原文中的 HTML。
-// 支持标题、段落、列表（含嵌套与任务项）、引用、代码块、表格、分隔线、链接与行内强调。
+// 轻量 Markdown 渲染：先整体转义再识别语法。原文里的 HTML 只认白名单里的标签和属性，由这里按白名单重新拼出来，
+// 不会原样进页面：事件属性、style、不安全的链接都丢掉，白名单外的标签照旧显示成文字；标签最后补齐配对。
+// 支持标题、段落、列表（含嵌套与任务项）、引用、代码块、表格、分隔线、链接、行内强调与这些 HTML。
 const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ESC[c]);
 
@@ -8,9 +9,75 @@ function safeUrl(raw) {
   return /^(https?:|mailto:|#|\/)/i.test(u) ? esc(u) : null;
 }
 
+// ---- Markdown 里的 HTML ----
+// 每个标签允许的属性（title 所有标签都允许）。数值属性只认数字，align 只认三个值。
+const TAGS = {
+  b: [], strong: [], i: [], em: [], u: [], s: [], del: [], ins: [], mark: [], small: [], sub: [], sup: [], kbd: [], code: [],
+  abbr: [], span: [], br: [], a: ["href"], img: ["src", "alt", "width", "height"],
+  p: ["align"], div: ["align"], hr: [], h1: [], h2: [], h3: [], h4: [], h5: [], h6: [], blockquote: [], pre: [],
+  ul: [], ol: ["start"], li: [], dl: [], dt: [], dd: [], details: ["open"], summary: [], figure: [], figcaption: [],
+  table: [], thead: [], tbody: [], tfoot: [], tr: [], th: ["colspan", "rowspan", "align"], td: ["colspan", "rowspan", "align"],
+};
+const VOID = new Set(["br", "hr", "img", "input"]);
+const BLOCK = /^<\/?(p|div|h[1-6]|hr|blockquote|pre|ul|ol|li|dl|dt|dd|details|summary|figure|figcaption|table|thead|tbody|tfoot|tr|th|td)(?=[\s/>]|$)/i;
+const unesc = (s) => s.replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" })[e]);
+
+// 一个已转义的标签（&lt;tag a="b"&gt;）：在白名单里就按白名单重拼，否则原样留作文字
+function tag(m, close, name, rawAttrs) {
+  const t = name.toLowerCase();
+  const allowed = TAGS[t];
+  if (!allowed) return m;
+  if (close) return VOID.has(t) ? "" : `</${t}>`;
+  const attrs = {};
+  for (const [, k, v1, v2, v3] of unesc(rawAttrs).matchAll(/([a-zA-Z_:][-\w:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g)) {
+    const key = k.toLowerCase(), val = v1 ?? v2 ?? v3 ?? "";
+    if (key === "title" || allowed.includes(key)) attrs[key] = val;
+  }
+  let out = "";
+  for (const [k, v] of Object.entries(attrs)) {
+    if (["width", "height", "colspan", "rowspan", "start"].includes(k)) { if (/^\d{1,4}$/.test(v)) out += ` ${k}="${v}"`; }
+    else if (k === "align") { if (/^(left|center|right)$/i.test(v)) out += ` align="${v.toLowerCase()}"`; }
+    else if (k === "open") out += " open";
+    else if (k !== "href" && k !== "src") out += ` ${k}="${esc(v)}"`;
+  }
+  if (t === "a") {
+    const href = attrs.href && safeUrl(attrs.href);
+    return href ? `<a href="${href}" target="_blank" rel="noopener noreferrer"${out}>` : "<a>";
+  }
+  if (t === "img") {
+    // 只直接显示本站的图；外站的图不自动加载（加载本身就会把地址里的内容发出去），显示成一个链接，点了才看
+    const src = (attrs.src || "").trim();
+    if (/^\/(?!\/)/.test(src)) return `<img src="${esc(src)}" loading="lazy"${out}>`;
+    if (/^https?:\/\//i.test(src)) return `<a href="${esc(src)}" target="_blank" rel="noopener noreferrer">${esc(attrs.alt || "图片")}</a>`;
+    return m;
+  }
+  return `<${t}${out}>`;
+}
+// 重拼好的标签先换成占位符（\u0001序号\u0001），等后面的 Markdown 规则跑完再换回：链接、强调不会改到属性里去
+const htmlTags = (s, keep) => s.replace(/&lt;!--[\s\S]*?--&gt;/g, "")
+  .replace(/&lt;(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s(?:(?!&gt;|&lt;).)*?)?)\s*\/?&gt;/g, (m, c, n, a) => {
+    const html = tag(m, c, n, a);
+    return html === m ? m : `\u0001${keep.push(html) - 1}\u0001`;
+  });
+
+// 补齐标签配对：多出来的结束标签丢掉，没关的在末尾关上。消息是拼进一大段 HTML 里的，不能让一条消息的 <div> 吞掉后面的消息
+function balance(html) {
+  const stack = [];
+  const out = html.replace(/<(\/?)([a-z][a-z0-9]*)\b[^>]*>/g, (m, close, t) => {
+    if (VOID.has(t)) return m;
+    if (!close) { stack.push(t); return m; }
+    const at = stack.lastIndexOf(t);
+    if (at < 0) return "";
+    return stack.splice(at).reverse().map((x) => `</${x}>`).join("");
+  });
+  return out + stack.reverse().map((x) => `</${x}>`).join("");
+}
+
 function inline(src) {
   const codes = [];
   let s = esc(src).replace(/`([^`\n]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`);
+  const tags = [];
+  s = htmlTags(s, tags);  // 在反引号之后：`<b>` 这样写在代码里的照旧是文字
   // 链接到不能点的地址（如工作目录里的相对路径 wiki/x.md）：不留原样的 [文字](路径)，显示文字和路径
   s = s.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (m, text, url) => {
     const href = safeUrl(url);
@@ -19,12 +86,13 @@ function inline(src) {
   });
   // 裸链接：前面不能是字母数字或 href=" / > 之类，避免把已生成的 <a> 再包一层
   // 中文标点（全角括号、引号、冒号等）不算进链接：“地址（说明）”里的“（”是正文
-  s = s.replace(/(^|[^\w/"'=>])(https?:\/\/[^\s<)）（「」【】《》，。；、：！？]+?)(?=[。，；、：！？（「」【】《》]|&quot;|&#39;|[\s<)）]|$)/g, (_, pre, url) =>
+  s = s.replace(/(^|[^\w/"'=>])(https?:\/\/[^\s<)）（「」【】《》，。；、：！？\u0001]+?)(?=[。，；、：！？（「」【】《》\u0001]|&quot;|&#39;|[\s<)）]|$)/g, (_, pre, url) =>
     `${pre}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
   s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+  s = s.replace(/\u0001(\d+)\u0001/g, (_, i) => tags[i] ?? "");
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${codes[i]}</code>`);
 }
 
@@ -87,6 +155,18 @@ export function renderMarkdown(src) {
       out.push(`<pre class="md-code"><code${fence[2] ? ` data-lang="${esc(fence[2])}"` : ""}>${esc(body.join("\n"))}</code></pre>`);
       continue;
     }
+    if (/^\s*<!--/.test(line)) {  // 注释块：整段不显示
+      while (i < lines.length && !lines[i].includes("-->")) i++;
+      i++;
+      continue;
+    }
+    if (BLOCK.test(line.trim())) {  // HTML 块：一直到空行，不包 <p>（和 CommonMark 一样，空行之后照常是 Markdown）
+      const body = [];
+      for (; i < lines.length && lines[i].trim(); i++) body.push(inline(lines[i]));
+      // 行之间用空格接：消息正文是 pre-wrap，换行会变成空行；<pre> 里的换行要保留
+      out.push(body.join(/^\s*<pre\b/i.test(line) ? "\n" : " "));
+      continue;
+    }
     const h = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
     if (h) { out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); i++; continue; }
     if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { out.push("<hr>"); i++; continue; }
@@ -106,9 +186,10 @@ export function renderMarkdown(src) {
     }
     if (LIST.test(line)) { const [html, next] = list(lines, i); out.push(html); i = next; continue; }
     const para = [];
-    for (; i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !LIST.test(lines[i])
+    for (; i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>|<!--)/.test(lines[i]) && !LIST.test(lines[i])
+      && !BLOCK.test(lines[i].trim())
       && !(lines[i].includes("|") && i + 1 < lines.length && isTableSep(lines[i + 1])); i++) para.push(lines[i]);
     out.push(`<p>${para.map(inline).join("<br>")}</p>`);
   }
-  return out.join("");
+  return balance(out.join(""));
 }
