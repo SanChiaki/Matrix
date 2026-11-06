@@ -268,6 +268,18 @@ button.icon svg { width: 14px; height: 14px; }
 .conv-list li.nested a { padding-left: 24px; }  /* 项目会话挂在项目下面：只缩进，不带头像 */
 .conv-list li.nested .t { font-weight: 400; color: var(--text-2); }
 .conv-list li.nested.selected .t { color: var(--text); }
+/* 项目折叠开关：在项目这一行右边，悬停、聚焦或已折叠时显出来；箭头朝下 = 展开着，朝右 = 折叠了 */
+.conv-list li.foldable { position: relative; }
+.conv-list li.foldable > a { padding-right: 32px; }
+.conv-fold { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); width: 24px; height: 24px; padding: 0;
+  background: none; border: 0; border-radius: var(--radius-xs); color: var(--muted); opacity: 0; transition: opacity var(--dur-fast), background var(--dur-fast); }
+.conv-fold::before { content: ""; width: 6px; height: 6px; border: solid currentColor; border-width: 0 1.5px 1.5px 0;
+  transform: translateY(-2px) rotate(45deg); transition: transform var(--dur-fast) var(--ease); }
+.conv-list li.folded .conv-fold::before { transform: translateX(-1px) rotate(-45deg); }
+.conv-fold:hover { background: var(--surface-3); color: var(--text); }
+.conv-list li.foldable:hover .conv-fold, .conv-fold:focus-visible, .conv-list li.folded .conv-fold { opacity: 1; }
+@media (hover: none) { .conv-fold { opacity: 1; } }
+.fold-count { font-size: var(--fs-xs); font-weight: 400; color: var(--muted); }
 .avatar.session { color: var(--muted); background: var(--surface-3); border-color: transparent; }
 .conv-list .c-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
 .conv-list .t { font-size: var(--fs-md); font-weight: 500; display: flex; align-items: center; gap: 6px; }

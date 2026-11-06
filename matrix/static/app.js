@@ -2429,9 +2429,10 @@ function renderConvList() {
     : c.status === "waiting" ? '<span class="dot-live waiting" title="等委托回报"></span>'
     : c.blocked ? '<span class="dot-live blocked" title="有成员上一轮中断"></span>' : "";
   // 每个对话只占一行：名字 + 状态点 / 待审核（不再显示最后一条消息，省出垂直空间）
-  const item = (href, sel, icon, name, c, cls = "") => `<li class="${sel ? "selected" : ""} ${cls}"><a href="#${esc(href)}" title="${esc(name)}"${sel ? ' aria-current="page"' : ""}>
+  // extra：名字后面的附加信息（折叠后的会话数）；after：<a> 之后、同一行里的按钮（折叠开关）
+  const item = (href, sel, icon, name, c, cls = "", extra = "", after = "") => `<li class="${sel ? "selected" : ""} ${cls}"><a href="#${esc(href)}" title="${esc(name)}"${sel ? ' aria-current="page"' : ""}>
       ${icon}<span class="c-body"><span class="t"><span class="n">${esc(name)}</span>${dot(c)}
-        ${c && pending.has(c.id) ? '<span class="pill pending" title="有待审核的 Agent 提议">待审核</span>' : ""}</span></span></a></li>`;
+        ${c && pending.has(c.id) ? '<span class="pill pending" title="有待审核的 Agent 提议">待审核</span>' : ""}${extra}</span></span></a>${after}</li>`;
   const opened = (c) => chatShown() && S.convId === c?.id;
 
   const home = homeConv();
@@ -2447,8 +2448,14 @@ function renderConvList() {
     const mine = sess.filter((x) => x.message_count).sort((a, b) => b.updated_at - a.updated_at);
     const blank = sess.some((x) => !x.message_count && opened(x));
     // 侧栏里项目和项目会话不带头像（省出宽度）；私聊仍带 Agent 头像，认人
-    return item(c ? c.id : `p-${g.id}`, opened(c) || blank, "", g.name, c)
-      + mine.map((x) => item(x.id, opened(x), "", x.title, x, "nested")).join("");
+    // 有会话的项目可以折叠：折叠后只留项目这一行，名字后面写会话数；打开着的会话在里面时项目这一行保持选中
+    const folded = mine.length > 0 && S.folded.has(g.id);
+    const fold = mine.length ? `<button type="button" class="conv-fold" data-fold="${esc(g.id)}" aria-expanded="${!folded}"
+      aria-label="${folded ? "展开" : "折叠"} ${esc(g.name)} 的会话" title="${folded ? "展开" : "折叠"}会话"></button>` : "";
+    const sel = opened(c) || blank || (folded && mine.some(opened));
+    return item(c ? c.id : `p-${g.id}`, sel, "", g.name, c, mine.length ? "foldable" + (folded ? " folded" : "") : "",
+      folded ? `<span class="fold-count" aria-label="${mine.length} 个会话">${mine.length}</span>` : "", fold)
+      + (folded ? "" : mine.map((x) => item(x.id, opened(x), "", x.title, x, "nested")).join(""));
   }).join("") || '<li class="empty">还没有项目</li>';
 
   // 只列出聊过的私聊（以及当前打开的那个）；要和新的 Agent 私聊，在 Agent 卡片上点“对话”
@@ -2470,6 +2477,19 @@ const homeConv = () => S.snap?.conversations.find((c) => c.kind === "dm" && !c.a
 
 // 侧栏里的弹出菜单（“更多”、账号）：点按钮开关，点外面、按 Esc、焦点离开就关，上下键在项之间移动
 // 左侧栏宽度可拖动：拖右边缘的竖条，或聚焦后用左右键；双击恢复默认。宽度记在本机（localStorage）
+// 侧栏里折叠起来的项目（项目 id），记在本机
+S.folded = new Set((() => { try { return JSON.parse(localStorage.getItem("rail-folded") || "[]"); } catch { return []; } })());
+$("#project-chat-list").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-fold]");
+  if (!b) return;
+  e.preventDefault();
+  const id = b.dataset.fold;
+  S.folded.has(id) ? S.folded.delete(id) : S.folded.add(id);
+  try { localStorage.setItem("rail-folded", JSON.stringify([...S.folded])); } catch {}
+  renderConvList();
+  $(`#project-chat-list [data-fold="${CSS.escape(id)}"]`)?.focus();  // 重画后焦点留在开关上，键盘可以接着按
+});
+
 function setupRailResize() {
   const MIN = 200, MAX = 420, DEF = 224, KEY = "rail-width";
   const rail = $(".rail"), root = document.body;
