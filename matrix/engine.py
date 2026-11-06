@@ -134,6 +134,30 @@ class ExecContext:
         return seat_id(self.conversation_id, self.agent_id)
 
 
+
+DEFAULT_SESSION_TITLE = "新会话"
+AUTO_TITLE_LEN = 24
+
+
+def auto_title(text: str, files: list[dict[str, Any]] | None = None) -> str:
+    """项目会话的标题：取第一条消息的第一句，去掉 Markdown / HTML 记号、@成员、链接，最多 24 个字（超出加省略号）。
+    只有附件时用第一个附件的文件名；什么都取不到就还是“新会话”。"""
+    t = re.sub(r"```[\s\S]*?(```|$)", " ", text or "")              # 代码块不进标题
+    t = re.sub(r"<!--[\s\S]*?-->|<[^>\n]*>", " ", t)               # HTML 标签
+    t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)               # [文字](链接) 留文字
+    t = re.sub(r"https?://\S+", " ", t)
+    t = re.sub(r"(^|\s)@[^\s@，。,:：]+", " ", t)                     # @成员
+    t = re.sub(r"^\s*(#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)", "", t, flags=re.M)
+    t = re.sub(r"[*_`~|#]+", "", t)
+    line = next((x.strip() for x in t.splitlines() if x.strip()), "")
+    first = re.split(r"(?<=[。！？!?；;])|(?<=[.])\s", line)[0].strip()
+    first = re.sub(r"\s+", " ", first).strip(" ，,。.：:；;！!？?、-—")
+    if not first and files:
+        first = str(files[0].get("name", "")).strip()
+    if not first:
+        return DEFAULT_SESSION_TITLE
+    return first if len(first) <= AUTO_TITLE_LEN else first[:AUTO_TITLE_LEN].rstrip() + "…"
+
 class NetworkError(ValueError):
     pass
 
@@ -3256,7 +3280,7 @@ class Network:
                 conv.title = title.strip()[:120] or conv.title
             else:
                 conv = Conversation(id=new_id("conv"), kind="session", project_id=g.id, agent_id=a.id,
-                                    title=title.strip()[:120] or "新会话", owner_id=user)
+                                    title=title.strip()[:120] or DEFAULT_SESSION_TITLE, owner_id=user)
                 self.store.conversations[conv.id] = conv
             self.store.save()
         if joined:
@@ -4359,6 +4383,11 @@ class Network:
                 msg.answers = answering.id
                 targets = [t for t in targets if t != answering.agent_id]
             conv.messages.append(msg)
+            # 项目会话发第一条消息时，按内容起标题（还是默认的“新会话”才改：人自己起过名的不动）
+            renamed = (conv.kind == "session" and conv.title == DEFAULT_SESSION_TITLE
+                       and sum(m.role == "user" for m in conv.messages) == 1)
+            if renamed:
+                conv.title = auto_title(msg.text, files)
             for aid in targets:
                 seat = self._seat(conv, aid)
                 if seat.blocked:  # 上一轮失败后再次被 @：同一会话接着做，不让人重发原需求
@@ -4371,6 +4400,8 @@ class Network:
             conv.updated_at = time.time()
             self.store.save()
         self.bus.emit("message.added", conversation_id=conv.id, message=_msg(msg))
+        if renamed:
+            self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
         if answering is not None:
             self._close_question(answering.id, "answered", answers=_free_answers(answering, msg.text), by=actor)
         for aid in targets:

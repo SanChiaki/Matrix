@@ -233,6 +233,33 @@ def test_new_session_reuses_the_empty_one(tmp_path: Path):
     assert net.create_session(p.id, actor=alice).id not in (s1.id, s2.id)
 
 
+def test_session_title_follows_the_first_message(tmp_path: Path):
+    """新会话发第一条消息时按内容起标题；人自己起过名的、之后的消息都不改。"""
+    net, alice, bob, a, p = setup(tmp_path)
+    s1 = net.create_session(p.id, actor=alice)
+    seq = net.bus.last_seq
+    net.send_message(s1.id, "## 竞品定价\n**白板**定价策略怎么定？顺便看看 https://e.com", actor=alice, background=False)
+    assert s1.title == "竞品定价"
+    assert any(e.type == "conversation.updated" and e.data["conversation"]["title"] == "竞品定价" for e in net.bus.since(seq))
+    net.send_message(s1.id, "再补充一点别的", actor=alice, background=False)
+    assert s1.title == "竞品定价"  # 只看第一条
+    s2 = net.create_session(p.id, "我起的名", actor=alice)
+    net.send_message(s2.id, "进展如何", actor=alice, background=False)
+    assert s2.title == "我起的名"
+    s3 = net.create_session(p.id, actor=alice)
+    net.send_message(s3.id, "把报告里的结论整理成一页给老板看的材料，下周开会要用，格式简单点", actor=alice, background=False)
+    assert s3.title == "把报告里的结论整理成一页给老板看的材料，下周开会…"
+
+
+def test_auto_title():
+    from matrix.engine import auto_title
+    assert auto_title("@知识管家 帮我对比两家的定价：\n- 甲") == "帮我对比两家的定价"
+    assert auto_title("<b>hi</b> there. second") == "hi there"
+    assert auto_title("看 [报告](wiki/r.md) 的结论") == "看 报告 的结论"
+    assert auto_title("```\ncode\n```") == "新会话"
+    assert auto_title("", [{"name": "需求.docx"}]) == "需求.docx"
+
+
 def test_sessions_api(tmp_path: Path):
     """不变量 18：会话接口只对它的人开放；换助理只能换成自己的 Agent。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
