@@ -2930,7 +2930,7 @@ function renderThread() {
       return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? viaPill(m.via) : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
-      <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`;
+      <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div>${attachmentsHtml(c.id, m.attachments)}</div></li>`;
   });
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
@@ -3107,7 +3107,8 @@ function heldCard(h) {
   const head = `<div class="who"><b>${esc(h.agent_name)}</b> ${what}用到了${h.source_names.map(esc).join("、")}的资料
     ${h.status === "pending" ? '<span class="pill status pending">等你确认</span>' : `<span class="pill status completed">${HELD_CN[h.status] || ""}</span>`}</div>`;
   const src = h.source_names.map(esc).join("、");
-  const body = `<div class="body">${esc(h.text)}</div>` + (h.status !== "pending" ? "" : `
+  const files = (h.file_names || []).length ? `<p class="hint">一起发出的文件：${h.file_names.map(esc).join("、")}</p>` : "";
+  const body = `<div class="body">${esc(h.text)}</div>${files}` + (h.status !== "pending" ? "" : `
       <p class="hint">发出后${h.audience_emails.length ? ` ${h.audience_emails.map(esc).join("、")} ` : "这里的人"}都看得到。只发这一次的话，它之后的回复还会再来问你。</p>
       <div class="actions"><button type="button" data-held="${esc(h.id)}" data-act="send">发这一次</button>
         <button type="button" class="ghost" data-held="${esc(h.id)}" data-act="grant" title="以后它在这个项目里可以直接用${src}的资料">发出，以后在这里都能用</button>

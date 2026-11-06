@@ -745,7 +745,7 @@ details.manual summary { cursor: pointer; font-size: var(--fs-md); color: var(--
 .handoffs .todo-list { list-style: none; padding: 0; }
 .ho-after { border: 0; padding: 0; margin: 4px 0; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: var(--fs-md); }
 .ho-after legend { padding: 0; margin-bottom: 2px; color: var(--muted); }
-dd .atts { justify-content: flex-start; }
+dd .atts, .msg.agent .atts { justify-content: flex-start; }  /* 用户气泡里靠右；Agent 回复与详情里靠左 */
 /* 项目页（主区域，#project-<id>）：面包屑 + 标签（资产 / 资源引用）+ 表格；预览弹层 */
 label.button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: var(--radius-sm); border: 1px solid transparent; white-space: nowrap;
   background: var(--accent); color: var(--on-accent); font-size: var(--fs-md); font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s; }

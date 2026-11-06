@@ -519,7 +519,7 @@ footer a { color: var(--text-2); }
         </button>
         <div class="node-detail" id="d-net"><div>
           <div class="parts">
-            <div class="part"><h4>对话与席位</h4><p>群聊里被 @ 的成员接任务；项目会话只属于开它的人；每个 Agent 一个私聊。席位 = Agent 在一个对话里的执行上下文</p></div>
+            <div class="part"><h4>对话与席位</h4><p>群聊里被 @ 的成员接任务；项目会话只属于开它的人；每个 Agent 一个私聊。席位 = Agent 在一个对话里的执行上下文；人随消息上传附件，Agent 用 <code>send_file</code> 把工作目录里的文件附在回复上发给人</p></div>
             <div class="part"><h4>收件箱调度</h4><p>每个席位、每个委托各有收件箱；有内容且没在跑，就续接它的会话跑一轮。同一上下文同时只跑一轮</p></div>
             <div class="part"><h4>委托与验收</h4><p><code>delegate</code> 立即返回；有效权限 = 自身 ∩ 授予 ∩ 可强制；约束沿链累加；防环、限深（默认 3）；只有直接委托方验收</p></div>
             <div class="part"><h4>失败与续接</h4><p>运行时错误分类；格式错、空回复、超时自动续接一次，仍失败只阻塞这一个席位，人点“继续”从中断处接着做</p></div>

@@ -11,7 +11,7 @@ import json
 import time
 from typing import Callable
 
-from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
+from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, CHAT_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
                      HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Question, Task, UserRequest, attachment_rel)
@@ -122,6 +122,8 @@ TOOL_GUIDE: dict[str, str] = {
     "accept_task": "接受一个已交付（in_review）的委托。",
     "request_changes": "退回一个已交付的委托并写明要改什么，对方会在原会话里修改后重新交付。",
     "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
+    "send_file": ("把工作目录里的文件（或目录，打成 zip）附在这一轮的回复上发给对话里的人，人直接下载；"
+                  "回复里说明是什么，不要把长内容贴进回复，也不要让人去工作目录里找。"),
     "answer_question": ("回答你委托的成员问你的问题（question_id 来自网络通知）。它一直在等：能替人决定的就直接答，"
                         "一个选项时写那个选项的原文。"),
     "escalate_question": ("成员问的事你决定不了（要人拍板、你没有依据）时转给人，可在 note 里写你的看法；"
@@ -184,7 +186,8 @@ def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, 
     return archive + [
         "", f"## 协作：你所在的项目「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()
-          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS + HOME_TOOLS + NOTE_TOOLS),
+          if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS + HOME_TOOLS + NOTE_TOOLS
+          + CHAT_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -403,6 +406,8 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                   "", "## 起草与定时",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in HOME_TOOLS)]
     parts += _requests()
+    parts += ["", "## 给人发文件", *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in CHAT_TOOLS),
+              f"- 只能发当前工作目录里你自己写出来的文件（`{PROJECT_FILES}/`、`{HOME}/`、`{SKILLS}/` 等只读挂载不能发）。"]
     parts += _abilities()
     if ask:
         parts += _asking(task=False)
