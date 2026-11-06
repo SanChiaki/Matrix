@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -146,6 +148,58 @@ class QuestionBridge:
 
 
 @dataclass
+class Material:
+    """端侧每轮要的一份只读材料（项目档案文件、对话附件、订阅的交付件、技能、插件挂载）。
+    内容在服务器上：文件按路径读（不进内存），插件挂载的是现成的字节。sha 是内容的 sha256，端侧按它缓存，
+    没变的不再传（docs/reference/device-runtimes.md“材料”）。"""
+
+    path: str                 # 工作目录里的相对路径，如 project/brief.md
+    sha: str
+    size: int
+    file: Path | None = None
+    data: bytes | None = None
+
+    def read(self, offset: int = 0, length: int | None = None) -> bytes:
+        if self.data is not None:
+            return self.data[offset:None if length is None else offset + length]
+        assert self.file is not None
+        with self.file.open("rb") as f:
+            f.seek(offset)
+            return f.read() if length is None else f.read(length)
+
+    def b64(self) -> str:
+        return base64.b64encode(self.read()).decode()
+
+
+_SHA_CACHE: dict[tuple[str, int, int], str] = {}  # (路径, 修改时间, 大小) → sha256：没改过的文件不重新算
+_SHA_LOCK = threading.Lock()
+
+
+def material_file(rel: str, path: Path, sha: str | None = None) -> Material:
+    """服务器上的一个文件作为材料。sha 已知（对话附件按内容寻址，文件名就是 sha）时不再算。"""
+    st = path.stat()
+    if sha is None:
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        with _SHA_LOCK:
+            sha = _SHA_CACHE.get(key)
+        if sha is None:
+            h = hashlib.sha256()
+            with path.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+            sha = h.hexdigest()
+            with _SHA_LOCK:
+                if len(_SHA_CACHE) > 20_000:
+                    _SHA_CACHE.clear()
+                _SHA_CACHE[key] = sha
+    return Material(path=rel, sha=sha, size=st.st_size, file=path)
+
+
+def material_bytes(rel: str, data: bytes) -> Material:
+    return Material(path=rel, sha=hashlib.sha256(data).hexdigest(), size=len(data), data=data)
+
+
+@dataclass
 class RunRequest:
     agent_id: str
     context_id: str     # 对话 id 或任务 id
@@ -160,9 +214,8 @@ class RunRequest:
     model: dict[str, str] | None = None  # {provider, model, reasoning_effort?}；None 用运行时默认
     approvals: ApprovalBridge | None = None
     questions: QuestionBridge | None = None  # 提问通道；None = 这一轮不能提问（运行时也不挂提问工具）
-    # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：
-    # [{"path": "project/x.md", "data": <bytes>}]
-    materials: list[dict[str, Any]] = field(default_factory=list)
+    # 每轮下发的只读材料（端侧运行时用；云侧由 _run 直接挂载目录）：支持缓存的连接器只收清单、缺的再来取
+    materials: list[Material] = field(default_factory=list)
     # 私有目录（端侧运行时用；云侧由 _run 直接挂载）："rw" 挂载并写回，"ro" 只挂载不写回，None 不挂载
     home: str | None = None
     # 端侧设备上用哪个 harness（端侧运行时用）；None = 设备的默认 harness
