@@ -87,6 +87,7 @@ class PluginPolicyIn(BaseModel):
     deny: list[str] = Field(default_factory=list, max_length=200)
     hosted_upload: bool = True
     sandbox_catalog: bool = True
+    proxy: str = "auto"                  # 远程插件服务的代理模式：auto / env / direct
 
 
 class CatalogGitIn(BaseModel):

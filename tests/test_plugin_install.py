@@ -429,3 +429,31 @@ def test_plugin_dependencies_from_lock_file(tmp_path: Path):
     finally:
         srv.close()
     assert not err and json.loads(text)["dep"] == "from-wheel", text
+
+
+def test_remote_plugin_service_proxy_mode(tmp_path: Path, wiki_server, monkeypatch):
+    """插件策略的 proxy：远程插件服务默认 auto，环境里配了代理也直连内网地址；改成 env 就照环境变量走代理
+    （这里是连不上的代理），管理后台改了下一次调用就生效。"""
+    for k in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(k, "http://127.0.0.1:1")
+    base, secrets, _ = wiki_server
+    net, host, _, _, g = make_net(tmp_path)
+    url = base + "/matrix-plugin.zip"
+    net.admin_save_plugin_policy(host, {"allow": ["127.0.0.1"]})
+    assert net.admin_plugins(host)["policy"]["proxy"] == "auto"
+    with pytest.raises(NeedsConfirm) as e:
+        net.install_plugin_url(g.id, url, actor=host)
+    out = net.install_plugin_url(g.id, url, confirm=True, actor=host, digest=e.value.digest)
+    secrets.write_text(json.dumps({g.id: out["secret"]}), encoding="utf-8")
+    assert net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "index"}, actor=host)
+
+    net.admin_save_plugin_policy(host, {"allow": ["127.0.0.1"], "proxy": "env"})
+    net.services.stop(g.id, "llm-wiki")
+    with pytest.raises(NetworkError, match="连不上"):
+        net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "index"}, actor=host)
+    net.admin_save_plugin_policy(host, {"allow": ["127.0.0.1"], "proxy": "direct"})
+    assert net.plugin_bridge(g.id, "llm-wiki", "service.call", {"tool": "index"}, actor=host)
+    with pytest.raises(NetworkError, match="proxy"):
+        net.admin_save_plugin_policy(host, {"proxy": "sometimes"})

@@ -50,7 +50,7 @@
 设计见 [plugin-install.md](../plugin-install.md)。`GET /api/admin/plugins` 一次给出：
 
 - **主持人自己装**（`PUT /api/admin/plugins/policy`，存 `<data>/plugin-policy.json`）：远程服务插件 `public` / `listed` / `off`、允许与禁止的主机、
-  能不能上传托管插件、目录里的托管插件进不进沙箱；沙箱可不可用（`sandbox.available()` 的探测结果与原因）。改了立即生效，已经装上的远程插件也按新策略。
+  能不能上传托管插件、目录里的托管插件进不进沙箱、远程插件服务走不走代理（`proxy`：auto / env / direct）；沙箱可不可用（`sandbox.available()` 的探测结果与原因）。改了立即生效，已经装上的远程插件也按新策略。
 - **部署方目录**：文件里的（`plugins.json`，只读，在文件里改）和后台加的（从 git 仓库添加 / 上传插件包 / 批准的上架申请；git 的可以重新拉取，
   后台加的可以移出目录），每个插件的来源（git 地址与提交号、谁加的）、服务类型、有几个项目在用（只给数量，不给项目名）。
 - **上架申请**：说明、提交的人、包里的文件（点开看内容，`GET …/submissions/<id>/file?path=`，最多 200 KB 文本）、体检结果；批准上架或拒绝（写理由）。

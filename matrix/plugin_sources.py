@@ -56,12 +56,15 @@ class InstallPolicy:
     """部署方对“主持人自己装插件”的策略（管理后台可改）。
     remote：off 不许装远程服务插件；public 公网主机都行（加上 allow 里的内网目标）；listed 只许 allow 里的。
     allow：域名（含子域名）、IP 或网段，写进来的也可以是内网、可以用 http。deny：域名（含子域名），优先于 allow。
-    hosted_upload：主持人上传的托管插件（进沙箱）。sandbox_catalog：目录里的托管插件也进沙箱（有沙箱时）。"""
+    hosted_upload：主持人上传的托管插件（进沙箱）。sandbox_catalog：目录里的托管插件也进沙箱（有沙箱时）。
+    proxy：远程插件服务（目录里的和自己装的）连接时怎么用环境变量里的代理，同 connectors.json 的 proxy：
+    auto 内网地址直连（allow 里的主机也算内网）、其余照环境变量；env 全照环境变量；direct 一律直连。"""
     remote: str = "public"
     allow: tuple[str, ...] = ()
     deny: tuple[str, ...] = ()
     hosted_upload: bool = True
     sandbox_catalog: bool = True
+    proxy: str = "auto"
 
     def fetch_policy(self) -> web_fetch.FetchPolicy:
         p = web_fetch.parse_policy({"allow": list(self.allow)})
@@ -69,7 +72,7 @@ class InstallPolicy:
 
     def to_dict(self) -> dict[str, Any]:
         return {"remote": self.remote, "allow": list(self.allow), "deny": list(self.deny),
-                "hosted_upload": self.hosted_upload, "sandbox_catalog": self.sandbox_catalog}
+                "hosted_upload": self.hosted_upload, "sandbox_catalog": self.sandbox_catalog, "proxy": self.proxy}
 
 
 def parse_policy(data: Any) -> InstallPolicy:
@@ -95,7 +98,11 @@ def parse_policy(data: Any) -> InstallPolicy:
     for key in ("hosted_upload", "sandbox_catalog"):
         if key in data and not isinstance(data[key], bool):
             raise SourceError(f"{key} 要是 true 或 false")
-    return InstallPolicy(remote, allow, deny, data.get("hosted_upload", True), data.get("sandbox_catalog", True))
+    from .mcp_client import PROXY_MODES
+    proxy = str(data.get("proxy") or "auto")
+    if proxy not in PROXY_MODES:
+        raise SourceError(f"proxy 只能是 {'/'.join(PROXY_MODES)}")
+    return InstallPolicy(remote, allow, deny, data.get("hosted_upload", True), data.get("sandbox_catalog", True), proxy)
 
 
 class PolicyStore:

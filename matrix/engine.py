@@ -2858,6 +2858,11 @@ class Network:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _service_net(self) -> dict[str, Any]:
+        """远程插件服务怎么走代理：每次连接取插件策略现在的 proxy，allow 里的主机算内网（管理后台改了即生效）。"""
+        return {"proxy": lambda: self.plugin_policy.get().proxy,
+                "allow": lambda: self.plugin_policy.get().fetch_policy()}
+
     def _service_client(self, g: Project, name: str, m: pluginfs.Manifest) -> Any:
         """调用方不持有锁（第一次用到时启动进程，要几秒）。按安装来源决定在哪里跑（不变量 24）：
         目录里的远程服务用部署方的密钥；自己装的远程服务每次都按部署方现在的策略再查一遍、用这个安装的密钥；
@@ -2868,7 +2873,7 @@ class Network:
         try:
             if m.service.url:
                 if source == "catalog":
-                    return self.services.remote(g.id, name, m.version, m.service.url)
+                    return self.services.remote(g.id, name, m.version, m.service.url, **self._service_net())
                 try:  # 每次都按现在的策略、现在解析出的地址查：主机换到内网地址（DNS 重绑定）也拦得住大部分
                     sources.check_remote(policy, m.service.url)
                 except sources.SourceError as e:
@@ -2876,7 +2881,7 @@ class Network:
                 secret = self._plugin_secret(g.id, name)
                 if not secret:
                     raise ServiceError("这个安装还没有签名密钥：请主持人在插件卡片上生成")
-                return self.services.remote(g.id, name, m.version, m.service.url, secret)
+                return self.services.remote(g.id, name, m.version, m.service.url, secret, **self._service_net())
             data = self._service_data(g, name)
             pkg = self.store.project_plugins_dir(g.id) / name
             env = self._plugin_env(pkg, m, source)

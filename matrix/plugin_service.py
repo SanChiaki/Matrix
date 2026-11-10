@@ -259,10 +259,12 @@ def _clip(text: str) -> str:
 class RemoteService:
     """部署方运行的远程插件服务：和 StdioClient 同样的接口。每次调用换一个新签的项目令牌。"""
 
-    def __init__(self, url: str, project: str, plugin: str, secret: bytes):
+    def __init__(self, url: str, project: str, plugin: str, secret: bytes,
+                 proxy: Any = "auto", allow: Any = None):
         from .mcp_client import RemoteMCP  # 延迟导入：只有用到远程服务时才需要
         self.project, self.plugin, self.secret = project, plugin, secret
-        self.mcp = RemoteMCP(url, timeout_s=CALL_TIMEOUT)
+        # proxy / allow：每次连接取部署方现在的插件策略（代理模式、算作内网的主机）
+        self.mcp = RemoteMCP(url, timeout_s=CALL_TIMEOUT, proxy=proxy, allow=allow)
         self.last_used = time.time()
         self._tools: list[dict[str, Any]] | None = None
 
@@ -310,8 +312,10 @@ class ServiceHost:
     _failures: dict[tuple[str, str], int] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def remote(self, project_id: str, plugin: str, version: str, url: str, secret: bytes | None = None) -> RemoteService:
-        """远程服务：不起进程，只缓存客户端（会话、工具列表）。secret 为空时用部署方的环境变量（目录里的插件）。"""
+    def remote(self, project_id: str, plugin: str, version: str, url: str, secret: bytes | None = None,
+               proxy: Any = "auto", allow: Any = None) -> RemoteService:
+        """远程服务：不起进程，只缓存客户端（会话、工具列表）。secret 为空时用部署方的环境变量（目录里的插件）。
+        proxy：代理模式（mcp_client.PROXY_MODES，或每次取现值的函数）；allow：算作内网的主机（函数，返回 FetchPolicy）。"""
         key = (project_id, plugin)
         secret = secret or os.environ.get(secret_env(plugin), "").encode()
         if not secret:
@@ -321,7 +325,7 @@ class ServiceHost:
             if (hit is not None and hit[0] == version and isinstance(hit[1], RemoteService) and hit[1].mcp.url == url
                     and hit[1].secret == secret):
                 return hit[1]
-            c = RemoteService(url, project_id, plugin, secret)
+            c = RemoteService(url, project_id, plugin, secret, proxy, allow)
             self._procs[key] = (version, c)
             return c
 

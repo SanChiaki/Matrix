@@ -124,6 +124,12 @@
         <textarea id="plp-allow" name="allow" rows="3" placeholder="plugins.corp.example&#10;10.20.0.0/16"></textarea></div>
       <div class="field"><label for="plp-deny">禁止的主机（一行一个域名，含子域名；优先于允许）</label>
         <textarea id="plp-deny" name="deny" rows="2"></textarea></div>
+      <div class="field"><label for="plp-proxy">远程插件服务走不走代理（服务器环境变量里配了 HTTPS_PROXY 等时；目录里的和自己装的都按这一项）</label>
+        <select id="plp-proxy" name="proxy">
+          <option value="auto">内网地址直连，其余走代理（上面允许的主机也算内网）</option>
+          <option value="env">全照环境变量（内网地址要自己写进 NO_PROXY）</option>
+          <option value="direct">一律直连，不走代理</option>
+        </select></div>
       <label class="switch"><input type="checkbox" name="hosted_upload"> 允许主持人上传带托管服务的插件（只在沙箱里跑，不能联网）</label>
       <label class="switch"><input type="checkbox" name="sandbox_catalog"> 部署方目录里的托管插件也放进沙箱（按清单决定能不能联网）</label>
       <p class="muted m-hint" id="pl-sandbox"></p>

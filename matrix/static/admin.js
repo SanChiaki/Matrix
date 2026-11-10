@@ -486,6 +486,7 @@ function renderPlugins() {
   f.deny.value = d.policy.deny.join("\n");
   f.hosted_upload.checked = d.policy.hosted_upload;
   f.sandbox_catalog.checked = d.policy.sandbox_catalog;
+  f.proxy.value = d.policy.proxy || "auto";
   $("#pl-sandbox").textContent = d.sandbox.available ? "沙箱：可用（bubblewrap）。"
     : `沙箱：不可用（${d.sandbox.note}）。主持人上传的托管插件装不上，目录里的托管插件由本部署直接运行。`;
   $("#pl-cat-hint").innerHTML = "所有项目的主持人都能从这里安装。装进项目的是当时那一版的拷贝：这里更新后，主持人在插件卡上看到“升级”。"
@@ -532,7 +533,8 @@ function bindPlugins() {
     $("#plp-save").disabled = true;
     try {
       P.data = await api("/api/admin/plugins/policy", { method: "PUT", body: { remote: f.remote.value, allow: lines(f.allow.value),
-        deny: lines(f.deny.value), hosted_upload: f.hosted_upload.checked, sandbox_catalog: f.sandbox_catalog.checked } });
+        deny: lines(f.deny.value), hosted_upload: f.hosted_upload.checked, sandbox_catalog: f.sandbox_catalog.checked,
+        proxy: f.proxy.value } });
       renderPlugins();
       $("#pl-error").textContent = "";
     } catch (e) { $("#pl-error").textContent = e.message; }

@@ -114,6 +114,22 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 
 顶层的对所有目录连接器生效，单个连接器写的 `proxy` 盖过顶层的；改了即生效。用户自己加的自定义连接器从不走代理，不受它影响。
 
+## 出网代理（可选）
+
+服务器只能经代理出网时，代理写在 `deploy/.env` 里（compose 用 `env_file` 交给 matrix 容器），写完执行 `docker compose up -d`
+重建容器（只 `restart` 不会重读 `.env`）：
+
+```
+HTTPS_PROXY=http://proxy.corp.example:3128
+HTTP_PROXY=http://proxy.corp.example:3128
+NO_PROXY=localhost,127.0.0.1,.corp.example
+```
+
+不用 Docker 时，在启动 `matrix` 的那个 shell 或 systemd 单元的 `Environment=` 里设同样的变量，重启服务生效。
+Matrix 的网页抓取、连接器和远程插件服务都读这几个变量。连接器与远程插件服务另有 `proxy` 开关，
+默认 `auto`：内网地址直连、不用写进 `NO_PROXY`。目录连接器的在 `connectors.json` 里改（见上面「内网连接器」）；
+远程插件服务的在管理后台「插件」页 →「远程插件服务走不走代理」改（存在 `/data/plugin-policy.json` 的 `proxy`），改了即生效。
+
 ## 内网 CA / 自签证书
 
 内网的模型供应商、抓取目标用自签 CA 时，把根 CA（PEM，扩展名 `.crt`）放进 `deploy/ca-certificates/`，然后
