@@ -189,6 +189,51 @@ def _public_opener(allow: Any = None) -> urllib.request.OpenerDirector:
 
 
 _PUBLIC_OPENER = _public_opener()
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# 部署方目录里的连接器怎么走代理（connectors.json 的 `proxy`，也可以每个连接器单写）：
+#   auto  内网地址直连，其余照环境变量（HTTPS_PROXY / NO_PROXY）；默认
+#   env   全照环境变量（原来的做法）
+#   direct 一律直连，不走代理
+PROXY_MODES = ("auto", "env", "direct")
+
+
+def is_intranet(url: str, allow: Any = None) -> bool:
+    """这个地址是不是内网：主机在白名单里、写成非公网 IP、或本机解析出的地址里有非公网的。
+    本机解析不了的域名不算内网（出网只能走代理的部署：交给代理解析）。"""
+    import socket
+    from urllib.parse import urlsplit
+    from .web_fetch import _literal, is_public
+    try:
+        p = urlsplit(url)
+        host, port = (p.hostname or "").rstrip(".").lower(), p.port or (443 if p.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if _listed(host, allow):
+        return True
+    literal = _literal(host)
+    if literal is not None:
+        return not is_public(literal)
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    return any(not is_public(i[4][0]) for i in infos)
+
+
+def goes_direct(url: str, mode: str, allow: Any = None) -> bool:
+    """按代理模式决定这一次连接是否绕过环境变量里的代理。"""
+    if mode == "direct":
+        return True
+    if mode == "env":
+        return False
+    if not any(urllib.request.getproxies().get(k) for k in ("http", "https", "all")):
+        return False  # 没配代理：怎么连都一样，不用去解析
+    return is_intranet(url, allow)
 
 
 def fetch_public(url: str, limit: int, timeout: float = 30) -> tuple[bytes, str]:
@@ -208,8 +253,10 @@ class MCPError(RuntimeError):
 
 class RemoteMCP:
     def __init__(self, url: str, headers: dict[str, str] | None = None, timeout_s: float = 60,
-                 public_only: bool = False, allow: Callable[[], Any] | None = None):
+                 public_only: bool = False, allow: Callable[[], Any] | None = None,
+                 proxy: str | Callable[[], str] = "auto"):
         self.url = url
+        self.proxy = proxy               # 非 public_only 时：代理模式（PROXY_MODES），可以是每次取现值的函数
         self.public_only = public_only   # 用户自己填的地址：只连公网、不跟重定向（check_public_url）
         self.allow = allow               # public_only 时：每次连接取部署方现在的内网白名单（热加载）
         self.headers = dict(headers or {})
@@ -230,8 +277,13 @@ class RemoteMCP:
                 allow = self.allow() if self.allow else None
                 opener = _PUBLIC_OPENER if allow is None else _public_opener(allow)
                 resp = opener.open(req, timeout=self.timeout_s)
-            else:
-                resp = urllib.request.urlopen(req, timeout=self.timeout_s)  # noqa: S310 —— 地址来自部署方的目录
+            else:  # 地址来自部署方的目录：内网地址按代理模式直连（allow 也算内网）
+                mode = self.proxy() if callable(self.proxy) else self.proxy
+                allow = self.allow() if self.allow else None
+                if goes_direct(self.url, mode, allow):
+                    resp = _DIRECT_OPENER.open(req, timeout=self.timeout_s)
+                else:  # 现建：urlopen 的全局 opener 在第一次用时就定下了代理，之后改环境变量不生效
+                    resp = urllib.request.build_opener().open(req, timeout=self.timeout_s)
         except urllib.error.HTTPError as e:
             if e.code == 404 and self.session_id:
                 raise _Expired() from e

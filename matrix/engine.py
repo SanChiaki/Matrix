@@ -1492,7 +1492,8 @@ class Network:
                 if c.url:
                     r = RemoteMCP(c.url, self._custom_headers(c), public_only=True, allow=self.connectors.allow)
                 else:
-                    r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
+                    r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)), allow=self.connectors.allow,
+                                  proxy=lambda cid=spec.id: self.connectors.proxy_mode(cid))
                 self._remotes[c.id] = r
             return r
 

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from matrix import auth
-from matrix.connector_catalog import ConnectorCatalog, parse_catalog
+from matrix.connector_catalog import ConnectorCatalog, parse_allow, parse_catalog
 from matrix.engine import Network, NetworkError
 from matrix.mcp_client import MCPError, RemoteMCP
 from matrix.models import CONNECTOR_PREFIX
@@ -654,6 +654,59 @@ def test_custom_connector_intranet_allowlist(tmp_path: Path, fake: FakeMCP):
     os.utime(cat, (time.time() + 5, time.time() + 5))
     with pytest.raises(MCPError, match="白名单"):
         net._remote(conn).list_tools()
+
+
+@pytest.fixture
+def dead_proxy(monkeypatch):
+    """环境里配了一个连不上的代理：走代理的请求都会失败，只有直连的能通。"""
+    for k in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(k, "http://127.0.0.1:1")
+
+
+def test_catalog_connector_proxy_modes(tmp_path: Path, fake: FakeMCP, dead_proxy, monkeypatch):
+    """目录里的连接器：默认 auto，内网地址绕过环境里的代理直连；env 照环境变量；每个连接器可以单写 proxy 盖过顶层。"""
+    import socket
+    from matrix import mcp_client as mc
+    ok = {"Authorization": f"Bearer {SECRET}"}
+    assert RemoteMCP(fake.url, ok).list_tools()                       # auto：127.0.0.1 直连
+    assert RemoteMCP(fake.url, ok, proxy="direct").list_tools()
+    with pytest.raises(MCPError, match="连不上"):
+        RemoteMCP(fake.url, ok, proxy="env").list_tools()             # 照环境变量走了连不上的代理
+
+    def fake_dns(ips):
+        return lambda host, port, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+    def boom(*a, **k):
+        raise OSError("no dns")
+    with monkeypatch.context() as mp:
+        mp.setattr(socket, "getaddrinfo", fake_dns(["10.1.2.3"]))
+        assert mc.goes_direct("https://mcp.corp.example/x", "auto")
+        mp.setattr(socket, "getaddrinfo", fake_dns(["93.184.216.34"]))
+        assert not mc.goes_direct("https://mcp.example.com/x", "auto")
+        assert mc.goes_direct("https://mcp.example.com/x", "auto", parse_allow({"allow": ["*.example.com"]}))  # 白名单里的也算内网
+        mp.setattr(socket, "getaddrinfo", boom)
+        assert not mc.goes_direct("https://api.example.com/x", "auto")      # 本机解析不了：交给代理
+    assert mc.goes_direct("http://192.168.1.8/mcp", "auto") and not mc.goes_direct("http://192.168.1.8/mcp", "env")
+
+    cat = catalog_file(tmp_path, fake.url)
+    data = json.loads(cat.read_text(encoding="utf-8"))
+    cc = ConnectorCatalog(cat)
+    assert cc.proxy_mode("docs") == "auto"
+    data["proxy"] = "env"
+    cat.write_text(json.dumps(data), encoding="utf-8")
+    os.utime(cat, (time.time() + 5, time.time() + 5))
+    assert cc.proxy_mode("docs") == "env"
+    data["connectors"][0]["proxy"] = "auto"
+    cat.write_text(json.dumps(data), encoding="utf-8")
+    os.utime(cat, (time.time() + 10, time.time() + 10))
+    assert cc.proxy_mode("docs") == "auto"
+    from matrix.connector_catalog import parse_proxy
+    assert parse_proxy({}) == "auto"
+    with pytest.raises(ValueError, match="proxy"):
+        parse_proxy({"proxy": "sometimes"})
+    with pytest.raises(ValueError, match="proxy"):
+        parse_catalog({"connectors": [{**data["connectors"][0], "proxy": 1}]})
 
 
 # ================= 自定义连接器：手工写的 MCP 配置 =================
