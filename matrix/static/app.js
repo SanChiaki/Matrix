@@ -1078,7 +1078,13 @@ function projectConvId(g) {
 function showProjectChat(g, panel) {
   hostChat(panel);
   const id = projectConvId(g);
-  if (id) { if (S.convId !== id || S.conv?.id !== id) openConv(id); return; }  // 已经开着：重绘由 renderProjectsView 做
+  if (id) {
+    if (S.convId !== id || S.conv?.id !== id) openConv(id);
+    // 已经开着：一般由 renderProjectsView 重绘。但切项目时对话数据可能比项目数据先到——那时 chatShown() 还是假，
+    // 那次重绘被跳过；项目数据到了走到这里，线程里画的还是上一个项目的对话，就在这里补画
+    else if ($("#thread").dataset.conv !== id) renderThread();
+    return;
+  }
   if (S.creatingConv === g.id) return;
   S.creatingConv = g.id;  // 第一次打开这个项目：建群聊（服务端是幂等的，这里只防止事件刷新连发）
   api("/api/conversations", { method: "POST", body: { project_id: g.id } })
@@ -2881,8 +2887,10 @@ function renderMembers() {
 }
 
 function renderThread() {
-  const c = S.conv;
+  // 切到另一个对话、它的数据还没到时，S.conv 还是上一个对话：显示“加载中”，不把上一个对话画进来
+  const c = S.conv && S.convId && S.conv.id !== S.convId ? { id: S.convId, loading: true } : S.conv;
   if (!c) return;
+  $("#thread").dataset.conv = c.loading ? "" : c.id;  // 线程里现在画的是哪个对话（showProjectChat 据此补画）
   if (c.missing || c.loading || c.failed) {
     $("#thread-head").innerHTML = "";
     $("#thread").innerHTML = `<li>${placeholder(c.missing ? "这个对话不存在或已删除。" : c.loading ? "正在加载…"
