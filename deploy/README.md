@@ -78,6 +78,22 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，见下面的「内网 CA / 自签证书」。
 升级 dsh 后跑 `matrix-dsh-check`，`web-fetch` 一项确认自带的 `web_fetch` 仍然关得掉。
 
+## 内网连接器（可选）
+
+部署方目录 `/data/connectors.json` 里的连接器地址本来就可以是内网、可以用 `http://`。用户自己加的**自定义连接器**
+（我的连接器、项目里写的 MCP 配置）默认只能连 `https://` 公网地址；要让它们连内网的 MCP 服务，在同一个文件顶层写 `allow`：
+
+```json
+{
+  "connectors": [],
+  "allow": ["mcp.corp.example", "*.svc.internal", "10.20.0.0/16"]
+}
+```
+
+- 写法同 `fetch.json` 的 `allow`：域名含子域名，也可以写 IP 或网段。写进来的主机可以是内网地址、可以用 `http://`。
+- 改了即生效；删掉一项后，已经连好的连接下一次调用就连不上。
+- 连接直连校验过的地址、不跟重定向、不走代理。内网服务用自签证书时，见下面的「内网 CA / 自签证书」。
+
 ## 内网 CA / 自签证书
 
 内网的模型供应商、抓取目标用自签 CA 时，把根 CA（PEM，扩展名 `.crt`）放进 `deploy/ca-certificates/`，然后

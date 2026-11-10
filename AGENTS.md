@@ -202,7 +202,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
 - `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准、提问应答者替人作答；覆盖层要一直关掉 dsh 的默认技能根。
-- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），不要放宽；
+- 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
   能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
 - IM 机器人的密钥只进 `vault/`；桥只放行绑定的人在单聊里说的话、只往他自己的单聊推，不要放宽；企业微信地址只由部署方经 `MATRIX_WECOM_URL` 改，不要做成用户可填（网络会被当跳板）。
 - 已知风险：沙箱只管写、不管读。接入第二个运行时或任何多机部署之前，必须先做读隔离。

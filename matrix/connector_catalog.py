@@ -9,7 +9,8 @@
          "auth": {"fields": [{"key": "token", "label": "个人访问令牌", "secret": true,
                               "header": "Authorization", "template": "Bearer {value}"}]},
          "skills": [{"name": "triage-issues", "description": "整理议题", "body": "……"}]}
-      ]
+      ],
+      "allow": ["mcp.corp.example", "10.20.0.0/16"]
     }
 
 - 接入方式目前只有远程 MCP（Streamable HTTP）：由网络带上凭证代为调用，运行时拿不到凭证。
@@ -22,7 +23,11 @@
   嵌进来的页面用看的人自己在那个系统的登录，Matrix 不给它任何东西（docs/reference/connectors-skills.md）。
 - `skills`：连接器自带的技能（docs/connectors-and-skills.md）。名字规则同技能。
 - 没有这个文件：不提供云端连接器。文件写坏了保留上一份能用的。
-- 这份文件里的地址由部署方负责；用户自定义的连接器另走 `mcp_client.public_only`，只连公网。
+- 这份文件里的地址由部署方负责（可以是内网、可以用 http）；用户自定义的连接器另走 `mcp_client.public_only`，只连 https 公网。
+- `allow`：用户自定义的连接器（我的连接器、项目里写的）也可以连的内网目标，写法同 fetch.json 的 `allow`：
+  域名含子域名（`*.x` 与 `x` 一样），也可以写 IP 或网段（CIDR）。写进来的主机可以是内网地址、可以用 http；
+  白名单里的域名解析到哪里都放行（内网 DNS 由部署方负责），其余域名解析出的每个地址都得是公网或落在白名单的网段里。
+  可省略（默认空：自定义连接器只连 https 公网）。只写这一项时 `connectors` 写空列表。
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from . import web_fetch
 from .skills import SkillError, check_name
 
 CONNECTOR_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
@@ -137,12 +143,23 @@ def parse_catalog(data: Any) -> list[ConnectorSpec]:
     return out
 
 
+def parse_allow(data: Any) -> web_fetch.FetchPolicy:
+    """顶层的 `allow`：自定义连接器可以连的内网目标（同 fetch.json 的写法）。只用来放行内网，公网照常可连。"""
+    allow = data.get("allow", []) if isinstance(data, dict) else []
+    try:
+        p = web_fetch.parse_policy({"allow": allow})
+    except ValueError as e:
+        raise ValueError(f"allow：{e}") from e
+    return web_fetch.FetchPolicy(domains=p.domains, networks=p.networks, public=True)
+
+
 class ConnectorCatalog:
     def __init__(self, path: Path | None):
         self.path = path
         self._lock = threading.Lock()
         self._mtime: float | None = None
         self._specs: list[ConnectorSpec] = []
+        self._allow = web_fetch.FetchPolicy()
         self.error: str | None = None
 
     def _refresh(self) -> None:
@@ -151,13 +168,14 @@ class ConnectorCatalog:
         try:
             mtime = self.path.stat().st_mtime
         except OSError:
-            self._mtime, self._specs, self.error = None, [], None
+            self._mtime, self._specs, self._allow, self.error = None, [], web_fetch.FetchPolicy(), None
             return
         if mtime == self._mtime:
             return
         self._mtime = mtime
         try:
-            self._specs = parse_catalog(json.loads(self.path.read_text(encoding="utf-8")))
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            self._specs, self._allow = parse_catalog(data), parse_allow(data)
             self.error = None
         except (OSError, ValueError) as e:
             self.error = str(e)
@@ -167,6 +185,12 @@ class ConnectorCatalog:
         with self._lock:
             self._refresh()
             return list(self._specs)
+
+    def allow(self) -> web_fetch.FetchPolicy | None:
+        """部署方给自定义连接器的内网白名单；没写就是 None（只连 https 公网）。"""
+        with self._lock:
+            self._refresh()
+            return self._allow if self._allow.allow_entries() else None
 
     def get(self, connector_id: str | None) -> ConnectorSpec | None:
         return next((s for s in self.specs() if s.id == connector_id), None) if connector_id else None

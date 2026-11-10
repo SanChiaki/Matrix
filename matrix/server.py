@@ -178,7 +178,7 @@ McpConfig = str | dict[str, Any]
 
 class CustomConnectorIn(BaseModel):
     name: str = Field("", max_length=60)                  # 不填就用配置里的服务名
-    config: McpConfig | None = Field(None)                # 接入方式：远程 MCP，地址只接受 https 公网地址
+    config: McpConfig | None = Field(None)                # 接入方式：远程 MCP，地址只接受 https 公网地址，或部署方白名单里的内网地址
     url: str = Field("", max_length=2000)                 # 旧写法：单个地址 + 一个请求头
     header: str = Field("", max_length=64)
     value: str = Field("", max_length=4000)               # 只进加密保管，不回显

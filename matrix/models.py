@@ -580,7 +580,7 @@ class Connection:
     error: str = ""
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    url: str = ""                        # 自定义的云端 MCP：用户填的 https 公网地址（只连公网，不跟重定向）
+    url: str = ""                        # 自定义的云端 MCP：用户填的 https 公网地址，或部署方白名单里的内网地址（不跟重定向）
 
     def public(self) -> dict[str, Any]:
         return asdict(self)
