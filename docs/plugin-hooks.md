@@ -275,3 +275,5 @@ Raft、Multica 这类东西做成插件，要的是 `route` 挂点：一条消�
 
 做完以后，security.md 的“沙箱只管写、不管读”这条风险才能去掉。
 
+2026-11-10：完整方案见 [cloud-runtime.md](cloud-runtime.md)（选型、数据进出、出口网关、分阶段与验收检查）。
+

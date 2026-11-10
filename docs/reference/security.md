@@ -13,7 +13,7 @@
   信任域隔离（不变量 13、16）目前只在提示词、网络工具与 API 层成立，文件层挡不住；共享项目会放大这个风险（别的参与者可以 @ 诱导读取）。
   接受理由：本地单机 Demo、所有用户在同一台机器上；范围：DSH 运行时，以及没有沙箱时网络直接托管的目录插件服务进程
   （主持人自己装的托管插件只在沙箱里跑，读不到数据目录，[plugin-install.md](../plugin-install.md) 第 4 节）；复查时机：接入第二个运行时或任何多机部署之前，必须先做读隔离。
-  已记为遗留任务：Matrix 与云端 Agent 隔离、云端 Agent 之间隔离（REQUIREMENTS #59，方案方向见 [plugin-hooks.md](../plugin-hooks.md#isolation-debt)）。
+  已记为遗留任务：Matrix 与云端 Agent 隔离、云端 Agent 之间隔离（REQUIREMENTS #59，方案见 [cloud-runtime.md](../cloud-runtime.md)，尚未实现）。
   云侧和端侧在执行面上的全部差异与云侧待优化的地方，见 [device-runtimes.md](device-runtimes.md#cloud-vs-device)。
 - 端侧材料（`material.fetch`）只回**这一轮清单里**的 sha，轮次结束就取不到；连接器在本机再校验路径（不进 `agent-home/`、不越界）、
   大小与 sha256。缓存在 `<工作根目录>/.cache/materials/`，只有这台设备上跑过的轮次给过它的内容（[device-runtimes.md](device-runtimes.md)“材料”）。

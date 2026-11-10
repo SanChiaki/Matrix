@@ -53,6 +53,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账** | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
+| 云侧执行面的生产级方案（设计，未实现）：每个执行单元一个沙箱、沙箱即托管设备、出口网关、分阶段与验收检查 | [docs/cloud-runtime.md](docs/cloud-runtime.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
 | 管理后台：用量台账（只看用量不看内容）、云侧模型目录 | [docs/reference/admin.md](docs/reference/admin.md) |
