@@ -75,6 +75,10 @@ Agent 勾选在 `Agent.connections`，只能勾自己的、位置对得上的（
 - 地址只能是 `https://` 的**公网**地址：解析出的每个地址都要 `is_global`，连接时直连校验过的 IP（防 DNS 重绑定），
   不跟重定向，不走代理（`mcp_client.check_public_url` / `public_only`）。地址存在 `Connection.url`，
   请求头名与值只进保管库（`{"headers": {...}}`；旧的 `{header, value}` 照读）。
+- 内网例外：部署方在 `connectors.json` 顶层写 `"allow": ["mcp.corp.example", "10.20.0.0/16"]`（写法同 `fetch.json`）后，
+  白名单里的主机可以是内网地址、可以用 `http://`（`ConnectorCatalog.allow()`，热加载）。白名单里的域名解析到哪里都放行；
+  其余域名解析出的每个地址都得是公网或落在白名单网段里。项目里写的（`check_url_shape`）与成员连接时（`check_public_url`）按同一份白名单查，
+  每次代连都取现在的白名单，删掉后已有的连接也连不上。
 - 回显：`config` 里请求头的值一律是 `<已保存>`（`Network.KEEP_SECRET`）；改配置时原样交回就沿用保管库里的，
   写新值就替换，新加的请求头写 `<已保存>` 会被拒绝。目录里的连接器没有 `config`（地址不给用户看）。
 - id（也是工具名前缀 `<id>__<工具>`）是 `custom-<名字>`，和自己的其他连接重了就加随机后缀（中文名都会落到 `custom-mcp`）。

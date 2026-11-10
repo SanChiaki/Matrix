@@ -3930,7 +3930,7 @@ function renderConnDetail() {
           <p class="hint">自定义连接器目前只能用 MCP 接入，由网络在云端代连。本机启动的 MCP（command）配在你电脑上的 AI 工具里，Matrix 客户端会自动认出来。</p></div>
         <div class="field"><label for="cu-config">MCP 配置</label>
           <textarea id="cu-config" name="config" class="mcp-config" rows="10" required spellcheck="false">${esc(MCP_TEMPLATE_MINE)}</textarea>
-          <p class="hint">写法同常见 MCP 客户端里的 mcpServers，一次写一个服务；可以直接粘贴服务文档里给的配置。地址只能是 https 的公网地址，不能是内网。</p></div>
+          <p class="hint">写法同常见 MCP 客户端里的 mcpServers，一次写一个服务；可以直接粘贴服务文档里给的配置。地址要是 https 的公网地址；内网地址（可以用 http）要部署方先放进白名单。</p></div>
         <fieldset class="checks"><legend>给哪些 Agent 用</legend>
           ${cloud.map((a) => `<label><input type="checkbox" name="agent" value="${esc(a.id)}" ${a.id === S.me?.assistant_id ? "checked" : ""}><span class="opt">${esc(a.name)}</span></label>`).join("") || '<p class="hint">你还没有在云端跑的 Agent。</p>'}
         </fieldset>

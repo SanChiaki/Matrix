@@ -8,13 +8,14 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
 from matrix import auth
-from matrix.connector_catalog import ConnectorCatalog, parse_catalog
+from matrix.connector_catalog import ConnectorCatalog, parse_allow, parse_catalog
 from matrix.engine import Network, NetworkError
 from matrix.mcp_client import MCPError, RemoteMCP
 from matrix.models import CONNECTOR_PREFIX
@@ -622,14 +623,100 @@ def test_custom_connector_public_only(tmp_path):
     assert c.get("/api/me/connections").json() == []
 
 
+def test_custom_connector_intranet_allowlist(tmp_path: Path, fake: FakeMCP):
+    """部署方在 connectors.json 的 allow 里写了的内网主机，自定义连接器可以连（可以用 http）；没写的照旧只连 https 公网。
+    白名单热加载：删掉之后已有的连接也连不上了。"""
+    from matrix.connector_catalog import parse_allow
+    from matrix.mcp_client import MCPError, check_public_url, check_url_shape
+    allow = parse_allow({"allow": ["127.0.0.1", "*.corp.example", "10.20.0.0/16"]})
+    assert check_public_url("http://127.0.0.1:8813/mcp", allow) == "http://127.0.0.1:8813/mcp"
+    assert check_url_shape("http://10.20.3.4/mcp", allow) and check_url_shape("http://kb.corp.example/mcp", allow)
+    for bad in ["http://10.0.0.5/x", "https://10.0.0.5/x", "http://example.com/mcp", "https://169.254.169.254/x",
+                "http://localhost/mcp", "http://u:p@127.0.0.1/mcp"]:
+        with pytest.raises(MCPError):
+            check_url_shape(bad, allow)
+    with pytest.raises(MCPError):
+        check_public_url("http://127.0.0.1:8813/mcp")
+    with pytest.raises(ValueError, match="allow"):
+        parse_allow({"allow": ["not a host!"]})
+
+    cat = tmp_path / "connectors.json"
+    cat.write_text(json.dumps({"connectors": [], "allow": ["127.0.0.1"]}), encoding="utf-8")
+    net = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False, connectors=ConnectorCatalog(cat))
+    users(net, "alice@x.io")
+    c = client(net, "alice@x.io")
+    r = c.post("/api/me/connections/custom", json={"name": "内网知识库", "config": {"type": "http", "url": fake.url,
+                                                                          "headers": {"Authorization": f"Bearer {SECRET}"}}})
+    assert r.status_code == 200, r.text
+    conn = next(x for x in net.store.connections.values() if x.url == fake.url)
+    assert [t["name"] for t in net._remote(conn).list_tools()]
+    cat.write_text(json.dumps({"connectors": []}), encoding="utf-8")
+    os.utime(cat, (time.time() + 5, time.time() + 5))
+    with pytest.raises(MCPError, match="白名单"):
+        net._remote(conn).list_tools()
+
+
+@pytest.fixture
+def dead_proxy(monkeypatch):
+    """环境里配了一个连不上的代理：走代理的请求都会失败，只有直连的能通。"""
+    for k in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(k, "http://127.0.0.1:1")
+
+
+def test_catalog_connector_proxy_modes(tmp_path: Path, fake: FakeMCP, dead_proxy, monkeypatch):
+    """目录里的连接器：默认 auto，内网地址绕过环境里的代理直连；env 照环境变量；每个连接器可以单写 proxy 盖过顶层。"""
+    import socket
+    from matrix import mcp_client as mc
+    ok = {"Authorization": f"Bearer {SECRET}"}
+    assert RemoteMCP(fake.url, ok).list_tools()                       # auto：127.0.0.1 直连
+    assert RemoteMCP(fake.url, ok, proxy="direct").list_tools()
+    with pytest.raises(MCPError, match="连不上"):
+        RemoteMCP(fake.url, ok, proxy="env").list_tools()             # 照环境变量走了连不上的代理
+
+    def fake_dns(ips):
+        return lambda host, port, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
+    def boom(*a, **k):
+        raise OSError("no dns")
+    with monkeypatch.context() as mp:
+        mp.setattr(socket, "getaddrinfo", fake_dns(["10.1.2.3"]))
+        assert mc.goes_direct("https://mcp.corp.example/x", "auto")
+        mp.setattr(socket, "getaddrinfo", fake_dns(["93.184.216.34"]))
+        assert not mc.goes_direct("https://mcp.example.com/x", "auto")
+        assert mc.goes_direct("https://mcp.example.com/x", "auto", parse_allow({"allow": ["*.example.com"]}))  # 白名单里的也算内网
+        mp.setattr(socket, "getaddrinfo", boom)
+        assert not mc.goes_direct("https://api.example.com/x", "auto")      # 本机解析不了：交给代理
+    assert mc.goes_direct("http://192.168.1.8/mcp", "auto") and not mc.goes_direct("http://192.168.1.8/mcp", "env")
+
+    cat = catalog_file(tmp_path, fake.url)
+    data = json.loads(cat.read_text(encoding="utf-8"))
+    cc = ConnectorCatalog(cat)
+    assert cc.proxy_mode("docs") == "auto"
+    data["proxy"] = "env"
+    cat.write_text(json.dumps(data), encoding="utf-8")
+    os.utime(cat, (time.time() + 5, time.time() + 5))
+    assert cc.proxy_mode("docs") == "env"
+    data["connectors"][0]["proxy"] = "auto"
+    cat.write_text(json.dumps(data), encoding="utf-8")
+    os.utime(cat, (time.time() + 10, time.time() + 10))
+    assert cc.proxy_mode("docs") == "auto"
+    from matrix.connector_catalog import parse_proxy
+    assert parse_proxy({}) == "auto"
+    with pytest.raises(ValueError, match="proxy"):
+        parse_proxy({"proxy": "sometimes"})
+    with pytest.raises(ValueError, match="proxy"):
+        parse_catalog({"connectors": [{**data["connectors"][0], "proxy": 1}]})
+
+
 # ================= 自定义连接器：手工写的 MCP 配置 =================
 @pytest.fixture
 def local_ok(monkeypatch):
     """测试里的 MCP 服务在本机：放开“只连公网”的那一层（真实的校验另有 test_custom_connector_public_only）。"""
     import matrix.engine as engine_mod
     import matrix.mcp_client as mcp_mod
-    monkeypatch.setattr(mcp_mod, "check_public_url", lambda u: u.strip())
-    monkeypatch.setattr(mcp_mod, "check_url_shape", lambda u: u.strip())
+    monkeypatch.setattr(mcp_mod, "check_public_url", lambda u, allow=None: u.strip())
+    monkeypatch.setattr(mcp_mod, "check_url_shape", lambda u, allow=None: u.strip())
     monkeypatch.setattr(engine_mod, "RemoteMCP", lambda url, headers=None, **k: RemoteMCP(url, headers))
 
 

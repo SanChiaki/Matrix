@@ -2,7 +2,8 @@
 
 只实现网络要用的三件事：initialize、tools/list、tools/call。响应可以是 JSON，也可以是 SSE 流
 （取 id 对得上的那一条）。会话 id（`Mcp-Session-Id`）由服务端发，过期（404）时重新初始化一次。
-目录里的地址来自部署方；用户自定义的地址用 `public_only`：只连 https 公网、防 DNS 重绑定、不跟重定向。
+目录里的地址来自部署方；用户自定义的地址用 `public_only`：只连 https 公网、防 DNS 重绑定、不跟重定向；
+部署方在 connectors.json 的 `allow` 里写了的内网主机例外（可以是内网地址、可以用 http），校验与连接同样直连校验过的地址。
 """
 
 from __future__ import annotations
@@ -12,59 +13,82 @@ import json
 import threading
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, Callable
 
 PROTO = "2025-06-18"
 
 
-def _public_ip(host: str, port: int) -> str:
-    """解析 host，所有地址都得是公网地址，返回第一个。连接时直连这个地址，防 DNS 重绑定。"""
-    import ipaddress
+def _listed(host: str, allow: Any) -> bool:
+    """host 在部署方给自定义连接器的内网白名单里（connectors.json 的 `allow`）：域名含子域名，或写成 IP 落在网段里。"""
+    if allow is None:
+        return False
+    from .web_fetch import _literal
+    literal = _literal(host)
+    return allow.named(host) or (literal is not None and allow.listed(literal))
+
+
+def _public_ip(host: str, port: int, allow: Any = None) -> str:
+    """解析 host，返回第一个地址；连接时直连这个地址，防 DNS 重绑定。
+    每个地址都得是公网地址，或落在部署方白名单的网段里；白名单里的域名解析到哪里都放行（内网 DNS 由部署方负责）。"""
     import socket
+    from .web_fetch import is_public
+    host = host.rstrip(".").lower()
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError as e:
         raise MCPError(f"解析不了地址 {host}：{e}") from e
     ips = [i[4][0] for i in infos]
-    for ip in ips:
-        a = ipaddress.ip_address(ip.split("%")[0])
-        if getattr(a, "ipv4_mapped", None):
-            a = a.ipv4_mapped
-        if not a.is_global or a.is_multicast:
-            raise MCPError(f"{host} 指向内网或保留地址，自定义连接器只能连公网服务")
     if not ips:
         raise MCPError(f"解析不了地址 {host}")
+    if allow is not None and allow.named(host):
+        return ips[0]
+    for ip in ips:
+        if not is_public(ip) and not (allow is not None and allow.listed(ip)):
+            raise MCPError(f"{host} 指向内网或保留地址，不在部署方给自定义连接器的白名单里"
+                           "（connectors.json 的 allow），只能连公网服务")
     return ips[0]
 
 
-def check_public_url(url: str) -> str:
-    """自定义连接器的地址：只能是 https 的公网地址（网络代连，不能被当跳板访问内网）。"""
+def _split(url: str, allow: Any) -> tuple[str, str, int]:
+    """只看写法：https（或白名单里的主机用 http）、有主机名、不带账号密码。返回（地址, 主机名, 端口）。"""
     from urllib.parse import urlsplit
     u = (url or "").strip()
-    p = urlsplit(u)
-    if p.scheme != "https" or not p.hostname or p.username or p.password or len(u) > 2000:
-        raise MCPError("地址要是 https://… 的公网地址")
-    _public_ip(p.hostname, p.port or 443)
+    try:
+        p = urlsplit(u)
+        port = p.port
+    except ValueError:
+        raise MCPError("地址写得不对") from None
+    if p.scheme not in ("https", "http") or not p.hostname or p.username or p.password or len(u) > 2000:
+        raise MCPError("地址要是 https://… 的公网地址，或部署方白名单里的内网地址")
+    host = p.hostname.rstrip(".").lower()
+    if p.scheme == "http" and not _listed(host, allow):
+        raise MCPError(f"{host} 要用 https（http 只给部署方白名单里的内网地址，见 connectors.json 的 allow）")
+    return u, host, port or (443 if p.scheme == "https" else 80)
+
+
+def check_public_url(url: str, allow: Any = None) -> str:
+    """自定义连接器的地址：https 的公网地址（网络代连，不能被当跳板访问内网）。
+    allow 是部署方的内网白名单（web_fetch.FetchPolicy，来自 connectors.json 的 `allow`）：
+    写进白名单的主机可以是内网、可以用 http。"""
+    u, host, port = _split(url, allow)
+    _public_ip(host, port, allow)
     return u
 
 
-def check_url_shape(url: str) -> str:
-    """不解析域名、只看写法的那一半：https、有主机名、不带账号密码，写成 IP 的得是公网地址。
-    项目里写下的配置先这样查（写的时候不去连），成员连接时再按 check_public_url 全查。"""
-    import ipaddress
-    from urllib.parse import urlsplit
-    u = (url or "").strip()
-    p = urlsplit(u)
-    if p.scheme != "https" or not p.hostname or p.username or p.password or len(u) > 2000:
-        raise MCPError("地址要是 https://… 的公网地址")
-    try:
-        a = ipaddress.ip_address(p.hostname)
-    except ValueError:
-        if p.hostname.lower() == "localhost" or p.hostname.lower().endswith(".localhost"):
-            raise MCPError("自定义连接器只能连公网服务") from None
+def check_url_shape(url: str, allow: Any = None) -> str:
+    """不解析域名、只看写法的那一半：https（白名单里的可以 http）、有主机名、不带账号密码，
+    写成 IP 的得是公网地址或在白名单里。项目里写下的配置先这样查（写的时候不去连），成员连接时再按 check_public_url 全查。"""
+    from .web_fetch import _literal, is_public
+    u, host, _ = _split(url, allow)
+    if _listed(host, allow):
         return u
-    if not a.is_global or a.is_multicast:
-        raise MCPError("自定义连接器只能连公网服务")
+    literal = _literal(host)
+    if literal is None:
+        if host == "localhost" or host.endswith(".localhost"):
+            raise MCPError("自定义连接器只能连公网服务（或部署方白名单里的内网地址）")
+        return u
+    if not is_public(literal):
+        raise MCPError("自定义连接器只能连公网服务（或部署方白名单里的内网地址）")
     return u
 
 
@@ -131,33 +155,85 @@ def server_config(url: str, headers: dict[str, str]) -> dict[str, Any]:
     return out
 
 
-def _public_opener() -> urllib.request.OpenerDirector:
+def _public_opener(allow: Any = None) -> urllib.request.OpenerDirector:
+    """直连校验过的地址（防 DNS 重绑定）、不跟重定向、不走代理。http 只给白名单里的主机。"""
     import http.client
     import socket
     import ssl
 
     class Conn(http.client.HTTPSConnection):
         def connect(self) -> None:
-            ip = _public_ip(self.host, self.port)
+            ip = _public_ip(self.host, self.port, allow)
             sock = socket.create_connection((ip, self.port), self.timeout)
             self.sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+
+    class PlainConn(http.client.HTTPConnection):
+        def connect(self) -> None:
+            if not _listed(self.host.rstrip(".").lower(), allow):
+                raise OSError("只允许 https（http 只给部署方白名单里的内网地址）")
+            self.sock = socket.create_connection((_public_ip(self.host, self.port, allow), self.port), self.timeout)
 
     class Https(urllib.request.HTTPSHandler):
         def https_open(self, req: Any) -> Any:
             return self.do_open(Conn, req)
 
+    class Http(urllib.request.HTTPHandler):
+        def http_open(self, req: Any) -> Any:
+            return self.do_open(PlainConn, req)
+
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a: Any, **k: Any) -> None:
             return None  # 不跟重定向：重定向可以指回内网
 
-    class NoHttp(urllib.request.HTTPHandler):
-        def http_open(self, req: Any) -> Any:
-            raise urllib.error.URLError("只允许 https")
-
-    return urllib.request.build_opener(Https, NoRedirect, NoHttp, urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener(Https, Http, NoRedirect, urllib.request.ProxyHandler({}))
 
 
 _PUBLIC_OPENER = _public_opener()
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# 部署方目录里的连接器怎么走代理（connectors.json 的 `proxy`，也可以每个连接器单写）：
+#   auto  内网地址直连，其余照环境变量（HTTPS_PROXY / NO_PROXY）；默认
+#   env   全照环境变量（原来的做法）
+#   direct 一律直连，不走代理
+PROXY_MODES = ("auto", "env", "direct")
+
+
+def is_intranet(url: str, allow: Any = None) -> bool:
+    """这个地址是不是内网：主机在白名单里、写成非公网 IP、或本机解析出的地址里有非公网的。
+    本机解析不了的域名不算内网（出网只能走代理的部署：交给代理解析）。"""
+    import socket
+    from urllib.parse import urlsplit
+    from .web_fetch import _literal, is_public
+    try:
+        p = urlsplit(url)
+        host, port = (p.hostname or "").rstrip(".").lower(), p.port or (443 if p.scheme == "https" else 80)
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if _listed(host, allow):
+        return True
+    literal = _literal(host)
+    if literal is not None:
+        return not is_public(literal)
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    return any(not is_public(i[4][0]) for i in infos)
+
+
+def goes_direct(url: str, mode: str, allow: Any = None) -> bool:
+    """按代理模式决定这一次连接是否绕过环境变量里的代理。"""
+    if mode == "direct":
+        return True
+    if mode == "env":
+        return False
+    if not any(urllib.request.getproxies().get(k) for k in ("http", "https", "all")):
+        return False  # 没配代理：怎么连都一样，不用去解析
+    return is_intranet(url, allow)
 
 
 def fetch_public(url: str, limit: int, timeout: float = 30) -> tuple[bytes, str]:
@@ -177,9 +253,12 @@ class MCPError(RuntimeError):
 
 class RemoteMCP:
     def __init__(self, url: str, headers: dict[str, str] | None = None, timeout_s: float = 60,
-                 public_only: bool = False):
+                 public_only: bool = False, allow: Callable[[], Any] | None = None,
+                 proxy: str | Callable[[], str] = "auto"):
         self.url = url
+        self.proxy = proxy               # 非 public_only 时：代理模式（PROXY_MODES），可以是每次取现值的函数
         self.public_only = public_only   # 用户自己填的地址：只连公网、不跟重定向（check_public_url）
+        self.allow = allow               # public_only 时：每次连接取部署方现在的内网白名单（热加载）
         self.headers = dict(headers or {})
         self.timeout_s = timeout_s
         self.session_id: str | None = None
@@ -195,9 +274,16 @@ class RemoteMCP:
         req = urllib.request.Request(self.url, data=json.dumps(payload).encode(), headers=headers, method="POST")
         try:
             if self.public_only:
-                resp = _PUBLIC_OPENER.open(req, timeout=self.timeout_s)
-            else:
-                resp = urllib.request.urlopen(req, timeout=self.timeout_s)  # noqa: S310 —— 地址来自部署方的目录
+                allow = self.allow() if self.allow else None
+                opener = _PUBLIC_OPENER if allow is None else _public_opener(allow)
+                resp = opener.open(req, timeout=self.timeout_s)
+            else:  # 地址来自部署方的目录：内网地址按代理模式直连（allow 也算内网）
+                mode = self.proxy() if callable(self.proxy) else self.proxy
+                allow = self.allow() if self.allow else None
+                if goes_direct(self.url, mode, allow):
+                    resp = _DIRECT_OPENER.open(req, timeout=self.timeout_s)
+                else:  # 现建：urlopen 的全局 opener 在第一次用时就定下了代理，之后改环境变量不生效
+                    resp = urllib.request.build_opener().open(req, timeout=self.timeout_s)
         except urllib.error.HTTPError as e:
             if e.code == 404 and self.session_id:
                 raise _Expired() from e

@@ -78,6 +78,58 @@ dsh 自带的 `web_fetch` 只抓公网地址，内网的域名和 IP 一律拒�
 只对云侧、有 `web.research` 权限的 Agent 生效。内网服务用自签证书时，见下面的「内网 CA / 自签证书」。
 升级 dsh 后跑 `matrix-dsh-check`，`web-fetch` 一项确认自带的 `web_fetch` 仍然关得掉。
 
+## 内网连接器（可选）
+
+部署方目录 `/data/connectors.json` 里的连接器地址本来就可以是内网、可以用 `http://`。用户自己加的**自定义连接器**
+（我的连接器、项目里写的 MCP 配置）默认只能连 `https://` 公网地址；要让它们连内网的 MCP 服务，在同一个文件顶层写 `allow`：
+
+```json
+{
+  "connectors": [],
+  "allow": ["mcp.corp.example", "*.svc.internal", "10.20.0.0/16"]
+}
+```
+
+- 写法同 `fetch.json` 的 `allow`：域名含子域名，也可以写 IP 或网段。写进来的主机可以是内网地址、可以用 `http://`。
+- 改了即生效；删掉一项后，已经连好的连接下一次调用就连不上。
+- 连接直连校验过的地址、不跟重定向、不走代理。内网服务用自签证书时，见下面的「内网 CA / 自签证书」。
+
+环境里配了代理（`HTTPS_PROXY` / `HTTP_PROXY`）时，目录里的连接器默认**内网地址直连、其余走代理**，不用为内网服务配 `NO_PROXY`。
+内网指：`allow` 里的主机、写成非公网 IP 的、服务机本机解析出非公网地址的（本机解析不了的域名交给代理）。要改就写 `proxy`：
+
+```json
+{
+  "proxy": "auto",
+  "connectors": [
+    {"id": "wiki", "name": "内部 Wiki", "url": "http://wiki-mcp.corp:8080/mcp", "proxy": "direct"}
+  ]
+}
+```
+
+| 值 | 做法 |
+|---|---|
+| `auto`（默认） | 内网地址直连，其余照环境变量（`NO_PROXY` 照常生效） |
+| `env` | 全照环境变量，和以前一样（内网地址要自己写进 `NO_PROXY`） |
+| `direct` | 一律直连，不走代理 |
+
+顶层的对所有目录连接器生效，单个连接器写的 `proxy` 盖过顶层的；改了即生效。用户自己加的自定义连接器从不走代理，不受它影响。
+
+## 出网代理（可选）
+
+服务器只能经代理出网时，代理写在 `deploy/.env` 里（compose 用 `env_file` 交给 matrix 容器），写完执行 `docker compose up -d`
+重建容器（只 `restart` 不会重读 `.env`）：
+
+```
+HTTPS_PROXY=http://proxy.corp.example:3128
+HTTP_PROXY=http://proxy.corp.example:3128
+NO_PROXY=localhost,127.0.0.1,.corp.example
+```
+
+不用 Docker 时，在启动 `matrix` 的那个 shell 或 systemd 单元的 `Environment=` 里设同样的变量，重启服务生效。
+Matrix 的网页抓取、连接器和远程插件服务都读这几个变量。连接器与远程插件服务另有 `proxy` 开关，
+默认 `auto`：内网地址直连、不用写进 `NO_PROXY`。目录连接器的在 `connectors.json` 里改（见上面「内网连接器」）；
+远程插件服务的在管理后台「插件」页 →「远程插件服务走不走代理」改（存在 `/data/plugin-policy.json` 的 `proxy`），改了即生效。
+
 ## 内网 CA / 自签证书
 
 内网的模型供应商、抓取目标用自签 CA 时，把根 CA（PEM，扩展名 `.crt`）放进 `deploy/ca-certificates/`，然后

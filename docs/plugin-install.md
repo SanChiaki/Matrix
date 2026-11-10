@@ -29,7 +29,8 @@
   "allow": ["plugins.corp.example", "10.20.0.0/16"],
   "deny": ["bad.example.com"],
   "hosted_upload": true,
-  "sandbox_catalog": true
+  "sandbox_catalog": true,
+  "proxy": "auto"
 }
 ```
 
@@ -38,6 +39,10 @@
 - `deny`：域名（含子域名），优先于 `allow`。
 - `hosted_upload`：主持人能不能上传托管插件（还要有沙箱）。
 - `sandbox_catalog`：目录里的托管插件也进沙箱（有沙箱时；默认是）。
+- `proxy`：服务器环境变量里配了代理（`HTTPS_PROXY` 等）时，远程插件服务（目录里的和主持人自己装的）怎么连。
+  `auto`（默认）内网地址直连、其余走代理（内网指：`allow` 里的主机、写成非公网 IP 的、本机解析出非公网地址的）；
+  `env` 全照环境变量（内网地址要自己写进 `NO_PROXY`）；`direct` 一律直连。同 `connectors.json` 的 `proxy`。
+  只决定走不走代理，不放宽能连哪里。
 
 策略每次调用远程服务前都按主机名与解析出的地址再查一遍：管理员关掉远程插件、或把某个主机加进 `deny`，已经装上的立即停用（不删，策略改回来就恢复）。
 

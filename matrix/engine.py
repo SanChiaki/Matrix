@@ -1303,20 +1303,20 @@ class Network:
             cid, always_suffix = f"{base}-{secrets.token_hex(2)}", False
         return cid
 
-    @staticmethod
-    def _custom_config(raw: Any) -> tuple[str, str, dict[str, str]]:
-        """手工写的 MCP 配置：解析，并全查地址（只连 https 公网，不能被当跳板访问内网）。"""
+    def _custom_config(self, raw: Any) -> tuple[str, str, dict[str, str]]:
+        """手工写的 MCP 配置：解析，并全查地址（只连 https 公网，不能被当跳板访问内网；
+        部署方在 connectors.json 的 allow 里写了的内网主机例外，可以用 http）。"""
         from .mcp_client import check_public_url, parse_server_config
         try:
             name, url, headers = parse_server_config(raw)
-            return name, check_public_url(url), headers
+            return name, check_public_url(url, self.connectors.allow()), headers
         except MCPError as e:
             raise NetworkError(str(e)) from e
 
     def add_custom_connector(self, name: str, config: Any, actor: str | None,
                              agent_ids: list[str] | None = None) -> dict[str, Any]:
         """自定义连接器：接入方式目前只有远程 MCP，配置由用户手工写（mcpServers 的写法，可以有多个请求头）。
-        地址只能是 https 公网地址；网络代连时每次重新解析、直连校验过的地址、不跟重定向。
+        地址只能是 https 公网地址（或部署方白名单里的内网地址，可以用 http）；网络代连时每次重新解析、直连校验过的地址、不跟重定向。
         请求头的值只进保管库（不变量 19）。"""
         uid = self._need_user(actor)
         cname, url, headers = self._custom_config(config)
@@ -1490,9 +1490,10 @@ class Network:
             r = self._remotes.get(c.id)
             if r is None or r.url != spec.url:
                 if c.url:
-                    r = RemoteMCP(c.url, self._custom_headers(c), public_only=True)
+                    r = RemoteMCP(c.url, self._custom_headers(c), public_only=True, allow=self.connectors.allow)
                 else:
-                    r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)))
+                    r = RemoteMCP(spec.url, spec.headers(self.vault.get(c.id)), allow=self.connectors.allow,
+                                  proxy=lambda cid=spec.id: self.connectors.proxy_mode(cid))
                 self._remotes[c.id] = r
             return r
 
@@ -1709,7 +1710,7 @@ class Network:
         from .mcp_client import check_url_shape, parse_server_config
         try:
             name, url, headers = parse_server_config(raw)
-            url = check_url_shape(url)
+            url = check_url_shape(url, self.connectors.allow())
         except MCPError as e:
             raise NetworkError(str(e)) from e
         for k, v in headers.items():
@@ -1803,7 +1804,7 @@ class Network:
             raise NetworkError(f"请填写：{'、'.join(missing)}")
         headers = {k: self.NEED_VAR.sub(lambda m: filled[m.group(1)], t) for k, t in templates.items()}
         try:
-            url = check_public_url(url)
+            url = check_public_url(url, self.connectors.allow())
         except MCPError as e:
             raise NetworkError(str(e)) from e
         with self._lock:
@@ -2857,6 +2858,11 @@ class Network:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def _service_net(self) -> dict[str, Any]:
+        """远程插件服务怎么走代理：每次连接取插件策略现在的 proxy，allow 里的主机算内网（管理后台改了即生效）。"""
+        return {"proxy": lambda: self.plugin_policy.get().proxy,
+                "allow": lambda: self.plugin_policy.get().fetch_policy()}
+
     def _service_client(self, g: Project, name: str, m: pluginfs.Manifest) -> Any:
         """调用方不持有锁（第一次用到时启动进程，要几秒）。按安装来源决定在哪里跑（不变量 24）：
         目录里的远程服务用部署方的密钥；自己装的远程服务每次都按部署方现在的策略再查一遍、用这个安装的密钥；
@@ -2867,7 +2873,7 @@ class Network:
         try:
             if m.service.url:
                 if source == "catalog":
-                    return self.services.remote(g.id, name, m.version, m.service.url)
+                    return self.services.remote(g.id, name, m.version, m.service.url, **self._service_net())
                 try:  # 每次都按现在的策略、现在解析出的地址查：主机换到内网地址（DNS 重绑定）也拦得住大部分
                     sources.check_remote(policy, m.service.url)
                 except sources.SourceError as e:
@@ -2875,7 +2881,7 @@ class Network:
                 secret = self._plugin_secret(g.id, name)
                 if not secret:
                     raise ServiceError("这个安装还没有签名密钥：请主持人在插件卡片上生成")
-                return self.services.remote(g.id, name, m.version, m.service.url, secret)
+                return self.services.remote(g.id, name, m.version, m.service.url, secret, **self._service_net())
             data = self._service_data(g, name)
             pkg = self.store.project_plugins_dir(g.id) / name
             env = self._plugin_env(pkg, m, source)
