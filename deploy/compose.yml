@@ -23,7 +23,7 @@ services:
         required: false
     expose:
       - "8765"                       # 不发布到宿主机：只有 caddy 能访问
-    # dsh 在 Linux 上用 bwrap 沙箱（没有可用沙箱时 fail closed，命令不执行）。bwrap 在容器里要建 user/pid 命名空间、
+    # dsh 在 Linux 上用 bwrap 沙箱（bwrap 起不来时 dsh 退到更弱的方式、照样执行，所以这两项不能去掉）。bwrap 在容器里要建 user/pid 命名空间、
     # 挂 /proc：默认 seccomp 和被遮住的 /proc 路径会拦。放开这两项会削弱容器自身的隔离，换来 Agent 命令的文件级限制。
     security_opt:
       - seccomp=unconfined

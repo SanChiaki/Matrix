@@ -1,0 +1,23 @@
+#!/app/.venv/bin/python
+"""阶段 0 原型：在 dsh 外面再包一层 bwrap（docs/cloud-runtime.md 第 8 节），当作 dsh 的可执行文件交给 DshRuntime。
+外层里只有：系统目录、Python 环境与 Matrix 代码（只读）、dsh（在 /usr 下）、这个执行单元的工作目录与它自己的 dsh 状态目录（读写）。
+网络共享（回调网络、调模型），新的 PID / 挂载 / IPC / 用户命名空间。只在部署镜像里用（路径按镜像写死）。"""
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from matrix import sandbox
+
+cwd = Path.cwd()
+state = Path(os.environ.get("MATRIX_UNIT_STATE") or (cwd.parent / (cwd.name + ".dsh-state")))
+state.mkdir(parents=True, exist_ok=True)
+dsh = shutil.which("dsh") or "dsh"
+ro = [*sandbox.python_dirs(), Path("/app/matrix")]
+args = sys.argv[1:]
+if "--patch" in args:  # 覆盖层文件要读得到（真实运行时它在工作目录里，本来就挂着）
+    ro.append(Path(args[args.index("--patch") + 1]).resolve())
+cmd = sandbox.wrap([dsh, *args], ro=ro, rw=[cwd, state], network=True)
+os.environ["HOME"] = str(state)
+os.environ["TMPDIR"] = "/tmp"  # dsh 起 bash 前要在 $TMPDIR 下建临时目录：必须指向外层里可写的 /tmp
+os.execvp(cmd[0], cmd)

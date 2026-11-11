@@ -412,11 +412,23 @@ class SandboxProvider(Protocol):
 **第 6 项。** 每 0.2 秒采样整棵进程树的常驻内存：一个执行单元一轮峰值 252 MB（dsh 约 228 MB，网络工具的 MCP 服务约 23 MB），两次一致；
 委托时委托方与执行方同时在跑，峰值 441 MB。这是 Node 22 上普通对话加工具调用的数字，装依赖、编译这类重活没测，也没算 gVisor 自己的开销。
 
+**补充（2026-11-11，另一台开着 seccomp 的 Ubuntu 24.04，runc）：**
+
+- 部署容器里，去掉 `seccomp=unconfined` 后 bwrap 不能建命名空间，去掉 `systempaths=unconfined` 后不能挂 `/proc`。所以只要容器里还要跑 bwrap
+  （现状与阶段 0），这两项就不能收紧；阶段 1 控制面不再跑 dsh，才能去掉。
+- **bwrap 起不来时 dsh 并不拒绝执行**，而是退到了别的沙箱方式（1 号进程不再是 bwrap，看得到容器里的其他进程）：`/data` 写不进，
+  但 `matrix-dsh-check` 的 `approval` 报“没申请升权就写到了工作目录以外”（目标在 `/tmp` 下）。`deploy/README.md` 原来写的
+  “没有可用沙箱时 fail closed”不准确，已改。对方案的影响：沙箱里内层 bwrap 起不来时不能默认当作“有沙箱”，`matrix-dsh-check`
+  要加一项检查内层用的是 bwrap（`deploy/isolation-check` 的探针已经会报 `INNER=`）。
+- runc 下重活与内存的基线见 [deploy/isolation-check/README.md](../deploy/isolation-check/README.md) 第 8 节。
+
 ### 还要验证
 
-1. 第 1、5 项：需要一台装了 gVisor（`runsc` 注册为 Docker 运行时）的机器。
-2. 有 seccomp 的宿主上，部署容器去掉 `seccomp=unconfined` 后嵌套 bwrap 是否还能运行（决定阶段 1 控制面容器能否收紧）。
-3. 重活（`npm install`、`uv sync`、编译）的内存与 I/O，用来定配额和并发。
+在一台装了 gVisor 的机器上跑 [deploy/isolation-check](../deploy/isolation-check/README.md)（一条命令，结果打成一个压缩包）：
+
+1. 第 1 项：gVisor 里 dsh 的 bwrap 能否运行，默认安全选项下能否运行（`t1`）。
+2. 第 5 项：重活在 gVisor 下能否跑通、耗时与内存比 runc 多多少（`t3`）。
+3. 第 6 项的 gVisor 部分：一轮运行、冷启动、空闲沙箱的开销（`t4`）。
 
 ## 12. 明确不做的
 
