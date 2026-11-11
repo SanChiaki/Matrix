@@ -216,7 +216,8 @@ matrix-connect setup <服务器>
 >   `ANTHROPIC_BASE_URL` 等）让子进程改用宿主凭据；驱动现在启动前清掉它们，用户自己的登录才生效。
 >   工具白名单的实际阻断效果仍未逐条验证。
 > - **ACP 路线**（第 2.3 节的另一种驱动）尚未实现，仍是后续项。
-> - 审批上行：三家都还是 `approval: none`，工作目录以外的写只能被拒绝，不能转给所有者。
+> - 审批上行：dsh 驱动已接上（`approval: interactive`，`approval.mjs` → 本机小桥 `/internal/approval` → `approval.request`）；
+>   Claude Code 与 Codex 仍是 `approval: none`：Codex 工作目录以外的写被沙箱拒绝即失败，Claude Code 没有沙箱，有 `file.write` 时写哪里只由它的工具白名单决定。
 
 ---
 
