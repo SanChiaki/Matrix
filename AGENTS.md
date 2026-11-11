@@ -83,7 +83,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/plugins.py` | 项目插件：清单（`plugin.json`）与包的校验、安装、`page/` 取文件、记录的存取与按清单校验、cron；部署方插件目录 `plugins.json`（`--plugins` / `MATRIX_PLUGINS`，热加载）。引擎里的安装、桥、触发在 `engine.py`「项目插件」一节 |
 | `matrix/releases.py` | 发布物的版本快照（`releases/<id>/v<N>/`：技能、文件、插件页面、`manifest.json`）的写入、清理与安全取文件；谁能发布、能看、订阅何时生效在 `engine.py`「发布与订阅」一节 |
 | `matrix/plugin_check.py` | `matrix-plugin check`：本地校验插件包（错误用安装时同一套校验，另给启发式提醒：桥客户端路径、外部资源与联网、没申请的能力、触发消息里会变空的字段） |
-| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载、配了抓取白名单时自带的 web_fetch 关得掉；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥；`--live`：回复、续接、技能、委托、连接器、沙箱审批、提问） |
+| `matrix/dsh_check.py` | `matrix-dsh-check`：对真实 dsh 的冒烟检查，升级云端 dsh 前后用（静态：覆盖层引用的插件都在、新工具插件提醒、覆盖层能加载、配了抓取白名单时自带的 web_fetch 关得掉；假的模型服务核对平台供应商生效、Agent 的命令看不到密钥、在 bwrap 沙箱里（不在就是 dsh 退到了更弱的沙箱）；`--live`：回复、续接、技能、委托、连接器、沙箱审批、提问） |
 | `matrix/static/plugin-sdk.js` | 插件页面里的桥客户端（`window.matrix`），经 `postMessage` 让父页面转给网络 |
 | `matrix/connector_catalog.py` | 云端连接器目录：部署方维护的 `connectors.json`（`--connectors` / `MATRIX_CONNECTORS`），热加载；地址只来自这里 |
 | `matrix/vault.py` | 连接器凭证与模型供应商密钥的加密保管（Fernet，`MATRIX_VAULT_KEY` 或 `<data>/vault.key`） |

@@ -214,7 +214,8 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
     pattern = prov0.key_env[:-1] + "[" + prov0.key_env[-1] + "]="
     probe = (f"printenv {prov0.key_env} >/dev/null; echo PRINTENV=$?; "
              f"echo PROC=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{pattern}'); "
-             f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}')")
+             f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}'); "
+             "echo PID1=$(tr '\\0' ' ' < /proc/1/cmdline 2>/dev/null | cut -c1-40)")
     fake = FakeProvider(probe)
     try:
         # compat：不配时 dsh 发 developer 角色与 max_completion_tokens，glm 一类端点据此回 400
@@ -253,6 +254,15 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
         report.add(FAIL if leaked else OK, "key-hidden",
                    f"Agent 的命令看得到供应商密钥（{'、'.join(leaked)}）：不能把密钥交给 dsh 进程的环境" if leaked
                    else "Agent 的命令看不到供应商密钥（printenv、/proc/*/environ、ps eww）")
+    if sys.platform.startswith("linux") and "PRINTENV=" in results:
+        # bwrap 起不来时 dsh 不拒绝执行，退到更弱的方式（工作目录以外仍有能写的地方，docs/cloud-runtime.md 第 11 节）：
+        # Agent 的命令在 bwrap 里时 1 号进程就是 bwrap
+        m = re.search(r"PID1=([^\n]*)", results)
+        pid1 = m.group(1).strip() if m else ""
+        report.add(OK if pid1.startswith("bwrap") else FAIL, "sandbox",
+                   "Agent 的命令在 bwrap 沙箱里" if pid1.startswith("bwrap") else
+                   f"Agent 的命令不在 bwrap 里（1 号进程：{pid1 or '看不到'}）：dsh 退到了更弱的沙箱，工作目录以外仍有能写的地方。"
+                   "容器里要放开 seccomp 与 /proc 遮挡（deploy/compose.yml），或改用 gVisor")
     if PROVIDER_DONE not in (res.final_text or ""):
         report.add(FAIL, "provider-end", f"这一轮没正常收尾：{res.error or res.final_text}"[:300])
 
@@ -335,8 +345,12 @@ class Live:
         self.helper = mk("Helper", "冒烟检查：被委托的成员", [], [], model=model, actor=self.uid)
         self.project = self.net.create_project("dsh 冒烟检查", "", [self.lead.id, self.helper.id], actor=self.uid)
         self.chat = self.net.project_chat(self.project.id, actor=self.uid)
-        self.outside = root / "outside"
-        self.outside.mkdir()
+        # 审批检查写的“工作目录以外”：不能放在 /tmp 下。dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的路径在 Agent 的 bash 里
+        # 不存在，写入报 ENOENT 而不是只读，dsh 不当它是沙箱拒绝、不发起升权，这一项就时好时坏（2026-11-11 在 runc 与 gVisor 下都复现）。
+        # 主目录下的路径在沙箱里可见但只读：写入报 EROFS，稳定地走到升权申请；批准后写在主目录里也写得成。
+        cache = Path.home() / ".cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        self.outside = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-outside-", dir=cache))
 
     def ask(self, text: str, approve: bool = False) -> tuple[str, list[Any]]:
         """@Lead 说一句，等到对话安静下来（委托也都有了结果）。返回 Lead 最后一条回复与这期间出现的审批申请。"""
@@ -465,6 +479,7 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
     finally:
         live.server.should_exit = True
         live.mcp.server.shutdown()
+        shutil.rmtree(live.outside, ignore_errors=True)
 
 
 def main() -> None:

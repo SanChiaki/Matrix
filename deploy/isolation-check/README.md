@@ -132,6 +132,8 @@ Ubuntu 24.04、4 核 16 GB、Docker 29（seccomp 开、cgroup v1）、没有 KVM
 - T3（runc）：小文件 1.6 秒、大文件 0.8 秒、git clone 3.1 秒、pip 16.8 秒、npm 10.8 秒、pytest 7.6 秒，宿主看到的峰值 303 MiB。
 - T4（runc）：一轮运行宿主看到的峰值 354 MiB，冷启动 250–300 毫秒，10 个空闲容器共 18 MiB。
 
+gVisor 的实测结果（另一台机器，2026-11-11）记在 [docs/cloud-runtime.md](../../docs/cloud-runtime.md) 第 11 节“gVisor 实测”。
+
 ## 9. 测完恢复机器
 
 ```bash

@@ -15,6 +15,7 @@
 5. **沙箱可以随时丢。** 工作目录的产物每轮结束在控制面留检查点；沙箱或节点没了，只损失正在跑的那一轮和可重建的缓存。
 
 选型：单机用 Docker + gVisor（`runsc`），集群用 Kubernetes + RuntimeClass（gVisor，或有 KVM 时用 Kata Containers）。
+2026-11-11 实测确认：dsh 的 bwrap 在 gVisor 里能运行，而且不用放开任何安全选项（第 11 节），所以默认用 gVisor，不需要 Kata。
 两者在同一个 `SandboxProvider` 接口后面，引擎不关心是哪一个。
 
 ## 1. 现状的问题
@@ -114,11 +115,14 @@ meta-muse#credentials-injection），粒度按 Matrix 的场合收细。
   不挂宿主目录，不挂 Docker socket，不挂数据目录。
 - 配额（cgroup，默认值，部署方可调）：2 核、内存上限 2 GB、512 个进程、卷 10 GB、出网流量与速率上限。超了只影响这个沙箱。
   内存是上限不是预留：实测一轮普通运行（dsh + 网络工具的 MCP 服务）峰值约 250 MB，dsh 每轮一个进程、轮次之间不占内存（第 11 节第 6 项）。
-  全局并发默认按 `(宿主内存 − 2 GB) / 512 MB` 估（16 GB 的机器约 28 个），装依赖、编译这类重活的实测出来之后再调。
+  gVisor 下一轮（委托时同时两个 dsh）宿主看到的峰值约 440 MB，比 runc 多约 90 MB；装依赖、跑测试这类重活峰值 300–420 MB；
+  空闲沙箱约 10–17 MB 一个（第 11 节）。全局并发默认按 `(宿主内存 − 2 GB) / 512 MB` 估（16 GB 的机器约 28 个）。
 - dsh 自己的 bwrap 沙箱**照旧开着**：`build_patch_yaml` 的权限覆盖层、“写只能写工作目录”、外溢审批（不变量 14）都不变。
   外层沙箱负责读隔离与爆炸半径，内层负责权限词表，两层各管各的。
 
-控制面的 Matrix 容器不再需要 `seccomp=unconfined` 与 `systempaths=unconfined`，一并去掉。
+控制面的 Matrix 容器不再需要 `seccomp=unconfined` 与 `systempaths=unconfined`，一并去掉。沙箱容器也不需要：
+实测 gVisor 里在默认 seccomp、`no-new-privileges`、去掉全部 capabilities 下，dsh 的 bwrap 照样能建命名空间、挂 `/proc`
+（gVisor 自己实现这些系统调用，不经宿主内核）。普通容器（runc）里则必须放开这两项，否则 dsh 退到更弱的沙箱（第 11 节补充）。
 
 ### 4.4 生命周期
 
@@ -368,12 +372,12 @@ class SandboxProvider(Protocol):
 
 | # | 问题 | 结论 |
 | --- | --- | --- |
-| 1 | dsh 的 bwrap 能否在 gVisor 里运行 | **未验证**：在这台机器上安装 gVisor 的操作被会话的权限策略拦下，待在有 gVisor 的机器上做 |
+| 1 | dsh 的 bwrap 能否在 gVisor 里运行 | **能，而且不用放开安全选项**（2026-11-11，见下文“gVisor 实测”） |
 | 2 | 阶段 0 外层 bwrap 套内层 bwrap，在部署容器里能否运行 | **能**，见下文 |
 | 3 | dsh 会话能否搬到另一个 `HOME`、换路径后能否续接 | **换 `HOME` 能，换路径不能**；在旧路径上 bind 挂载能，符号链接不能。方案已改（4.3、9.2） |
 | 4 | 供应商指向网关、密钥填占位值时是否正常 | **正常**：流式、工具调用、重试、`compat` 都没问题，见下文 |
-| 5 | gVisor 下的兼容性与 I/O 开销 | **未验证**：同第 1 项 |
-| 6 | 一轮运行的内存 | 单个执行单元峰值约 **250 MB**，见下文 |
+| 5 | gVisor 下的兼容性与 I/O 开销 | **全部跑通**；总耗时约 1.6 倍，`uv sync` 慢得多（约 8 倍），见下文 |
+| 6 | 一轮运行的内存 | 单个执行单元峰值约 **250 MB**（runc）；gVisor 下每轮多约 90 MB，冷启动 0.7–1.9 秒，见下文 |
 
 **第 2 项。** dsh 内层沙箱的实际参数是 `--ro-bind / / --unshare-pid --proc /proc --tmpfs /tmp --bind <工作目录> <工作目录>`：
 整个根目录只读可见，不开网络与用户命名空间。外层用 `matrix/sandbox.wrap`（共享网络），只挂系统目录、Python 环境与 Matrix 代码（只读）、
@@ -422,13 +426,48 @@ class SandboxProvider(Protocol):
   要加一项检查内层用的是 bwrap（`deploy/isolation-check` 的探针已经会报 `INNER=`）。
 - runc 下重活与内存的基线见 [deploy/isolation-check/README.md](../deploy/isolation-check/README.md) 第 8 节。
 
+### gVisor 实测（2026-11-11）
+
+用 [deploy/isolation-check](../deploy/isolation-check/README.md) 在一台阿里云主机上跑：Alibaba Cloud Linux 4.0.6（RHEL 系，内核 6.6）、
+2 vCPU / 1.8 GB（低于工具包要求的 4 核 8 GB，另有约 700 MB 的其他服务在跑）、没有 KVM、Docker 24.0.9（cgroup v2、seccomp 开）、
+gVisor release-20261102.0（默认平台 systrap），真模型 `deepseek-flash`。
+
+**第 1 项：能，而且不用放开安全选项。** 两组安全选项（默认 + `no-new-privileges`；compose 现在放开的两项）结果一样：
+
+- 直接起 bwrap（dsh 的原样参数、带用户命名空间、外层套内层）都成功；Agent 的命令在 bwrap 里（`INNER=bwrap`），只看得到 5 个进程。
+- 阶段 0 外层套内层同样有效：数据目录、别人的私有目录与会话、`vault.key` 都读不到，工作目录照常可写。
+- `matrix-dsh-check --live` 除 `approval` 外全部通过（含 `key-hidden`）。`approval` 时好时坏，runc 下同样如此，原因是检查本身：
+  目标目录放在 `/tmp` 下，而 dsh 的内层沙箱把 `/tmp` 换成空的 tmpfs，写入报“不存在”而不是“只读”，模型有时直接收尾、不申请升权。
+  已把目标挪到主目录下（`matrix/dsh_check.py`），本机连跑 5 次全部通过。
+- 对比同一台机器的 runc（第 2 项的组合）：和参考机一样，只有放开两项时 bwrap 能跑；默认选项下 dsh 退到更弱的沙箱，
+  `approval` 报“没申请升权就写到了工作目录以外”。`matrix-dsh-check` 已加一项 `sandbox`：Agent 的命令不在 bwrap 里就变红。
+
+**第 5 项：全部跑通，没有兼容性问题。** 各步秒数（runc → gVisor）：
+
+| 小文件 2 万个 | 512 MB 大文件 | git clone | pip 装 3 个包 | npm 装 3 个包 | uv sync | pytest | tsc | 合计 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.9 → 2.0 | 3.4 → 5.9 | 0.9 → 1.2 | 1.5 → 2.4 | 13.2 → 15.6 | **1.6 → 12.7** | 7.3 → 11.3 | 0.9 → 1.8 | 34 → 54 |
+
+大多数操作慢 1.2–2.2 倍。`uv sync` 慢约 8 倍，是唯一明显的异常：它从缓存往虚拟环境里链接、拷贝大量小文件，正落在 gVisor 文件系统开销最大的地方。
+Agent 装 Python 依赖很常见，阶段 1 要专门调（第 3 项）。
+
+**第 6 项（gVisor 部分）。** 机器小、同机有别的服务，绝对值偏差大，看相对值：
+
+| | runc | gVisor |
+| --- | --- | --- |
+| 一轮运行（委托时同时两个 dsh），宿主看到的峰值 | 344 MiB | 437 MiB |
+| 重活，宿主看到的峰值 | 423 MiB | 309 MiB |
+| 冷启动（5 次，毫秒） | 389–627 | 695–1936 |
+| 10 个空闲沙箱（`docker stats` 合计 / 宿主已用内存增加） | 0 / 55 MiB | 96 / 174 MiB |
+
+gVisor 每轮多约 90 MB，空闲沙箱约 10–17 MB 一个，冷启动 1–2 秒。按 4.4 的“空闲 10 分钟才停”，大多数轮次碰不到冷启动。
+
 ### 还要验证
 
-在一台装了 gVisor 的机器上跑 [deploy/isolation-check](../deploy/isolation-check/README.md)（一条命令，结果打成一个压缩包）：
-
-1. 第 1 项：gVisor 里 dsh 的 bwrap 能否运行，默认安全选项下能否运行（`t1`）。
-2. 第 5 项：重活在 gVisor 下能否跑通、耗时与内存比 runc 多多少（`t3`）。
-3. 第 6 项的 gVisor 部分：一轮运行、冷启动、空闲沙箱的开销（`t4`）。
+1. `uv sync` 在 gVisor 下慢 8 倍的原因与调法：试 gVisor 的根文件系统 overlay（`--overlay2`）与 directfs 设置、uv 的 `UV_LINK_MODE`，
+   把 uv 缓存放进执行单元的卷。
+2. 在符合要求的机器（4 核 8 GB 以上、没有别的服务）上重测第 6 项，定内存上限与并发的默认值。
+3. 外溢审批（不变量 14）的去留（9.2），与沙箱实现一起定。
 
 ## 12. 明确不做的
 

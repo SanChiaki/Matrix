@@ -260,7 +260,7 @@ uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
 
 ## 沙箱
 
-dsh 在 Linux 上用 bwrap 做沙箱。bwrap 起不来时 dsh 不会拒绝执行，而是退到一种更弱的方式：实测工作目录以外仍有能写的地方（如 `/tmp`），`matrix-dsh-check` 的 `approval` 一项会变红（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 11 节）。所以下面两个安全选项不能去掉。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
+dsh 在 Linux 上用 bwrap 做沙箱。bwrap 起不来时 dsh 不会拒绝执行，而是退到一种更弱的方式：实测工作目录以外仍有能写的地方（如 `/tmp`），`matrix-dsh-check` 的 `sandbox` 一项会变红（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 11 节）。所以下面两个安全选项不能去掉。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
 
 沙箱只限制写，不限制读，见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
 
