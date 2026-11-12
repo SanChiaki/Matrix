@@ -56,6 +56,53 @@ def test_register_login_logout(tmp_path: Path):
     assert "password-123" not in raw  # 只存 scrypt 哈希
 
 
+
+def test_admin_password_reset_link(tmp_path: Path):
+    """忘了密码：管理员发一次性链接，本人自己设新密码；旧密码与原有登录随之失效，链接只能用一次。"""
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    admin_id, bob_id = users(net, "admin@x.io", "bob@x.io")  # 没指定管理员：最早注册的那个人
+    admin, bob, anon = client(net, "admin@x.io"), client(net, "bob@x.io"), TestClient(create_app(net))
+    assert bob.post(f"/api/admin/users/{admin_id}/reset").status_code == 404  # 不是管理员：按不存在处理
+    assert admin.post("/api/admin/users/user-nope/reset").status_code == 404
+
+    first = admin.post(f"/api/admin/users/{bob_id}/reset").json()["token"]
+    r = admin.post(f"/api/admin/users/{bob_id}/reset")
+    assert r.status_code == 200
+    token = r.json()["token"]
+    assert r.json()["path"] == f"/#reset={token}" and r.json()["expires_at"] > time.time()
+    assert anon.post("/api/auth/reset/check", json={"token": first}).status_code == 400  # 再发一条，旧的作废
+    assert anon.post("/api/auth/reset/check", json={"token": token}).json() == {"email": "bob@x.io"}
+    raw = (tmp_path / "state.json").read_text(encoding="utf-8")
+    assert token not in raw  # 只存哈希
+
+    assert anon.post("/api/auth/reset", json={"token": token, "password": "short"}).status_code == 400
+    r = anon.post("/api/auth/reset", json={"token": token, "password": "new-password-1"})
+    assert r.status_code == 200 and r.json()["email"] == "bob@x.io"
+    assert anon.get("/api/me").json()["id"] == bob_id  # 设好即登录
+    assert bob.get("/api/me").status_code == 401  # 原有的登录失效
+    assert admin.get("/api/me").status_code == 200  # 别人的不受影响
+    assert anon.post("/api/auth/reset", json={"token": token, "password": "another-pass"}).status_code == 400
+    assert anon.post("/api/auth/login", json={"email": "bob@x.io", "password": "password-123"}).status_code == 400
+    assert anon.post("/api/auth/login", json={"email": "bob@x.io", "password": "new-password-1"}).status_code == 200
+    raw = (tmp_path / "state.json").read_text(encoding="utf-8")
+    assert "new-password-1" not in raw
+
+
+def test_password_reset_expires_and_survives_restart(tmp_path: Path):
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    (uid,) = users(net, "a@x.io")
+    live, _ = auth.issue_reset(net.store, uid)
+    stale, _ = auth.issue_reset(net.store, users(net, "b@x.io")[0])
+    with net.store.lock:
+        next(r for r in net.store.resets.values() if r["user_id"] != uid)["expires_at"] = time.time() - 1
+        net.store.save()
+    with pytest.raises(auth.AuthError):
+        auth.reset_info(net.store, stale)
+    reloaded = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)  # 重启后没用的链接照样能用
+    assert auth.reset_info(reloaded.store, live) == "a@x.io"
+    assert len(reloaded.store.resets) == 1
+
+
 def test_first_user_claims_existing_data(tmp_path: Path):
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path)  # 带种子数据
     first, second = users(net, "first@x.io", "second@x.io")

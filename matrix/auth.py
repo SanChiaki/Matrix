@@ -1,6 +1,7 @@
 """用户与登录：邮箱 + 密码（scrypt，仅标准库），登录令牌存在 state.json 里，经 HttpOnly cookie 传递。
 
-这是最简实现：没有邮箱验证、找回密码、令牌过期轮换；令牌在退出登录时作废。
+这是最简实现：没有邮箱验证、令牌过期轮换；令牌在退出登录时作废。忘了密码由管理员发一条一次性的重置链接
+（`issue_reset` / `reset_password`），用户自己设新密码，管理员看不到新密码。
 """
 
 from __future__ import annotations
@@ -33,13 +34,17 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
+def _check_password(password: str) -> None:
+    if len(password) < 8:
+        raise AuthError("密码至少 8 位")
+
+
 def register(store: Store, email: str, password: str) -> tuple[User, str, bool]:
     """建用户并登录；返回 (用户, 登录令牌, 是否第一个用户)。第一个用户认领所有无主的旧数据。"""
     email = normalize_email(email)
     if not EMAIL_RE.match(email):
         raise AuthError("邮箱格式不对")
-    if len(password) < 8:
-        raise AuthError("密码至少 8 位")
+    _check_password(password)
     salt = secrets.token_bytes(16)
     with store.lock:
         if any(u.email == email for u in store.users.values()):
@@ -79,6 +84,66 @@ def user_of(store: Store, token: str | None) -> User | None:
         return None
     s = store.sessions.get(token)
     return store.users.get(s["user_id"]) if s else None
+
+
+# ---- 管理员重置密码：一次性链接，用户自己设新密码 ----
+# 链接里的令牌只在签发时返回一次，state.json 里只存 sha256；每人同时只有一条（再发一条，旧的作废），
+# RESET_TTL_S 内有效，用过即作废。重置后这个人所有的登录都失效（端侧连接器令牌不受影响，在“设备”里另行吊销）。
+RESET_TTL_S = 24 * 3600
+
+
+def _reset_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def issue_reset(store: Store, user_id: str, by: str | None = None) -> tuple[str, float]:
+    """给 user_id 签发重置令牌；返回 (令牌明文, 过期时间)。调用方负责确认 by 是管理员。"""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with store.lock:
+        if user_id not in store.users:
+            raise AuthError("用户不存在")
+        for h in [h for h, r in store.resets.items() if r["user_id"] == user_id]:
+            del store.resets[h]
+        store.resets[_reset_hash(token)] = {"user_id": user_id, "by": by, "created_at": now,
+                                            "expires_at": now + RESET_TTL_S}
+        store.save()
+    return token, now + RESET_TTL_S
+
+
+def _reset_entry(store: Store, token: str) -> tuple[str, User]:
+    """调用方持有锁。有效的令牌 → (哈希, 用户)；过期的顺手删掉。"""
+    h = _reset_hash(token or "")
+    r = store.resets.get(h)
+    user = store.users.get(r["user_id"]) if r else None
+    if r is not None and (user is None or r["expires_at"] <= time.time()):
+        del store.resets[h]
+        store.save()
+        user = None
+    if user is None:
+        raise AuthError("重置链接无效或已过期，请找管理员重新发一条")
+    return h, user
+
+
+def reset_info(store: Store, token: str) -> str:
+    """重置页显示是哪个账号：令牌有效时返回邮箱。"""
+    with store.lock:
+        return _reset_entry(store, token)[1].email
+
+
+def reset_password(store: Store, token: str, password: str) -> tuple[User, str]:
+    """用重置令牌设新密码：令牌作废、这个人原有的登录全部失效，再登录一次；返回 (用户, 新的登录令牌)。"""
+    _check_password(password)
+    salt = secrets.token_bytes(16)
+    digest = _hash(password, salt)  # 在锁外算：scrypt 慢
+    with store.lock:
+        h, user = _reset_entry(store, token)
+        del store.resets[h]
+        user.password_hash, user.salt = digest, salt.hex()
+        store.sessions = {t: s for t, s in store.sessions.items() if s["user_id"] != user.id}
+        session = _new_session(store, user.id)
+        store.save()
+    return user, session
 
 
 # ---- 端侧连接器令牌（与登录 cookie 分开：可多条、按设备吊销、不随退出登录失效） ----
