@@ -19,11 +19,12 @@
     <form id="auth-form" aria-labelledby="auth-title" hidden>
       <h1 id="auth-title">登录</h1>
       <p class="muted" id="auth-sub">用邮箱和密码登录。</p>
-      <div class="field"><label for="auth-email">邮箱</label><input id="auth-email" type="email" autocomplete="email" required></div>
+      <div class="field" id="auth-email-field"><label for="auth-email">邮箱</label><input id="auth-email" type="email" autocomplete="email" required></div>
       <div class="field"><label for="auth-pass">密码</label><input id="auth-pass" type="password" autocomplete="current-password" minlength="8" required></div>
       <p class="error" role="alert" id="auth-error"></p>
       <button type="submit" id="auth-submit">登录</button>
       <p class="hint"><span id="auth-switch-text">还没有账号？</span> <button type="button" class="link" id="auth-switch">注册</button></p>
+      <p class="hint" id="auth-forgot">忘了密码？请管理员在管理后台给你发一条重置链接。</p>
     </form>
   </div>
 </div>

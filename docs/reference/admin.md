@@ -1,7 +1,7 @@
 # 管理后台
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。代码：`matrix/usage.py`（台账与统计，纯函数）、`engine.py`「管理后台」一节、
-> `server.py` 的 `/admin` 与 `/api/admin/usage`、`static/admin.*`。测试：`tests/test_admin.py`。
+> `server.py` 的 `/admin` 与 `/api/admin/*`、`static/admin.*`；重置密码在 `auth.py`。测试：`tests/test_admin.py`。
 
 部署方看整个网络的使用情况：多少人在用、跑了多少轮、花了多少 token、哪里在失败；并配置平台云侧 Agent 能用的模型。
 
@@ -16,6 +16,18 @@
 管理员是部署方的角色，不是项目参与者。统计里只有计数、类别（场合、运行位置、模型、错误类别）与账号邮箱，
 **不出现项目名、Agent 名、消息正文、提示词、回复、工具参数**。`test_admin_dashboard` 会在统计或台账里出现这些内容时变红。
 新增统计项时守住这一条：要按项目、按 Agent 细分，只给 id 级别的计数，不带名字。
+
+<a id="reset"></a>
+## 重置密码（“用量”页的用户表）
+
+没有邮件通道，忘了密码的人找管理员。管理员在用户表那一行点“重置密码”，`POST /api/admin/users/<id>/reset`
+返回一条一次性链接 `/#reset=<令牌>`（只显示这一次），转给本人；本人打开后自己设新密码（`/api/auth/reset/check` 显示是哪个账号，
+`/api/auth/reset` 设密码并登录），管理员看不到新密码。
+
+- 令牌只在签发时返回一次，`state.json` 的 `password_resets` 只存 sha256；每人同时只有一条（再发一条，旧的作废），
+  24 小时（`auth.RESET_TTL_S`）内有效，用过即作废，服务重启后没用的照样有效。
+- 设好新密码后，这个人原有的登录全部失效；端侧连接器令牌不受影响，要在“设备”里另行吊销。
+- 不是管理员的人调这个接口按不存在处理（404）。测试：`tests/test_users.py` 的 `test_admin_password_reset_link`。
 
 ## 模型目录（“模型”标签页）
 

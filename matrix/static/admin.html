@@ -64,6 +64,7 @@
     <div class="tiles" id="tiles-now"></div>
 
     <h3>用户</h3>
+    <p class="error" id="u-error" role="alert"></p>
     <div class="table-wrap"><table id="t-users"></table></div>
 
     <div class="grid-2">
@@ -166,6 +167,15 @@
       <p class="muted m-hint">只拉这一层（浅克隆），不拉子模块、不运行仓库里的任何东西；记下提交号与包的指纹。之后可以“重新拉取”。</p>
       <p class="error" id="plg-error" role="alert"></p>
       <div class="actions m-actions"><button type="button" class="ghost" id="plg-cancel">取消</button><button type="submit" id="plg-submit">添加</button></div>
+    </form>
+  </dialog>
+  <dialog id="reset-dialog" class="m-dialog">
+    <form method="dialog">
+      <h2>重置密码</h2>
+      <p>把这条链接发给 <b id="rs-email"></b> 本人，对方打开后自己设新密码，你看不到新密码。</p>
+      <div class="field"><label for="rs-link">重置链接</label><input id="rs-link" readonly></div>
+      <p class="muted m-hint">链接只显示这一次，<span id="rs-expires"></span>前有效，用过一次就作废；再发一条，这条随即作废。对方设好新密码后，原来的登录都会退出（端侧连接器不受影响）。</p>
+      <div class="actions m-actions"><button type="button" class="ghost" id="rs-copy">复制链接</button><button type="submit">完成</button></div>
     </form>
   </dialog>
   <dialog id="pl-file-dialog" class="m-dialog pl-file">

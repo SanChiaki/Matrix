@@ -482,6 +482,15 @@ class CredentialsIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class ResetCheckIn(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+
+
+class ResetIn(BaseModel):
+    token: str = Field(min_length=1, max_length=200)
+    password: str = Field(min_length=1, max_length=200)
+
+
 class DecisionIn(BaseModel):
     allow: bool
     note: str = Field("", max_length=500)
@@ -654,6 +663,17 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         set_cookie(response, token)
         return user.public()
 
+    # 重置密码：令牌在链接的 # 后面（不进服务器日志与 Referer），页面用 POST 交上来
+    @app.post("/api/auth/reset/check")
+    def reset_check(body: ResetCheckIn) -> dict:
+        return {"email": auth.reset_info(store, body.token)}
+
+    @app.post("/api/auth/reset")
+    def reset(body: ResetIn, response: Response) -> dict:
+        user, token = auth.reset_password(store, body.token, body.password)
+        set_cookie(response, token)
+        return user.public()
+
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response) -> dict:
         auth.logout(store, request.cookies.get(auth.COOKIE))
@@ -672,6 +692,16 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.get("/api/admin/usage")
     def admin_usage(user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
         return network.admin_usage(user.id, days)
+
+    @app.post("/api/admin/users/{user_id}/reset")
+    def admin_reset_password(user_id: str, user: Me) -> dict:
+        """给忘了密码的人发一条一次性重置链接：令牌只在这里返回一次，管理员把链接转给本人。"""
+        if not network.is_admin(user.id):
+            raise HTTPException(404, "unknown admin")
+        if user_id not in store.users:
+            raise HTTPException(404, "unknown user")
+        token, expires_at = auth.issue_reset(store, user_id, by=user.id)
+        return {"token": token, "path": f"/#reset={token}", "expires_at": expires_at}
 
     @app.get("/api/admin/models")
     def admin_models(user: Me) -> dict:

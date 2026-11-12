@@ -206,6 +206,7 @@ class Store:
         self.proposals: dict[str, Proposal] = {}
         self.users: dict[str, User] = {}
         self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
+        self.resets: dict[str, dict[str, Any]] = {}     # 重置密码令牌的 sha256 → {user_id, by, created_at, expires_at}
         self.approvals: dict[str, Approval] = {}
         self.questions: dict[str, Question] = {}  # Agent 在运行中提的问题（等人或委托方回答）
         self.requests: dict[str, UserRequest] = {}  # 用户下发的任务（看板）
@@ -311,6 +312,7 @@ class Store:
                 "proposals": [p.to_dict() for p in self.proposals.values()],
                 "users": [asdict(u) for u in self.users.values()],
                 "sessions": self.sessions,
+                "password_resets": self.resets,
                 "approvals": [a.to_dict() for a in self.approvals.values()],
                 "questions": [q.to_dict() for q in self.questions.values()],
                 "requests": [r.to_dict() for r in self.requests.values()],
@@ -398,6 +400,9 @@ class Store:
         for u in raw.get("users", []):
             self.users[u["id"]] = User(**_known(User, u))
         self.sessions = {t: s for t, s in (raw.get("sessions") or {}).items() if s.get("user_id") in self.users}
+        now = time.time()
+        self.resets = {h: r for h, r in (raw.get("password_resets") or {}).items()
+                       if r.get("user_id") in self.users and float(r.get("expires_at") or 0) > now}
         for a in raw.get("approvals", []):
             ap = Approval(**_known(Approval, a))
             if ap.status == "pending":  # 等审批的那次运行已随重启结束

@@ -202,6 +202,7 @@ function renderTables(d) {
     { label: "用户任务", num: true, html: (u) => num(u.requests) },
     { label: "连接器调用", num: true, html: (u) => num(u.connector_calls) },
     ...runCols.slice(0, 3),
+    { label: "", html: (u) => `<button type="button" class="link" data-reset="${esc(u.id)}">重置密码</button>` },
   ], d.users, "还没有用户");
   table("#t-models", [{ label: "模型", html: (r) => esc(r.model) }, ...runCols], d.models);
   table("#t-runtimes", [{ label: "位置", html: (r) => esc(runtimeName(r)) }, ...runCols], d.runtimes);
@@ -241,6 +242,33 @@ async function load() {
   }
   $("#denied").hidden = true;
   render();
+}
+
+// ---------- 重置密码：发一条一次性链接，用户自己设新密码 ----------
+function bindUsers() {
+  $("#t-users").addEventListener("click", async (ev) => {
+    const b = ev.target.closest("button[data-reset]");
+    const u = b && S.data?.users.find((x) => x.id === b.dataset.reset);
+    if (!u) return;
+    $("#u-error").textContent = "";
+    if (!confirm(`给 ${u.email} 发一条重置密码的链接？之前发过、还没用的那条会作废。`)) return;
+    try {
+      const r = await api(`/api/admin/users/${encodeURIComponent(u.id)}/reset`, { method: "POST" });
+      $("#rs-email").textContent = u.email;
+      $("#rs-link").value = new URL(r.path, location.origin).href;
+      $("#rs-expires").textContent = new Date(r.expires_at * 1000).toLocaleString("zh-CN", { hour12: false });
+      $("#rs-copy").textContent = "复制链接";
+      $("#reset-dialog").showModal();
+      $("#rs-link").select();
+    } catch (e) { $("#u-error").textContent = e.message; }
+  });
+  $("#rs-copy").addEventListener("click", async () => {
+    $("#rs-link").select();
+    try { await navigator.clipboard.writeText($("#rs-link").value); $("#rs-copy").textContent = "已复制"; }
+    catch { $("#rs-copy").textContent = "请手动复制"; }
+  });
+  // 关掉后清空：链接不留在页面里
+  $("#reset-dialog").addEventListener("close", () => { $("#rs-link").value = ""; });
 }
 
 // ---------- 模型目录 ----------
@@ -725,6 +753,7 @@ async function init() {
   $("#me").textContent = me.email;
   if (!me.admin) return deny("没有权限", "管理后台只给部署方指定的管理员。");
   $(".admin-tabs").hidden = false;
+  bindUsers();
   bindCatalog();
   bindPlugins();
   bindIm();
