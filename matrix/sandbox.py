@@ -78,8 +78,10 @@ def _symlink_hops(path: str) -> list[tuple[str, str]]:
     return list(dict.fromkeys(out))
 
 
-def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = False, nested: bool = False) -> list[str]:
-    """把一条命令包进 bwrap。rw[0] 是工作目录。ro 里可以有单个文件（如 CA 证书）。
+def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = False, nested: bool = False,
+         binds: list[tuple[Path, Path]] | None = None, chdir: Path | None = None) -> list[str]:
+    """把一条命令包进 bwrap。rw[0] 是工作目录（chdir 没给时）。ro 里可以有单个文件（如 CA 证书）。
+    binds：（宿主上的目录, 沙箱里的路径）——云侧沙箱的工作目录挂在它原来的绝对路径上（docs/cloud-runtime.md 4.3）。
 
     nested：里面的程序还要自己起 bwrap（dsh 的内层沙箱）。以 root 运行时 bwrap 默认不建用户命名空间，去掉全部特权后
     内层建不了命名空间（实测 “Creating new namespace failed”）；这时显式建一个用户命名空间（uid 0 映射到自己），特权只在
@@ -120,7 +122,10 @@ def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = Fal
     for p in rw:
         p.mkdir(parents=True, exist_ok=True)
         cmd += ["--bind", str(p), str(p)]
-    cmd += ["--chdir", str(rw[0]), "--", *argv]
+    for src, dest in binds or []:
+        src.mkdir(parents=True, exist_ok=True)
+        cmd += ["--bind", str(src), str(dest)]
+    cmd += ["--chdir", str(chdir or rw[0]), "--", *argv]
     return cmd
 
 
