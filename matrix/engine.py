@@ -4606,7 +4606,11 @@ class Network:
             if not full:
                 self._running.add(cid)
         for unit in evict:  # 给它腾位置：停掉最久没用的空闲沙箱（目录保留）
-            self.sandbox.stop(unit)
+            with self._lock:  # 放锁之后它可能又被调度起来了：那就不停（停了会打断它刚开始的一轮）
+                rec = self.store.sandboxes.get(unit)
+                if rec is None or rec.desired != "stopped" or self._cid_of(unit) in self._running:
+                    continue
+                self.sandbox.stop(unit)
         if full:
             self._sandbox_full(kind, cid, agent)
             return

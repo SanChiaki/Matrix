@@ -274,6 +274,7 @@ def main(argv: list[str] | None = None) -> None:
                 conn.serve_forever()
             except DeviceError as e:
                 attempt += 1
+                print(f"沙箱客户端断线（第 {attempt} 次）：{e}", file=sys.stderr, flush=True)
                 if not credential or attempt > 3:   # 连不回去：退出就是沙箱退出
                     print(f"沙箱客户端退出：{e}", file=sys.stderr, flush=True)
                     return
