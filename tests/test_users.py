@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.channels import CHANNELS, make_net
 from matrix import auth
 from matrix.engine import Network, NetworkError
 from matrix.models import TaskStatus
@@ -396,8 +397,10 @@ def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
     assert "内部收购组" not in p and "alice@x.io）" not in p.split("你同时还在处理")[1]
 
 
-def test_home_merge_keeps_both_on_conflict(tmp_path: Path):
-    """不变量 15：两次并行运行改同一个私有文件：后写回的那份另存为冲突副本，不覆盖先写回的。"""
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_home_merge_keeps_both_on_conflict(tmp_path: Path, channel: str):
+    """不变量 15：两次并行运行改同一个私有文件：后写回的那份另存为冲突副本，不覆盖先写回的。
+    两种通道都跑：沙箱方式下私有目录由网络持有，客户端只报改动，合并语义不变。"""
     gate = threading.Barrier(2, timeout=5)
 
     def handler(call: ScriptCall) -> str:
@@ -408,7 +411,7 @@ def test_home_merge_keeps_both_on_conflict(tmp_path: Path):
             time.sleep(0.1)  # 让私聊那次先写回
         return "ok"
 
-    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    net = make_net(ScriptedRuntime(handler), tmp_path, channel, seed=False)
     alice, = users(net, "alice@x.io")
     a = net.create_agent("A", "a", [], ["file.write"], actor=alice)
     g = net.create_project("G", "", [a.id], actor=alice)

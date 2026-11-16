@@ -539,6 +539,26 @@ class UserRequest:
 
 
 @dataclass
+class SandboxRecord:
+    """云侧一个执行单元的沙箱台账（docs/cloud-runtime.md 4.4）：控制面记“应该是什么状态”与代数，后端只报实际状态。
+    只在沙箱方式（MATRIX_CLOUD_SANDBOX）下有；旧的 state.json 没有这一项，读成空。"""
+
+    unit: str                            # seat:<对话>/<Agent> | task:<任务>
+    agent_id: str
+    owner_id: str | None
+    workdir: str                         # 逻辑工作目录的绝对路径：定下就永远不变（dsh 的会话绑死了它）
+    desired: str = "stopped"             # running | stopped | destroyed
+    generation: int = 0                  # 每新建一次沙箱加一；对账时代数对不上的沙箱结束掉
+    last_used: float = 0.0
+    imported: bool = False               # 旧方式的工作目录与 dsh 会话已导入检查点（第 10 节）
+    ended_at: float | None = None        # 执行单元结束（委托验收 / 被拒、对话或 Agent 删除）的时间：过保留期销毁
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class Device:
     """一个端侧连接器（用户电脑上的 matrix-connect，见 docs/device-runtimes.md 第 2 节）。
     令牌是高熵随机串，只存 sha256；吊销后立即失效。一个用户可以有多台设备。"""

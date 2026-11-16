@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
+from .sandboxes import hello_message as sandbox_hello, provider_named, sandbox_config
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
@@ -1383,8 +1384,8 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         return network.task_detail(task_id, actor=user.id)
 
     # ---- 工作目录（只读）：Agent 的所有者看产物 ----
-    def _download(path) -> FileResponse:
-        return FileResponse(path, filename=path.name, content_disposition_type="attachment",
+    def _download(path, name: str | None = None) -> FileResponse:
+        return FileResponse(path, filename=name or path.name, content_disposition_type="attachment",
                             headers={"X-Content-Type-Options": "nosniff"})
 
     @app.get("/api/tasks/{task_id}/files")
@@ -1393,7 +1394,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.get("/api/tasks/{task_id}/files/{path:path}")
     def task_file(task_id: str, path: str, user: Me) -> FileResponse:
-        return _download(network.workdir_file("task", task_id, path, actor=user.id))
+        return _download(*network.workdir_download("task", task_id, path, actor=user.id))
 
     @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files")
     def seat_files(conv_id: str, agent_id: str, user: Me) -> dict:
@@ -1401,7 +1402,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.get("/api/conversations/{conv_id}/seats/{agent_id}/files/{path:path}")
     def seat_file(conv_id: str, agent_id: str, path: str, user: Me) -> FileResponse:
-        return _download(network.workdir_file("seat", f"{conv_id}/{agent_id}", path, actor=user.id))
+        return _download(*network.workdir_download("seat", f"{conv_id}/{agent_id}", path, actor=user.id))
 
     @app.post("/api/conversations/{conv_id}/seats/{agent_id}/stop")
     def stop_seat(conv_id: str, agent_id: str, user: Me) -> dict:
@@ -1550,6 +1551,14 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
             dev.last_seen_at = time.time()
             store.save()
         network.bus.emit("device.connected", device_id=dev.id, runtime=info.runtime)
+        try:
+            await _pump(ws, rt)
+        finally:
+            network.unregister_runtime(dev.id, rt)
+            network.bus.emit("device.disconnected", device_id=dev.id)
+
+    async def _pump(ws: WebSocket, rt: DeviceRuntime) -> None:
+        """一条连接的接收循环（端侧设备与云侧沙箱共用）。"""
         pending: set[asyncio.Task] = set()
 
         async def answer(msg: dict) -> None:
@@ -1575,9 +1584,30 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
                     await ws.send_json(reply)
         except (WebSocketDisconnect, RuntimeError):
             pass
+
+    @app.websocket("/api/sandbox/connect")
+    async def sandbox_connect(ws: WebSocket, token: str = "", credential: str = "") -> None:
+        """云侧沙箱客户端连回来（docs/cloud-runtime.md 4.4，阶段 1a）。不是用户设备：不走设备配对与令牌，
+        不出现在“设备”页。一次性启动令牌换执行单元凭证（用过即废）；断线后凭凭证重连。这条连接只代表那一个执行单元。"""
+        hub = network.sandbox_hub
+        grant = hub.by_credential(credential) if credential else hub.redeem(token)
+        if grant is None or network.sandbox is None:
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        link = WebSocketLink(ws, asyncio.get_running_loop())
+        try:
+            await ws.send_json(sandbox_hello(grant))
+            hello = await ws.receive_json()
+            rt = hub.accept(grant, link, hello)
+        except Exception:  # noqa: BLE001 —— 握手内容不合法 / 断开
+            await ws.close(code=1008)
+            return
+        link.on_message = rt.on_message
+        try:
+            await _pump(ws, rt)
         finally:
-            network.unregister_runtime(dev.id, rt)
-            network.bus.emit("device.disconnected", device_id=dev.id)
+            hub.detach(grant.unit, rt)
 
     # ---- 运行时回调（凭执行上下文令牌，不走登录） ----
     @app.post("/internal/tools")
@@ -1623,18 +1653,21 @@ class MatrixServer(uvicorn.Server):
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
-                  admins: str | None = None, fetch: str | None = None) -> Network:
+                  admins: str | None = None, fetch: str | None = None, sandbox: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
     admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
-    fetch：抓取白名单文件；None = `<data>/fetch.json`（没有这个文件就用 dsh 自带的 web_fetch）。"""
+    fetch：抓取白名单文件；None = `<data>/fetch.json`（没有这个文件就用 dsh 自带的 web_fetch）。
+    sandbox：云侧执行面的沙箱后端（off / local；None = 读 MATRIX_CLOUD_SANDBOX，默认 off，docs/cloud-runtime.md 阶段 1a）。"""
     runtime = DshRuntime(dsh_bin) if runtime_name == "dsh" else ScriptedRuntime(scenario_handler)
     return Network(runtime, Path(data).resolve(), tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=seed,
                    models=ModelCatalog(Path(models).resolve()) if models else None,
                    connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None,
                    plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None,
                    admins=(admins or "").split(","),
-                   fetch=FetchConfig(Path(fetch).resolve()) if fetch else None)
+                   fetch=FetchConfig(Path(fetch).resolve()) if fetch else None,
+                   sandbox=provider_named(sandbox if sandbox is not None else sandbox_config()["backend"]),
+                   sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect")
 
 
 def main() -> None:
@@ -1657,11 +1690,17 @@ def main() -> None:
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=compat.env("HOST", "127.0.0.1"))
+    p.add_argument("--sandbox", default=None, choices=["off", "local"],
+                   help="云侧执行面：local = 每个执行单元一个本机子进程沙箱（外层 bwrap）；默认读 MATRIX_CLOUD_SANDBOX，没有就 off")
     args = p.parse_args()
     args.data = args.data or compat.data_dir()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
-                            connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch)
+                            connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,
+                            sandbox=args.sandbox)
+    if network.sandbox is not None:
+        rep = network.sandbox_report()
+        print(f"[matrix] 云侧执行面：{rep['backend']} 后端（{rep['note']}）")
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     if args.runtime == "dsh" and shutil.which(args.dsh_bin) is None:  # 不然启动正常，到第一轮才 FileNotFoundError
         print(f"[matrix] 警告：找不到 dsh（--dsh-bin {args.dsh_bin}，PATH={os.environ.get('PATH', '')}）："
