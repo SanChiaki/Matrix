@@ -5645,6 +5645,9 @@ class Network:
                     and now - st.started_at >= grace_s:
                 self.sandbox.stop(unit) if rec is not None else self.sandbox.destroy(unit)
                 acts["stopped"].append(unit)
+            elif st.state != "running" and rec is None:   # 没有执行单元的卷：控制面不认识，删掉（检查点才是准）
+                self.sandbox.destroy(unit)
+                acts["destroyed"].append(unit)
         changed = False
         for unit, rec in recs.items():
             st = actual.get(unit)

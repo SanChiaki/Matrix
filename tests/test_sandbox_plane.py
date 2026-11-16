@@ -305,6 +305,9 @@ def test_reconcile_three_cases(tmp_path: Path):
     assert acts["stopped"] == []                              # 刚起的：宽限期内不动
     acts = net.reconcile_sandboxes(now=time.time() + 120)
     assert "seat:orphan/x" in acts["stopped"]                 # 1. 没有记录
+    sb.adopt("seat:orphan/y", generation=1)
+    sb.crash("seat:orphan/y")                                 # 没有记录、已停的（只剩卷）：删掉
+    assert "seat:orphan/y" in net.reconcile_sandboxes()["destroyed"] and sb.status("seat:orphan/y").state == "absent"
 
     net.send_message(chat.id, "@Lead 委托", actor=alice)
     assert started.wait(5)
