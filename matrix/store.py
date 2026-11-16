@@ -299,6 +299,12 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def unit_state_dir(self, kind: str, unit_id: str) -> Path:
+        """云侧一个执行单元（席位 `<对话>/<Agent>` 或委托）自己的 dsh 状态目录：那一轮 dsh 的 HOME（会话、缓存）。
+        不在任何工作目录里，外层沙箱里只有它和工作目录可写（docs/cloud-runtime.md 第 8 节阶段 0）。不在这里建：
+        第一次在新方式下运行时才建，引擎据此判断要不要从共用的 ~/.dsh 搬旧会话。"""
+        return self.root / "dsh-state" / ("tasks" if kind == "task" else "seats") / Path(*unit_id.split("/"))
+
     # ---------- 持久化 ----------
     def save(self) -> None:
         with self.lock:

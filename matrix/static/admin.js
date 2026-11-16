@@ -265,6 +265,10 @@ function renderCatalog() {
       + "已有 Agent 自己填的模型和目录里的对得上就算选了它，对不上的改用默认模型。</span>")
     + (d.error ? `<div class="warn-box">目录文件 <code>${esc(d.path)}</code> 有错（${esc(d.error)}），`
       + `${d.active ? "现在用的是上一份能用的" : "现在只能用运行时默认"}。在这里保存会整份覆盖它。</div>` : "");
+  const iso = d.isolation;   // 云侧运行有没有读隔离（部署方开关 MATRIX_CLOUD_ISOLATION）
+  $("#m-isolation").innerHTML = iso ? (iso.active
+    ? `<span class="pill on">云侧读隔离</span><span>${esc(iso.note)}</span>`
+    : `<span class="pill off">云侧未隔离</span><span>${esc(iso.note)}（MATRIX_CLOUD_ISOLATION=${esc(iso.mode)}）</span>`) : "";
   table("#t-presets", [
     { label: "名称", html: (m) => `<b>${esc(m.label)}</b>${m.id === d.default ? ' <span class="tag">默认</span>' : ""}`
       + (m.description ? `<div class="muted">${esc(m.description)}</div>` : "") },

@@ -1666,6 +1666,10 @@ def main() -> None:
     if args.runtime == "dsh" and shutil.which(args.dsh_bin) is None:  # 不然启动正常，到第一轮才 FileNotFoundError
         print(f"[matrix] 警告：找不到 dsh（--dsh-bin {args.dsh_bin}，PATH={os.environ.get('PATH', '')}）："
               f"云侧 Agent 每一轮都会失败。装好 dsh 或用 --dsh-bin 指到它，再跑 matrix-dsh-check 确认", file=sys.stderr)
+    if args.runtime == "dsh":  # 云侧运行有没有读隔离（MATRIX_CLOUD_ISOLATION，docs/cloud-runtime.md 第 8 节阶段 0）
+        iso = network.cloud_isolation()
+        print(f"云侧读隔离（{iso['mode']}）：{'有' if iso['active'] else '没有'}。{iso['note']}",
+              file=sys.stdout if iso["active"] else sys.stderr)
     catalog = network.models
     if catalog.active:
         print(f"预置模型：{catalog.path}（{len(catalog.presets())} 个）")

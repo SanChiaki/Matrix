@@ -25,7 +25,7 @@ class DshDriver:
     def __init__(self, dsh_bin: str = "dsh", bridge_url: str = "", profile: str = "headless"):
         self.dsh_bin = dsh_bin
         self.bridge_url = bridge_url.rstrip("/")
-        self._runtime = DshRuntime(dsh_bin, profile)
+        self._runtime = DshRuntime(dsh_bin, profile, hosted=False)  # 端侧：不套外层沙箱，审批照旧上行
 
     def capabilities(self) -> RuntimeCapabilities:
         # 与云侧同一套覆盖层与沙箱；审批经连接器上行

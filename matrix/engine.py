@@ -57,7 +57,7 @@ from .device import DeviceRuntime
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
-                      RuntimeCapabilities, ToolBridge)
+                      RuntimeCapabilities, ToolBridge, adopt_dsh_session)
 from .store import Store
 from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
 
@@ -68,7 +68,7 @@ class Limits:
     max_revisions: int = 3          # 一个任务最多被退回修改几次
     max_retries: int = 3            # 一个失败任务最多被续接几次
     tool_timeout_s: float = 900     # 一次网络工具调用最长等多久（委托的运行超时与次数上限在 Agent 设置里）
-    approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
+    approval_timeout_s: float = 900  # 交给端侧审批桥的超时（端侧审批本身不按时间作废，只随设备断连结束；云侧不审批）
     connector_ask_timeout_s: float = 540  # 共享项目里用连接器前问所有者，最多等多久（短于连接器桥的回调超时）
     question_timeout_s: float = 3600  # Agent 提的问题最多等多久没人回答就作废（dsh 那次调用拿到“没有得到回答”）
     max_schedules: int = 20         # 每个人最多几个定时
@@ -229,6 +229,9 @@ class Network:
         self._question_waits: dict[str, threading.Event] = {}
         self._question_holders: dict[str, str] = {}  # 问题 id → 送到的委托方上下文（席位 id 或上一级任务 id），只它能答
         self._home_locks: dict[str, threading.Lock] = {}
+        # 改成每个执行单元一个 dsh 状态目录之前，云侧 dsh 的会话都在服务进程的 HOME 下（共用的 ~/.dsh）：
+        # 旧会话第一次在新方式下运行时从这里搬（_adopt_dsh_state）。测试里换成临时目录
+        self.legacy_dsh_home = Path.home()
         self._lock = self.store.lock
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="matrix-round")
         self._migrate_skill_packs()
@@ -4791,8 +4794,10 @@ class Network:
         seat = conv.seats[agent_id]
         project = self.store.projects.get(conv.project_id) if conv.project_id else None
         items = self._drain(seat)
-        self._flow_reset(seat)
         sid = seat_id(conv.id, agent_id)
+        if not agent.device_runtime:
+            self._adopt_dsh_state(seat, "seat", sid, self.store.root / seat.workdir)
+        self._flow_reset(seat)
         with self._lock:
             home = self._is_home(conv)
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
@@ -4850,7 +4855,8 @@ class Network:
                                    home_writable="file.write" in ctx.authority, archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
-                                   ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals)
+                                   ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals,
+                                   cloud=not agent.device_runtime)
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
@@ -4933,6 +4939,8 @@ class Network:
             self._wait_for_device(task)
             return
         items = self._drain(task)
+        if not agent.device_runtime:
+            self._adopt_dsh_state(task, "task", task.id, self.store.task_dir(task.id))
         self._flow_reset(task)
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
@@ -4951,7 +4959,7 @@ class Network:
                                             home_hidden=hidden, home_mixed=mixed,
                                             home_frozen=self._others(ctx, agent),
                                             ask=self.capabilities(agent).questions,
-                                            goals=self.capabilities(agent).goals)
+                                            goals=self.capabilities(agent).goals, cloud=not agent.device_runtime)
             workdir = self._write_task_files(task, knowledge)
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
@@ -5208,6 +5216,28 @@ class Network:
         return "\n\n".join(blocks), wake
 
     # ================= 运行时调用 =================
+    def _adopt_dsh_state(self, holder: Seat | Task, kind: str, unit_id: str, workdir: Path) -> None:
+        """云侧执行单元第一次在“每个执行单元一个 dsh 状态目录”的方式下运行：建它的状态目录；它记着一个会话的，
+        把会话的两处文件从共用的 ~/.dsh 搬进来（docs/cloud-runtime.md 10.2 第 3 步）。搬不了（文件已不在）就清掉会话 id，
+        走现有的“没有会话”流程：委托重发完整委托说明，席位按新会话重发身份、档案与还没进会话的消息。"""
+        state = self.store.unit_state_dir(kind, unit_id)
+        if state.is_dir():
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        sid = holder.dsh_session_id
+        if not sid:
+            return
+        try:
+            moved = adopt_dsh_session(self.legacy_dsh_home, state, workdir.resolve(), sid)
+        except OSError as e:
+            print(f"[matrix] 搬 dsh 会话 {sid} 失败：{e}", file=sys.stderr)
+            moved = False
+        if not moved:
+            with self._lock:
+                self._new_session(holder)
+                self.store.save()
+            print(f"[matrix] {unit_id} 的 dsh 会话 {sid} 在共用的 ~/.dsh 里找不到，换新会话", file=sys.stderr)
+
     def _run(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, holder: Seat | Task,
              timeout_s: float | None, mount_home: bool = True, hide: set[str] | frozenset[str] = frozenset()) -> RunResult:
         """跑一轮；可恢复的运行时错误（如工具参数 JSON 损坏）用同一个会话自动续接一次。"""
@@ -5602,10 +5632,11 @@ class Network:
             tools = ToolBridge(url=self.tool_url, token=token,
                                handler=lambda name, args: self.handle_tool(token, name, args),
                                timeout_s=self.limits.tool_timeout_s, names=ctx.tools)
-        # 审批通道总是挂载：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请
+        # 审批通道只给端侧：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请。
+        # 云侧不审批（不变量 14）：工作目录以外一律不可写，dsh 没有应答者时以 unavailable 拒绝升权
         approvals = ApprovalBridge(url=self.approval_url, token=token,
                                    handler=lambda tool, reason: self.request_approval(token, tool, reason),
-                                   timeout_s=self.limits.approval_timeout_s)
+                                   timeout_s=self.limits.approval_timeout_s) if agent.device_runtime else None
         # 提问通道：运行时能把 ask_user_question 转回来时挂载（席位里问人，委托里先问委托方）
         questions = QuestionBridge(url=self.question_url, token=token,
                                    handler=lambda items: self.request_question(token, items),
@@ -5666,7 +5697,9 @@ class Network:
                                               harness=agent.harness, cancel=cancel, connectors=connectors,
                                               local_connectors=[c.connector_id for c in conns if c.where != "cloud"],
                                               llm_provider=llm_provider, env=llm_env,
-                                              fetch=None if agent.device_runtime else self.fetch.policy()))
+                                              fetch=None if agent.device_runtime else self.fetch.policy(),
+                                              state_dir=None if agent.device_runtime
+                                              else self.store.unit_state_dir(ctx.kind, ctx.id)))
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -5733,17 +5766,19 @@ class Network:
         except NetworkError as e:
             return str(e), True
 
-    # ================= 工作区外溢审批 =================
-    # dsh 沙箱：没有 file.write 是只读，有则只能写工作目录（和平台临时目录）。工作目录以外的写被拒后，模型可以带理由
-    # 申请升权重试同一调用一次；dsh 把申请交给审批应答者——我们挂载的插件把它转到这里，等 Agent 的所有者决定。
-    # 获批只对那一次调用生效（以 danger-full-access 运行），不是放行某个路径。读不受沙箱限制。
+    # ================= 工作区外溢审批（不变量 14） =================
+    # dsh 沙箱：没有 file.write 是只读，有则只能写工作目录（和平台临时目录）。
+    # 云侧：工作目录以外一律不可写，也不审批（docs/cloud-runtime.md 7.1）。覆盖层不插应答者；万一有申请到这里，回 unavailable、不建记录。
+    # 端侧：工作目录以外的写被拒后，模型可以带理由申请升权重试同一调用一次；dsh 把申请交给审批应答者——连接器的插件
+    # 经本机小桥与 approval.request 把它转到这里，等 Agent 的所有者决定。获批只对那一次调用生效，不是放行某个路径。
     def request_approval(self, token: str, tool: str, reason: str) -> str:
-        """返回 dsh 的结果词：allowed-once | rejected | cancelled | unavailable。阻塞到所有者决定或超时。"""
+        """返回 dsh 的结果词：allowed-once | rejected | cancelled | unavailable。端侧阻塞到所有者决定或设备断连；
+        云侧一律 unavailable。"""
         ctx = self._contexts.get(token)
         if ctx is None:
             return "unavailable"
         agent = self.store.agents.get(ctx.agent_id)
-        if agent is None:
+        if agent is None or not agent.device_runtime:
             return "unavailable"
         conv = self.store.conversations.get(ctx.conversation_id)
         ap = Approval(id=new_id("appr"), agent_id=agent.id, owner_id=agent.owner_id, context_id=ctx.id,
@@ -5761,21 +5796,15 @@ class Network:
                                        text=f"{agent.name} 申请在工作目录以外操作，等 {self._email(ap.owner_id)} 批准："
                                             f"{_short(ap.reason, 200)}",
                                        audience=[ap.owner_id] if ap.owner_id else []))
-        if agent.device_runtime:  # 端侧：所有者的电脑可能不在，审批不因时间作废，只随断连结束（§5）
-            while not done.wait(5):
-                if self.runtime_for(agent) is None:
-                    with self._lock:
-                        if ap.status == "pending":
-                            ap.status, ap.note, ap.decided_at = "cancelled", "设备断连", time.time()
-                            self.store.save()
-                    self.bus.emit("approval.updated", approval=ap.to_dict())
-                    break
-        elif not done.wait(self.limits.approval_timeout_s):
-            with self._lock:
-                if ap.status == "pending":
-                    ap.status, ap.note, ap.decided_at = "cancelled", "等待超时", time.time()
-                    self.store.save()
-            self.bus.emit("approval.updated", approval=ap.to_dict())
+        # 端侧：所有者的电脑可能不在，审批不因时间作废，只随断连结束（§5）
+        while not done.wait(5):
+            if self.runtime_for(agent) is None:
+                with self._lock:
+                    if ap.status == "pending":
+                        ap.status, ap.note, ap.decided_at = "cancelled", "设备断连", time.time()
+                        self.store.save()
+                self.bus.emit("approval.updated", approval=ap.to_dict())
+                break
         with self._lock:
             self._approval_waits.pop(ap.id, None)
         return {"allowed": "allowed-once", "rejected": "rejected"}.get(ap.status, "cancelled")
@@ -6905,7 +6934,10 @@ class Network:
         caps = self.capabilities(a)
         d["device_online"] = self.device_online(a)
         d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
-                                     "enforcement": {x: caps.level(x) for x in a.authority}}
+                                     "enforcement": {x: caps.level(x) for x in a.authority},
+                                     # 云侧运行有没有读隔离（docs/cloud-runtime.md 4.5）；端侧读的是所有者自己的电脑，不适用
+                                     "isolation": caps.isolation, "isolation_note": caps.isolation_note,
+                                     "approval": caps.approval}
         d["effective_authority"] = caps.effective(a.authority)
         d["model_info"] = self.model_info(a)
         if not d["mine"]:  # 联合项目里别人的 Agent：只给名片（名称、描述、能力、自身权限）
@@ -7533,7 +7565,16 @@ class Network:
         out["default_agents"] = default_agents
         out["unlisted"] = sorted(unlisted.values(), key=lambda r: -r["agents"])
         out["runtime_default"] = getattr(self.runtime, "default_model", lambda: None)()
+        out["isolation"] = self.cloud_isolation()
         return out
+
+    def cloud_isolation(self) -> dict[str, Any]:
+        """云侧运行有没有读隔离（管理后台显示）：{mode, active, level, note}。脚本运行时不执行 Agent 的命令，不适用。"""
+        probe = getattr(self.runtime, "isolation", None)
+        if callable(probe):
+            return probe()
+        return {"mode": "off", "active": False, "level": "none",
+                "note": f"运行时 {self.runtime.name} 不执行 Agent 的命令（离线演练），没有外层沙箱"}
 
     def _has_provider_key(self, provider_id: str) -> bool:
         try:

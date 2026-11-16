@@ -794,7 +794,10 @@ function renderAgentEditor(isNew = false) {
       ${a && a.runtime_capabilities ? `<div class="field"><label>它跑的地方实际能做到的</label>
         <div class="card-meta">${Object.entries(a.runtime_capabilities.enforcement).map(([k, v]) =>
           `<span class="tag ${v === "enforced" ? "ok" : ""}" title="${esc(v)}">${esc(k)}${v === "enforced" ? "" : ` · ${esc(v === "advisory" ? "仅约定" : "不可用")}`}</span>`).join("")}</div>
-        <p class="hint">只有“可强制”的权限会进入有效权限；其余会在委托时自动收窄，并写明原因。</p></div>` : ""}
+        <p class="hint">只有“可强制”的权限会进入有效权限；其余会在委托时自动收窄，并写明原因。</p>
+        ${a.runtime_capabilities.placement !== "device" && a.runtime_capabilities.isolation_note
+          ? `<p class="hint${a.runtime_capabilities.isolation === "none" ? " warn" : ""}">${a.runtime_capabilities.isolation === "none"
+            ? "云侧没有读隔离" : "云侧有读隔离"}：${esc(a.runtime_capabilities.isolation_note)}。工作目录以外一律写不进，也不审批。</p>` : ""}</div>` : ""}
       ${a ? abilityBoxes(a) : ""}
       <fieldset class="model"><legend>运行位置</legend>
         <div class="field"><label for="af-device">运行在</label>
