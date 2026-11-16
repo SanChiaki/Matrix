@@ -18,6 +18,7 @@
 | `t5` | 检查点恢复：会话的两处文件与产物打成包，换一个全新的容器解包后能否续接 | 对比用 | **要** |
 | `t6` | `uv sync` 拆开计时：慢在下载还是慢在放文件；四种放法、项目与缓存放在根文件系统或卷上的各种组合；runc、gVisor 及其变体对比 | 对比用 | 否 |
 | `t7` | 并发：同时起 2、4、8、16 个执行单元（内存不够的档自动跳过），看成功数与每个占多少内存 | 对比用 | 否 |
+| `t8` | 阶段 1b 的 docker 后端：构建沙箱镜像与管理器镜像，起沙箱管理器，每个执行单元一个容器，在 `insecure-runc` 与 `runsc` 下各跑一遍完整的 `matrix-dsh-check --live --sandbox docker`（含 `restore`、`deliver`、`isolation`（内层 bwrap）、`resource-limit`） | 对比用 | **要** |
 | `pack` | 把结果打成 `isolation-results-<主机>-<时间>.tgz` | 否 | 否 |
 
 没有模型密钥时，不调真模型的部分照跑（Agent 的 bash 由一个本地假模型服务驱动），真模型那几项（回复、续接、委托、审批、提问等）跳过。
@@ -112,6 +113,18 @@ export DEEPSEEK_API_KEY=sk-...
 
 屏幕上和 `results/summary.txt` 里会逐步出现结果，每步的完整日志在 `results/` 下。中途断了可以只跑剩下的步骤，例如 `./run.sh t3 t4 pack`。
 
+只跑阶段 1b 的 docker 后端（`t8`，要密钥；镜像会重建）：
+
+```bash
+./run.sh info build t8 pack
+```
+
+`t8` 会建一张沙箱网络 `isochk-sandbox`（默认 `172.31.254.0/24`，网关 `172.31.254.1`；和机器上已有的网络冲突时设
+`T8_SUBNET` / `T8_GATEWAY`），起一个 `isochk-sandboxd` 容器（唯一挂 docker.sock），控制面在部署镜像里、监听网关的 `18765` 端口
+（`T8_PORT`）。沙箱容器经这张网络直接出网；机器只能经代理出网时，代理要在沙箱网络能到的地址上，写进
+`T8_SANDBOX_ENV`（JSON，例如 `'{"HTTPS_PROXY": "http://172.31.254.1:3128", "NO_PROXY": "172.31.254.1"}'`）。
+跑完会删掉它建的容器、卷与网络，镜像 `matrix-sandbox:isochk`、`matrix-sandboxd:isochk` 留着（第 9 节一起删）。
+
 ## 5. 发回什么
 
 最后一行会打出压缩包的路径（`isolation-results-<主机>-<时间>.tgz`），把它发回来即可。里面是 `summary.txt` 和各步日志：
@@ -157,6 +170,11 @@ export DEEPSEEK_API_KEY=sk-...
 **T7**：每行 `CONC n=<个数> ok=<成功数> … per_unit=<每个占的内存> host_avail_min=<期间最低可用内存>`。
 `ok` 小于 `n` 或 `host_avail_min` 接近 0 的那一档，就是这台机器的上限。
 
+**T8（阶段 1b）**，看 `[t8-runsc]` 与 `[t8-insecure-runc]`：两档都应该全是 ✓。`runsc` 有 ✗ 而 `insecure-runc` 全过，就是 gVisor 下的兼容性问题
+（这正是要找的，把对应的 `t8-runsc.log` 一起发回来）。`isolation` 一项另核对 Agent 的命令在 dsh 的内层 bwrap 里；
+`resource-limit` 看超额内存（退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常。
+`[t8-insecure-runc]` 那一行“未达到生产隔离”是预期的：runc 档只用于对比与过渡。
+
 ## 8. 参考：在另一台机器上的结果（runc，没有 gVisor）
 
 Ubuntu 24.04、4 核 16 GB、Docker 29（seccomp 开、cgroup v1）、没有 KVM，2026-11-11：
@@ -180,14 +198,14 @@ sudo runsc uninstall && sudo systemctl restart docker
 ```
 
 ```bash
-docker rmi matrix:isolation-check && sudo apt-get remove -y runsc
+docker rmi matrix:isolation-check matrix-sandbox:isochk matrix-sandboxd:isochk && sudo apt-get remove -y runsc
 ```
 
 ## 10. 文件
 
 | 文件 | 作用 |
 | --- | --- |
-| `run.sh` | 入口，按步骤跑并汇总 |
+| `run.sh` | 入口，按步骤跑并汇总（`t8` 用 `deploy/Dockerfile.sandbox` 与 `matrix-sandboxd`） |
 | `incontainer.sh` | 容器里的探针：直接起 bwrap、裸 dsh（A）与阶段 0 外层包住的 dsh（B）去读别人的东西 |
 | `probe.py` | 用假模型服务驱动 dsh 里 Agent 的 bash，执行指定命令 |
 | `outer_dsh` | 阶段 0 原型：在 dsh 外面再包一层 bwrap（复用 `matrix/sandbox.py`）。已实现为 `matrix/runtime.py` 的 `outer_argv`（`MATRIX_CLOUD_ISOLATION`），这里保留原型以便对照 |

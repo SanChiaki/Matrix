@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 云侧执行面隔离验证（docs/cloud-runtime.md 第 11 节）。用法见同目录 README.md：
-#   ./run.sh all        依次跑 info build t1 … t7，最后打包结果
-#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 pack
+#   ./run.sh all        依次跑 info build t1 … t8，最后打包结果
+#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 t8 pack
 # 环境变量：DEEPSEEK_API_KEY（有就跑真模型的检查）、DOCKER_NETWORK（如 host）、BUILD_ARGS（额外的 docker build 参数）、
-#           IMAGE（镜像名）、OUT（结果目录）、CONC（t7 同时起几个执行单元，默认 "2 4 8 16"）。
+#           IMAGE（镜像名）、OUT（结果目录）、CONC（t7 同时起几个执行单元，默认 "2 4 8 16"）、
+#           T8_SUBNET / T8_GATEWAY / T8_PORT（t8 的沙箱网络与回连端口）、T8_SANDBOX_ENV（t8 沙箱里固定的环境，JSON 对象，如出网代理）。
 set -uo pipefail
 KIT=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$KIT/../.." && pwd)
@@ -204,6 +205,49 @@ t7() {  # 并发：同时起 N 个执行单元，每个里一个 dsh 在跑命�
   done
 }
 
+t8() {  # docker 后端（阶段 1b）：沙箱管理器 + 每个执行单元一个容器，insecure-runc 与 runsc 各跑一遍 matrix-dsh-check --live --sandbox docker
+  if [ -z "$LIVE" ]; then say "[t8] SKIPPED（要 DEEPSEEK_API_KEY：这一步全是真模型的检查）"; return; fi
+  local sub=${T8_SUBNET:-172.31.254.0/24} gw=${T8_GATEWAY:-172.31.254.1} port=${T8_PORT:-18765} senv=${T8_SANDBOX_ENV:-}
+  [ -n "$senv" ] || senv='{}'
+  # shellcheck disable=SC2086
+  for target in sandbox sandboxd; do
+    if ! docker build $BUILD_ARGS -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
+        > "$OUT/t8-build-$target.log" 2>&1; then say "[t8] build-$target=FAIL（看 t8-build-$target.log）"; return; fi
+  done
+  docker network rm isochk-sandbox > /dev/null 2>&1
+  docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false --subnet "$sub" --gateway "$gw" \
+    --label dev.matrix.isochk=1 isochk-sandbox > /dev/null || { say "[t8] 建不了沙箱网络"; return; }
+  local rts=(insecure-runc); have_runsc && rts+=(runsc) || say "[t8-runsc] SKIPPED（Docker 没注册 runsc）"
+  for rt in "${rts[@]}"; do
+    local dir; dir=$(mktemp -d); chmod 777 "$dir"
+    cat > "$dir/sandboxd.json" <<JSON
+{"image": "matrix-sandbox:isochk", "runtime": "$rt", "network": "isochk-sandbox",
+ "connect_url": "ws://$gw:$port/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
+ "env": $senv}
+JSON
+    chmod 644 "$dir/sandboxd.json"
+    docker rm -f isochk-sandboxd > /dev/null 2>&1
+    docker run -d --name isochk-sandboxd --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+      -e DOCKER_CONFIG=/tmp/.docker -e MATRIX_SANDBOXD_CONFIG=/etc/matrix/sandboxd.json \
+      -v /var/run/docker.sock:/var/run/docker.sock -v "$dir":/run/matrix-sandboxd \
+      -v "$dir/sandboxd.json":/etc/matrix/sandboxd.json:ro matrix-sandboxd:isochk matrix-sandboxd --socket-mode 666 > /dev/null
+    sleep 3
+    docker logs isochk-sandboxd > "$OUT/t8-$rt-sandboxd.log" 2>&1
+    # 控制面（matrix-dsh-check 里的临时服务）跑在部署镜像里，监听沙箱网络的网关；它自己不碰 docker.sock
+    mapfile -t args < <(common runc "$SEC_COMPOSE")
+    docker run --rm --network host "${args[@]}" -e MATRIX_SANDBOXD_SOCKET=/run/matrix-sandboxd/sandboxd.sock \
+      -v "$dir":/run/matrix-sandboxd "$IMAGE" matrix-dsh-check --live --sandbox docker --listen "$gw" --port "$port" \
+      --root /home/matrix/isochk --timeout 300 > "$OUT/t8-$rt.log" 2>&1
+    collect "$OUT/t8-$rt.log" "[t8-$rt]"
+    grep -h 'production\|未达到生产隔离\|gVisor' "$OUT/t8-$rt-sandboxd.log" | head -2 | sed "s/^/[t8-$rt] /" >> "$SUM"
+    docker rm -f isochk-sandboxd > /dev/null 2>&1
+    docker ps -aq --filter label=dev.matrix.unit | xargs -r docker rm -f > /dev/null
+    docker volume ls -q --filter label=dev.matrix.unit | xargs -r docker volume rm > /dev/null
+    rm -rf "$dir"
+  done
+  docker network rm isochk-sandbox > /dev/null 2>&1
+}
+
 pack() {
   local f="$KIT/isolation-results-$(hostname -s)-$(date +%Y%m%d-%H%M).tgz"
   tar czf "$f" -C "$(dirname "$OUT")" "$(basename "$OUT")"
@@ -211,10 +255,10 @@ pack() {
 }
 
 steps=("$@"); [ ${#steps[@]} -eq 0 ] && steps=(all)
-[ "${steps[0]}" = all ] && steps=(info build t1 t2 t3 t4 t5 t6 t7 pack)
+[ "${steps[0]}" = all ] && steps=(info build t1 t2 t3 t4 t5 t6 t7 t8 pack)
 for s in "${steps[@]}"; do
   case $s in
-    info|build|t1|t2|t3|t4|t5|t6|t7|pack) $s ;;
-    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 t5 t6 t7 pack）"; exit 2 ;;
+    info|build|t1|t2|t3|t4|t5|t6|t7|t8|pack) $s ;;
+    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 t5 t6 t7 t8 pack）"; exit 2 ;;
   esac
 done
