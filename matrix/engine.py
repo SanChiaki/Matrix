@@ -5560,8 +5560,13 @@ class Network:
                                                 "files": [{"path": f["path"], "sha": f["sha"], "size": f["size"]} for f in stored],
                                                 "session": {k: sess[k] for k in ("sha", "size", "session_id")} if sess else None,
                                                 "limit": self.checkpoints.limit}}
+        # 模型密钥：平台配的供应商只经这里；服务进程环境里的 *_API_KEY（dsh 自带供应商用）照阶段 0 的口径带上。
+        # 1a / 1b 里密钥仍进执行面（沙箱客户端的内存与 dsh 进程环境），阶段 2 的出口网关去掉
+        keys = {k: v for k, v in os.environ.items() if k.endswith("_API_KEY") and not k.startswith(("MATRIX_", "AGENTNET_"))}
+        if keys or llm_env:
+            extra["env"] = {**keys, **llm_env}
         if llm_provider is not None:
-            extra.update(llm_provider=llm_provider, env=dict(llm_env))
+            extra["llm_provider"] = llm_provider
         policy = self.fetch.policy()
         if policy is not None:
             extra["fetch"] = {"allow": policy.allow_entries(), "public": policy.public,
@@ -8086,7 +8091,7 @@ class Network:
         if self.sandbox is not None:
             rep = self.sandbox.report()
             return {"mode": f"sandbox:{self.sandbox.name}", "active": rep["isolation"] != "none",
-                    "level": rep["isolation"], "note": rep["note"]}
+                    "level": rep["isolation"], "note": rep["note"], "production": bool(rep.get("production"))}
         probe = getattr(self.runtime, "isolation", None)
         if callable(probe):
             return probe()

@@ -1690,8 +1690,9 @@ def main() -> None:
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=compat.env("HOST", "127.0.0.1"))
-    p.add_argument("--sandbox", default=None, choices=["off", "local"],
-                   help="云侧执行面：local = 每个执行单元一个本机子进程沙箱（外层 bwrap）；默认读 MATRIX_CLOUD_SANDBOX，没有就 off")
+    p.add_argument("--sandbox", default=None, choices=["off", "local", "docker"],
+                   help="云侧执行面：local = 每个执行单元一个本机子进程沙箱（外层 bwrap）；docker = 每个执行单元一个容器，"
+                        "经沙箱管理器 matrix-sandboxd（MATRIX_SANDBOXD_SOCKET）；默认读 MATRIX_CLOUD_SANDBOX，没有就 off")
     args = p.parse_args()
     args.data = args.data or compat.data_dir()
 

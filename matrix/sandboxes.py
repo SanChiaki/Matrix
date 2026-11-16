@@ -526,6 +526,85 @@ class LocalSandboxes:
         return out
 
 
+# ================= docker 后端：经沙箱管理器（matrix-sandboxd） =================
+class DockerSandboxes:
+    """docker 后端（阶段 1b）：每个执行单元一个容器（生产用 gVisor）。Matrix 服务不碰 Docker，只经 Unix socket 上的本地 HTTP
+    向沙箱管理器提请求；请求里只有执行单元 id、所有者、Agent、代数、配额、启动令牌、逻辑工作目录（管理器校验前缀）。
+    镜像、运行时、安全选项、网络、挂载模板都在管理器的配置里。"""
+
+    name = "docker"
+
+    def __init__(self, socket_path: str):
+        self.socket_path = socket_path
+        self.host: SandboxHost | None = None
+        self._report: tuple[float, dict[str, Any]] | None = None
+
+    def bind(self, host: SandboxHost) -> None:
+        self.host = host
+
+    def _call(self, method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 180) -> Any:
+        import http.client
+        import socket
+
+        class Conn(http.client.HTTPConnection):
+            def connect(conn) -> None:  # noqa: N805
+                conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                conn.sock.settimeout(timeout)
+                conn.sock.connect(self.socket_path)
+        c = Conn("sandboxd", timeout=timeout)
+        try:
+            raw = json.dumps(body).encode() if body is not None else None
+            c.request(method, path, body=raw, headers={"Content-Type": "application/json"} if raw else {})
+            r = c.getresponse()
+            data = json.loads(r.read() or b"null")
+        except (OSError, ValueError) as e:
+            raise SandboxError(f"TRANSPORT 连不上沙箱管理器（{self.socket_path}）：{e}") from e
+        finally:
+            c.close()
+        if r.status != 200:
+            msg = str((data or {}).get("error") if isinstance(data, dict) else data)
+            raise SandboxError(msg if msg.startswith(("ISOLATION", "TRANSPORT")) else f"TRANSPORT 沙箱管理器拒绝：{msg}")
+        return data
+
+    def report(self) -> dict[str, Any]:
+        cached = self._report
+        if cached is not None and time.time() - cached[0] < 30:
+            return cached[1]
+        try:
+            rep = self._call("GET", "/report", timeout=30)
+        except SandboxError as e:
+            rep = {"isolation": "none", "production": False, "quota": False, "note": f"docker 后端不可用：{e}"}
+        self._report = (time.time(), rep)
+        return rep
+
+    def ensure(self, spec: SandboxSpec) -> SandboxStatus:
+        assert self.host is not None
+        q = spec.quota
+        got = self._call("POST", "/ensure", {
+            "unit_id": spec.unit_id, "owner_id": spec.owner_id, "agent_id": spec.agent_id,
+            "generation": spec.generation, "boot_token": spec.boot_token,
+            "workdir": str(self.host.workdir_of(spec.unit_id)),
+            "quota": {"cpus": q.cpus, "memory_mb": q.memory_mb, "pids": q.pids}})
+        return SandboxStatus(**got)
+
+    def stop(self, unit_id: str) -> None:
+        self._call("POST", "/stop", {"unit_id": unit_id})
+        if self.host is not None:
+            self.host.hub.detach(unit_id)
+
+    def destroy(self, unit_id: str) -> None:
+        self._call("POST", "/destroy", {"unit_id": unit_id})
+        if self.host is not None:
+            self.host.hub.detach(unit_id)
+
+    def status(self, unit_id: str) -> SandboxStatus:
+        from urllib.parse import quote
+        return SandboxStatus(**self._call("GET", f"/status?unit_id={quote(unit_id)}", timeout=30))
+
+    def list(self) -> list[SandboxStatus]:
+        return [SandboxStatus(**x) for x in self._call("GET", "/list", timeout=60)]
+
+
 # ================= 引擎眼里的云侧运行时 =================
 class SandboxRuntime:
     """把一轮交给执行单元的沙箱。`connect(unit)` 由引擎给：要沙箱（幂等）并等客户端连上，返回那条连接的 DeviceRuntime。"""
@@ -564,7 +643,7 @@ class SandboxRuntime:
 
 
 def sandbox_config(env: dict[str, str] | None = None) -> dict[str, Any]:
-    """部署方开关（docs/cloud-runtime.md、deploy/README.md）：MATRIX_CLOUD_SANDBOX=off（默认）| local；
+    """部署方开关（docs/cloud-runtime.md、deploy/README.md）：MATRIX_CLOUD_SANDBOX=off（默认）| local | docker（MATRIX_SANDBOXD_SOCKET）；
     MATRIX_SANDBOX_MAX / MATRIX_SANDBOX_PER_USER（并发上限）、MATRIX_SANDBOX_IDLE（秒）、MATRIX_SANDBOX_RETAIN（秒）、
     MATRIX_CHECKPOINT_LIMIT（字节）、MATRIX_SANDBOX_ROOT（执行面目录树）。"""
     from . import compat
@@ -598,7 +677,10 @@ def provider_named(name: str) -> SandboxProvider | None:
         return LocalSandboxes()
     if name == "memory":
         return MemorySandboxes()
-    raise ValueError(f"MATRIX_CLOUD_SANDBOX 的值 {name!r} 认不出（off / local）")
+    if name == "docker":
+        from . import compat
+        return DockerSandboxes(compat.env("SANDBOXD_SOCKET") or "/run/matrix-sandboxd/sandboxd.sock")
+    raise ValueError(f"MATRIX_CLOUD_SANDBOX 的值 {name!r} 认不出（off / local / docker）")
 
 
 __all__ = ["CANCEL", "FILE_FETCH", "RUN_REQUEST", "Grant", "LocalSandboxes", "MemorySandboxes", "Quota",

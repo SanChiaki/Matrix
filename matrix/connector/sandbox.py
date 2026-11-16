@@ -254,7 +254,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--state", required=True)
     p.add_argument("--dsh-bin", default="dsh")
     args = p.parse_args(argv)
-    token = sys.stdin.readline().strip()   # 一次性启动令牌：不放在命令行与环境变量里
+    # 一次性启动令牌：local 后端经 stdin 给；docker 后端经环境变量 MATRIX_BOOT_TOKEN 给（读完就从环境里拿掉，用过即废）
+    token = os.environ.pop("MATRIX_BOOT_TOKEN", "") or sys.stdin.readline().strip()
     os.environ["HOME"] = args.state
     bridge = LocalBridge()
     driver = DshDriver(args.dsh_bin, bridge.url, state_dir=Path(args.state))
