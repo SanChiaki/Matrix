@@ -172,7 +172,8 @@ def security_args(conf: DockerConfig) -> list[str]:
     （第 11 节补充，matrix-dsh-check 的 sandbox 一项会变红）。gVisor 自己实现这些系统调用，不需要放开。"""
     out = ["--runtime", RUNTIMES[conf.runtime], "--user", conf.user, "--cap-drop", "ALL",
            "--security-opt", "no-new-privileges", "--read-only", "--ipc", "private",
-           "--tmpfs", f"/tmp:rw,nosuid,nodev,size={conf.tmp_mb}m,mode=1777"]
+           # /tmp 要能执行：dsh 的原生模块加载器把 .node 拷到 $TMPDIR 再加载（noexec 下 dsh 起不来，实测），Agent 装依赖也要
+           "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={conf.tmp_mb}m,mode=1777"]
     if conf.runtime == "insecure-runc":
         out += ["--security-opt", "seccomp=unconfined", "--security-opt", "systempaths=unconfined"]
     return out
@@ -191,7 +192,9 @@ def run_argv(req: dict[str, Any], conf: DockerConfig, now: float) -> list[str]:
             "--cpus", f"{q['cpus']:g}", "--memory", f"{q['memory_mb']}m", "--memory-swap", f"{q['memory_mb']}m",
             "--pids-limit", str(q["pids"]),
             "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=2",
-            "--mount", f"type=volume,src={work},dst={req['workdir']}",
+            # volume-nocopy：空卷挂上来时 Docker 会照搬挂载点（镜像里没有、临时建的、归 root）的属主，把初始化时交给
+            # 沙箱用户的属主又改回 root；工作目录卷不要这一步
+            "--mount", f"type=volume,src={work},dst={req['workdir']},volume-nocopy",
             "--mount", f"type=volume,src={state},dst={STATE_DIR}",
             "--workdir", req["workdir"]]
     for k, v in labels.items():

@@ -79,7 +79,7 @@ def test_run_argv_security_options_runsc():
     assert ("--cpus", "2") in pairs
     work, state = names("seat:conv-1/agent-1")[1:]
     mounts = [y for x, y in pairs if x == "--mount"]
-    assert mounts == [f"type=volume,src={work},dst=/data/conversations/conv-1/agent-1",
+    assert mounts == [f"type=volume,src={work},dst=/data/conversations/conv-1/agent-1,volume-nocopy",
                       f"type=volume,src={state},dst=/state"]
     assert "-v" not in a and "bind" not in s and "docker.sock" not in s
     assert "seccomp=unconfined" not in s and "systempaths=unconfined" not in s
