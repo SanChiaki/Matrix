@@ -407,7 +407,8 @@ def _free_port() -> int:
 class Live:
     """一个临时的网络：真实 dsh 运行时 + 只监听本机的回调服务 + 本机 echo 连接器。"""
 
-    def __init__(self, rt: DshRuntime, root: Path, timeout_s: float, model: dict[str, str] | None = None):
+    def __init__(self, rt: DshRuntime, root: Path, timeout_s: float, model: dict[str, str] | None = None,
+                 sandbox: str = "off"):
         import uvicorn
 
         from . import auth
@@ -421,8 +422,11 @@ class Live:
         catalog.write_text(json.dumps({"connectors": [{"id": "smoke", "name": "冒烟", "url": self.mcp.url}]}), encoding="utf-8")
         port = _free_port()
         (root / "data").mkdir()
+        from .sandboxes import provider_named
         self.net = Network(rt, root / "data", tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=False,
-                           connectors=ConnectorCatalog(catalog))
+                           connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox),
+                           sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect")
+        self.sandbox = sandbox
         self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host="127.0.0.1", port=port, log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
         while not self.server.started:
@@ -431,7 +435,8 @@ class Live:
         mk = self.net.create_agent
         self.lead = mk("Lead", "冒烟检查：主执行者", [], ["delegate", "file.write", "shell.exec", "connector.use"],
                        model=model, actor=self.uid)
-        self.helper = mk("Helper", "冒烟检查：被委托的成员", [], [], model=model, actor=self.uid)
+        self.helper = mk("Helper", "冒烟检查：被委托的成员", [], ["file.write", "shell.exec"] if sandbox != "off" else [],
+                         model=model, actor=self.uid)
         self.project = self.net.create_project("dsh 冒烟检查", "", [self.lead.id, self.helper.id], actor=self.uid)
         self.chat = self.net.project_chat(self.project.id, actor=self.uid)
         # 审批检查写的“工作目录以外”：不能放在 /tmp 下。dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的路径在 Agent 的 bash 里
@@ -546,13 +551,96 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return (OK, "提问工具、应答者、网络转给人、回答回到原来的调用都通") if b in text \
             else (FAIL, f"问了，但回答没回到模型：{text[:120]!r}")
 
-    return [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
-            ("connector", connector), ("approval", approval), ("question", question)]
+    def home() -> tuple[str, str]:
+        code = nonce()
+        text, _ = live.ask(f"用 bash 执行 `echo HOME-{code} > agent-home/smoke-note.md`，然后只回复 DONE。")
+        f = live.net.agent_home(live.lead.id) / "smoke-note.md"
+        if not f.is_file() or code not in f.read_text(encoding="utf-8"):
+            return FAIL, f"私有目录没写回：{text[:120]!r}"
+        labels = json.loads((live.net.store.root / "flow" / f"{live.lead.id}.json").read_text(encoding="utf-8"))
+        return (OK, "私有目录写回、记了来源标签") if "smoke-note.md" in labels else (FAIL, "写回了但没有来源标签")
+
+    def send_file() -> tuple[str, str]:
+        code = nonce()
+        text, _ = live.ask(f"用 bash 执行 `echo FILE-{code} > smoke-file.txt`，再调用网络工具 send_file 把 smoke-file.txt 发出来，"
+                           "然后只回复 SENT。")
+        att = [a for m in live.chat.messages if m.role == "agent" for a in m.attachments if a["name"] == "smoke-file.txt"]
+        if not att:
+            return FAIL, f"没有附上文件：{text[:120]!r}"
+        data = (live.net.store.attachment_dir(live.chat.id) / att[-1]["sha"]).read_text(encoding="utf-8")
+        return (OK, "send_file 回读工作目录里的文件") if code in data else (FAIL, f"附件内容不对：{data[:80]!r}")
+
+    def deliver() -> tuple[str, str]:
+        # 委托交付的产物进委托方的工作目录（沙箱方式下读执行者的检查点，作为材料放进委托方的 deliveries/）
+        code = nonce()
+        text, _ = live.ask(f"用网络工具 delegate 委托 Helper，authority 授予 [\"file.write\", \"shell.exec\"]：让它用 bash 执行 `echo D-{code} > smoke-deliver.txt`，"
+                           "然后只回复 DONE。等它交付后验收，再用 bash 执行 `cat deliveries/*/smoke-deliver.txt`，只回复命令的输出。")
+        tasks = [t for t in live.net.store.tasks.values() if t.delegatee_id == live.helper.id
+                 and "smoke-deliver.txt" in (t.result or {}).get("files", [])]
+        if not tasks:
+            return FAIL, f"交付里没有产物 smoke-deliver.txt：{text[:120]!r}"
+        return (OK, "执行者的产物随交付进了委托方的工作目录") if f"D-{code}" in text \
+            else (FAIL, f"产物交了，但委托方读不到：{text[:120]!r}")
+
+    def restore() -> tuple[str, str]:
+        # 沙箱重建：让 Agent 记住编号、写产物，再把这个执行单元的沙箱连目录销毁，下一轮从检查点恢复
+        code = nonce()
+        live.ask(f"记住这个编号：R-{code}。用 bash 执行 `echo R-{code} > smoke-restore.txt`，然后只回复 OK。")
+        unit = f"seat:{live.chat.id}/{live.lead.id}"
+        live.net.sandbox.destroy(unit)
+        text, _ = live.ask("先用 bash 执行 `cat smoke-restore.txt`。然后回复：上一轮让你记住的编号，以及文件里的内容。")
+        ck = live.net.checkpoints.load(unit)
+        if f"R-{code}" not in text:
+            return FAIL, f"重建后不记得编号或产物没恢复：{text[:160]!r}"
+        return OK, f"沙箱销毁后从检查点恢复：记得编号、产物在（会话包 {len(ck.sessions) if ck else 0} 份）"
+
+    def isolation() -> tuple[str, str]:
+        # 阶段 0 的读隔离、进程隔离在沙箱里照样成立：让 Agent 的 bash 读数据目录与别的单元，看控制面记下的工具结果
+        data = live.net.store.root
+        tag = nonce()
+        marks = {"DATA": data / "state.json", "VAULT": data / "vault.key", "HOME_OTHER": data / "agents" / "x" / "n.md",
+                 "OTHER_UNIT": data / "tasks" / "task-other" / "r.md", "SERVER_HOME": Path.home() / f".matrix-check-{tag}"}
+        for p in marks.values():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.write_text(f"MARK-{tag}", encoding="utf-8")
+        arg = f"matrix-check-proc-{tag}"
+        outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", arg])
+        probe = "; ".join([f"cat {json.dumps(str(p))} >/dev/null 2>&1 && echo {n}=READ || echo {n}=blocked"
+                           for n, p in marks.items()] +
+                          [f"echo PROC_SEEN=$(grep -l '{arg[:-1]}[{arg[-1]}]' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)"])
+        try:
+            live.ask(f"用 bash 原样执行下面这条命令，不要改动：\n{probe}\n然后只回复 DONE。")
+        finally:
+            outside.kill()
+            marks["SERVER_HOME"].unlink(missing_ok=True)
+        log = data / "run-logs" / "seats" / live.chat.id / live.lead.id / "dsh-events.jsonl"
+        results = []
+        for line in log.read_text(encoding="utf-8").splitlines() if log.is_file() else []:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") == "tool_result":   # 只看工具结果（命令本身的文字里也有 X=READ）
+                results.append(json.dumps(ev.get("result"), ensure_ascii=False))
+        seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", " ".join(results[-6:])))
+        if not any(k in seen for k in marks):
+            return FAIL, "Agent 的 bash 没跑这条探针（看控制面的 run-logs）"
+        bad = [k for k in marks if seen.get(k) == "READ"] + (["PROC"] if seen.get("PROC_SEEN", "0") != "0" else [])
+        return (FAIL, f"沙箱里读得到 / 看得到：{'、'.join(bad)}") if bad else \
+            (OK, "数据目录、vault.key、别人的私有目录、别的执行单元、服务主目录都读不到，看不到沙箱之外的进程")
+
+    out = [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
+           ("connector", connector), ("approval", approval), ("question", question)]
+    if live.sandbox != "off":
+        out += [("home", home), ("send-file", send_file), ("deliver", deliver), ("restore", restore),
+                ("isolation", isolation)]
+    return out
 
 
 def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, only: set[str],
-                model: dict[str, str] | None = None) -> None:
-    live = Live(rt, root, timeout_s, model)
+                model: dict[str, str] | None = None, sandbox: str = "off") -> None:
+    live = Live(rt, root, timeout_s, model, sandbox)
     try:
         for name, fn in _scenarios(live):
             if only and name not in only:
@@ -570,6 +658,9 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
                 print("  其余实际检查跳过。")
                 break
     finally:
+        if live.net.sandbox is not None:
+            for unit in list(live.net.store.sandboxes):
+                live.net.sandbox.stop(unit)
         live.server.should_exit = True
         live.mcp.server.shutdown()
         shutil.rmtree(live.outside, ignore_errors=True)
@@ -582,11 +673,15 @@ def main() -> None:
     p.add_argument("--dsh-bin", default="dsh")
     p.add_argument("--profile", default="headless")
     p.add_argument("--live", action="store_true", help="实际跑几轮（要调模型）")
-    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question")
+    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question；"
+                        "--sandbox 时另有 home,send-file,deliver,restore,isolation")
     p.add_argument("--model", default="", help="实际检查的 Agent 用这个模型，provider/model（默认用 dsh 的默认模型），"
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
     p.add_argument("--keep", action="store_true", help="保留临时数据目录")
+    p.add_argument("--sandbox", choices=["off", "local"], default="off",
+                   help="--live 用云侧执行面的沙箱方式跑（local 后端：本机子进程 + 外层 bwrap），另加 home、send-file、"
+                        "restore（沙箱销毁后从检查点恢复）、isolation（沙箱里的读隔离与进程隔离）")
     p.add_argument("--isolation", choices=["required", "preferred", "off"], default="",
                    help="云侧外层沙箱的档位（默认读 MATRIX_CLOUD_ISOLATION，没有就是 preferred）")
     args = p.parse_args()
@@ -603,7 +698,7 @@ def main() -> None:
     if args.live and ok:
         provider, _, name = args.model.partition("/")
         live_checks(rt, report, root, args.timeout, {x.strip() for x in args.only.split(",") if x.strip()},
-                    {"provider": provider, "model": name} if name else None)
+                    {"provider": provider, "model": name} if name else None, args.sandbox)
     elif args.live:
         print("静态检查没过，不跑实际检查。")
     if report.failed or args.keep:
