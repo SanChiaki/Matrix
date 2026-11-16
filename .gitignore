@@ -10,3 +10,5 @@ __pycache__/
 *.pyc
 .gstack/
 deploy/.env
+# 部署方按 deploy/sandboxd.example.json 写的沙箱管理器配置
+deploy/sandboxd.json
