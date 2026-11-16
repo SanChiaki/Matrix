@@ -7,9 +7,14 @@
   配了抓取白名单时，自带的 web_fetch 关得掉、web_search 还在、白名单抓取服务装得上。
 - 平台配的模型供应商（不调真模型：本机起一个假的 OpenAI 兼容服务）：覆盖层里的供应商生效、密钥经环境变量带上，
   而 Agent 的命令看不到这个密钥（printenv、各进程的 /proc/*/environ、ps eww）。research: deepseek-harness#model-providers
-- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批、提问。
+- 云侧隔离（同样由假服务驱动 Agent 的 bash，docs/cloud-runtime.md 第 8 节）：`read-isolation` 读数据目录里的标记、
+  另一个执行单元的工作目录与 dsh 会话、`vault.key`、服务进程主目录里的东西，读得到就失败；`proc-isolation` 看沙箱之外的进程
+  与它们的环境变量。外层沙箱不可用、又不是 required 时给“未隔离”的提醒，不算通过。
+- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、
+  工作目录以外写不进且不产生审批（云侧不审批，不变量 14）、提问。
 
     uv run matrix-dsh-check [--dsh-bin dsh] [--live] [--model provider/model] [--only resume,approval] [--keep]
+                            [--isolation required|preferred|off]
     docker compose exec matrix matrix-dsh-check --live
 
 数据放在临时目录，跑完删掉（`--keep` 或有失败时保留，便于看 `dsh-events.jsonl`）。不碰正式数据目录。
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import shutil
@@ -134,7 +140,7 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
     if "includeDefaultRoots: false" not in full.stdout:
         problems.append("skill-filesystem 的 includeDefaultRoots: false 没生效（会读部署机器上的技能目录）")
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
-               else "没有权限的覆盖层：网络工具、连接器桥、审批与提问应答者、后台任务守护都装上，按权限禁用的插件都关了")
+               else "没有权限的覆盖层：网络工具、连接器桥、审批（端侧驱动用）与提问应答者、后台任务守护都装上，按权限禁用的插件都关了")
     fetch_check(rt, report, workdir)
     return not missing
 
@@ -226,7 +232,7 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
         res = rt.run(RunRequest(agent_id="check", context_id="provider", prompt="跑一下", cwd=workdir / "provider",
                                 authority=list(AUTHORITY_PLUGINS), model=preset.run_model(), timeout_s=timeout_s,
                                 llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
-                                env={prov.key_env: secret}))
+                                env={prov.key_env: secret}, state_dir=workdir / "provider-state"))
     finally:
         fake.server.shutdown()
     reqs = fake.requests
@@ -265,6 +271,89 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
                    "容器里要放开 seccomp 与 /proc 遮挡（deploy/compose.yml），或改用 gVisor")
     if PROVIDER_DONE not in (res.final_text or ""):
         report.add(FAIL, "provider-end", f"这一轮没正常收尾：{res.error or res.final_text}"[:300])
+
+
+# ================= 云侧隔离（假服务驱动 Agent 的 bash，不调真模型） =================
+def _fake_bash(rt: DshRuntime, cwd: Path, state: Path, probe: str, authority: list[str],
+               timeout_s: float = 120) -> tuple[str, Any]:
+    """让 Agent 的 bash 执行 probe（由假的模型服务下指令），返回（工具结果的文本, 运行结果）。"""
+    fake = FakeProvider(probe)
+    try:
+        prov = Provider(id="matrix-check", name="Matrix check", api="openai-completions", base_url=fake.url)
+        preset = ModelPreset(id="check", label="Fake", provider=prov.id, model="fake-1")
+        res = rt.run(RunRequest(agent_id="check", context_id="isolation", prompt="跑一下", cwd=cwd, authority=authority,
+                                model=preset.run_model(), timeout_s=timeout_s, state_dir=state,
+                                llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
+                                env={prov.key_env: "sk-matrix-check-" + secrets.token_hex(8)}))
+    finally:
+        fake.server.shutdown()
+    return " ".join(x for r in fake.requests for x in r["results"]), res
+
+
+def isolation_checks(rt: DshRuntime, report: Report, workdir: Path) -> None:
+    """read-isolation / proc-isolation：在一个假的数据目录里摆好别人的东西，让这个执行单元里 Agent 的 bash 去读。
+    读得到、看得到就是失败（外层沙箱可用时）；外层不可用、又不是 required 时是“未隔离”的提醒。"""
+    iso = rt.isolation()
+    report.add(OK if iso["active"] else FAIL if iso["mode"] == "required" else WARN, "isolation",
+               f"{iso['mode']}：{iso['note']}"[:400])
+    # 不放在 /tmp 下：dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的东西没有外层也读不到，检查就失真了。
+    # 放在服务进程的主目录下（和真实部署的 /data 一样，内层沙箱里整个可见、只读）
+    tag = secrets.token_hex(4)
+    base = (Path.home() / ".cache" / f"matrix-dsh-check-{tag}").resolve()
+    data = base / "data"
+    cwd, state = data / "conversations" / "c1" / "a1", data / "dsh-state" / "seats" / "c1" / "a1"
+    marks = {  # 名字 → 路径：都是这个执行单元不该读到的
+        "DATA": data / "state.json",                                          # 数据目录里的标记（相当于 state.json）
+        "VAULT": data / "vault.key",
+        "OTHER_UNIT": data / "tasks" / "task-other" / "report.md",           # 另一个执行单元的工作目录
+        "OTHER_SESSION": data / "dsh-state" / "tasks" / "task-other" / ".dsh" / "sessions" / "--x--" / "s-1" / "index.json",
+        "OTHER_HOME": data / "agents" / "agent-other" / "notes.md",          # 别人的私有目录
+        "SERVER_HOME": base / "marker.txt",                                   # 服务进程的主目录（数据目录以外）
+    }
+    for name, p in marks.items():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"MARK-{name}-{tag}\n", encoding="utf-8")
+    cwd.mkdir(parents=True, exist_ok=True)
+    (cwd / "mine.txt").write_text("mine\n", encoding="utf-8")
+    shared = Path.home() / ".dsh"   # 共用的 ~/.dsh（旧会话与 dsh 自己的凭据）：在就看能不能列出来
+    lines = [f"cat {json.dumps(str(p))} >/dev/null 2>&1 && echo {n}=READ || echo {n}=blocked" for n, p in marks.items()]
+    lines.append("cat mine.txt >/dev/null 2>&1 && echo MINE=READ || echo MINE=blocked")
+    if shared.is_dir():
+        lines.append(f"ls -A {json.dumps(str(shared))} >/dev/null 2>&1 && echo SHARED_DSH=READ || echo SHARED_DSH=blocked")
+    # 沙箱之外的进程：一个带标记参数与标记环境变量的进程（[x] 让 grep 不匹配到这条命令自己）
+    arg, secret = f"matrix-check-proc-{tag}", f"matrix-check-env-{tag}"
+    lines += [f"echo PROC_SEEN=$(grep -l '{arg[:-1]}[{arg[-1]}]' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)",
+              f"echo ENV_SEEN=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{secret[:-1]}[{secret[-1]}]')",
+              "echo PROCS=$(ls /proc | grep -c '^[0-9]')"]
+    outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", arg],
+                               env={**os.environ, "MATRIX_CHECK_PROC_ENV": secret})
+    try:
+        results, res = _fake_bash(rt, cwd, state, "; ".join(lines), ["shell.exec", "file.write"])
+    finally:
+        outside.kill()
+        shutil.rmtree(base, ignore_errors=True)
+    if "MINE=" not in results:
+        why = res.error or res.final_text or "没有输出"
+        status = FAIL if iso["active"] or iso["mode"] == "required" else WARN
+        report.add(status, "read-isolation", f"Agent 的 bash 没跑起来，没法检查：{why}"[:400])
+        report.add(status, "proc-isolation", "同上，没法检查")
+        return
+    seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", results))
+    readable = [n for n in [*marks, "SHARED_DSH"] if seen.get(n) == "READ"]
+    if seen.get("MINE") != "READ":
+        report.add(FAIL, "read-isolation", "Agent 的命令连自己工作目录里的文件都读不到：探针本身不对")
+    elif not iso["active"]:
+        report.add(FAIL if iso["mode"] == "required" else WARN, "read-isolation",
+                   f"未隔离：Agent 的命令读得到 {'、'.join(readable) or '（这次没读到，但没有外层沙箱）'}（{iso['note']}）"[:400])
+    else:
+        report.add(FAIL if readable else OK, "read-isolation",
+                   f"外层沙箱里读得到不该读的：{'、'.join(readable)}" if readable else
+                   "数据目录的标记、vault.key、别的执行单元的工作目录与 dsh 会话、别人的私有目录、服务进程的主目录"
+                   + ("、共用的 ~/.dsh" if shared.is_dir() else "") + "都读不到；自己的工作目录照常可读")
+    procs = [k for k in ("PROC_SEEN", "ENV_SEEN") if seen.get(k, "0") != "0"]
+    detail = (f"看得到沙箱之外的进程（{'、'.join(procs)}，共 {seen.get('PROCS', '?')} 个进程）" if procs else
+              f"看不到沙箱之外的进程与它们的环境变量（Agent 的命令只看得到 {seen.get('PROCS', '?')} 个进程）")
+    report.add((FAIL if iso["active"] else WARN) if procs else OK, "proc-isolation", detail)
 
 
 # ================= 实际跑（--live） =================
@@ -434,14 +523,18 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return (OK, "连接器桥、网络代调用正常") if f"ECHO-{code}" in text else (WARN, f"调用了，但回复没照抄结果：{text[:120]!r}")
 
     def approval() -> tuple[str, str]:
+        # 云侧不审批（不变量 14）：工作目录以外写不进，升权申请没有应答者（dsh 回 unavailable），网络也不建审批记录。
+        # 让模型去申请：万一覆盖层又带上了应答者，这里会自动批准，文件写出来或有了记录就变红
         target = live.outside / f"smoke-{nonce()}.txt"
-        text, asked = live.ask(f"用 bash 执行 `echo hi > {target}`。这个路径在工作目录以外，沙箱会拒绝；"
-                               "被拒绝时按提示带上理由申请升权，重试同一条命令一次。完成后只回复 DONE。", approve=True)
-        if not asked:
-            return (FAIL, "没申请升权就写到了工作目录以外：沙箱没起作用") if target.exists() \
-                else (FAIL, f"没有出现升权申请（模型没申请，或审批应答者没装上）：{text[:120]!r}")
-        return (OK, f"沙箱拦住了工作目录以外的写，升权申请转到网络，批准后写成（{asked[0].tool}）") if target.exists() \
-            else (FAIL, "申请批准了，但文件没写出来")
+        text, _ = live.ask(f"用 bash 执行 `echo hi > {target}`。这个路径在工作目录以外，沙箱会拒绝；"
+                           "被拒绝时按提示带上理由申请升权，重试同一条命令一次；还是不行就停下。完成后只回复 DONE。",
+                           approve=True)
+        records = [a for a in live.net.store.approvals.values() if a.kind not in ("connector", "connector_write")]
+        if target.exists():
+            return FAIL, "写到了工作目录以外：沙箱没起作用，或升权申请被批准了"
+        if records:
+            return FAIL, f"产生了审批记录（{len(records)} 条）：云侧不该再审批，覆盖层不该有应答者"
+        return OK, "工作目录以外写不进，也没有产生审批记录（云侧不审批）"
 
     def question() -> tuple[str, str]:
         a, b = f"甲-{nonce()}", f"乙-{nonce()}"
@@ -494,16 +587,19 @@ def main() -> None:
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
     p.add_argument("--keep", action="store_true", help="保留临时数据目录")
+    p.add_argument("--isolation", choices=["required", "preferred", "off"], default="",
+                   help="云侧外层沙箱的档位（默认读 MATRIX_CLOUD_ISOLATION，没有就是 preferred）")
     args = p.parse_args()
 
     if shutil.which(args.dsh_bin) is None and not Path(args.dsh_bin).is_file():
         raise SystemExit(f"找不到 dsh：{args.dsh_bin}")
-    rt = DshRuntime(args.dsh_bin, args.profile)
+    rt = DshRuntime(args.dsh_bin, args.profile, isolation=args.isolation or None)
     root = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-"))
     report = Report()
     ok = static_checks(rt, report, root)
     if ok:
         provider_checks(rt, report, root)
+        isolation_checks(rt, report, root)
     if args.live and ok:
         provider, _, name = args.model.partition("/")
         live_checks(rt, report, root, args.timeout, {x.strip() for x in args.only.split(",") if x.strip()},
@@ -514,7 +610,8 @@ def main() -> None:
         print(f"\n临时数据：{root}（各轮的 dsh 事件在 data/conversations/*/ 下的 dsh-events.jsonl）")
     else:
         shutil.rmtree(root, ignore_errors=True)
-    print(f"\n{'有检查没过' if report.failed else '全部通过'}：" + "  ".join(f"{MARK[s]}{n}" for s, n, _ in report.rows))
+    verdict = "有检查没过" if report.failed else "没有失败，但有提醒" if any(s == WARN for s, _, _ in report.rows) else "全部通过"
+    print(f"\n{verdict}：" + "  ".join(f"{MARK[s]}{n}" for s, n, _ in report.rows))
     sys.exit(1 if report.failed else 0)
 
 
