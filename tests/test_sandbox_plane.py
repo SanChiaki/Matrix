@@ -466,3 +466,14 @@ def test_sandbox_connector_rejects_bad_material_paths(tmp_path: Path):
             c._material_path(tmp_path / "w", bad)
     assert c._material_path(tmp_path / "w", "agent-home/.n.md") == tmp_path / "w" / "agent-home" / ".n.md"
     c.bridge.close()
+
+
+def test_capabilities_report_the_sandbox_backend(tmp_path: Path):
+    """沙箱方式下能力报告与管理后台显示后端的隔离等级；云侧不审批（不变量 14）照旧。"""
+    net, sb, alice = build(tmp_path, lambda c: "ok")
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    caps = net.capabilities(a)
+    assert caps.approval == "sandbox-only" and caps.placement == "hosted" and caps.isolation == "none"
+    iso = net.cloud_isolation()
+    assert iso["mode"] == "sandbox:memory" and not iso["active"]
+    assert net.sandbox_report()["backend"] == "memory"

@@ -8081,7 +8081,12 @@ class Network:
         return out
 
     def cloud_isolation(self) -> dict[str, Any]:
-        """云侧运行有没有读隔离（管理后台显示）：{mode, active, level, note}。脚本运行时不执行 Agent 的命令，不适用。"""
+        """云侧运行有没有读隔离（管理后台显示）：{mode, active, level, note}。脚本运行时不执行 Agent 的命令，不适用。
+        沙箱方式下报后端的能力（mode=sandbox:<后端>）。"""
+        if self.sandbox is not None:
+            rep = self.sandbox.report()
+            return {"mode": f"sandbox:{self.sandbox.name}", "active": rep["isolation"] != "none",
+                    "level": rep["isolation"], "note": rep["note"]}
         probe = getattr(self.runtime, "isolation", None)
         if callable(probe):
             return probe()
