@@ -1,4 +1,5 @@
 {
+  "namespace": "matrix",
   "image": "matrix-sandbox:local",
   "runtime": "runsc",
   "network": "matrix-sandbox",

@@ -55,6 +55,9 @@ class Unavailable(RuntimeError):
 @dataclass
 class DockerConfig:
     """部署方写死的沙箱模板（`--config` 的 JSON 文件；没有的字段用默认值）。"""
+    # 部署的名字：容器与卷的名字、标签都带上它，管理器只认自己这个名字下的沙箱。同一个 Docker 上跑几套 Matrix（含验证工具）时
+    # 各写各的，否则一套的对账会把另一套的沙箱当成“没有记录”删掉（2026-11-16 本机实测踩到）
+    namespace: str = "matrix"
     image: str = "matrix-sandbox:latest"
     runtime: str = "runsc"                       # runsc（默认，gVisor）| insecure-runc（未达到生产隔离）
     network: str = "matrix-sandbox"              # 沙箱专用的 Docker 网络（容器间不互通，见 deploy/compose.sandbox.yml）
@@ -72,6 +75,8 @@ class DockerConfig:
     dsh_bin: str = "dsh"
 
     def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,30}", self.namespace):
+            raise ValueError("namespace 只能是小写字母、数字、连字符，至多 31 个字符")
         if self.runtime not in RUNTIMES:
             raise ValueError(f"runtime 只能是 {'、'.join(RUNTIMES)}（写的是 {self.runtime!r}）")
         if self.network in ("host", "none", "") or ":" in self.network:
@@ -100,10 +105,10 @@ class DockerConfig:
         return self.runtime == "runsc"
 
 
-def names(unit: str) -> tuple[str, str, str]:
-    """执行单元 → （容器名, 工作目录卷, 状态卷）。名字只由 id 的哈希决定，标签里才有原样的 id。"""
-    h = hashlib.sha256(unit.encode()).hexdigest()[:16]
-    return f"matrix-sbx-{h}", f"matrix-sbx-{h}-work", f"matrix-sbx-{h}-state"
+def names(unit: str, ns: str = "matrix") -> tuple[str, str, str]:
+    """执行单元 → （容器名, 工作目录卷, 状态卷）。名字由部署名与 id 的哈希决定，标签里才有原样的 id。"""
+    h = hashlib.sha256(f"{ns}\0{unit}".encode()).hexdigest()[:16]
+    return f"{ns}-sbx-{h}", f"{ns}-sbx-{h}-work", f"{ns}-sbx-{h}-state"
 
 
 def _num(v: Any, lo: float, hi: float, what: str, integer: bool) -> float:
@@ -183,8 +188,8 @@ def run_argv(req: dict[str, Any], conf: DockerConfig, now: float) -> list[str]:
     """起一个沙箱的 `docker run` 参数（纯函数）。挂载只有这个执行单元的两个卷：工作目录挂在逻辑路径（原来的绝对路径）上，
     dsh 状态挂在 /state；不挂宿主目录、docker.sock、数据目录。启动令牌经环境变量给客户端（用过即废）。"""
     unit, q = req["unit_id"], req["quota"]
-    name, work, state = names(unit)
-    labels = {"unit": unit, "generation": str(req["generation"]), "started": f"{now:.3f}",
+    name, work, state = names(unit, conf.namespace)
+    labels = {"ns": conf.namespace, "unit": unit, "generation": str(req["generation"]), "started": f"{now:.3f}",
               "agent": req["agent_id"], "owner": req.get("owner_id") or ""}
     argv = ["docker", "run", "-d", "--name", name, "--hostname", "sandbox", "--init",
             *security_args(conf),
@@ -284,7 +289,7 @@ class Manager:
         return got[0] if isinstance(got, list) and got else None
 
     def status(self, unit: str) -> dict[str, Any]:
-        name, work, _ = names(unit)
+        name, work, _ = names(unit, self.conf.namespace)
         c = self._inspect(name)
         if c is None:
             rc, _, _ = self.run(["docker", "volume", "inspect", work])
@@ -301,13 +306,13 @@ class Manager:
         if not ok:
             raise Unavailable(f"ISOLATION: {why}")
         unit = req["unit_id"]
-        name, work, state = names(unit)
+        name, work, state = names(unit, self.conf.namespace)
         with self._lock:
             cur = self.status(unit)
             if cur["state"] == "running" and cur["generation"] == req["generation"]:
                 return cur
             self._docker("rm", "-f", name, ok=(0, 1))
-            labels = ["--label", f"{LABEL}.unit={unit}"]
+            labels = ["--label", f"{LABEL}.ns={self.conf.namespace}", "--label", f"{LABEL}.unit={unit}"]
             if self.run(["docker", "volume", "inspect", work])[0] != 0:
                 self._docker("volume", "create", *labels, work)
                 rc, out, err = self.run(init_argv(self.conf, work))
@@ -322,21 +327,22 @@ class Manager:
         return {"unit_id": unit, "state": "running", "generation": req["generation"], "started_at": now}
 
     def stop(self, unit: str) -> None:
-        self._docker("rm", "-f", names(unit)[0], ok=(0, 1))
+        self._docker("rm", "-f", names(unit, self.conf.namespace)[0], ok=(0, 1))
 
     def destroy(self, unit: str) -> None:
-        name, work, state = names(unit)
+        name, work, state = names(unit, self.conf.namespace)
         self._docker("rm", "-f", name, ok=(0, 1))
         self._docker("volume", "rm", "-f", work, state, ok=(0, 1))
 
     def list(self) -> list[dict[str, Any]]:
-        """带执行单元标签的容器与卷（只认这个管理器的标签）。"""
+        """这个部署名下带执行单元标签的容器与卷。"""
         out: dict[str, dict[str, Any]] = {}
         fmt = '{{.Label "' + LABEL + '.unit"}}'
-        vols = self._docker("volume", "ls", "--filter", f"label={LABEL}.unit", "--format", fmt)
+        mine = f"label={LABEL}.ns={self.conf.namespace}"   # 只认自己这个部署名下的
+        vols = self._docker("volume", "ls", "--filter", mine, "--format", fmt)
         for unit in {u.strip() for u in vols.splitlines() if u.strip()}:
             out[unit] = {"unit_id": unit, "state": "stopped", "generation": 0, "started_at": 0.0}
-        cs = self._docker("ps", "-a", "--filter", f"label={LABEL}.unit", "--format",
+        cs = self._docker("ps", "-a", "--filter", mine, "--format",
                           fmt + '\t{{.State}}\t{{.Label "' + LABEL + '.generation"}}\t{{.Label "' + LABEL + '.started"}}')
         for line in cs.splitlines():
             parts = line.split("\t")

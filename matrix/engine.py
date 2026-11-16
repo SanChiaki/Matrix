@@ -5425,6 +5425,8 @@ class Network:
             rec.generation += 1
             gen = rec.generation
             self.store.save()
+        print(f"[matrix] 新建 {unit} 的沙箱（第 {gen} 代）：之前 连接={'无' if live is None else live.generation} "
+              f"沙箱={st.state}/{st.generation}", file=sys.stderr, flush=True)
         token = self.sandbox_hub.issue(unit, gen)
         spec = SandboxSpec(unit_id=unit, owner_id=rec.owner_id, agent_id=rec.agent_id, generation=gen, boot_token=token)
         try:

@@ -77,13 +77,13 @@ def test_run_argv_security_options_runsc():
     assert ("--network", "matrix-sandbox") in pairs and "--privileged" not in a and "host" not in a
     assert ("--memory", "2048m") in pairs and ("--memory-swap", "2048m") in pairs and ("--pids-limit", "512") in pairs
     assert ("--cpus", "2") in pairs
-    work, state = names("seat:conv-1/agent-1")[1:]
+    work, state = names("seat:conv-1/agent-1", conf.namespace)[1:]
     mounts = [y for x, y in pairs if x == "--mount"]
     assert mounts == [f"type=volume,src={work},dst=/data/conversations/conv-1/agent-1,volume-nocopy",
                       f"type=volume,src={state},dst=/state"]
     assert "-v" not in a and "bind" not in s and "docker.sock" not in s
     assert "seccomp=unconfined" not in s and "systempaths=unconfined" not in s
-    assert ("--label", "dev.matrix.unit=seat:conv-1/agent-1") in pairs and ("--label", "dev.matrix.generation=3") in pairs
+    assert ("--label", "dev.matrix.ns=matrix") in pairs and ("--label", "dev.matrix.unit=seat:conv-1/agent-1") in pairs and ("--label", "dev.matrix.generation=3") in pairs
     assert a[a.index(conf.image) + 1:a.index(conf.image) + 4] == ["python", "-m", "matrix.connector.sandbox"]
     assert ("--env", f"MATRIX_BOOT_TOKEN={TOKEN}") in pairs
 
@@ -137,9 +137,10 @@ class FakeDocker:
         if cmd[:2] == ["volume", "ls"]:
             return 0, "", ""
         if cmd[:2] == ["ps", "-a"]:
+            ns = cmd[cmd.index("--filter") + 1].split("=", 2)[2]
             rows = [f"{c['Config']['Labels']['dev.matrix.unit']}\t{'running' if c['State']['Running'] else 'exited'}\t"
                     f"{c['Config']['Labels']['dev.matrix.generation']}\t{c['Config']['Labels']['dev.matrix.started']}"
-                    for c in self.containers.values()]
+                    for c in self.containers.values() if c["Config"]["Labels"].get("dev.matrix.ns") == ns]
             return 0, "\n".join(rows), ""
         return 1, "", f"unexpected {cmd}"
 
@@ -161,6 +162,18 @@ def test_manager_ensure_is_idempotent_and_labels():
     assert m.status("seat:conv-1/agent-1")["state"] == "stopped"     # 卷还在
     m.destroy("seat:conv-1/agent-1")
     assert m.status("seat:conv-1/agent-1")["state"] == "absent"
+
+
+def test_namespaces_keep_deployments_apart():
+    """同一个 Docker 上两套部署：名字不同，各自只列得到自己的沙箱（否则一套的对账会删掉另一套的）。"""
+    d = FakeDocker()
+    a, b = Manager(DockerConfig(namespace="prod"), run=d), Manager(DockerConfig(namespace="check"), run=d)
+    a.ensure(body())
+    assert names("seat:conv-1/agent-1", "prod")[0] != names("seat:conv-1/agent-1", "check")[0]
+    assert [x["unit_id"] for x in a.list()] == ["seat:conv-1/agent-1"] and b.list() == []
+    assert b.status("seat:conv-1/agent-1")["state"] == "absent"
+    with pytest.raises(ValueError):
+        DockerConfig(namespace="Bad Name")
 
 
 def test_missing_runtime_fails_closed():

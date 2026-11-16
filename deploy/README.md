@@ -332,7 +332,7 @@ cp sandboxd.example.json sandboxd.json       # runtime 默认 runsc；镜像名�
 docker compose -f compose.yml -f compose.sandbox.yml --profile build build
 ```
 
-`sandboxd.json` 里能改的：`image`、`runtime`（`runsc` / `insecure-runc`）、`network`、`connect_url`（沙箱客户端连回来的地址，和
+`sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`network`、`connect_url`（沙箱客户端连回来的地址，和
 `.env` 的 `MATRIX_SANDBOX_GATEWAY` 一致）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`、`tmp_mb`、`env`（不能放密钥，
 名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
 内网构建的参数与主镜像相同，另有 `DOCKER_CLI_TARBALL`（管理器镜像里 docker 命令行的静态包地址）。
@@ -360,7 +360,7 @@ docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # �
 
 **回退**：`docker compose -f compose.yml up -d`（不带叠加文件），`matrix` 回到在自己容器里跑 dsh 的方式（`compose.yml` 里的安全选项照旧）。
 沙箱方式期间新写的产物只在检查点里（`/data/checkpoints/` + `/data/content/`）。留下的沙箱容器与卷：
-`docker ps -aq --filter label=dev.matrix.unit | xargs -r docker rm -f`、`docker volume ls -q --filter label=dev.matrix.unit | xargs -r docker volume rm`。
+`docker ps -aq --filter label=dev.matrix.ns=matrix | xargs -r docker rm -f`、`docker volume ls -q --filter label=dev.matrix.ns=matrix | xargs -r docker volume rm`（`matrix` 换成 `sandboxd.json` 的 `namespace`）。
 
 **排错**
 

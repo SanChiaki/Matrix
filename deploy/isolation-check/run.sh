@@ -221,7 +221,7 @@ t8() {  # docker 后端（阶段 1b）：沙箱管理器 + 每个执行单元一
   for rt in "${rts[@]}"; do
     local dir; dir=$(mktemp -d); chmod 777 "$dir"
     cat > "$dir/sandboxd.json" <<JSON
-{"image": "matrix-sandbox:isochk", "runtime": "$rt", "network": "isochk-sandbox",
+{"namespace": "isochk", "image": "matrix-sandbox:isochk", "runtime": "$rt", "network": "isochk-sandbox",
  "connect_url": "ws://$gw:$port/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
  "env": $senv}
 JSON
@@ -241,8 +241,8 @@ JSON
     collect "$OUT/t8-$rt.log" "[t8-$rt]"
     grep -h 'production\|未达到生产隔离\|gVisor' "$OUT/t8-$rt-sandboxd.log" | head -2 | sed "s/^/[t8-$rt] /" >> "$SUM"
     docker rm -f isochk-sandboxd > /dev/null 2>&1
-    docker ps -aq --filter label=dev.matrix.unit | xargs -r docker rm -f > /dev/null
-    docker volume ls -q --filter label=dev.matrix.unit | xargs -r docker volume rm > /dev/null
+    docker ps -aq --filter label=dev.matrix.ns=isochk | xargs -r docker rm -f > /dev/null
+    docker volume ls -q --filter label=dev.matrix.ns=isochk | xargs -r docker volume rm > /dev/null
     rm -rf "$dir"
   done
   docker network rm isochk-sandbox > /dev/null 2>&1

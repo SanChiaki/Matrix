@@ -408,7 +408,9 @@ class SandboxProvider(Protocol):
 - **管理器**是唯一挂 docker.sock 的进程。Matrix 服务经共享卷里的 Unix socket 调它（本地 HTTP：ensure / stop / destroy / status / list / report），
   请求只有执行单元 id、所有者、Agent、代数、配额、启动令牌、逻辑工作目录；逻辑工作目录必须落在配置允许的前缀下（compose 里是 `/data/conversations/`、
   `/data/tasks/`）。镜像、运行时、安全选项、网络、挂载模板、命令写死在管理器的配置（`sandboxd.json`）里，请求带别的字段一律拒绝（`validate_ensure`）。
-  管理器不存意图，只给容器与卷打执行单元 id、代数、起动时间的标签；对账照旧由控制面做，没有记录的卷也删掉。
+  管理器不存意图，只给容器与卷打部署名、执行单元 id、代数、起动时间的标签；对账照旧由控制面做，没有记录的卷也删掉。
+  部署名（`namespace`）是本机实测补上的：同一个 Docker 上跑着两套控制面时，一套的对账把另一套正在用的沙箱当成“没有记录”删掉，
+  那一轮报 `TRANSPORT device disconnected`；现在管理器只列、只管自己名下的。
 - **容器**（`run_argv`，纯函数）：uid 1000、`--cap-drop ALL`、`no-new-privileges`、只读根、`/tmp` 是 512 MB 的 tmpfs、独立 PID / 挂载 / IPC 命名空间、
   `--cpus 2`、`--memory 2g`（不给 swap）、`--pids-limit 512`；挂载只有这个单元的两个卷：工作目录挂在原来的绝对路径上，dsh 状态挂在 `/state`。
   不挂宿主目录、docker.sock、数据目录。运行时默认 `runsc`；部署方写 `insecure-runc` 才用 runc，这时只多放开 seccomp 与 `/proc` 遮挡两项
@@ -419,7 +421,7 @@ class SandboxProvider(Protocol):
 
 验证（本机，Docker 29、cgroup v1、overlayfs，**没有 gVisor**——这台机器的策略不允许装 runsc）：`insecure-runc` 档下
 `matrix-dsh-check --live --sandbox docker` 全部通过，含新加的 `resource-limit`（Agent 申请 3 GB 内存被结束、起 900 个进程被挡在 512 以内、之后别的
-执行单元照常）与 `isolation` 里的内层 bwrap 核对；工具包 `t8` 在本机按同样的方式跑过一遍（`question` 一次断线，单独重跑两次都通过）；
+执行单元照常）与 `isolation` 里的内层 bwrap 核对；工具包 `t8` 在本机按同样的方式跑过（早先几遍偶有一项报 `TRANSPORT device disconnected`，查明是同一个 Docker 上另一套控制面的对账删了沙箱，加了部署名后不再出现）；
 compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API 跑通两轮真实对话（续接记得编号、产物进检查点），Matrix 容器里没有 docker.sock、
 经 socket 发带镜像 / 挂载 / 特权的请求都被拒。**`runsc` 档没在本机验证**，要在装了 gVisor 的机器上跑工具包的 `t8`。
 
