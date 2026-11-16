@@ -284,6 +284,32 @@ Python 环境与 Matrix 代码、dsh 与 node（只读），这个席位或委�
 去掉这两项后外层与内层都起不来。是否生效看 `docker compose logs matrix` 开头的“云侧读隔离”一行，或跑 `matrix-dsh-check`。
 外层不设内存与 CPU 上限（Node 预留的虚拟地址空间很大，设地址空间上限 dsh 会起不来）；配额要等阶段 1 的 cgroup。
 
+### 云侧执行面：沙箱方式（试用，默认关）
+
+阶段 1a（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节“阶段 1a 的实现”）：每个席位或委托一个沙箱，沙箱里是端侧客户端的同一套代码，
+连回 Matrix 的 `/api/sandbox/connect` 领活；只读材料按清单 + 缓存下发，产物与 dsh 会话每轮结束存进检查点。打开方法：`.env` 里写
+
+```
+MATRIX_CLOUD_SANDBOX=local          # off（默认）= 照旧；local = 每个执行单元一个本机子进程沙箱（外层 bwrap）
+# 可选：
+MATRIX_SANDBOX_MAX=28               # 全局同时在的沙箱数，默认按 (内存 − 2 GB) / 512 MB 估
+MATRIX_SANDBOX_PER_USER=4           # 每个用户同时在的沙箱数
+MATRIX_SANDBOX_IDLE=600             # 空闲多少秒停沙箱（目录保留）
+MATRIX_SANDBOX_RETAIN=604800        # 执行单元结束后多少秒销毁沙箱目录（检查点留着）
+MATRIX_CHECKPOINT_LIMIT=1000000000  # 每个执行单元的检查点最多存多少字节的产物，超出的只记清单
+MATRIX_SANDBOX_ROOT=                # 执行面目录树，默认 /data/exec
+```
+
+或命令行 `matrix --sandbox local`。要求与现在的外层沙箱一样（Linux、bwrap 能在容器里建命名空间，compose 现在的安全选项下可用）；
+起不来时云侧运行失败并写明原因，不会悄悄退回不隔离的子进程。满了的时候委托等待、席位排队，不算失败。
+
+- 打开后第一次运行的执行单元会把旧工作目录的产物、阶段 0 状态目录（或 `dsh-home`）里的 dsh 会话导入检查点，原目录不删，会话续得上。
+- 新增的数据：`/data/exec/`（沙箱的工作目录与状态，可以不备份，能从检查点重建）、`/data/checkpoints/` 与 `/data/content/`（检查点，**要备份**）、
+  `/data/run-logs/`（dsh 事件）。
+- 没做的：配额（cgroup）、批量建检查点的 `matrix migrate workdirs` 与导出回退。回退就是关掉开关：旧方式照旧用原来的工作目录，
+  沙箱方式期间新写的产物只在检查点里。
+- 升级 dsh 时加跑 `matrix-dsh-check --live --sandbox local`。
+
 ### dsh 自己的沙箱
 
 dsh 在 Linux 上用 bwrap 做沙箱。bwrap 起不来时 dsh 不会拒绝执行，而是退到一种更弱的方式：实测工作目录以外仍有能写的地方（如 `/tmp`），`matrix-dsh-check` 的 `sandbox` 一项会变红（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 11 节）。所以下面两个安全选项不能去掉。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。

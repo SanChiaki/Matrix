@@ -1,6 +1,6 @@
-# 云侧执行面：生产级方案（阶段 0 已实现，其余是设计）
+# 云侧执行面：生产级方案（阶段 0、阶段 1a 已实现，其余是设计）
 
-2026-11-10 定方向。2026-11-16 实现了阶段 0（单机止血）与云侧取消外溢审批，实现与设计的出入见第 8 节“阶段 0 的实现”。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
+2026-11-10 定方向。2026-11-16 实现了阶段 0（单机止血）与云侧取消外溢审批，实现与设计的出入见第 8 节“阶段 0 的实现”；同日实现了阶段 1 的前半（1a：云侧 Agent 改走端侧客户端的协议、在沙箱里运行、数据进出做成材料清单与检查点，开关后面、默认关），见第 8 节“阶段 1a 的实现”。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
 模型密钥不进执行面），并为 #60（出口代理注入连接器凭证）提供前提。现状与逐条欠账见
 [reference/device-runtimes.md](reference/device-runtimes.md#cloud-debt)，风险见 [reference/security.md](reference/security.md)。
 
@@ -364,6 +364,42 @@ class SandboxProvider(Protocol):
 验证：本机（root，bwrap 0.9）与部署镜像（以 `matrix` 用户、compose 的安全选项）里 `matrix-dsh-check --live` 全部通过，
 含 `read-isolation`、`proc-isolation` 与新的 `approval`；`MATRIX_CLOUD_ISOLATION=required` 在不放开 seccomp 的容器里按预期拒绝运行。
 旧会话迁移用真模型验证过：旧代码（共用 HOME）让 Agent 记住一个编号，换成新代码后同一个会话续接、记得编号。
+
+**阶段 1a 的实现（2026-11-16，开关后面，默认关）。** 阶段 1 拆成两半：1a 先用本机子进程当“沙箱”把完整链路跑通
+（不碰 Docker / gVisor），1b 再换成 `docker` 后端 + gVisor、配额与控制面容器收紧。开关 `MATRIX_CLOUD_SANDBOX=off`（默认）| `local`
+（或 `matrix --sandbox local`），关着时引擎的路径与原来完全一样。打开后云侧 Agent 的一轮：
+
+1. 引擎（`_kick`）先给这个执行单元占一个沙箱的位置：全局与每用户并发上限，满了先停最久没用的空闲沙箱，没有空闲的就等
+   （委托进 `WAITING`、不失败、不消耗重试；席位排队并告诉所有者；有位置时重新调度）。
+2. `SandboxRuntime` 向 `SandboxProvider` 要沙箱（`ensure`，按执行单元 id 与代数幂等）；沙箱不在了就新建一代：发新的一次性启动令牌，
+   旧凭证作废。沙箱里的客户端从 stdin 读令牌，连新端点 `/api/sandbox/connect`，换到执行单元凭证（`SandboxHub`）。
+3. 这一轮经 `DeviceRuntime` 的协议派给它：`run.request` 带材料清单，客户端按 sha 取缺的；工具、提问、事件照端侧的方式回传，
+   云端连接器多一条 `connector.call`。沙箱连接只接受派给自己执行单元的运行（`DeviceRuntime.unit`），控制面对它发来的请求只按这个单元认定身份。
+4. 轮次结束客户端经 `blob.put` 交内容、在 `run.result` 里报产物清单、私有目录的改动、当前会话包；控制面校验后存检查点、三方合并私有目录。
+
+代码：`matrix/sandboxes.py`（接口、`MemorySandboxes`、`LocalSandboxes`、`SandboxHub`、`SandboxRuntime`）、`matrix/checkpoints.py`
+（内容存储、检查点、会话打包）、`matrix/connector/sandbox.py`（沙箱客户端，端侧连接器的一层薄子类）、`engine.py`“云侧执行面：沙箱方式”一节。
+测试 `tests/test_sandbox_plane.py`；不变量 8、15、22 的测试改成两种通道都跑（`tests/channels.py`）。验证：`matrix-dsh-check --live --sandbox local`
+在本机（root）与部署镜像（`matrix` 用户、compose 的安全选项）里全部通过，含沙箱方式另加的 `home`、`send-file`、`deliver`、`restore`（销毁沙箱后
+从检查点恢复：记得编号、产物在）、`isolation`（沙箱里读不到数据目录、`vault.key`、别人的私有目录与别的执行单元，看不到沙箱之外的进程）；
+旧方式跑过的执行单元换成沙箱方式后续接同一个会话、记得编号、旧产物在（真模型）。
+
+和设计不一样的地方：
+
+| 设计 | 1a 的实现 | 原因 |
+| --- | --- | --- |
+| 接口四个方法 | 另有 `list()`（对账要知道实际有哪些沙箱）、`report()`（能力报告）、`bind(host)`（拿到身份中心与客户端连回来的地址） | 对账与能力报告离不开；`SandboxSpec` 里仍然没有路径、命令、挂载参数 |
+| 逻辑工作目录由管理器按模板生成 | 由控制面按执行单元定下（台账 `SandboxRecord.workdir`，就是旧方式的绝对路径），后端经 `workdir_of(unit)` 取 | 1a 没有独立的 `matrix-sandboxd`；第一次记下以后不再变 |
+| 卷 | 执行面目录树 `<data>/exec/units/<seats|tasks>/<id>/{work,state}`（`MATRIX_SANDBOX_ROOT` 可改），local 后端用 bwrap 把 `work/` 挂到逻辑路径上 | 本机没有卷；目录树不在数据目录的 `conversations/`、`tasks/` 里，那里只剩空的挂载点目录（席位建立时就有） |
+| 沙箱客户端是 1 号进程、断线由 C2 认领 | 断线时控制面照旧结束在途的轮次；客户端凭凭证重连 3 次，连不上就退出（退出即沙箱退出） | 认领轮次是控制面 C2 的事 |
+| 配额 | local 后端没有 cgroup 配额，能力报告照实写（`isolation_note`）；只有并发上限 | 1b 的 `docker` 后端做 |
+| 模型密钥不进执行面 | 1a 里平台供应商的密钥随 `run.request.env` 进沙箱客户端的内存、再进 dsh 进程环境（和阶段 0 一样）；local 后端的进程环境只带 `*_API_KEY`（不带 `MATRIX_*`）、代理与 CA 变量 | 阶段 2 的出口网关去掉 |
+| 共享知识只在第一轮写进 `shared/` | 沙箱方式下 `DELEGATION.json` 与 `shared/`（当时看得到的共享知识）每轮作为材料下发 | 沙箱重建后也在；材料按 sha 缓存，没变的不传 |
+| 委托方修改自己 `deliveries/` 里的文件 | `deliveries/` 是网络持有的材料，每轮按交付记录重新放（改动不保留） | 交付快照本来就归网络；沙箱重建后也能恢复 |
+| 技能整份拷进 `skills/` | 和端侧一样走材料，合计上限 `SKILLS_TOTAL`（16 MB），超了的跳过 | 复用端侧分支 |
+| 私有目录“改过”的判定 | 客户端按（大小、修改时间）比对，同 `homedir.fingerprint`；内容一样只是被重写过的文件也算改过 | 与旧方式的 `sync_back` 口径一致，不变量 15、22 的行为不变 |
+| `matrix migrate workdirs` / `export` / `purge-legacy` | **没做**：只做了“第一次在沙箱方式下运行时按需导入”（产物、别人交来的 `deliveries/`、阶段 0 状态目录或共用 `~/.dsh` 里的会话），原目录不删 | 这一步的重点是链路；批量建检查点与导出回退留到 1b。在那之前回退办法：关掉开关，旧方式照旧用原目录（沙箱方式里新写的产物只在检查点里，要手工从 `<data>/checkpoints/` + `<data>/content/` 取） |
+| 不变量 26 | **没加进不变量表**：1a 的版本（云侧 Agent 的代码只在沙箱里跑，控制面只经连接给材料、收检查点）只有开关打开时才成立 | 等默认切换成沙箱方式时再加进不变量表并补“两种通道”之外的结构检查 |
 
 **阶段 1：执行面独立。** `SandboxProvider`、`matrix-sandboxd`、沙箱镜像、沙箱客户端（connector 复用）、`docker` 后端 + gVisor、
 执行单元卷、材料清单、产物检查点、私有目录“材料进、改动出”、配额、`--isolation`（先默认 `preferred`，见 9.1）、旧数据迁移（第 10 节）。

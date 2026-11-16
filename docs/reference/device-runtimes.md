@@ -58,6 +58,35 @@
 - 结果：没变的档案文件、附件第二轮起一个字节都不传，新附件每台设备只传一次（`tests/test_device_materials.py`）。
   每轮开始先清掉上一轮的只读副本（`project/`、`attachments/`、`skills/`、`releases/`、`plugins/`）。
 
+<a id="cloud-sandbox"></a>
+## 云侧沙箱方式（阶段 1a，开关后面，默认关）
+
+`MATRIX_CLOUD_SANDBOX=local`（或 `matrix --sandbox local`）时，云侧 Agent 的一轮不再是服务的子进程，而是跑在这个执行单元
+（席位或委托）自己的沙箱里，沙箱里是端侧客户端的同一套代码（`matrix/connector/sandbox.py` 的 `SandboxConnector`，`Connector` 的薄子类）
+与同一套协议。设计与 1a 的实现说明见 [cloud-runtime.md](../cloud-runtime.md) 第 8 节“阶段 1a 的实现”。和端侧的差别：
+
+- **接入**：不是用户设备。新端点 `/api/sandbox/connect`，一次性启动令牌（stdin 给客户端，用过即废、120 秒过期）换执行单元凭证
+  （只在客户端内存里，断线重连用）；不走设备配对、不出现在“设备”页、不受配对上限影响。一条沙箱连接只接受派给它那个执行单元的运行
+  （`DeviceRuntime.unit`），材料只能取这一轮清单里的。
+- **协议只做加法**（只在沙箱连接上出现，旧的端侧客户端永远收不到）：`blob.put`（分块交内容，服务端校验 sha256，单份与每轮有上限）、
+  `connector.call`（云端连接器经连接代调用）、`file.fetch` 的 `dir: "zip"`；`run.request` 另带 `home: net-rw | net-ro`、`checkpoint`、
+  `llm_provider` / `env`、`fetch`、`cloud_connectors`；`run.result` 另带 `outputs`、`home_changes`、`session_pack`。
+- **材料**：和端侧一样只给清单、按 sha 缓存（缓存在单元的状态目录里）；另外 `DELEGATION.json`、`shared/`、别人交来的 `deliveries/<任务>/`
+  也是材料。私有目录多一种方式“由网络持有：材料进、改动出”：可挂的部分（按来源场合，不变量 22）作为材料下发到 `agent-home/`，
+  轮次结束客户端只报改过、删过的文件，控制面校验（路径不越界、不是链接、内容真交上来了、单个 100 MB / 每轮 500 MB / 5000 个以内）后
+  落进暂存副本，再用原来的 `homedir.sync_back` 三方合并、更新来源标签。
+- **产物检查点**：每轮按 `workdir.outputs` 的口径报产物清单，有变化的才交内容，存进内容存储（`<data>/content/`，按 sha），
+  记为单元的最新检查点（`<data>/checkpoints/`，总量默认 1 GB，超出只记清单）；当前 dsh 会话打成包一起交，只存最新两份。
+  委托交付读执行者的检查点、作为材料放进委托方的 `deliveries/`；人浏览与下载工作目录读检查点（只记了清单的经活着的沙箱回读）；
+  `publish_file` / `send_file` 经客户端回读。沙箱（连目录）没了，下一轮从检查点恢复产物与会话。
+- **dsh 事件**存在控制面 `<data>/run-logs/` 下，不在工作目录里。
+- **台账与对账**：`state.json` 的 `sandboxes` 记每个单元应有的状态与代数；启动时与每分钟对账（没有记录或代数过期的沙箱结束掉，
+  记录是运行中而沙箱不在的那一轮按传输错误结束：云侧委托判失败可续接，不变量 12）；空闲 10 分钟停（目录保留），执行单元结束
+  （委托验收 / 被拒、对话或 Agent 没了）7 天后销毁。
+- **local 后端**：每个单元一个本机子进程，外层 bwrap（阶段 0 的同一套）里只读挂系统目录、Python 与 Matrix 代码、dsh 与 node、CA 证书，
+  可写的只有单元的工作目录（挂在原来的绝对路径上，dsh 会话续得上）与状态目录。没有 bwrap 时起不来（不退回不隔离的子进程）；
+  没有 cgroup 配额，网络与内核仍和服务器共用。
+
 <a id="cloud-vs-device"></a>
 ## 云侧与端侧的差异
 
@@ -99,5 +128,6 @@
 
 需求表里的对应条目：#59（读隔离）、#68（材料与私有目录不再每轮整份拷贝、资源上限）。
 这六条的解决方案（每个执行单元一个沙箱、云侧沙箱复用端侧客户端与协议、出口网关、分阶段）见 [cloud-runtime.md](../cloud-runtime.md)；
-阶段 0（外层 bwrap、执行单元各自的 dsh 状态目录、云侧取消外溢审批）已实现，其余未实现。
+阶段 0（外层 bwrap、执行单元各自的 dsh 状态目录、云侧取消外溢审批）已实现；阶段 1a（沙箱方式：每个执行单元一个沙箱、
+端侧客户端协议、材料清单、私有目录“材料进、改动出”、产物与会话检查点，上一节）已实现、默认关，打开时第 2、3、4 条在云侧消失；其余未实现。
 

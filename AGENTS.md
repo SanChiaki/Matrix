@@ -16,7 +16,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - 语言 / 依赖：Python ≥ 3.14，FastAPI + uvicorn，包管理用 `uv`，测试用 pytest。
 - 运行时：默认以 DeepSeek Harness（DSH）headless 为 Agent 运行时；`scripted` 运行时是确定性脚本，用于测试与离线演练。
-- 状态：全部持久化在 `--data` 目录（默认 `.matrix/`，只有改名前的 `.agentnet/` 时沿用它；都已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`，云侧每个执行单元（席位、委托）另有自己的 dsh 状态目录 `dsh-state/`（那一轮 dsh 的 HOME，不在工作目录里）；每个 Agent 有持久私有目录 `agents/<id>/`；每个项目有档案目录 `projects/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何代码仓库。
+- 状态：全部持久化在 `--data` 目录（默认 `.matrix/`，只有改名前的 `.agentnet/` 时沿用它；都已被 gitignore）的 `state.json`；对话、任务各有独立工作目录 `conversations/<id>/`、`tasks/<id>/`，云侧每个执行单元（席位、委托）另有自己的 dsh 状态目录 `dsh-state/`（那一轮 dsh 的 HOME，不在工作目录里）；打开沙箱方式（`MATRIX_CLOUD_SANDBOX`，默认关）时执行单元的工作目录与状态在执行面目录树 `exec/` 里，产物与会话的检查点在 `checkpoints/` + `content/`，dsh 事件在 `run-logs/`；每个 Agent 有持久私有目录 `agents/<id>/`；每个项目有档案目录 `projects/<id>/`（`files/` 与变更日志 `log.jsonl`），不放进任何代码仓库。
 
 核心概念（定义见 [domain.md](docs/reference/domain.md)）：
 
@@ -53,7 +53,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账**、云侧外层沙箱（`MATRIX_CLOUD_ISOLATION`）与执行单元的 dsh 状态目录 | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
-| 云侧执行面的生产级方案（阶段 0 单机止血已实现，其余是设计）：每个执行单元一个沙箱、沙箱即托管设备、出口网关、分阶段与验收检查 | [docs/cloud-runtime.md](docs/cloud-runtime.md)；验证工具包 [deploy/isolation-check/](deploy/isolation-check/README.md) |
+| 云侧执行面的生产级方案（阶段 0 单机止血已实现；阶段 1a 沙箱方式已实现、默认关（`MATRIX_CLOUD_SANDBOX`）；其余是设计）：每个执行单元一个沙箱、沙箱即托管设备、出口网关、分阶段与验收检查 | [docs/cloud-runtime.md](docs/cloud-runtime.md)；验证工具包 [deploy/isolation-check/](deploy/isolation-check/README.md) |
 | 控制面的生产级方案（设计，未实现）：状态进数据库、重启不打断运行、备机接管、按租户分片、登录加固 | [docs/control-plane.md](docs/control-plane.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
@@ -74,7 +74,9 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者（只给端侧驱动；云侧不审批）：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `matrix/dsh_plugins/jobs.mjs` | dsh 后台任务守护：Agent 要收尾时还有后台任务在跑，追加一条消息让它先收完或结束（headless 退出会结束它们） |
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
-| `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
+| `matrix/sandboxes.py` | 云侧执行面的沙箱方式（阶段 1a，开关 `MATRIX_CLOUD_SANDBOX`，默认关）：`SandboxProvider` 接口与 `SandboxSpec`（只有执行单元 id、所有者、Agent、代数、配额、一次性启动令牌）、`MemorySandboxes`（测试用假后端）、`LocalSandboxes`（本机子进程 + 外层 bwrap，工作目录 bind 到原来的绝对路径）、`SandboxHub`（启动令牌换执行单元凭证，一条连接只服务一个单元）、`SandboxRuntime`；引擎里的台账、对账、容量、材料与检查点在 `engine.py`“云侧执行面：沙箱方式”一节 |
+| `matrix/checkpoints.py` | 内容存储（按 sha 的本机目录，接口留出换对象存储的余地）、分块收沙箱交来的内容并校验、每个执行单元的检查点（产物清单 + 最新两份 dsh 会话包）、旧工作目录导入、会话打包与解包 |
+| `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`）；云侧沙箱客户端（`sandbox.py`，`Connector` 的薄子类：一个沙箱一个执行单元、私有目录“材料进、改动出”、交检查点与恢复） |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
 | `matrix/plugin_service.py` | 插件服务（不变量 24）的客户端：网络托管的 stdio MCP 进程（`ServiceHost` 按项目 × 插件一个，按需启动、空闲停掉、版本换了重启、连续起不来暂停；最小环境 `service_env`；按带哈希的锁文件建依赖环境 `build_env`）与远程 MCP（`RemoteService`，每次调用带 `sign_token` 签的项目令牌；目录里的用部署方的密钥，自己装的每个安装一把）；工具、资源都走标准 MCP。工具按原名 `<插件>__<工具>` 经 `mcp_server.py` 的 `__list_tools__` 动态列出；挂点与工具在 `engine.py`「插件服务」一节 |
@@ -108,7 +110,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_cloud_isolation.py`（云侧外层沙箱的命令拼装、开关与降级、执行单元的 dsh 状态目录与旧会话迁移）、`test_sandbox.py`（沙箱命令拼装）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_cloud_isolation.py`（云侧外层沙箱的命令拼装、开关与降级、执行单元的 dsh 状态目录与旧会话迁移）、`test_sandbox_plane.py`（云侧沙箱方式：令牌、单元绑定、材料与检查点、交付、容量、重建恢复、对账、旧数据导入；`channels.py` 让不变量 8、15、22 的测试两种通道都跑）、`test_sandbox.py`（沙箱命令拼装）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -133,6 +135,8 @@ uv run python examples/llm-wiki/setup_demo.py                        # 搭项目
 uv run python examples/teammates/setup_demo.py                       # 搭队友协作（Raft 式）演示数据（.matrix-team-demo，见该目录 README）
 uv run matrix-dsh-check [--dsh-bin <dsh>] [--live]                   # 对真实 dsh 冒烟检查（升级 dsh 前后跑，--live 要调模型；含云侧读隔离检查）
 MATRIX_CLOUD_ISOLATION=required uv run matrix                      # 云侧外层沙箱：required 没有就拒绝云侧运行 / preferred（默认）有就用 / off
+uv run matrix --sandbox local                                      # 云侧沙箱方式（阶段 1a，默认关）：每个执行单元一个本机子进程沙箱，走端侧协议
+uv run matrix-dsh-check --live --sandbox local                     # 同一组实际检查在沙箱方式下跑（另加 home、send-file、deliver、restore、isolation）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect run                                        # 前台运行已配对的连接器
@@ -209,4 +213,5 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
   能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
 - IM 机器人的密钥只进 `vault/`；桥只放行绑定的人在单聊里说的话、只往他自己的单聊推，不要放宽；企业微信地址只由部署方经 `MATRIX_WECOM_URL` 改，不要做成用户可填（网络会被当跳板）。
+- 沙箱方式（`MATRIX_CLOUD_SANDBOX`）下沙箱交回来的东西都不可信：产物清单、私有目录改动、会话包只经 `checkpoints.clean_manifest`、`Network._apply_home_changes`、`Uploads`（路径、大小、sha 校验）进入网络的状态，不要绕过；沙箱连接只接受派给它那个执行单元的运行（`DeviceRuntime.unit`），不要放宽。不变量 26（执行面与控制面分离）只在开关打开时成立，所以没进不变量表，等默认切换时再加。
 - 已知风险：云侧读隔离只做到阶段 0（单机止血，外层 bwrap）：文件读隔离有了，内核与网络仍共用、没有 cgroup 配额、模型密钥仍在 dsh 环境变量里，没有外层沙箱的部署（`preferred` 降级、`off`）仍是“沙箱只管写不管读”，插件服务里目录托管的进程也读得到数据目录。多机部署、接真实账号之前要做完 [cloud-runtime.md](docs/cloud-runtime.md) 的阶段 1–2，至少用 `MATRIX_CLOUD_ISOLATION=required`。
