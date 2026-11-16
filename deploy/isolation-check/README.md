@@ -15,6 +15,9 @@
 | `t2` | 普通容器（runc）里：seccomp、`/proc` 遮挡各种组合下 bwrap 能否运行；阶段 0 的外层套内层能否运行 | 否 | 可选 |
 | `t3` | 重活（2 万个小文件、512 MB 大文件、git clone、pip、npm、uv sync、pytest）在 runc 与 gVisor 下能否跑通、各要多久、占多少内存 | 对比用 | 否 |
 | `t4` | 一轮 Agent 运行的内存、容器冷启动时间、10 个空闲沙箱的内存开销，runc 与 gVisor 对比 | 对比用 | 可选 |
+| `t5` | 检查点恢复：会话的两处文件与产物打成包，换一个全新的容器解包后能否续接 | 对比用 | **要** |
+| `t6` | `uv sync` 拆开计时：慢在下载还是慢在放文件；四种放法、项目与缓存放在根文件系统或卷上的各种组合；runc、gVisor 及其变体对比 | 对比用 | 否 |
+| `t7` | 并发：同时起 2、4、8、16 个执行单元（内存不够的档自动跳过），看成功数与每个占多少内存 | 对比用 | 否 |
 | `pack` | 把结果打成 `isolation-results-<主机>-<时间>.tgz` | 否 | 否 |
 
 没有模型密钥时，不调真模型的部分照跑（Agent 的 bash 由一个本地假模型服务驱动），真模型那几项（回复、续接、委托、审批、提问等）跳过。
@@ -60,6 +63,25 @@ sudo apt-get update && sudo apt-get install -y runsc
 sudo runsc install && sudo systemctl restart docker
 ```
 
+可选，给 `t6` 用：再注册三个只差一个参数的 gVisor 变体，用来找 `uv sync` 慢在哪。参数名以 `runsc flags` 的输出为准，
+哪个注册失败就跳过哪个，脚本只跑注册成功的。每条之后都要重启 Docker（最后统一重启一次即可）：
+
+```bash
+sudo runsc install --runtime runsc-nooverlay -- --overlay2=none
+```
+
+```bash
+sudo runsc install --runtime runsc-memoverlay -- --overlay2=root:memory
+```
+
+```bash
+sudo runsc install --runtime runsc-hostnet -- --network=host
+```
+
+```bash
+sudo systemctl restart docker
+```
+
 确认装好了，应该看到 `runsc` 和 gVisor 的启动信息：
 
 ```bash
@@ -80,6 +102,12 @@ export DEEPSEEK_API_KEY=sk-...
 
 ```bash
 ./run.sh all
+```
+
+只补跑 2026-11-16 新加的三步（已经跑过前四步的机器，镜像要重建一次，因为脚本变了）：
+
+```bash
+./run.sh info build t5 t6 t7 pack
 ```
 
 屏幕上和 `results/summary.txt` 里会逐步出现结果，每步的完整日志在 `results/` 下。中途断了可以只跑剩下的步骤，例如 `./run.sh t3 t4 pack`。
@@ -121,6 +149,14 @@ export DEEPSEEK_API_KEY=sk-...
 **T4**：`[t4-<运行时>-round] HOST_PEAK_MEM` 是一轮运行（委托时同时两个 dsh）从宿主看到的内存，包括 gVisor 自己的开销；
 `COLD_START_MS` 是 5 次冷启动的毫秒数；`IDLE_10_SANDBOXES host_used_delta` 除以 10 约等于一个空闲沙箱的开销。
 
+**T5**：`RESTORE_RECALL=ok`（记得上一轮的编号）与 `RESTORE_PRODUCT=ok`（接着改了产物）都出现，就是检查点恢复可行。
+
+**T6**：每行 `UV <项目位置>/<缓存位置> <放法> <cold|warm> <ok|FAIL> <秒>`。`cold` 含下载，`warm` 是缓存已有、离线，只剩往虚拟环境里放文件。
+对比 runc 与 runsc：`cold` 慢而 `warm` 不慢，慢在网络；`warm` 也慢，慢在文件系统，再看哪种放法、哪种位置组合最快，以及哪个变体有改善。
+
+**T7**：每行 `CONC n=<个数> ok=<成功数> … per_unit=<每个占的内存> host_avail_min=<期间最低可用内存>`。
+`ok` 小于 `n` 或 `host_avail_min` 接近 0 的那一档，就是这台机器的上限。
+
 ## 8. 参考：在另一台机器上的结果（runc，没有 gVisor）
 
 Ubuntu 24.04、4 核 16 GB、Docker 29（seccomp 开、cgroup v1）、没有 KVM，2026-11-11：
@@ -131,6 +167,9 @@ Ubuntu 24.04、4 核 16 GB、Docker 29（seccomp 开、cgroup v1）、没有 KVM
 - `compose` 组阶段 0 外层套内层：数据目录、别人的私有目录与会话、`vault.key` 都读不到，工作目录照常可写。
 - T3（runc）：小文件 1.6 秒、大文件 0.8 秒、git clone 3.1 秒、pip 16.8 秒、npm 10.8 秒、pytest 7.6 秒，宿主看到的峰值 303 MiB。
 - T4（runc）：一轮运行宿主看到的峰值 354 MiB，冷启动 250–300 毫秒，10 个空闲容器共 18 MiB。
+- T5（runc，2026-11-16）：恢复成功；检查点包 4 个文件、约 15 KB。
+- T6（runc）：`warm` 0.05–0.2 秒（硬链接最快，拷贝 0.2 秒），项目与缓存不在同一个文件系统时 0.3–0.4 秒；`cold` 0.6–1.2 秒；虚拟环境 1504 个文件。
+- T7（runc）：2、4、8 个都全部成功，每个 253–260 MiB。
 
 gVisor 的实测结果（另一台机器，2026-11-11）记在 [docs/cloud-runtime.md](../../docs/cloud-runtime.md) 第 11 节“gVisor 实测”。
 
@@ -153,4 +192,6 @@ docker rmi matrix:isolation-check && sudo apt-get remove -y runsc
 | `probe.py` | 用假模型服务驱动 dsh 里 Agent 的 bash，执行指定命令 |
 | `outer_dsh` | 阶段 0 原型：在 dsh 外面再包一层 bwrap（复用 `matrix/sandbox.py`） |
 | `heavy.py` | 重活 |
+| `ckpt.py` | 检查点恢复：打包与解包续接 |
+| `uvprobe.py` | `uv sync` 拆开计时 |
 | `memsample.py` | 容器里按进程类别采样常驻内存 |

@@ -3,7 +3,7 @@
 > 入口见 [AGENTS.md](../../AGENTS.md)，那里只列红线。
 
 - `/api/*` 要求登录（邮箱 + 密码，`auth.py`，HttpOnly + SameSite=Lax cookie），按用户做归属与可见性检查。
-  这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
+  这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。补齐的设计见 [control-plane.md](../control-plane.md) 第 8 节（未实现）。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
 - `/internal/tools`、`/internal/approval`、`/internal/question` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
 - **网络管关系，不管 Agent 在自己环境里能碰什么**。云侧 Agent 的读隔离目前做不到（见下一条）；端侧 Agent

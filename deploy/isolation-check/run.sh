@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # 云侧执行面隔离验证（docs/cloud-runtime.md 第 11 节）。用法见同目录 README.md：
-#   ./run.sh all        依次跑 info build t1 t2 t3 t4，最后打包结果
-#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 pack
+#   ./run.sh all        依次跑 info build t1 … t7，最后打包结果
+#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 pack
 # 环境变量：DEEPSEEK_API_KEY（有就跑真模型的检查）、DOCKER_NETWORK（如 host）、BUILD_ARGS（额外的 docker build 参数）、
-#           IMAGE（镜像名）、OUT（结果目录）。
+#           IMAGE（镜像名）、OUT（结果目录）、CONC（t7 同时起几个执行单元，默认 "2 4 8 16"）。
 set -uo pipefail
 KIT=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$KIT/../.." && pwd)
@@ -23,10 +23,13 @@ SEC_DEFAULT="--security-opt no-new-privileges"
 say() { echo "$*" | tee -a "$SUM"; }
 have_runsc() { docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q '"runsc"'; }
 runtimes() { echo runc; have_runsc && echo runsc; }
+# 另外注册的 runsc 变体（README 第 3 节可选步骤：runsc-nooverlay、runsc-memoverlay、runsc-hostnet 等），t6 逐个对比
+runsc_variants() { docker info --format '{{range $k, $v := .Runtimes}}{{$k}}{{"\n"}}{{end}}' 2>/dev/null | grep '^runsc-' || true; }
 
 # 挂进容器的脚本：拷到一个谁都能读的临时目录（容器里是 uid 1000，可能读不了克隆下来的目录）
 MNT=$(mktemp -d)
-cp "$KIT"/probe.py "$KIT"/memsample.py "$KIT"/heavy.py "$KIT"/incontainer.sh "$KIT"/outer_dsh "$MNT"/
+cp "$KIT"/probe.py "$KIT"/memsample.py "$KIT"/heavy.py "$KIT"/ckpt.py "$KIT"/uvprobe.py "$KIT"/incontainer.sh "$KIT"/outer_dsh \
+   "$REPO"/pyproject.toml "$REPO"/uv.lock "$MNT"/
 chmod 755 "$MNT"; chmod 644 "$MNT"/*; chmod 755 "$MNT"/incontainer.sh "$MNT"/outer_dsh
 trap 'rm -rf "$MNT"' EXIT
 
@@ -49,7 +52,7 @@ drun() {  # drun <runtime> <安全选项> <命令...>：前台跑完
 }
 
 collect() {  # collect <日志> <前缀>：把关键行收进 summary
-  grep -E '^(A_|B_)?(✓|✗|!|ok=|[A-Z_]+=|HEAVY|MEM_|全部通过|有检查没过)' "$1" | sed "s/^/$2 /" >> "$SUM" || true
+  grep -E '^(A_|B_)?(✓|✗|!|ok=|[A-Z_]+=|HEAVY|MEM_|UV |全部通过|有检查没过)' "$1" | sed "s/^/$2 /" >> "$SUM" || true
 }
 
 to_mib() { awk -v s="$1" 'BEGIN { n = s + 0; if (s ~ /GiB/) n *= 1024; else if (s ~ /KiB/) n /= 1024; else if (s ~ /[0-9]B$/) n /= 1048576; printf "%d", n }'; }
@@ -151,6 +154,56 @@ t4() {  # 第 6 项：一轮运行的内存、冷启动、空闲沙箱的开销
   done
 }
 
+t5() {  # 检查点恢复：会话的两处文件 + 产物打成包，在全新的容器里解包后续接（docs/cloud-runtime.md 5.2）
+  say "## T5 检查点恢复（换一个全新的容器续接会话）"
+  [ -n "$LIVE" ] || { say "T5=SKIPPED（要真模型：设 DEEPSEEK_API_KEY）"; return; }
+  for rt in $(runtimes); do
+    local d; d=$(mktemp -d); chmod 777 "$d"
+    drun "$rt" "$SEC_COMPOSE -v $d:/ckpt -w /app" python /kit/ckpt.py first /ckpt/unit.tgz > "$OUT/t5-$rt-first.log" 2>&1
+    drun "$rt" "$SEC_COMPOSE -v $d:/ckpt -w /app" python /kit/ckpt.py again /ckpt/unit.tgz > "$OUT/t5-$rt-again.log" 2>&1
+    collect "$OUT/t5-$rt-first.log" "[t5-$rt]"; collect "$OUT/t5-$rt-again.log" "[t5-$rt]"
+    rm -rf "$d"
+  done
+}
+
+t6() {  # uv sync 拆开计时：下载还是放文件、放法、位置（根文件系统 / 卷），runc 对 runsc 及其变体
+  say "## T6 uv sync 拆开计时"
+  for rt in $(runtimes) $(runsc_variants); do
+    docker volume rm -f isochk-vol > /dev/null 2>&1; docker volume create isochk-vol > /dev/null
+    docker run --rm --user root -v isochk-vol:/vol "$IMAGE" chown matrix:matrix /vol
+    drun "$rt" "$SEC_COMPOSE -v isochk-vol:/vol" python /kit/uvprobe.py > "$OUT/t6-$rt.log" 2>&1
+    collect "$OUT/t6-$rt.log" "[t6-$rt]"
+    docker volume rm -f isochk-vol > /dev/null 2>&1
+  done
+}
+
+t7() {  # 并发：同时起 N 个执行单元，每个里一个 dsh 在跑命令（假模型，不要密钥），看内存与成功数
+  say "## T7 并发（定默认并发上限用）"
+  for rt in $(runtimes); do
+    for n in ${CONC:-2 4 8 16}; do
+      local avail; avail=$(free -m | awk '/Mem:/ {print $7}')
+      if [ $((n * 400)) -gt "$avail" ]; then say "[t7-$rt] CONC n=$n SKIPPED（可用内存 ${avail}MiB 不够，按每个 400MiB 估）"; continue; fi
+      local before min ids=() ok=0 t0=$SECONDS a id
+      before=$(free -m | awk '/Mem:/ {print $3}'); min=$avail
+      mapfile -t args < <(common "$rt" "$SEC_COMPOSE")
+      for _ in $(seq 1 "$n"); do
+        ids+=("$(docker run -d "${args[@]}" -w /app "$IMAGE" python /kit/probe.py dsh /tmp/w 'sleep 25; echo CONC_DONE' file.write shell.exec)")
+      done
+      local peak=0 used
+      while [ -n "$(docker ps -q --filter "ancestor=$IMAGE" --filter status=running)" ]; do
+        a=$(free -m | awk '/Mem:/ {print $7}'); [ "$a" -lt "$min" ] && min=$a
+        used=$(free -m | awk '/Mem:/ {print $3}'); [ "$used" -gt "$peak" ] && peak=$used
+        sleep 1
+        [ $((SECONDS - t0)) -gt 300 ] && break
+      done
+      for id in "${ids[@]}"; do docker logs "$id" 2>&1 | grep -q CONC_DONE && ok=$((ok + 1)); done
+      docker rm -f "${ids[@]}" > /dev/null 2>&1
+      say "[t7-$rt] CONC n=$n ok=$ok host_used_delta=$((peak - before))MiB per_unit=$(( (peak - before) / n ))MiB host_avail_min=${min}MiB wall=$((SECONDS - t0))s"
+      sleep 3
+    done
+  done
+}
+
 pack() {
   local f="$KIT/isolation-results-$(hostname -s)-$(date +%Y%m%d-%H%M).tgz"
   tar czf "$f" -C "$(dirname "$OUT")" "$(basename "$OUT")"
@@ -158,10 +211,10 @@ pack() {
 }
 
 steps=("$@"); [ ${#steps[@]} -eq 0 ] && steps=(all)
-[ "${steps[0]}" = all ] && steps=(info build t1 t2 t3 t4 pack)
+[ "${steps[0]}" = all ] && steps=(info build t1 t2 t3 t4 t5 t6 t7 pack)
 for s in "${steps[@]}"; do
   case $s in
-    info|build|t1|t2|t3|t4|pack) $s ;;
-    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 pack）"; exit 2 ;;
+    info|build|t1|t2|t3|t4|t5|t6|t7|pack) $s ;;
+    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 t5 t6 t7 pack）"; exit 2 ;;
   esac
 done
