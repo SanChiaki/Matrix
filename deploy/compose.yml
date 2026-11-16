@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
     volumes:
       - matrix-data:/data            # Matrix 状态（state.json、对话、任务、Agent 私有目录、群组档案）
-      - dsh-home:/home/matrix/.dsh   # dsh 的配置、会话与模型凭据
+      - dsh-home:/home/matrix/.dsh   # 升级前共用的 dsh 会话与凭据：云侧不再用，旧会话第一次运行时拷进 /data/dsh-state/
     env_file:
       - path: .env
         required: false

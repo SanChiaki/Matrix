@@ -1,6 +1,6 @@
-# 云侧执行面：生产级方案（设计，未实现）
+# 云侧执行面：生产级方案（阶段 0 已实现，其余是设计）
 
-2026-11-10 定方向。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
+2026-11-10 定方向。2026-11-16 实现了阶段 0（单机止血）与云侧取消外溢审批，实现与设计的出入见第 8 节“阶段 0 的实现”。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
 模型密钥不进执行面），并为 #60（出口代理注入连接器凭证）提供前提。现状与逐条欠账见
 [reference/device-runtimes.md](reference/device-runtimes.md#cloud-debt)，风险见 [reference/security.md](reference/security.md)。
 
@@ -155,6 +155,8 @@ Matrix 的共享群聊里几个人的消息进同一个席位、同一个沙箱�
 - 启动参数 `--isolation required`（多用户部署最终的默认；过渡期先是 `preferred`，见 9.1）：没有可用的沙箱后端、或后端是 `process` / `insecure-runc` 时，
   云侧运行一律拒绝并在后台写明原因，不退回子进程方式。端侧运行不受影响。
 - `RuntimeCapabilities` 加一项 `isolation`（`none` / `sandbox` / `vm`），Agent 页与管理后台显示当前云侧的隔离等级。
+  阶段 0 已加（外层 bwrap 记 `sandbox`，另有一句 `isolation_note` 说明用的什么、为什么没有）；开关是环境变量 `MATRIX_CLOUD_ISOLATION`，
+  阶段 0 默认 `preferred`。
 
 ## 5. 数据怎么进出沙箱
 
@@ -312,7 +314,8 @@ class SandboxProvider(Protocol):
 | Codex | 沙箱拒绝，这一步失败，不上行 |
 | Claude Code | 没有沙箱，`file.write` 只靠工具白名单，记 `advisory`，不进有效权限 |
 
-要改的（从阶段 0 起生效，因为阶段 0 的外层已经让云侧审批失效）：
+要改的（从阶段 0 起生效，因为阶段 0 的外层已经让云侧审批失效；2026-11-16 已做，只有“端侧驱动的审批另做检查”还没有：
+`matrix-dsh-check` 跑的是云侧，端侧 dsh 驱动的审批靠 `tests/test_device.py`、`tests/test_users.py` 的端侧一组与连接器实测）：
 
 - `build_patch_yaml`：云侧运行不再插入审批应答者（`matrix-approval`）。dsh 在没有应答者时以 `unavailable` 拒绝升权，Agent 得到明确的“不允许”，
   不会等人。端侧 dsh 驱动照旧插入。
@@ -334,11 +337,33 @@ class SandboxProvider(Protocol):
 
 - Matrix 起 dsh 时外面再包一层 bwrap（复用 `matrix/sandbox.py`）：文件系统里只有系统目录、dsh 与 Python 环境（只读）、
   这个执行单元的工作目录、它自己的 dsh 状态目录；新的 PID 命名空间；`setrlimit` 上限。
-- dsh 状态按执行单元分目录，共用的 `~/.dsh` 停用；模型供应商只用平台配置；`vault.key` 只从 `MATRIX_VAULT_KEY` 读、不落数据卷。
+- dsh 状态按执行单元分目录，共用的 `~/.dsh` 停用；模型供应商只用平台配置。~~`vault.key` 只从 `MATRIX_VAULT_KEY` 读、不落数据卷~~
+  **不做**（2026-11-16）：外层沙箱里本来就读不到 `vault.key`，而改成只认环境变量会让现有部署（密钥在数据卷里的）丢掉保管密钥、
+  解不开已存的凭证。留到控制面与执行面分开之后（阶段 1 起控制面不再执行 Agent 代码）再看。
 - 解决：读整个数据目录、读别人的会话、读 `vault.key`。**不解决**：共用内核与网络、没有 cgroup 配额、密钥仍在 dsh 环境变量里。
   所以它不是生产方案，只是缩小阶段 1 上线前的风险。
 - 已在部署镜像里实测可行（第 11 节第 2 项）。实现时要注意：`TMPDIR` 指向外层的 `/tmp`；`--patch` 指向的覆盖层文件要读得到；
   外溢审批（不变量 14）在外层里基本失效，所以从阶段 0 起云侧就不再审批（7.1）。
+
+**阶段 0 的实现（2026-11-16，已上线）。** 代码在 `matrix/runtime.py`（`DshRuntime` 的 `hosted`、`outer_argv`、`outer_ro`、
+`adopt_dsh_session`）、`matrix/sandbox.py`（`wrap(nested=True)`、`available("nested")`、`dsh_limits`）与 `engine._adopt_dsh_state`；
+检查在 `matrix-dsh-check`（`isolation`、`read-isolation`、`proc-isolation`、改过的 `approval`）。和上面的设计不一样的地方：
+
+| 设计 | 实现 | 原因 |
+| --- | --- | --- |
+| `setrlimit` 上限 | 只设不生成 core、单个文件最大 4 GB | 地址空间上限会让 Node/V8 起不来（它预留很大的虚拟地址空间）；CPU 秒数会停掉长轮次；打开文件数 Node 与 MCP 服务要得多。进程数、内存、磁盘总量要 cgroup，阶段 1 做 |
+| `vault.key` 只从环境变量读 | 不做 | 见上一条 |
+| 外层去掉全部特权 | 非 root 照旧；**以 root 运行时**外层显式建一个用户命名空间（uid 0 映射到自己），不去掉特权 | root 下 bwrap 不建用户命名空间，去掉特权后内层 bwrap 建不了命名空间（实测）；特权只在沙箱自己的用户命名空间里有效，碰不到设备与宿主内核接口。部署镜像以非 root 运行，不走这条 |
+| 外层可用就套 | 先真跑一次“外层里再起一层 bwrap”探测（`available("nested")`），能跑才套 | 外层能起、内层起不来时，dsh 会退到更弱的内层沙箱（第 11 节补充），比不套更糟 |
+| 只挂系统目录、dsh 与 Python | 另外只读挂环境变量（`NODE_EXTRA_CA_CERTS`、`SSL_CERT_FILE` 等）指向的 CA 证书；dsh 与 node 的安装位置按真实路径解析（镜像里在 `/usr` 下，本机常在 `/opt/dsh`、`/opt/node22`）；包含工作目录或状态目录的只读目录一律不挂 | 经代理、内网 CA 出网时 dsh 要读证书；位置因部署而异不能写死；防止把整个数据目录带进去 |
+| 状态目录放在执行单元的卷里 | `<data>/dsh-state/{seats/<对话>/<Agent>,tasks/<任务>}/`，在数据目录下、不在任何工作目录里 | 阶段 0 还没有卷；到阶段 1 搬进卷的 `/state` |
+| 旧会话“搬” | 拷贝（原处不删），第一次在新方式下运行（状态目录还不存在）时做；搬不了清会话 id | 回退到共用 `~/.dsh` 时还能续接（10.4）；`purge-legacy` 之前不删旧数据 |
+| 端侧、云侧同一个 `DshRuntime` | 端侧驱动用 `DshRuntime(hosted=False)`：不套外层、不换 HOME、照旧插审批应答者 | 端侧读的是所有者自己的电脑，审批保留（7.1） |
+| `read-isolation` 要真模型 | 用假模型服务驱动 Agent 的 bash（同 `key-hidden`），不加 `--live` 也跑；数据目录放在主目录下而不在 `/tmp` | 结果确定、不花 token；dsh 内层把 `/tmp` 换成空 tmpfs，标记放在 `/tmp` 下没有外层也读不到，检查会失真 |
+
+验证：本机（root，bwrap 0.9）与部署镜像（以 `matrix` 用户、compose 的安全选项）里 `matrix-dsh-check --live` 全部通过，
+含 `read-isolation`、`proc-isolation` 与新的 `approval`；`MATRIX_CLOUD_ISOLATION=required` 在不放开 seccomp 的容器里按预期拒绝运行。
+旧会话迁移用真模型验证过：旧代码（共用 HOME）让 Agent 记住一个编号，换成新代码后同一个会话续接、记得编号。
 
 **阶段 1：执行面独立。** `SandboxProvider`、`matrix-sandboxd`、沙箱镜像、沙箱客户端（connector 复用）、`docker` 后端 + gVisor、
 执行单元卷、材料清单、产物检查点、私有目录“材料进、改动出”、配额、`--isolation`（先默认 `preferred`，见 9.1）、旧数据迁移（第 10 节）。

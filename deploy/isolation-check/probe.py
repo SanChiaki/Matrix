@@ -14,10 +14,11 @@ prov = Provider(id="probe", name="probe", api="openai-completions", base_url=fak
                 compat={"supportsDeveloperRole": False, "maxTokensField": "max_tokens"})
 preset = ModelPreset(id="p", label="p", provider="probe", model="fake-1")
 try:
-    res = DshRuntime(dsh).run(RunRequest(agent_id="probe", context_id="probe", prompt="go", cwd=cwd, authority=auth,
-                                         model=preset.run_model(), timeout_s=120,
-                                         llm_provider={"id": "probe", "config": llm_config(prov, preset)},
-                                         env={prov.key_env: "sk-probe-secret"}))
+    # 裸 dsh：外层由调用方（outer_dsh 原型）决定，不套 Matrix 自己的
+    res = DshRuntime(dsh, isolation="off").run(RunRequest(agent_id="probe", context_id="probe", prompt="go", cwd=cwd,
+                                                          authority=auth, model=preset.run_model(), timeout_s=120,
+                                                          llm_provider={"id": "probe", "config": llm_config(prov, preset)},
+                                                          env={prov.key_env: "sk-probe-secret"}))
 finally:
     fake.server.shutdown()
 out = [x for r in fake.requests for x in r["results"]]

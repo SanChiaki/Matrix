@@ -190,7 +190,7 @@ docker rmi matrix:isolation-check && sudo apt-get remove -y runsc
 | `run.sh` | 入口，按步骤跑并汇总 |
 | `incontainer.sh` | 容器里的探针：直接起 bwrap、裸 dsh（A）与阶段 0 外层包住的 dsh（B）去读别人的东西 |
 | `probe.py` | 用假模型服务驱动 dsh 里 Agent 的 bash，执行指定命令 |
-| `outer_dsh` | 阶段 0 原型：在 dsh 外面再包一层 bwrap（复用 `matrix/sandbox.py`） |
+| `outer_dsh` | 阶段 0 原型：在 dsh 外面再包一层 bwrap（复用 `matrix/sandbox.py`）。已实现为 `matrix/runtime.py` 的 `outer_argv`（`MATRIX_CLOUD_ISOLATION`），这里保留原型以便对照 |
 | `heavy.py` | 重活 |
 | `ckpt.py` | 检查点恢复：打包与解包续接 |
 | `uvprobe.py` | `uv sync` 拆开计时 |

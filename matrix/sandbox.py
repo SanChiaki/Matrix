@@ -186,8 +186,8 @@ def available(kind: str = "plugin") -> tuple[bool, str]:
                 why = "" if ok else (r.stderr.strip().splitlines() or [f"退出码 {r.returncode}"])[-1]
             except (OSError, subprocess.TimeoutExpired) as e:
                 ok, why = False, str(e)
-        what = "外层沙箱里再起 bwrap" if kind == "nested" else "bubblewrap"
-        _probe[kind] = (True, "bubblewrap") if ok else (False, f"{what}在这台机器上跑不起来：{why}")
+        what = "外层沙箱里再起一层 bwrap" if kind == "nested" else "bubblewrap"
+        _probe[kind] = (True, "bubblewrap") if ok else (False, f"{what}，在这台机器上跑不起来：{why}")
         return _probe[kind]
 
 

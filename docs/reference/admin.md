@@ -28,13 +28,15 @@
 - 整份保存：先用 `parse_catalog` 校验，不合法不落盘；带着读到时的版本（文件内容的 sha256），期间文件被别处改过就 409，不覆盖。
   写临时文件再替换。保存后发 `models.updated`，打开着的页面重新拉 `/api/models`。
 - 后台不能关掉目录（删掉 `models.json` 才回到自由填写）；文件写坏时页面显示原因，保存会整份覆盖它。
-- 接口：`GET` / `PUT /api/admin/models`。只给每个模型在用的云侧 Agent 数，不给 Agent 名。
+- 接口：`GET` / `PUT /api/admin/models`。只给每个模型在用的云侧 Agent 数，不给 Agent 名。`GET` 另带 `isolation`
+  （`Network.cloud_isolation`：云侧运行有没有读隔离、开关档位与一句说明），页面在目录状态下面一行显示。
 - 模型的供应商有两种：
   - **平台配的供应商**（页面下方“供应商”）：名称、协议（`openai-completions` / `openai-responses` / `anthropic-messages`）、地址、密钥，
     字段照 dsh 的 `llm-pi-ai`（research: deepseek-harness#model-providers）。用它的模型还可以填上下文长度、单次最多输出、能不能看图片；
     推理强度只能是 dsh 的名字（`off` … `max`），原样交给供应商。
-  - **dsh 里已配置的供应商**（如 `deepseek-official`）：只写名字，provider / model 要和服务器上 dsh 的配置一致，凭据在 dsh 里配
-    （[deploy/README.md](../../deploy/README.md)）。
+  - **dsh 自带的供应商**（如 `deepseek-official`）：只写名字，凭据只能来自服务进程的环境变量（如 `DEEPSEEK_API_KEY`）。
+    云侧每个执行单元用自己的 dsh 状态目录当 HOME，dsh 自己登录过、存在共用 `~/.dsh` 里的凭据与供应商不再读（2026-11-16 起，
+    [deploy/README.md](../../deploy/README.md)「配置模型凭据」）。
 - 供应商的密钥：
   - 只写不读：`PUT` 里的 `providers[].api_key` 有值才换，空着沿用；返回、页面只有 `has_key`。删掉供应商时密钥一起删；还有模型在用的供应商页面不让删。
   - 存在保管库（`vault/model-provider-<id>.bin`，和连接器凭证同一把保管密钥），不进 `models.json`、`state.json`、事件、日志、台账。

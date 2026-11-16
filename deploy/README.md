@@ -20,15 +20,22 @@ docker compose up -d --build
 
 ## 配置模型凭据（DSH）
 
-凭据只放在 `dsh-home` 卷里（容器内的 `/home/matrix/.dsh`），不进镜像，也不进仓库。以下两种方式选一种：
+凭据不进镜像，也不进仓库。以下两种方式选一种：
 
 - 在 `.env` 里写 `DEEPSEEK_API_KEY=...`，然后执行 `docker compose up -d` 让它生效。
-- 进容器用 dsh 自己的方式登录或配置：`docker compose exec matrix dsh headless --help`。
+- 在管理后台的“模型”页添加供应商（协议、地址、密钥；密钥加密存在数据卷的 `vault/` 里，每轮只交给那一个 dsh 进程）。
+
+**2026-11-16 起的破坏性变化**：云侧每个执行单元（席位、委托）用自己的 dsh 状态目录（`/data/dsh-state/`）当 HOME，
+共用的 `dsh-home` 卷（`/home/matrix/.dsh`）不再给云侧运行用（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 5.4、第 8 节阶段 0）。
+**进容器用 dsh 自己登录或配置、存在 `dsh-home` 里的凭据与默认供应商从此失效**：升级前把要用的供应商在“模型”页重配一遍，
+或改用 `.env` 里的 `DEEPSEEK_API_KEY`。只能用账号登录、给不出地址加密钥的供应商，云侧不能再用。
+`dsh-home` 卷先别删：里面的旧会话在每个执行单元第一次运行时被拷进它自己的状态目录（原处不删，回退时还能用），之后就用不到了。
 
 ## 预置模型（可选）
 
 在数据卷里放一份 `/data/models.json`，云侧 Agent 就只能从里面选模型；改这个文件即生效，不用重启。删掉文件回到自由填写。
-`provider` 必须是 dsh 里已配置的。
+`provider` 必须是管理后台“模型”页里配的供应商，或 dsh 自带、只靠环境变量就能用的（如 `deepseek-official` 配 `DEEPSEEK_API_KEY`）；
+dsh 自己登录过、存在共用 `~/.dsh` 里的供应商云侧不再读。
 
 ```json
 {
@@ -206,7 +213,7 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 ```bash
 npm install --prefix /tmp/dsh-new @deepseek-ai/dsh@<版本>
 uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh           # 静态：插件 id、覆盖层能加载，不调模型
-uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    # 实际跑：回复、续接、技能、委托、连接器、沙箱审批
+uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    # 实际跑：回复、续接、技能、委托、连接器、工作目录以外写不进、提问
 ```
 
 `--live` 要 dsh 能调模型：本机单独装的 dsh 可能解析不了桌面 App 存的凭据，用账号登录的加 `--model deepseek-account/deepseek-flash`；
@@ -216,16 +223,16 @@ uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    #
 就会在没有权限时重新可用，所以“找不到”算失败；新出现的 `tool-*` 插件给提醒，确认要不要按权限禁用（`runtime.AUTHORITY_PLUGINS` /
 `ALWAYS_DISABLED`）再加进 `dsh_check.KNOWN_TOOLS`。
 
-服务器上更新前先备份 `dsh-home`（新版本可能改会话格式），更新后在容器里再跑一次：
+服务器上更新前先备份 `matrix-data`（新版本可能改会话格式；云侧的 dsh 会话在 `/data/dsh-state/`），更新后在容器里再跑一次：
 
 ```bash
-docker run --rm -v matrix_dsh-home:/d -v "$PWD":/b alpine tar czf /b/dsh-home.tgz -C /d .
+docker run --rm -v matrix_matrix-data:/d -v "$PWD":/b alpine tar czf /b/matrix-data.tgz -C /d .
 cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 docker compose exec matrix matrix-dsh-check --live
 ```
 
 不想等仓库改版本号、临时换一个版本：`docker compose build --build-arg DSH_VERSION=<版本> && docker compose up -d`
-（下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `dsh-home`。
+（下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `matrix-data`。
 
 ## 证书
 
@@ -260,14 +267,34 @@ uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
 
 ## 沙箱
 
+### 云侧读隔离（外层沙箱）
+
+云侧 dsh 每一轮外面再包一层 bwrap（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节阶段 0）：Agent 的命令只看得到系统目录、
+Python 环境与 Matrix 代码、dsh 与 node（只读），这个席位或委托的工作目录和它自己的 dsh 状态目录（读写）；数据卷的其余部分、
+别的执行单元、`vault.key`、`dsh-home` 在里面不存在，也看不到沙箱之外的进程。网络仍共享（要回调 Matrix、调模型）。开关是 `.env` 里的：
+
+| `MATRIX_CLOUD_ISOLATION` | 外层可用 | 外层不可用 |
+| --- | --- | --- |
+| `preferred`（默认） | 套上 | 照旧跑，启动日志、管理后台“模型”页与 Agent 页写明“没有读隔离” |
+| `required` | 套上 | 云侧运行一律拒绝，失败说明里写原因（端侧不受影响） |
+| `off` | 不套 | 不套 |
+
+写错的值按 `required` 处理。多用户部署、接真实账号的建议写 `required`。现在的 compose（`seccomp=unconfined`、`systempaths=unconfined`、
+非 root）下外层可用，已实测（部署镜像里 `matrix-dsh-check --live` 全部通过，含 `read-isolation`、`proc-isolation`）；
+去掉这两项后外层与内层都起不来。是否生效看 `docker compose logs matrix` 开头的“云侧读隔离”一行，或跑 `matrix-dsh-check`。
+外层不设内存与 CPU 上限（Node 预留的虚拟地址空间很大，设地址空间上限 dsh 会起不来）；配额要等阶段 1 的 cgroup。
+
+### dsh 自己的沙箱
+
 dsh 在 Linux 上用 bwrap 做沙箱。bwrap 起不来时 dsh 不会拒绝执行，而是退到一种更弱的方式：实测工作目录以外仍有能写的地方（如 `/tmp`），`matrix-dsh-check` 的 `sandbox` 一项会变红（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 11 节）。所以下面两个安全选项不能去掉。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
 
-沙箱只限制写，不限制读，见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
+dsh 自己的沙箱只限制写，不限制读；读由上面的外层管。外层只做到“文件读隔离”：内核与网络仍共用、没有 cgroup 配额、模型密钥仍在 dsh 进程的环境变量里，
+见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
 
 ## 数据与备份
 
-- `matrix-data` 卷存放 Matrix 的全部状态。
-- `dsh-home` 卷存放 dsh 的会话和凭据。
+- `matrix-data` 卷存放 Matrix 的全部状态，包括云侧每个执行单元的 dsh 会话（`/data/dsh-state/`）。
+- `dsh-home` 卷是升级前共用的 dsh 会话和凭据：云侧不再用它，只在旧会话第一次被拷走前要留着（凭据见「配置模型凭据」）。
 
 备份示例：
 

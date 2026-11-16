@@ -15,7 +15,7 @@ from matrix.runtime import DshRuntime, RunRequest
 step, pack = sys.argv[1], Path(sys.argv[2])
 work = Path(os.environ.get("CKPT_WORKDIR", "/data/conversations/c1/a1"))
 home = Path(os.environ.get("CKPT_HOME", "/tmp/unit-state"))
-rt = DshRuntime(os.environ.get("CKPT_DSH", "dsh"))
+rt = DshRuntime(os.environ.get("CKPT_DSH", "dsh"), isolation="off")  # 不套 Matrix 的外层：HOME 由这里给
 AUTH = ["file.write", "shell.exec"]
 
 
