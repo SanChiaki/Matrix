@@ -579,8 +579,9 @@ def outer_argv(cmd: list[str], *, cwd: Path, state: Path, ro: list[Path]) -> lis
 
 
 def dsh_session_dirname(cwd: Path) -> str:
-    """dsh 存会话的目录名：工作目录的绝对路径，/ 换成 -，前后各加 --（如 /data/c/a → --data-c-a--）。"""
-    return "--" + str(cwd).lstrip("/").replace("/", "-") + "--"
+    """dsh 存会话的目录名：工作目录的绝对路径，/ 换成 -，前后各加 --（如 /data/c/a → --data-c-a--，Linux 上实测）。
+    云侧只在 Linux 上跑；别的系统上的写法没核对过（反斜杠、盘符的冒号也换成 -），对不上时按会话 id 找。"""
+    return "--" + re.sub(r"[/\\:]", "-", cwd.as_posix().lstrip("/")) + "--"
 
 
 def dsh_session_files(home: Path, cwd: Path, session_id: str) -> tuple[Path | None, Path]:
@@ -670,7 +671,7 @@ class DshRuntime:
                     env = dict(os.environ, HOME=home) if self.hosted else None
                     out = subprocess.run(argv([self.dsh_bin, self.profile, "--dump-config"]), capture_output=True,
                                          text=True, encoding="utf-8", errors="replace", timeout=30, env=env,
-                                         creationflags=no_window()).stdout
+                                         stdin=subprocess.DEVNULL, creationflags=no_window()).stdout
                 block = out.split("- id: agent-default-model", 1)[1].split("\n- ", 1)[0]
                 for key, dst in (("provider", "provider"), ("model", "model"), ("reasoningEffort", "reasoning_effort")):
                     m = re.search(rf"^\s+{key}: ['\"]?([^'\"\n]+)", block, re.M)

@@ -46,12 +46,13 @@ def test_install_root_follows_the_real_location(tmp_path: Path):
     pkg = tmp_path / "opt" / "dsh" / "node_modules" / "@deepseek-ai" / "dsh" / "lib"
     pkg.mkdir(parents=True)
     (pkg / "bin.js").write_text("", encoding="utf-8")
-    assert install_root(str(pkg / "bin.js")) == tmp_path / "opt" / "dsh" / "node_modules"
+    assert install_root(str(pkg / "bin.js")) == (tmp_path / "opt" / "dsh" / "node_modules").resolve()
     node = tmp_path / "node22" / "bin"
     node.mkdir(parents=True)
     (node / "node").write_text("", encoding="utf-8")
-    assert install_root(str(node / "node")) == tmp_path / "node22"
-    assert install_root("/usr/bin/node") is None   # 系统目录整块挂着，不另挂
+    assert install_root(str(node / "node")) == (tmp_path / "node22").resolve()
+    if os.name == "posix":
+        assert install_root("/usr/bin/node") is None   # 系统目录整块挂着，不另挂
     assert install_root(None) is None
 
 
@@ -64,7 +65,7 @@ def test_install_root_resolves_npm_bin_links(tmp_path: Path):
     bins = tmp_path / "dsh" / "node_modules" / ".bin"
     bins.mkdir()
     os.symlink("../@deepseek-ai/dsh/lib/bin.js", bins / "dsh")
-    assert install_root(str(bins / "dsh")) == tmp_path / "dsh" / "node_modules"
+    assert install_root(str(bins / "dsh")) == (tmp_path / "dsh" / "node_modules").resolve()
 
 
 def test_outer_ro_has_code_runtimes_and_ca(tmp_path: Path):
