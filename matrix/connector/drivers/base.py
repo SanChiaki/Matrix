@@ -34,6 +34,8 @@ class RunSpec:
     # None = 旧服务端没发这个字段，保持旧行为（不干预）
     connectors: list[str] | None = None
     questions: bool = False           # 这一轮能不能提问（ask_user_question 经网络转给人或委托方）；旧服务端不发 = 不能
+    # 云侧沙箱客户端才有：run.request 另带的 llm_provider、env（模型密钥）、fetch（抓取白名单）、cloud_connectors。端侧永远为空
+    cloud: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -53,6 +55,9 @@ class RunCtx(Protocol):
     def call_tool(self, name: str, args: dict[str, Any]) -> tuple[str, bool]: ...  # run.request.tool_names 之内
     def ask_approval(self, tool: str, reason: str) -> str: ...  # allowed-once | rejected | cancelled | unavailable
     def ask_question(self, questions: list[dict[str, Any]]) -> dict[str, Any]: ...  # {answers} | {error}
+    # 云端连接器（只在云侧沙箱客户端里有）：列工具、调用
+    def list_connectors(self) -> list[dict[str, Any]]: ...
+    def call_connector(self, name: str, args: dict[str, Any]) -> tuple[str, bool]: ...
 
 
 class Driver(Protocol):

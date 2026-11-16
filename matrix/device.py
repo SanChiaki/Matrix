@@ -53,13 +53,27 @@ TOOL_CALL = "tool.call"            # {run_id, call_id, name, args}
 APPROVAL_REQUEST = "approval.request"  # {run_id, call_id, tool, reason}
 MATERIAL_FETCH = "material.fetch"  # {run_id, call_id, sha, offset} —— 取这一轮清单里的一份材料，回执 {data(base64), total} 或 {error}
 QUESTION_REQUEST = "question.request"  # {run_id, call_id, questions} —— Agent 提问（ask_user_question），回执 {answers} 或 {error}
-FILE_FETCH = "file.fetch"          # {run_id, call_id, path} —— 服务器要读端侧工作目录里的文件（publish_file）
+FILE_FETCH = "file.fetch"          # {run_id, call_id, path, dir?} —— 服务器要读端侧工作目录里的文件（publish_file）
+                                   #  dir: "zip"（只发给沙箱客户端）—— 是目录时打成 zip，回执带 zip: true
+# 只在云侧沙箱的连接上（docs/cloud-runtime.md 第 5 节，阶段 1a；旧的端侧客户端永远收不到、也不用发）：
+BLOB_PUT = "blob.put"              # {run_id, call_id, sha, offset, data(base64), total} —— 交一块内容（产物、私有目录改动、会话包），
+                                   #  回执 {ok} 或 {error}；服务端收齐后校验 sha256
+CONNECTOR_CALL = "connector.call"  # {run_id, call_id, op: list|call, name?, args?} —— 云端连接器（网络代调用），
+                                   #  回执 {tools} 或 {text, is_error}
+# run.request 在沙箱连接上另带：home: "net-rw" | "net-ro"（私有目录由网络持有：材料进、改动出）、
+#  checkpoint: {id, files: [{path, sha, size}], session: {sha, size, session_id} | null, limit}、
+#  llm_provider、env、fetch、cloud_connectors
+# run.result 在沙箱连接上另带：outputs: [{path, sha, size, stored}]、home_changes: {written: [{path, sha, size}], deleted: [path]}、
+#  session_pack: {sha, size, session_id}
 
 PROTOCOL = 1
 # 连接器在握手（hello.ok.features）里声明的可选能力；不认识的忽略
 FEATURE_MATERIALS_CACHE = "materials-cache"  # 材料只收清单、按 sha 缓存、缺的再取
+FEATURE_SANDBOX = "sandbox"                  # 云侧沙箱客户端（只在沙箱端点上有意义）
 MATERIAL_CHUNK = 1 << 20                     # material.fetch 一次最多回多少字节（base64 前）
-BLOCKING = (TOOL_CALL, APPROVAL_REQUEST, QUESTION_REQUEST, MATERIAL_FETCH)  # 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
+# 处理时可能长时间阻塞的消息：传输层不能在接收循环里同步处理
+BLOCKING = (TOOL_CALL, APPROVAL_REQUEST, QUESTION_REQUEST, MATERIAL_FETCH, BLOB_PUT, CONNECTOR_CALL)
+RESULT_EXTRA = ("outputs", "home_changes", "session_pack")
 
 
 class DeviceError(RuntimeError):
@@ -108,10 +122,15 @@ class DeviceInfo:
 class DeviceRuntime:
     """一个已连接的端侧运行时。一个连接器可以承载多个 Agent；这里按 Agent 绑定。"""
 
-    def __init__(self, link: DeviceLink, info: DeviceInfo, *, now: Callable[[], float] = time.time):
+    def __init__(self, link: DeviceLink, info: DeviceInfo, *, now: Callable[[], float] = time.time,
+                 unit: str | None = None, uploads: Any = None):
+        """unit：这条连接是云侧沙箱客户端时，它绑定的执行单元（只接受派给这个单元的运行）；uploads：收 blob.put 的地方。"""
         self.name = info.runtime
         self.link = link
         self.info = info
+        self.unit = unit
+        self.uploads = uploads
+        self.generation = 0
         self._now = now
         self._runs: dict[str, threading.Event] = {}
         self._results: dict[str, dict[str, Any]] = {}
@@ -132,6 +151,8 @@ class DeviceRuntime:
         return self.info.capabilities_for(harness) is not None
 
     def run(self, req: RunRequest) -> RunResult:
+        if self.unit is not None and req.unit != self.unit:  # 沙箱连接只接受派给它那个执行单元的运行（不变量 10）
+            return RunResult("", "", ok=False, error=f"TRANSPORT 这个沙箱属于 {self.unit}，不接受 {req.unit} 的运行")
         run_id = self._next_run_id()
         done = threading.Event()
         mats = list(getattr(req, "materials", None) or [])
@@ -141,7 +162,7 @@ class DeviceRuntime:
             self._reqs[run_id] = req
             self._by_context[req.context_id] = run_id
             if cached:  # 这一轮能取的只有清单里的这些（按 sha），轮次结束就不能再取
-                self._blobs[run_id] = {m.sha: m for m in mats}
+                self._blobs[run_id] = {m.sha: m for m in [*mats, *(req.blobs if self.unit is not None else [])]}
         payload = {
             "type": RUN_REQUEST, "run_id": run_id,
             "agent_id": req.agent_id, "context_id": req.context_id,
@@ -156,6 +177,9 @@ class DeviceRuntime:
             "connectors": list(getattr(req, "local_connectors", None) or []),
             "questions": req.questions is not None,  # 这一轮能不能提问：不能时驱动不挂提问工具
         }
+        if self.unit is not None:  # 沙箱连接另带的字段（旧的端侧客户端永远收不到）
+            payload.update(req.sandbox)
+            payload["cloud_connectors"] = req.connectors is not None and "connector.use" in req.authority
         try:
             self.link.send(payload)
             replied = self._await(done, req)
@@ -166,6 +190,8 @@ class DeviceRuntime:
                 self._runs.pop(run_id, None)
                 self._reqs.pop(run_id, None)
                 self._blobs.pop(run_id, None)
+            if self.uploads is not None:
+                self.uploads.end(self._upload_key(run_id))
                 if self._by_context.get(req.context_id) == run_id:
                     self._by_context.pop(req.context_id, None)
         if req.cancel is not None and req.cancel.is_set() and not replied:
@@ -185,7 +211,11 @@ class DeviceRuntime:
             usage=dict(data.get("usage") or {}),
             ok=bool(data.get("ok", True)),
             error=data.get("error"),
+            extra={k: data[k] for k in RESULT_EXTRA if k in data} if self.unit is not None else {},
         )
+
+    def _upload_key(self, run_id: str) -> str:
+        return f"{id(self)}:{run_id}"
 
     @staticmethod
     def _await(done: threading.Event, req: RunRequest) -> bool:
@@ -263,6 +293,24 @@ class DeviceRuntime:
             out = {"error": "这一轮不能提问"} if on_question is None or not isinstance(raw, list) else \
                 on_question([q for q in raw if isinstance(q, dict)])
             return {"reply_to": msg.get("call_id"), **out}
+        elif kind == BLOB_PUT:
+            if self.unit is None or self.uploads is None or req is None:
+                return {"reply_to": msg.get("call_id"), "error": "这条连接不收内容"}
+            try:
+                data = base64.b64decode(str(msg.get("data") or ""), validate=True)
+            except ValueError:
+                return {"reply_to": msg.get("call_id"), "error": "内容不是合法的 base64"}
+            err = self.uploads.put(self._upload_key(run_id), str(msg.get("sha", "")), msg.get("offset"), data,
+                                   msg.get("total"))
+            return {"reply_to": msg.get("call_id"), **({"error": err} if err else {"ok": True})}
+        elif kind == CONNECTOR_CALL:
+            bridge = req.connectors if req is not None and "connector.use" in req.authority else None
+            if self.unit is None or bridge is None:
+                return {"reply_to": msg.get("call_id"), "text": "这一轮没有云端连接器", "is_error": True}
+            if msg.get("op") == "list":
+                return {"reply_to": msg.get("call_id"), "tools": bridge.list_tools()}
+            text, is_error = bridge.call(str(msg.get("name", "")), dict(msg.get("args") or {}))
+            return {"reply_to": msg.get("call_id"), "text": text, "is_error": is_error}
         elif kind == RUN_RESULT:
             with self._lock:
                 self._results[run_id] = msg
@@ -302,6 +350,35 @@ class DeviceRuntime:
             return None
         try:
             return base64.b64decode(box["data"])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def fetch_path(self, context_id: str | None, path: str, timeout_s: float = 120) -> tuple[bytes, bool] | None:
+        """沙箱连接：读工作目录里的文件或目录（目录打成 zip）。context_id=None 时不限于某一轮（沙箱里只有这一个执行单元）。
+        返回（字节, 是不是 zip）；不在线 / 越界 / 不存在返回 None。"""
+        if self.unit is None:
+            return None
+        with self._lock:
+            run_id = self._by_context.get(context_id) if context_id is not None else ""
+        if run_id is None:
+            return None
+        cid = f"f{uuid.uuid4().hex[:12]}"
+        done, box = threading.Event(), {}
+        with self._lock:
+            self._fetches[cid] = (done, box)
+        try:
+            self.link.send({"type": FILE_FETCH, "run_id": run_id, "call_id": cid, "path": path, "dir": "zip"})
+            if not done.wait(timeout_s):
+                return None
+        except DeviceError:
+            return None
+        finally:
+            with self._lock:
+                self._fetches.pop(cid, None)
+        if box.get("error") or "data" not in box:
+            return None
+        try:
+            return base64.b64decode(box["data"]), bool(box.get("zip"))
         except Exception:  # noqa: BLE001
             return None
 

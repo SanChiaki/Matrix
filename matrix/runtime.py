@@ -235,6 +235,15 @@ class RunRequest:
     # 云侧 dsh：这个执行单元（席位或委托）自己的 dsh 状态目录，当这一轮 dsh 的 HOME；不在任何工作目录里。
     # 外层沙箱里只有它和工作目录可写。None = 沿用进程的 HOME（端侧驱动、测试）
     state_dir: Path | None = None
+    # 云侧沙箱方式（docs/cloud-runtime.md 第 5 节，阶段 1a）：这一轮属于哪个执行单元（seat:<对话>/<Agent> | task:<任务>）；
+    # None = 不是沙箱方式。只给沙箱运行时与它的连接用
+    unit: str | None = None
+    # 沙箱方式：这一轮另外能取的内容（检查点里的产物与会话包），只供恢复，不当材料写进工作目录
+    blobs: list[Material] = field(default_factory=list)
+    # 沙箱方式：run.request 里另带的字段（checkpoint 等），由引擎算好
+    sandbox: dict[str, Any] = field(default_factory=dict)
+    # dsh 的事件是否写进工作目录的 dsh-events.jsonl；沙箱里不写（事件经连接回到控制面，存在控制面那边）
+    events_file: bool = True
 
 
 # 运行时错误分类（参照 Raft daemon 的 runtimeErrorDeliveryPolicy）：
@@ -248,6 +257,7 @@ ERROR_CLASSES: dict[str, tuple[str, bool]] = {
     "SERVER": ("provider_server", False),
     "STOPPED": ("stopped", False),  # 人终止了这一轮：不自动续接，等人决定
     "ISOLATION": ("isolation_unavailable", False),  # 部署方要求云侧有读隔离而这台机器做不到：拒绝运行，等部署方处理
+    "CAPACITY": ("sandbox_capacity", False),  # 云侧执行面满了：委托回到等待，席位排队（不是失败）
 }
 
 
@@ -302,6 +312,8 @@ class RunResult:
     usage: dict[str, int] = field(default_factory=dict)
     ok: bool = True
     error: str | None = None
+    # 沙箱方式：客户端在 run.result 里另报的（产物清单、私有目录改动、会话包），由引擎校验后进检查点
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def error_class(self) -> str | None:
@@ -744,7 +756,8 @@ class DshRuntime:
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(req.prompt)
             proc.stdin.close()
-            with open(req.cwd / "dsh-events.jsonl", "a", encoding="utf-8") as log:
+            with (open(req.cwd / "dsh-events.jsonl", "a", encoding="utf-8") if req.events_file
+                  else open(os.devnull, "w", encoding="utf-8")) as log:
                 for line in proc.stdout:
                     line = line.strip()
                     if not line:
