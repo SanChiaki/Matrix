@@ -23,7 +23,14 @@
     共享项目会放大这个风险（别的参与者可以 @ 诱导读取）。是不是有读隔离在启动日志、管理后台“模型”页与 Agent 页上写明；
   - 以 root 运行服务时，外层沙箱建自己的用户命名空间（特权只在里面有效）；部署镜像以非 root 运行，不受影响；
   - 网络直接托管的目录插件服务进程不在这层沙箱里，读得到数据目录（主持人自己装的托管插件只在沙箱里跑，[plugin-install.md](../plugin-install.md) 第 4 节）。
-  接受理由：阶段 1（每个执行单元一个 gVisor 沙箱）与阶段 2（出口网关）还没做；复查时机：多机部署、多用户部署接真实账号之前，至少要
+  **沙箱方式（`MATRIX_CLOUD_SANDBOX`，默认关）**：打开后控制面不再执行 Agent 代码。`local` 后端（1a）是本机子进程 + 外层 bwrap，
+  上面几条（共用内核与网络、没有配额）照样成立；`docker` 后端（1b）每个执行单元一个容器，经沙箱管理器 `matrix-sandboxd`
+  （唯一持有 docker.sock，Matrix 服务只经 Unix socket 提只含 id、配额、启动令牌、逻辑工作目录的请求，镜像与安全选项写死在管理器配置里），
+  有 CPU、内存、进程数配额，Matrix 容器不再放开 seccomp 与 `/proc` 遮挡。仍没解决的：`runsc`（gVisor）档才有独立的内核边界，
+  `insecure-runc` 档与宿主共用内核、并且沙箱容器放开了 seccomp 与 `/proc` 遮挡（内层 bwrap 要），能力报告与管理后台写“未达到生产隔离”；
+  卷没有大小上限；沙箱还能直接出网，也能访问控制面的其他接口（都要登录或执行上下文令牌）；模型密钥随 `run.request` 进沙箱。
+  gVisor 档的完整检查（`deploy/isolation-check` 的 `t8`）在写这一版时还没在装了 gVisor 的机器上跑过。
+  接受理由：阶段 1（每个执行单元一个 gVisor 沙箱）还是开关后面的试用、阶段 2（出口网关）还没做；复查时机：多机部署、多用户部署接真实账号之前，至少要
   `MATRIX_CLOUD_ISOLATION=required` 并做完阶段 1–2。云侧和端侧在执行面上的全部差异与云侧待优化的地方，见 [device-runtimes.md](device-runtimes.md#cloud-vs-device)。
 - 端侧材料（`material.fetch`）只回**这一轮清单里**的 sha，轮次结束就取不到；连接器在本机再校验路径（不进 `agent-home/`、不越界）、
   大小与 sha256。缓存在 `<工作根目录>/.cache/materials/`，只有这台设备上跑过的轮次给过它的内容（[device-runtimes.md](device-runtimes.md)“材料”）。

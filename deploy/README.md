@@ -306,9 +306,72 @@ MATRIX_SANDBOX_ROOT=                # 执行面目录树，默认 /data/exec
 - 打开后第一次运行的执行单元会把旧工作目录的产物、阶段 0 状态目录（或 `dsh-home`）里的 dsh 会话导入检查点，原目录不删，会话续得上。
 - 新增的数据：`/data/exec/`（沙箱的工作目录与状态，可以不备份，能从检查点重建）、`/data/checkpoints/` 与 `/data/content/`（检查点，**要备份**）、
   `/data/run-logs/`（dsh 事件）。
-- 没做的：配额（cgroup）、批量建检查点的 `matrix migrate workdirs` 与导出回退。回退就是关掉开关：旧方式照旧用原来的工作目录，
+- 没做的：配额（local 后端没有 cgroup 配额，docker 后端有，见下一节）、批量建检查点的 `matrix migrate workdirs` 与导出回退。回退就是关掉开关：旧方式照旧用原来的工作目录，
   沙箱方式期间新写的产物只在检查点里。
 - 升级 dsh 时加跑 `matrix-dsh-check --live --sandbox local`。
+
+### 云侧执行面：docker 后端（每个执行单元一个容器）
+
+阶段 1b（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节“阶段 1b 的实现”）：每个席位或委托一个容器，生产用 gVisor（`runsc`）。
+容器由沙箱管理器 `sandboxd` 创建，它是唯一挂 `docker.sock` 的服务；Matrix 自己不再跑 dsh，也就不再需要放开 seccomp 与 `/proc` 遮挡。
+
+**1. 装 gVisor**（宿主上，Debian / Ubuntu；其他发行版见 <https://gvisor.dev/docs/user_guide/install/>）：
+
+```bash
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+sudo apt-get update && sudo apt-get install -y runsc
+sudo runsc install && sudo systemctl restart docker
+docker info --format '{{json .Runtimes}}'    # 里面要有 "runsc"
+```
+
+**2. 写管理器配置并构建镜像**（在 `deploy/` 下）：
+
+```bash
+cp sandboxd.example.json sandboxd.json       # runtime 默认 runsc；镜像名、配额、沙箱里固定的环境（出网代理、CA）在这里改
+docker compose -f compose.yml -f compose.sandbox.yml --profile build build
+```
+
+`sandboxd.json` 里能改的：`image`、`runtime`（`runsc` / `insecure-runc`）、`network`、`connect_url`（沙箱客户端连回来的地址，和
+`.env` 的 `MATRIX_SANDBOX_GATEWAY` 一致）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`、`tmp_mb`、`env`（不能放密钥，
+名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
+内网构建的参数与主镜像相同，另有 `DOCKER_CLI_TARBALL`（管理器镜像里 docker 命令行的静态包地址）。
+
+**3. 打开**：
+
+```bash
+docker compose -f compose.yml -f compose.sandbox.yml up -d
+docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # 第二行写着隔离等级
+```
+
+叠加文件会把 `matrix` 改成 `MATRIX_CLOUD_SANDBOX=docker`、挂上管理器的 socket 目录、在沙箱网络网关（默认 `172.31.255.1`）上开放 8765、
+安全选项改成只有 `no-new-privileges`。沙箱网络 `matrix-sandbox`（默认 `172.31.255.0/24`）和机器上已有的网络冲突时，在 `.env` 里改
+`MATRIX_SANDBOX_SUBNET` / `MATRIX_SANDBOX_GATEWAY`，同时改 `sandboxd.json` 的 `connect_url`。
+
+- **`insecure-runc`**：没装 gVisor 时可以先用 runc 试（`sandboxd.json` 写 `"runtime": "insecure-runc"`）。这一档沙箱容器与宿主共用内核，
+  而且为了让 dsh 的内层 bwrap 能建命名空间，沙箱容器放开了 seccomp 与 `/proc` 遮挡（不放开 dsh 会悄悄退到更弱的沙箱）。
+  管理后台、Agent 页、启动日志会一直写“未达到生产隔离”。**不要用在多用户部署上**。
+- 配置的运行时不在（比如写了 `runsc` 但没装）：云侧运行一律拒绝并写明原因，不退回 runc。
+- 沙箱经沙箱网络直接出网；服务器只能经代理出网时，代理地址要是沙箱网络能到的（不能是宿主的 127.0.0.1），写进 `sandboxd.json` 的 `env`。
+- 配额：CPU、内存（不给 swap）、进程数由 cgroup 管；**卷没有大小上限**（Docker 的 local 卷做不到）。
+- 数据：沙箱的卷（`matrix-sbx-*`）只是缓存，能从检查点重建，不用备份；`/data/checkpoints/` 与 `/data/content/` 要备份。
+- 升级 dsh：重建沙箱镜像（上面第 2 步），再跑 `deploy/isolation-check` 的 `t8`，或在宿主上
+  `matrix-dsh-check --live --sandbox docker --listen <网关> --port <端口> --root <管理器允许的前缀下的目录>`。
+
+**回退**：`docker compose -f compose.yml up -d`（不带叠加文件），`matrix` 回到在自己容器里跑 dsh 的方式（`compose.yml` 里的安全选项照旧）。
+沙箱方式期间新写的产物只在检查点里（`/data/checkpoints/` + `/data/content/`）。留下的沙箱容器与卷：
+`docker ps -aq --filter label=dev.matrix.unit | xargs -r docker rm -f`、`docker volume ls -q --filter label=dev.matrix.unit | xargs -r docker volume rm`。
+
+**排错**
+
+| 现象 | 处理 |
+| --- | --- |
+| 云侧运行失败，原因以 `ISOLATION` 开头 | 管理器配置的运行时不在：`docker info` 里没有 `runsc`，按第 1 步装好并重启 Docker |
+| 失败原因是“连不上沙箱管理器” | `sandboxd` 没起来或 socket 卷没挂上：`docker compose … logs sandboxd` |
+| 失败原因是“沙箱的客户端没有连上” | 沙箱连不回 Matrix：`connect_url` 与网关、端口不一致，或防火墙拦了沙箱网络到网关的 8765；`docker logs <沙箱容器>` 看客户端的报错 |
+| 失败原因是“沙箱容器起不来” / “工作目录卷准备不了” | 镜像名不对或没构建（第 2 步）；`docker images | grep matrix-sandbox` |
+| Agent 的命令报 Permission denied、dsh 起不来 | 用的是旧的沙箱镜像或改过 `tmp_mb` 之外的模板：重建镜像；`/tmp` 必须可执行（模板里已是 `exec`） |
+| `matrix-dsh-check` 的 `isolation` 说“不在 dsh 的内层 bwrap 里” | runc 档下沙箱容器没放开 seccomp / `/proc` 遮挡（模板已带）；或宿主的 AppArmor 拦了用户命名空间：改用 gVisor |
 
 ### dsh 自己的沙箱
 

@@ -83,6 +83,11 @@
 - **台账与对账**：`state.json` 的 `sandboxes` 记每个单元应有的状态与代数；启动时与每分钟对账（没有记录或代数过期的沙箱结束掉，
   记录是运行中而沙箱不在的那一轮按传输错误结束：云侧委托判失败可续接，不变量 12）；空闲 10 分钟停（目录保留），执行单元结束
   （委托验收 / 被拒、对话或 Agent 没了）7 天后销毁。
+- **docker 后端（阶段 1b）**：每个单元一个容器（默认 gVisor），由沙箱管理器 `matrix-sandboxd` 创建与销毁；Matrix 服务只经 Unix socket 提
+  只含 id、配额、启动令牌、逻辑工作目录的请求，镜像、运行时、安全选项、网络、挂载都在管理器的配置里。容器非 root、去掉全部特权、只读根，
+  CPU / 内存 / 进程数有配额，工作目录卷挂在原来的绝对路径上；沙箱在专用网络里（容器间不通），经网关连回 Matrix。`insecure-runc` 档
+  （用 runc）要放开 seccomp 与 `/proc` 遮挡、标“未达到生产隔离”。启动令牌经环境变量 `MATRIX_BOOT_TOKEN` 给客户端。部署见
+  `deploy/compose.sandbox.yml` 与 [deploy/README.md](../../deploy/README.md)。
 - **local 后端**：每个单元一个本机子进程，外层 bwrap（阶段 0 的同一套）里只读挂系统目录、Python 与 Matrix 代码、dsh 与 node、CA 证书，
   可写的只有单元的工作目录（挂在原来的绝对路径上，dsh 会话续得上）与状态目录。没有 bwrap 时起不来（不退回不隔离的子进程）；
   没有 cgroup 配额，网络与内核仍和服务器共用。

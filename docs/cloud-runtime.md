@@ -1,4 +1,4 @@
-# 云侧执行面：生产级方案（阶段 0、阶段 1a 已实现，其余是设计）
+# 云侧执行面：生产级方案（阶段 0、阶段 1a、1b 已实现，1a / 1b 在开关后面；其余是设计）
 
 2026-11-10 定方向。2026-11-16 实现了阶段 0（单机止血）与云侧取消外溢审批，实现与设计的出入见第 8 节“阶段 0 的实现”；同日实现了阶段 1 的前半（1a：云侧 Agent 改走端侧客户端的协议、在沙箱里运行、数据进出做成材料清单与检查点，开关后面、默认关），见第 8 节“阶段 1a 的实现”。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
 模型密钥不进执行面），并为 #60（出口代理注入连接器凭证）提供前提。现状与逐条欠账见
@@ -400,6 +400,40 @@ class SandboxProvider(Protocol):
 | 私有目录“改过”的判定 | 客户端按（大小、修改时间）比对，同 `homedir.fingerprint`；内容一样只是被重写过的文件也算改过 | 与旧方式的 `sync_back` 口径一致，不变量 15、22 的行为不变 |
 | `matrix migrate workdirs` / `export` / `purge-legacy` | **没做**：只做了“第一次在沙箱方式下运行时按需导入”（产物、别人交来的 `deliveries/`、阶段 0 状态目录或共用 `~/.dsh` 里的会话），原目录不删 | 这一步的重点是链路；批量建检查点与导出回退留到 1b。在那之前回退办法：关掉开关，旧方式照旧用原目录（沙箱方式里新写的产物只在检查点里，要手工从 `<data>/checkpoints/` + `<data>/content/` 取） |
 | 不变量 26 | **没加进不变量表**：1a 的版本（云侧 Agent 的代码只在沙箱里跑，控制面只经连接给材料、收检查点）只有开关打开时才成立 | 等默认切换成沙箱方式时再加进不变量表并补“两种通道”之外的结构检查 |
+
+**阶段 1b 的实现（2026-11-16，开关后面，默认关）。** `MATRIX_CLOUD_SANDBOX=docker`：每个执行单元一个容器，由沙箱管理器
+`matrix-sandboxd`（`matrix/sandboxd.py`）创建与销毁。部署用 `deploy/compose.sandbox.yml` 叠在 `compose.yml` 上（默认部署不变），
+镜像在 `deploy/Dockerfile.sandbox`（`sandbox` 与 `sandboxd` 两个目标）。
+
+- **管理器**是唯一挂 docker.sock 的进程。Matrix 服务经共享卷里的 Unix socket 调它（本地 HTTP：ensure / stop / destroy / status / list / report），
+  请求只有执行单元 id、所有者、Agent、代数、配额、启动令牌、逻辑工作目录；逻辑工作目录必须落在配置允许的前缀下（compose 里是 `/data/conversations/`、
+  `/data/tasks/`）。镜像、运行时、安全选项、网络、挂载模板、命令写死在管理器的配置（`sandboxd.json`）里，请求带别的字段一律拒绝（`validate_ensure`）。
+  管理器不存意图，只给容器与卷打执行单元 id、代数、起动时间的标签；对账照旧由控制面做，没有记录的卷也删掉。
+- **容器**（`run_argv`，纯函数）：uid 1000、`--cap-drop ALL`、`no-new-privileges`、只读根、`/tmp` 是 512 MB 的 tmpfs、独立 PID / 挂载 / IPC 命名空间、
+  `--cpus 2`、`--memory 2g`（不给 swap）、`--pids-limit 512`；挂载只有这个单元的两个卷：工作目录挂在原来的绝对路径上，dsh 状态挂在 `/state`。
+  不挂宿主目录、docker.sock、数据目录。运行时默认 `runsc`；部署方写 `insecure-runc` 才用 runc，这时只多放开 seccomp 与 `/proc` 遮挡两项
+  （runc 里内层 bwrap 要；gVisor 不要），能力报告与管理后台写“未达到生产隔离”。配置的运行时不在时拒绝云侧运行（`ISOLATION`），不退回别的。
+- **网络**：沙箱接在专用的 `matrix-sandbox` 网络上（`enable_icc=false`，容器之间不通），Matrix 只在这张网络的网关上开放 8765，沙箱客户端经它连回
+  `/api/sandbox/connect`。不用 host 网络。阶段 2 把这张网络改成只通出口网关。
+- **Matrix 容器**不再跑 dsh，叠加文件把它的安全选项改成只有 `no-new-privileges`（去掉 `seccomp=unconfined` 与 `systempaths=unconfined`）。
+
+验证（本机，Docker 29、cgroup v1、overlayfs，**没有 gVisor**——这台机器的策略不允许装 runsc）：`insecure-runc` 档下
+`matrix-dsh-check --live --sandbox docker` 全部通过，含新加的 `resource-limit`（Agent 申请 3 GB 内存被结束、起 900 个进程被挡在 512 以内、之后别的
+执行单元照常）与 `isolation` 里的内层 bwrap 核对；工具包 `t8` 在本机按同样的方式跑过一遍（`question` 一次断线，单独重跑两次都通过）；
+compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API 跑通两轮真实对话（续接记得编号、产物进检查点），Matrix 容器里没有 docker.sock、
+经 socket 发带镜像 / 挂载 / 特权的请求都被拒。**`runsc` 档没在本机验证**，要在装了 gVisor 的机器上跑工具包的 `t8`。
+
+和设计不一样的地方：
+
+| 设计 | 1b 的实现 | 原因 |
+| --- | --- | --- |
+| 沙箱客户端是容器的 1 号进程 | `--init`：1 号进程是 Docker 的 tini，客户端是它唯一的子进程 | 收孤儿进程；客户端退出 tini 跟着退出，“客户端退出即沙箱退出”不变 |
+| 卷 10 GB 上限 | **没有**：Docker 的 local 卷做不到大小上限（overlayfs 上的 `--storage-opt size` 只管容器根，而且要 xfs + pquota），能力报告写 `volume_quota: false` | 以后可选：支持大小上限的卷驱动（XFS + pquota）、或者定期统计、超了停沙箱 |
+| 卷 | 每个执行单元两个卷（工作目录、`/state`），新的工作目录卷先用一个只有 CHOWN 特权、不联网的一次性容器交给沙箱用户，挂载加 `volume-nocopy` | 卷挂在镜像里没有的路径上时归 root；不加 nocopy 时 Docker 会照搬临时建的挂载点的属主（root） |
+| 启动令牌注入 | 经环境变量 `MATRIX_BOOT_TOKEN`（客户端读完从环境里拿掉；看得到它的只有能 `docker inspect` 的人与这个容器里的进程，而令牌用过即废） | `docker run -d` 没有 stdin |
+| `/tmp` | tmpfs 要 `exec` | dsh 的原生模块加载器把 `.node` 拷到 `$TMPDIR` 再加载，noexec 下 dsh 起不来 |
+| 控制面容器去掉 `seccomp=unconfined` | 只在叠加 `compose.sandbox.yml` 时去掉；默认的 `compose.yml` 不变（还在跑 dsh） | 不破坏现有部署 |
+| 预热池、冷启动优化 | 没做 | 阶段 3 |
 
 **阶段 1：执行面独立。** `SandboxProvider`、`matrix-sandboxd`、沙箱镜像、沙箱客户端（connector 复用）、`docker` 后端 + gVisor、
 执行单元卷、材料清单、产物检查点、私有目录“材料进、改动出”、配额、`--isolation`（先默认 `preferred`，见 9.1）、旧数据迁移（第 10 节）。
