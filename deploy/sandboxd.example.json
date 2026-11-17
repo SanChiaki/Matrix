@@ -7,7 +7,6 @@
   "subnet_pool": "10.213.0.0/16",
   "workdir_prefixes": ["/data/conversations/", "/data/tasks/"],
   "cpus": 2,
-  "memory_mb": 2048,
   "host_reserve_mb": 1024,
   "pids": 512,
   "tmp_mb": 512,

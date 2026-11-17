@@ -283,9 +283,14 @@ def test_serve_says_clearly_when_socket_path_is_too_long(tmp_path: Path):
 def test_quota_is_checked_against_host_memory(tmp_path: Path):
     """配额不能超过“宿主内存 − 预留”：超了拒绝启动，错误里写明宿主内存、配额与怎么改；宿主内存是注入的，不读真机。"""
     with pytest.raises(ValueError) as e:
-        fit_host(DockerConfig(), 1800)                     # 1.8 GB 的宿主，默认 2048 MB
+        fit_host(DockerConfig(memory_mb=2048), 1800)       # 1.8 GB 的宿主，部署方写了 2048 MB
     msg = str(e.value)
-    assert "宿主内存 1800 MB" in msg and "memory_mb=2048 MB" in msg and "最多 776 MB" in msg and "改到 776 以下" in msg
+    assert "宿主内存 1800 MB" in msg and "memory_mb=2048 MB" in msg and "最多 776 MB" in msg and "把 memory_mb 改到 776 以下" in msg
+    # 没写 memory_mb：按宿主定，min(2048, 宿主内存 − 预留)；3 GB 以下的机器用默认配置也起得来
+    conf, note = fit_host(DockerConfig(), 1871)
+    assert conf.memory_mb == 847 and conf.max_memory_mb == 847 and "默认 847 MB" in note
+    assert fit_host(DockerConfig(), 16087)[0].memory_mb == 2048
+    assert validate_ensure(body(), fit_host(DockerConfig(), 1871)[0])["quota"]["memory_mb"] == 847
     with pytest.raises(ValueError, match="max_memory_mb=4096 MB"):
         fit_host(DockerConfig(memory_mb=512, max_memory_mb=4096), 1800)
     with pytest.raises(ValueError, match="放不下"):
@@ -299,7 +304,8 @@ def test_quota_is_checked_against_host_memory(tmp_path: Path):
     conf, _ = fit_host(DockerConfig(), 64000)                                         # 大宿主：上限还是 8192
     assert conf.max_memory_mb == 8192 and conf.memory_mb == 2048
     conf, note = fit_host(DockerConfig(), None)                                        # 读不到：跳过，打一行
-    assert conf.max_memory_mb == 0 and conf.memory_cap == 8192 and "跳过" in note
+    assert conf.memory_mb == 2048 and conf.max_memory_mb == 0 and conf.memory_cap == 8192 and "跳过" in note
+    assert validate_ensure(body(), DockerConfig())["quota"]["memory_mb"] == 2048     # 没经过 fit_host 也是 2048
     mi = tmp_path / "meminfo"
     mi.write_text("MemTotal:        1843200 kB\nMemFree:  1 kB\n", encoding="ascii")
     assert host_memory_mb(str(mi)) == 1800 and host_memory_mb(str(tmp_path / "nope")) is None

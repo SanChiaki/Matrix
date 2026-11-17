@@ -340,7 +340,7 @@ docker compose -f compose.yml -f compose.sandbox.yml --profile build build
 
 管理器的 socket 是 0660、属组 gid 1000（Matrix 服务的用户），管理器用 `group_add` 加进这个组，别的进程连不上。
 `sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`gateway_container`（出口网关所在的容器，compose 里是 `matrix-core`）、
-`connect_url`（沙箱客户端连回来的地址，`{gateway}` 换成网关在执行单元网络上的地址）、`subnet_pool`（每个执行单元一张网络，从这里切 /28）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`（单个沙箱的默认配额与请求能要的上限）、`host_reserve_mb`（留给宿主的内存，默认 1024；管理器启动时 `memory_mb`、`max_memory_mb` 都不能超过“宿主内存 − 它”，超了拒绝启动，小内存的机器要把 `memory_mb` 调小，例如 2 GB 的机器 768）、`tmp_mb`、`env`（不能放密钥，
+`connect_url`（沙箱客户端连回来的地址，`{gateway}` 换成网关在执行单元网络上的地址）、`subnet_pool`（每个执行单元一张网络，从这里切 /28）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`（单个沙箱的默认配额与请求能要的上限）、`host_reserve_mb`（留给宿主的内存，默认 1024；管理器启动时 `memory_mb`、`max_memory_mb` 都不能超过“宿主内存 − 它”，超了拒绝启动）。`memory_mb` 不写时按宿主定：`min(2048, 宿主内存 − 预留)`，读不到宿主内存时 2048；`max_memory_mb` 不写时取“宿主内存 − 预留”，最多 8192。样例里没写这两项，小内存的机器用样例也起得来；写了就按写的核对）、`tmp_mb`、`env`（不能放密钥，
 名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
 内网构建的参数与主镜像相同，另有 `DOCKER_CLI_TARBALL`（管理器镜像里 docker 命令行的静态包地址）。
 

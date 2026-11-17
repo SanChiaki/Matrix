@@ -45,7 +45,7 @@
 | 建议 | 4 核、8 GB 内存、磁盘空闲 20 GB 以上 | 2 核、2 GB 内存、磁盘空闲 15 GB，机器上不跑别的 |
 | `t8` 拒绝开跑的下限 | 内存 4 GB（可用 3 GB）、2 核、磁盘空闲 15 GB | 内存 1.7 GB（可用 1.2 GB）、2 核、磁盘空闲 15 GB |
 | 跑哪几档 | `insecure-runc` 与 `runsc` 各一遍（`T8_RUNTIMES` 可改） | 只有 `runsc`；没有 runsc 直接说明并退出，不退回 runc |
-| 单个沙箱的内存配额 | 管理器默认 2048 MB（`T8_MEMORY_MB` 可改） | 按宿主定：宿主 ≤ 4 GB 时 768 MB，再大 1024 MB（`T8_MEMORY_MB` 可改） |
+| 单个沙箱的内存配额 | 管理器按宿主定：`min(2048, 宿主内存 − 1024)`（`T8_MEMORY_MB` 可改） | 按宿主定：宿主 ≤ 4 GB 时 768 MB，再大 1024 MB（`T8_MEMORY_MB` 可改） |
 | 验证什么 | 全部检查，含 `resource-limit`（配额 + 256 MB 的内存申请、pids + 100 个进程被挡住）与 runc / gVisor 对照 | gVisor 下的 `sandbox`、`isolation`、`read-isolation`、`proc-isolation`、`net-isolation`、`key-absent`、`egress-tools`、`reply`、`resume`、`delegate`、`deliver`、`restore` |
 | 不验证什么 | — | **不验证配额（`resource-limit`）与 runc 对照**；`t1`–`t7` 也别在小机器上跑 |
 

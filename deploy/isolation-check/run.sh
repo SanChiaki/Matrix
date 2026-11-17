@@ -268,7 +268,7 @@ t8() {  # docker 后端（阶段 1b / 2a / 2b）：沙箱管理器 + 每个执�
       say "[$tag] Docker 没注册 runsc：轻量模式只验证 gVisor，不退回 runc。先按 README 第 3 节装 gVisor"; return 1
     fi
   fi
-  say "[$tag] 运行时：${rts[*]}；单个沙箱内存：${mem:-管理器默认（2048）}MB；进程数：${pids:-管理器默认（512）}；检查：${only:-全部}"
+  say "[$tag] 运行时：${rts[*]}；单个沙箱内存：${mem:-管理器按宿主内存定（最多 2048）}MB；进程数：${pids:-管理器默认（512）}；检查：${only:-全部}"
   # 一个一个构建，不并行（构建阶段的内存峰值见 README 第 2 节）
   local target
   for target in sandbox sandboxd; do
