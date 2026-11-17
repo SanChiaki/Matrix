@@ -20,15 +20,22 @@ docker compose up -d --build
 
 ## 配置模型凭据（DSH）
 
-凭据只放在 `dsh-home` 卷里（容器内的 `/home/matrix/.dsh`），不进镜像，也不进仓库。以下两种方式选一种：
+凭据不进镜像，也不进仓库。以下两种方式选一种：
 
 - 在 `.env` 里写 `DEEPSEEK_API_KEY=...`，然后执行 `docker compose up -d` 让它生效。
-- 进容器用 dsh 自己的方式登录或配置：`docker compose exec matrix dsh headless --help`。
+- 在管理后台的“模型”页添加供应商（协议、地址、密钥；密钥加密存在数据卷的 `vault/` 里，每轮只交给那一个 dsh 进程）。
+
+**2026-11-16 起的破坏性变化**：云侧每个执行单元（席位、委托）用自己的 dsh 状态目录（`/data/dsh-state/`）当 HOME，
+共用的 `dsh-home` 卷（`/home/matrix/.dsh`）不再给云侧运行用（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 5.4、第 8 节阶段 0）。
+**进容器用 dsh 自己登录或配置、存在 `dsh-home` 里的凭据与默认供应商从此失效**：升级前把要用的供应商在“模型”页重配一遍，
+或改用 `.env` 里的 `DEEPSEEK_API_KEY`。只能用账号登录、给不出地址加密钥的供应商，云侧不能再用。
+`dsh-home` 卷先别删：里面的旧会话在每个执行单元第一次运行时被拷进它自己的状态目录（原处不删，回退时还能用），之后就用不到了。
 
 ## 预置模型（可选）
 
 在数据卷里放一份 `/data/models.json`，云侧 Agent 就只能从里面选模型；改这个文件即生效，不用重启。删掉文件回到自由填写。
-`provider` 必须是 dsh 里已配置的。
+`provider` 必须是管理后台“模型”页里配的供应商，或 dsh 自带、只靠环境变量就能用的（如 `deepseek-official` 配 `DEEPSEEK_API_KEY`）；
+dsh 自己登录过、存在共用 `~/.dsh` 里的供应商云侧不再读。
 
 ```json
 {
@@ -206,7 +213,7 @@ cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 ```bash
 npm install --prefix /tmp/dsh-new @deepseek-ai/dsh@<版本>
 uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh           # 静态：插件 id、覆盖层能加载，不调模型
-uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    # 实际跑：回复、续接、技能、委托、连接器、沙箱审批
+uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    # 实际跑：回复、续接、技能、委托、连接器、工作目录以外写不进、提问
 ```
 
 `--live` 要 dsh 能调模型：本机单独装的 dsh 可能解析不了桌面 App 存的凭据，用账号登录的加 `--model deepseek-account/deepseek-flash`；
@@ -216,16 +223,16 @@ uv run matrix-dsh-check --dsh-bin /tmp/dsh-new/node_modules/.bin/dsh --live    #
 就会在没有权限时重新可用，所以“找不到”算失败；新出现的 `tool-*` 插件给提醒，确认要不要按权限禁用（`runtime.AUTHORITY_PLUGINS` /
 `ALWAYS_DISABLED`）再加进 `dsh_check.KNOWN_TOOLS`。
 
-服务器上更新前先备份 `dsh-home`（新版本可能改会话格式），更新后在容器里再跑一次：
+服务器上更新前先备份 `matrix-data`（新版本可能改会话格式；云侧的 dsh 会话在 `/data/dsh-state/`），更新后在容器里再跑一次：
 
 ```bash
-docker run --rm -v matrix_dsh-home:/d -v "$PWD":/b alpine tar czf /b/dsh-home.tgz -C /d .
+docker run --rm -v matrix_matrix-data:/d -v "$PWD":/b alpine tar czf /b/matrix-data.tgz -C /d .
 cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 docker compose exec matrix matrix-dsh-check --live
 ```
 
 不想等仓库改版本号、临时换一个版本：`docker compose build --build-arg DSH_VERSION=<版本> && docker compose up -d`
-（下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `dsh-home`。
+（下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `matrix-data`。
 
 ## 证书
 
@@ -260,14 +267,147 @@ uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
 
 ## 沙箱
 
-dsh 在 Linux 上用 bwrap 做沙箱。如果没有可用的沙箱，它会 fail closed，也就是拒绝执行命令，而不是不加限制地执行。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
+### 云侧读隔离（外层沙箱）
 
-沙箱只限制写，不限制读，见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
+云侧 dsh 每一轮外面再包一层 bwrap（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节阶段 0）：Agent 的命令只看得到系统目录、
+Python 环境与 Matrix 代码、dsh 与 node（只读），这个席位或委托的工作目录和它自己的 dsh 状态目录（读写）；数据卷的其余部分、
+别的执行单元、`vault.key`、`dsh-home` 在里面不存在，也看不到沙箱之外的进程。网络仍共享（要回调 Matrix、调模型）。开关是 `.env` 里的：
+
+| `MATRIX_CLOUD_ISOLATION` | 外层可用 | 外层不可用 |
+| --- | --- | --- |
+| `preferred`（默认） | 套上 | 照旧跑，启动日志、管理后台“模型”页与 Agent 页写明“没有读隔离” |
+| `required` | 套上 | 云侧运行一律拒绝，失败说明里写原因（端侧不受影响） |
+| `off` | 不套 | 不套 |
+
+写错的值按 `required` 处理。多用户部署、接真实账号的建议写 `required`。现在的 compose（`seccomp=unconfined`、`systempaths=unconfined`、
+非 root）下外层可用，已实测（部署镜像里 `matrix-dsh-check --live` 全部通过，含 `read-isolation`、`proc-isolation`）；
+去掉这两项后外层与内层都起不来。是否生效看 `docker compose logs matrix` 开头的“云侧读隔离”一行，或跑 `matrix-dsh-check`。
+外层不设内存与 CPU 上限（Node 预留的虚拟地址空间很大，设地址空间上限 dsh 会起不来）；配额要等阶段 1 的 cgroup。
+
+### 云侧执行面：沙箱方式（试用，默认关）
+
+阶段 1a（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节“阶段 1a 的实现”）：每个席位或委托一个沙箱，沙箱里是端侧客户端的同一套代码，
+连回 Matrix 的 `/api/sandbox/connect` 领活；只读材料按清单 + 缓存下发，产物与 dsh 会话每轮结束存进检查点。打开方法：`.env` 里写
+
+```
+MATRIX_CLOUD_SANDBOX=local          # off（默认）= 照旧；local = 每个执行单元一个本机子进程沙箱（外层 bwrap）
+# 可选：
+MATRIX_SANDBOX_MAX=28               # 全局同时在的沙箱数，默认按 (内存 − 2 GB) / 512 MB 估
+MATRIX_SANDBOX_PER_USER=4           # 每个用户同时在的沙箱数
+MATRIX_SANDBOX_IDLE=600             # 空闲多少秒停沙箱（目录保留）
+MATRIX_SANDBOX_RETAIN=604800        # 执行单元结束后多少秒销毁沙箱目录（检查点留着）
+MATRIX_CHECKPOINT_LIMIT=1000000000  # 每个执行单元的检查点最多存多少字节的产物，超出的只记清单
+MATRIX_SANDBOX_ROOT=                # 执行面目录树，默认 /data/exec
+```
+
+或命令行 `matrix --sandbox local`。要求与现在的外层沙箱一样（Linux、bwrap 能在容器里建命名空间，compose 现在的安全选项下可用）；
+起不来时云侧运行失败并写明原因，不会悄悄退回不隔离的子进程。满了的时候委托等待、席位排队，不算失败。
+
+- 打开后第一次运行的执行单元会把旧工作目录的产物、阶段 0 状态目录（或 `dsh-home`）里的 dsh 会话导入检查点，原目录不删，会话续得上。
+- 新增的数据：`/data/exec/`（沙箱的工作目录与状态，可以不备份，能从检查点重建）、`/data/checkpoints/` 与 `/data/content/`（检查点，**要备份**）、
+  `/data/run-logs/`（dsh 事件）。
+- 配额：local 后端没有 cgroup 配额，docker 后端有（见下一节）。
+- **有存量数据时的步骤**（服务停着跑，`docker compose run --rm matrix matrix migrate …`）：
+  1. 备份 `matrix-data` 与 `dsh-home` 两个卷；
+  2. `matrix migrate workdirs`：给现有的每个席位、委托建第一份检查点（可重复跑，跑到一半断了再跑一遍）；报告里列出超过检查点上限、只记了清单的文件，
+     决定调大 `MATRIX_CHECKPOINT_LIMIT` 后重跑，还是放弃它们；
+  3. 打开开关、起服务；
+  4. **回退**：停服务，`matrix migrate export`（检查点写回原目录、会话放回能续接的位置），关掉开关再起服务；
+  5. 确认不再回退后，`matrix migrate purge-legacy` 先看会删什么，再加 `--yes` 真删。之后只能从备份恢复。
+- 升级 dsh 时加跑 `matrix-dsh-check --live --sandbox local`。
+
+### 云侧执行面：docker 后端（每个执行单元一个容器）
+
+阶段 1b（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 8 节“阶段 1b 的实现”）：每个席位或委托一个容器，生产用 gVisor（`runsc`）。
+容器由沙箱管理器 `sandboxd` 创建，它是唯一挂 `docker.sock` 的服务；Matrix 自己不再跑 dsh，也就不再需要放开 seccomp 与 `/proc` 遮挡。
+
+**1. 装 gVisor**（宿主上，Debian / Ubuntu；其他发行版见 <https://gvisor.dev/docs/user_guide/install/>）：
+
+```bash
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+sudo apt-get update && sudo apt-get install -y runsc
+sudo runsc install && sudo systemctl restart docker
+docker info --format '{{json .Runtimes}}'    # 里面要有 "runsc"
+```
+
+**2. 写管理器配置并构建镜像**（在 `deploy/` 下）：
+
+```bash
+cp sandboxd.example.json sandboxd.json       # runtime 默认 runsc；镜像名、配额、沙箱里固定的环境（出网代理、CA）在这里改
+docker compose -f compose.yml -f compose.sandbox.yml --profile build build
+```
+
+管理器的 socket 是 0660、属组 gid 1000（Matrix 服务的用户），管理器用 `group_add` 加进这个组，别的进程连不上。
+`sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`gateway_container`（出口网关所在的容器，compose 里是 `matrix-core`）、
+`connect_url`（沙箱客户端连回来的地址，`{gateway}` 换成网关在执行单元网络上的地址）、`subnet_pool`（每个执行单元一张网络，从这里切 /28）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`（单个沙箱的默认配额与请求能要的上限）、`host_reserve_mb`（留给宿主的内存，默认 1024；管理器启动时 `memory_mb`、`max_memory_mb` 都不能超过“宿主内存 − 它”，超了拒绝启动）。`memory_mb` 不写时按宿主定：`min(2048, 宿主内存 − 预留)`，读不到宿主内存时 2048；`max_memory_mb` 不写时取“宿主内存 − 预留”，最多 8192。样例里没写这两项，小内存的机器用样例也起得来；写了就按写的核对）、`tmp_mb`、`env`（不能放密钥，
+名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
+内网构建的参数与主镜像相同，另有 `DOCKER_CLI_TARBALL`（管理器镜像里 docker 命令行的静态包地址）。
+
+**3. 打开**：
+
+```bash
+docker compose -f compose.yml -f compose.sandbox.yml up -d
+docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # 第二行写着隔离等级
+```
+
+叠加文件会把 `matrix` 改成 `MATRIX_CLOUD_SANDBOX=docker`、挂上管理器的 socket 目录、安全选项改成只有 `no-new-privileges`，
+容器名固定为 `matrix-core`，核心只监听内部网络的地址（`MATRIX_HOST=matrix`），出口网关监听 8766（`MATRIX_GATEWAY_LISTEN`）。
+管理器给每个执行单元建一张 internal 网络（没有对外路由、宿主不在上面），只接这个沙箱和 `matrix-core`：沙箱只连得到出口网关。
+`subnet_pool`（默认 `10.213.0.0/16`）和机器上已有的网络冲突时在 `sandboxd.json` 里改。
+
+**模型**：沙箱方式下只支持平台配置的模型供应商（管理后台“模型”页填地址与密钥，Agent 选它）：密钥留在核心，模型请求经出口网关换上。
+用 dsh 自带供应商（`.env` 里的 `DEEPSEEK_API_KEY` 之类）的 Agent 这一轮会报错，提示去后台配。DeepSeek 写成：协议 `openai-completions`、
+地址 `https://api.deepseek.com`、模型 `deepseek-flash`。
+
+**出网**：沙箱里的命令只能经出口网关的代理出网（环境里已经设好 `HTTPS_PROXY`）。公网要 Agent 有 `web.research`（只到 80 / 443），
+包镜像源写进 `.env` 的 `MATRIX_GATEWAY_MIRRORS`（逗号分隔的主机，有 `shell.exec` 就放行，内网的镜像源也行），别的内网目标只认 `fetch.json` 的 `allow`。
+网关解开 HTTPS（出网 CA 第一次用到时生成在 `/data/gateway/ca/`，私钥只在这里，沙箱只拿到证书；轮换：删掉这个目录、重启 matrix），
+逐个请求放行：镜像源与白名单只读，公网只 GET / HEAD；要 Agent 往某个外部主机写（POST 等）就把它写进 `MATRIX_GATEWAY_WRITE_HOSTS`，
+更好的做法是包成连接器。每轮发往外部主机的请求有出网预算（`MATRIX_GATEWAY_BUDGET`，默认 65536 字节），超了这一轮的公网读即停并告诉所有者。
+证书固定的客户端、非 HTTP 协议走不通。`MATRIX_GATEWAY_TLS=off` 退回只按主机放行的隧道。每个请求记在 `/data/gateway/egress.jsonl`（执行单元、主机、端口、方法、字节数、结果；
+有别人在场的场合记完整 URL）。服务器自己要经代理出网时，
+在 `.env` 里给 matrix 设 `HTTPS_PROXY`（网关转发模型请求与出网时用它）。
+
+- **`insecure-runc`**：没装 gVisor 时可以先用 runc 试（`sandboxd.json` 写 `"runtime": "insecure-runc"`）。这一档沙箱容器与宿主共用内核，
+  而且为了让 dsh 的内层 bwrap 能建命名空间，沙箱容器放开了 seccomp 与 `/proc` 遮挡（不放开 dsh 会悄悄退到更弱的沙箱）。
+  管理后台、Agent 页、启动日志会一直写“未达到生产隔离”。**不要用在多用户部署上**。
+- 配置的运行时不在（比如写了 `runsc` 但没装）：云侧运行一律拒绝并写明原因，不退回 runc。
+- `sandboxd.json` 不写 `gateway_container` 时是 1b 的旧形态（共用一张网络、沙箱能直接出网），能力报告写“未达到生产隔离”。
+- 排错：沙箱连不回来（“沙箱的客户端没有连上”）先看 `docker network inspect <沙箱名>` 里有没有 `matrix-core`、`connect_url` 的端口和 `MATRIX_GATEWAY_LISTEN` 是否一致；
+  命令出不了网看 `/data/gateway/egress.jsonl` 里那一行的 `result`（被拒的写着原因）。
+- 配额：CPU、内存（不给 swap）、进程数由 cgroup 管；**卷没有大小上限**（Docker 的 local 卷做不到；按用量停沙箱放在阶段 3）。
+- 控制面不认识的沙箱（比如 `state.json` 从备份恢复后）：运行中的停掉、卷保留，卷过 `MATRIX_SANDBOX_RETAIN`（默认 7 天）才删，日志里写明删了哪个。
+- 数据：沙箱的卷（`matrix-sbx-*`）只是缓存，能从检查点重建，不用备份；`/data/checkpoints/` 与 `/data/content/` 要备份。
+- 升级 dsh：重建沙箱镜像（上面第 2 步），再跑 `deploy/isolation-check` 的 `t8`，或在宿主上
+  `matrix-dsh-check --live --sandbox docker --listen <网关> --port <端口> --root <管理器允许的前缀下的目录>`。
+
+**回退**：`docker compose -f compose.yml up -d`（不带叠加文件），`matrix` 回到在自己容器里跑 dsh 的方式（`compose.yml` 里的安全选项照旧）。
+沙箱方式期间新写的产物只在检查点里（`/data/checkpoints/` + `/data/content/`）。留下的沙箱容器与卷：
+`docker ps -aq --filter label=dev.matrix.ns=matrix | xargs -r docker rm -f`、`docker volume ls -q --filter label=dev.matrix.ns=matrix | xargs -r docker volume rm`（`matrix` 换成 `sandboxd.json` 的 `namespace`）。
+
+**排错**
+
+| 现象 | 处理 |
+| --- | --- |
+| 云侧运行失败，原因以 `ISOLATION` 开头 | 管理器配置的运行时不在：`docker info` 里没有 `runsc`，按第 1 步装好并重启 Docker |
+| 失败原因是“连不上沙箱管理器” | `sandboxd` 没起来或 socket 卷没挂上：`docker compose … logs sandboxd` |
+| 失败原因是“沙箱的客户端没有连上” | 沙箱连不回 Matrix：`connect_url` 与网关、端口不一致，或防火墙拦了沙箱网络到网关的 8765；`docker logs <沙箱容器>` 看客户端的报错 |
+| 失败原因是“沙箱容器起不来” / “工作目录卷准备不了” | 镜像名不对或没构建（第 2 步）；`docker images | grep matrix-sandbox` |
+| Agent 的命令报 Permission denied、dsh 起不来 | 用的是旧的沙箱镜像或改过 `tmp_mb` 之外的模板：重建镜像；`/tmp` 必须可执行（模板里已是 `exec`） |
+| `matrix-dsh-check` 的 `isolation` 说“不在 dsh 的内层 bwrap 里” | runc 档下沙箱容器没放开 seccomp / `/proc` 遮挡（模板已带）；或宿主的 AppArmor 拦了用户命名空间：改用 gVisor |
+
+### dsh 自己的沙箱
+
+dsh 在 Linux 上用 bwrap 做沙箱。bwrap 起不来时 dsh 不会拒绝执行，而是退到一种更弱的方式：实测工作目录以外仍有能写的地方（如 `/tmp`），`matrix-dsh-check` 的 `sandbox` 一项会变红（[docs/cloud-runtime.md](../docs/cloud-runtime.md) 第 11 节）。所以下面两个安全选项不能去掉。bwrap 要在容器里创建命名空间，所以 `matrix` 容器设置了 `seccomp=unconfined` 和 `systempaths=unconfined`，同时用 `cap_drop: ALL` 去掉了全部特权，并以非 root 用户运行。这样会削弱容器自身的隔离，换来的是 Agent 执行的命令受到文件级的限制。
+
+dsh 自己的沙箱只限制写，不限制读；读由上面的外层管。外层只做到“文件读隔离”：内核与网络仍共用、没有 cgroup 配额、模型密钥仍在 dsh 进程的环境变量里，
+见 [docs/reference/security.md](../docs/reference/security.md) 的“已知风险”。
 
 ## 数据与备份
 
-- `matrix-data` 卷存放 Matrix 的全部状态。
-- `dsh-home` 卷存放 dsh 的会话和凭据。
+- `matrix-data` 卷存放 Matrix 的全部状态，包括云侧每个执行单元的 dsh 会话（`/data/dsh-state/`）。
+- `dsh-home` 卷是升级前共用的 dsh 会话和凭据：云侧不再用它，只在旧会话第一次被拷走前要留着（凭据见「配置模型凭据」）。
 
 备份示例：
 

@@ -34,9 +34,10 @@ HIDDEN_LIST_LIMIT = 50  # 提示词里最多列这么多个没挂上的笔记名
 
 
 def _home(writable: bool, mounted: bool = True, hidden: list[str] = (), mixed: list[str] = (),
-          frozen: bool = False) -> list[str]:
+          frozen: bool = False, cloud: bool = False) -> list[str]:
     """hidden：这一轮没挂上的笔记（写在别的场合，给这里的人看会越界），只列名字，用 open_note 读。
-    mixed：挂上了、但写的时候有别人的输入。frozen：这里有别人，技能只读。"""
+    mixed：挂上了、但写的时候有别人的输入。frozen：这里有别人，技能只读。
+    cloud：云侧运行，工作目录以外一律不可写、也没有审批（不变量 14）；端侧可以申请升权、由所有者批准。"""
     if mounted:
         how = "可以读写" if writable else "只能读（你没有 file.write）"
         home = ["", "## 你的私有目录",
@@ -58,10 +59,15 @@ def _home(writable: bool, mounted: bool = True, hidden: list[str] = (), mixed: l
     else:
         home = ["", "## 你的私有目录",
                 "- 这个项目里有别人，你在本机运行，私有目录没有挂载。不要设法读取或复述它的内容。"]
-    return home + [
-            "", "## 工作区边界",
-            "- 你的写操作只限于当前工作目录。需要写工作目录以外时，照沙箱拒绝后的提示带理由申请升权重试一次；"
-            "申请会交给你的所有者审批。被拒绝就停下来说明，不要绕过。"]
+    return home + ["", "## 工作区边界", *(_CLOUD_BOUNDARY if cloud else _DEVICE_BOUNDARY)]
+
+
+_CLOUD_BOUNDARY = [
+    "- 你只能写当前工作目录。工作目录以外一律写不进，也没有审批：不要申请升权，也不要设法绕过。",
+    "- 产物都放在工作目录里：交付、发文件、发布进项目档案都从这里取。"]
+_DEVICE_BOUNDARY = [
+    "- 你的写操作只限于当前工作目录。需要写工作目录以外时，照沙箱拒绝后的提示带理由申请升权重试一次；"
+    "申请会交给你的所有者审批。被拒绝就停下来说明，不要绕过。"]
 
 
 def format_note(rel: str, where: str, mixed: bool, text: str, truncated: bool) -> str:
@@ -349,7 +355,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
                       home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
-                      home_frozen: bool = False, ask: bool = False, goals: bool = False) -> str:
+                      home_frozen: bool = False, ask: bool = False, goals: bool = False, cloud: bool = False) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
@@ -414,7 +420,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
         parts += _asking(task=False)
     if goals:
         parts += _goals(task=False)
-    parts += [*_attachments_note(), *_home(home_writable, home, home_hidden, home_mixed, home_frozen), *_writing(), "",
+    parts += [*_attachments_note(), *_home(home_writable, home, home_hidden, home_mixed, home_frozen, cloud), *_writing(), "",
               "回复直接面向用户，结论要有依据，信息缺口要标注。", "", body]
     return "\n".join(parts)
 
@@ -567,7 +573,7 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
                       knowledge: list[KnowledgeItem], home_writable: bool, archive: str = "",
                       home: bool = True, plugins: bool = False, home_hidden: list[str] = (), services: bool = False,
                       home_mixed: list[str] = (), home_frozen: bool = False, ask: bool = False,
-                      goals: bool = False) -> str:
+                      goals: bool = False, cloud: bool = False) -> str:
     d = task.delegation
     parts = [
         *_identity(agent), "",
@@ -587,13 +593,13 @@ def build_task_prompt(task: Task, agent: AgentNode, delegator: AgentNode, projec
         *_network_tools(project, can_delegate, plugins, services),
         *_abilities(),
         *_knowledge(knowledge),
-        *_home(home_writable, home, home_hidden, home_mixed, home_frozen),
+        *_home(home_writable, home, home_hidden, home_mixed, home_frozen, cloud),
         *(_asking(task=True) if ask else []),
         *(_goals(task=True) if goals else []),
         *_writing(),
         "", "## 交付",
-        "- 第一行写一句话结论：做成了什么、没做成什么。然后说明交付了什么、在哪里（工作目录里的文件，"
-        "或工作目录之外的位置）、委托方怎么确认；无法确认的内容要标注。",
+        "- 第一行写一句话结论：做成了什么、没做成什么。然后说明交付了什么、在哪里（工作目录里的文件"
+        + ("" if cloud else "，或工作目录之外的位置") + "）、委托方怎么确认；无法确认的内容要标注。",
         "- 篇幅、形式与依据的要求以上面的输出要求和约束为准。",
         "- 你在工作目录里写的文件会在交付时整体拷给委托方（`deliveries/<任务 id>/`），不用把文件内容贴进回复；"
         "草稿与临时文件放在 `tmp/` 下或删掉，它们不随交付。",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from matrix.dsh_check import KNOWN_TOOLS, disabled_in, plugin_ids
+from matrix.dsh_check import KNOWN_TOOLS, disabled_in, plugin_ids, resource_plan
 from matrix.runtime import ALWAYS_DISABLED, AUTHORITY_PLUGINS, build_patch_yaml
 
 CONFIG = """\
@@ -50,3 +50,14 @@ def test_provider_overlay_names_only_the_key_env():
     assert {"llm-pi-ai", "agent-default-model"} <= plugin_ids(overlay)
     assert '"apiKeyEnv": "MATRIX_LLM_HI_API_KEY"' in overlay
     assert "llm-pi-ai" not in plugin_ids(build_patch_yaml([], model=preset.run_model()))  # 不用平台供应商时不碰它
+
+
+def test_resource_probe_follows_quota_and_host_memory():
+    """resource-limit 探针按管理器报的配额定大小（配额 + 余量），宿主可用内存不够就提醒并跳过；没有配额的后端不跑。"""
+    rep = {"quota": True, "quota_default": {"memory_mb": 768, "pids": 256}}
+    assert resource_plan(rep, 4000) == ("", 1024, 356)
+    skip, mem, _ = resource_plan(rep, 1400)        # 1024 + 512 > 1400
+    assert mem == 1024 and "宿主可用内存 1400 MB" in skip and "1536" in skip
+    assert resource_plan(rep, None)[0] == ""       # 读不到可用内存（不是 Linux）：照跑
+    assert "没有配额" in resource_plan({"quota": False}, 64000)[0]
+    assert resource_plan({"quota": True}, 64000) == ("", 2304, 612)   # 老的管理器没报默认配额：按 4.3 的默认值

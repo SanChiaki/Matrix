@@ -1,0 +1,89 @@
+# 云侧执行面（docs/cloud-runtime.md 阶段 1b）的两个镜像，同一个文件两个目标：
+#   sandbox  ：沙箱镜像。每个执行单元一个容器，里面是沙箱客户端（matrix/connector/sandbox.py）+ dsh（带内层 bwrap）+ 常用工具。
+#              没有任何密钥，没有 Matrix 的状态；只读根文件系统下能跑（HOME 在 /state 卷，临时文件在 /tmp）。
+#   sandboxd ：沙箱管理器 matrix-sandboxd。唯一挂 docker.sock 的服务，里面多一个 docker 命令行。
+# 构建：docker build -f deploy/Dockerfile.sandbox --target sandbox  -t matrix-sandbox:latest  .
+#       docker build -f deploy/Dockerfile.sandbox --target sandboxd -t matrix-sandboxd:latest .
+# 内网构建的参数与 deploy/Dockerfile 相同（APT_MIRROR、NPM_REGISTRY、PYPI_INDEX、NODE_TARBALL、deploy/ca-certificates/）。
+FROM python:3.14-slim-bookworm AS base
+
+ARG UV_VERSION=0.12.1
+ARG APT_MIRROR=""
+ARG PYPI_INDEX=""
+
+COPY deploy/ca-certificates/ /usr/local/share/ca-certificates/matrix/
+ENV NODE_USE_SYSTEM_CA=1 \
+    UV_SYSTEM_CERTS=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN set -eux; \
+    rm -f /usr/local/share/ca-certificates/matrix/README /usr/local/share/ca-certificates/matrix/.gitignore; \
+    update-ca-certificates; \
+    if [ -n "$APT_MIRROR" ]; then \
+      sed -i -e "s|https\?://deb.debian.org|${APT_MIRROR%/}|g" -e "s|https\?://security.debian.org|${APT_MIRROR%/}|g" \
+        /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl xz-utils; \
+    PYPI_HTTP_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    pip install --no-cache-dir ${PYPI_INDEX:+--index-url "$PYPI_INDEX"} ${PYPI_HTTP_HOST:+--trusted-host "$PYPI_HTTP_HOST"} \
+      uv==${UV_VERSION}; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 matrix && mkdir -p /app && chown matrix:matrix /app
+WORKDIR /app
+COPY --chown=matrix:matrix pyproject.toml uv.lock ./
+COPY --chown=matrix:matrix matrix ./matrix
+USER matrix
+RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
+    if [ -n "$PYPI_INDEX" ]; then UV_DEFAULT_INDEX="$PYPI_INDEX" uv sync --no-dev; else uv sync --frozen --no-dev; fi; \
+    rm -rf /home/matrix/.cache
+ENV PATH=/app/.venv/bin:$PATH
+
+
+# ---------------- 沙箱镜像 ----------------
+FROM base AS sandbox
+ARG DSH_VERSION=0.2.1-rc.5
+ARG NODE_MAJOR=24
+ARG NPM_REGISTRY=""
+ARG NODE_TARBALL=""
+USER root
+# bubblewrap：dsh 的内层沙箱（gVisor 里不用放开任何安全选项；runc 里要放开 seccomp 与 /proc 遮挡，见管理器的 insecure-runc 档）。
+# 其余是 Agent 常用的命令行工具。不装编译工具链与浏览器：需要的部署方在这个镜像之上加。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends bubblewrap git gnupg jq ripgrep procps less file unzip zip \
+      openssh-client patch tree; \
+    if [ -n "$NODE_TARBALL" ]; then \
+      mkdir -p /opt/node; \
+      curl -fsSL "$NODE_TARBALL" | tar -xJ -C /opt/node --strip-components=1; \
+      ln -sf /opt/node/bin/node /opt/node/bin/npm /opt/node/bin/npx /usr/local/bin/; \
+    else \
+      curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -; \
+      apt-get install -y --no-install-recommends nodejs; \
+    fi; \
+    npm install -g ${NPM_REGISTRY:+--registry="$NPM_REGISTRY"} @deepseek-ai/dsh@${DSH_VERSION}; \
+    command -v dsh || ln -sf "$(npm prefix -g)/bin/dsh" /usr/local/bin/dsh; \
+    command -v dsh; \
+    apt-get purge -y gnupg; apt-get autoremove -y; rm -rf /var/lib/apt/lists/* /root/.npm; \
+    # /state：dsh 状态卷的挂载点，归沙箱用户（空卷挂上来时照搬属主）
+    mkdir -p /state && chown matrix:matrix /state
+USER matrix
+ENV HOME=/state \
+    TMPDIR=/tmp
+# 命令由管理器给（python -m matrix.connector.sandbox …），这里不设默认的
+
+
+# ---------------- 沙箱管理器 ----------------
+FROM base AS sandboxd
+# docker 命令行（静态包，只取 docker 这一个文件）：Debian 自带的 docker.io 太旧，连不上新版 Docker（API 版本）。
+# 内网构建时把 DOCKER_CLI_TARBALL 指到镜像站上的同一个包。
+ARG DOCKER_CLI_TARBALL=https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz
+USER root
+RUN set -eux; \
+    curl -fsSL "$DOCKER_CLI_TARBALL" | tar -xz -C /usr/local/bin --strip-components=1 docker/docker; \
+    docker --version
+# 以 root 运行：要读写 docker.sock（它本来就等于宿主 root，所以只给这一个服务挂）。compose 里去掉全部特权、只读根
+ENV MATRIX_SANDBOXD_SOCKET=/run/matrix-sandboxd/sandboxd.sock
+CMD ["matrix-sandboxd"]

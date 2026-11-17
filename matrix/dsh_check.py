@@ -7,9 +7,14 @@
   配了抓取白名单时，自带的 web_fetch 关得掉、web_search 还在、白名单抓取服务装得上。
 - 平台配的模型供应商（不调真模型：本机起一个假的 OpenAI 兼容服务）：覆盖层里的供应商生效、密钥经环境变量带上，
   而 Agent 的命令看不到这个密钥（printenv、各进程的 /proc/*/environ、ps eww）。research: deepseek-harness#model-providers
-- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、沙箱升权审批、提问。
+- 云侧隔离（同样由假服务驱动 Agent 的 bash，docs/cloud-runtime.md 第 8 节）：`read-isolation` 读数据目录里的标记、
+  另一个执行单元的工作目录与 dsh 会话、`vault.key`、服务进程主目录里的东西，读得到就失败；`proc-isolation` 看沙箱之外的进程
+  与它们的环境变量。外层沙箱不可用、又不是 required 时给“未隔离”的提醒，不算通过。
+- 实际跑（`--live`，要调模型，花一点 token）：回复与网络工具、续接会话、技能、委托、连接器代调用、
+  工作目录以外写不进且不产生审批（云侧不审批，不变量 14）、提问。
 
     uv run matrix-dsh-check [--dsh-bin dsh] [--live] [--model provider/model] [--only resume,approval] [--keep]
+                            [--isolation required|preferred|off]
     docker compose exec matrix matrix-dsh-check --live
 
 数据放在临时目录，跑完删掉（`--keep` 或有失败时保留，便于看 `dsh-events.jsonl`）。不碰正式数据目录。
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import shutil
@@ -134,7 +140,7 @@ def static_checks(rt: DshRuntime, report: Report, workdir: Path) -> bool:
     if "includeDefaultRoots: false" not in full.stdout:
         problems.append("skill-filesystem 的 includeDefaultRoots: false 没生效（会读部署机器上的技能目录）")
     report.add(FAIL if problems else OK, "overlay", "；".join(problems)[:400] if problems
-               else "没有权限的覆盖层：网络工具、连接器桥、审批与提问应答者、后台任务守护都装上，按权限禁用的插件都关了")
+               else "没有权限的覆盖层：网络工具、连接器桥、审批（端侧驱动用）与提问应答者、后台任务守护都装上，按权限禁用的插件都关了")
     fetch_check(rt, report, workdir)
     return not missing
 
@@ -166,8 +172,10 @@ class FakeProvider:
     """OpenAI chat completions 的最小假服务（SSE）。带工具的第一次请求让 Agent 用 bash 找密钥，之后收尾；
     记下每次请求的认证头、模型、推理强度、工具结果，以及受 compat 影响的系统提示角色和输出上限字段。"""
 
-    def __init__(self, probe: str) -> None:
+    def __init__(self, probe: str, host: str = "127.0.0.1") -> None:
+        """host：监听在哪（docker 后端的沙箱在自己的网络里，要监听在它连得到的网关上）。probe 可以随时换。"""
         self.requests: list[dict[str, Any]] = []
+        self.probe = probe
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -193,7 +201,7 @@ class FakeProvider:
                     self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
 
                 if "bash" in tools and not results:
-                    args = json.dumps({"description": "check", "command": probe})
+                    args = json.dumps({"description": "check", "command": fake.probe})
                     chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
                                                                 "function": {"name": "bash", "arguments": args}}]})
                     chunk({}, "tool_calls")
@@ -202,8 +210,8 @@ class FakeProvider:
                     chunk({}, "stop")
                 self.wfile.write(b"data: [DONE]\n\n")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        self.server = ThreadingHTTPServer((host, 0), H)
+        self.url = f"http://{host}:{self.server.server_address[1]}/v1"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
 
@@ -214,7 +222,8 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
     pattern = prov0.key_env[:-1] + "[" + prov0.key_env[-1] + "]="
     probe = (f"printenv {prov0.key_env} >/dev/null; echo PRINTENV=$?; "
              f"echo PROC=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{pattern}'); "
-             f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}')")
+             f"echo PS=$(ps eww 2>/dev/null | grep -c '{pattern}'); "
+             "echo PID1=$(tr '\\0' ' ' < /proc/1/cmdline 2>/dev/null | cut -c1-40)")
     fake = FakeProvider(probe)
     try:
         # compat：不配时 dsh 发 developer 角色与 max_completion_tokens，glm 一类端点据此回 400
@@ -225,7 +234,7 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
         res = rt.run(RunRequest(agent_id="check", context_id="provider", prompt="跑一下", cwd=workdir / "provider",
                                 authority=list(AUTHORITY_PLUGINS), model=preset.run_model(), timeout_s=timeout_s,
                                 llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
-                                env={prov.key_env: secret}))
+                                env={prov.key_env: secret}, state_dir=workdir / "provider-state"))
     finally:
         fake.server.shutdown()
     reqs = fake.requests
@@ -253,8 +262,100 @@ def provider_checks(rt: DshRuntime, report: Report, workdir: Path, timeout_s: fl
         report.add(FAIL if leaked else OK, "key-hidden",
                    f"Agent 的命令看得到供应商密钥（{'、'.join(leaked)}）：不能把密钥交给 dsh 进程的环境" if leaked
                    else "Agent 的命令看不到供应商密钥（printenv、/proc/*/environ、ps eww）")
+    if sys.platform.startswith("linux") and "PRINTENV=" in results:
+        # bwrap 起不来时 dsh 不拒绝执行，退到更弱的方式（工作目录以外仍有能写的地方，docs/cloud-runtime.md 第 11 节）：
+        # Agent 的命令在 bwrap 里时 1 号进程就是 bwrap
+        m = re.search(r"PID1=([^\n]*)", results)
+        pid1 = m.group(1).strip() if m else ""
+        report.add(OK if pid1.startswith("bwrap") else FAIL, "sandbox",
+                   "Agent 的命令在 bwrap 沙箱里" if pid1.startswith("bwrap") else
+                   f"Agent 的命令不在 bwrap 里（1 号进程：{pid1 or '看不到'}）：dsh 退到了更弱的沙箱，工作目录以外仍有能写的地方。"
+                   "容器里要放开 seccomp 与 /proc 遮挡（deploy/compose.yml），或改用 gVisor")
     if PROVIDER_DONE not in (res.final_text or ""):
         report.add(FAIL, "provider-end", f"这一轮没正常收尾：{res.error or res.final_text}"[:300])
+
+
+# ================= 云侧隔离（假服务驱动 Agent 的 bash，不调真模型） =================
+def _fake_bash(rt: DshRuntime, cwd: Path, state: Path, probe: str, authority: list[str],
+               timeout_s: float = 120) -> tuple[str, Any]:
+    """让 Agent 的 bash 执行 probe（由假的模型服务下指令），返回（工具结果的文本, 运行结果）。"""
+    fake = FakeProvider(probe)
+    try:
+        prov = Provider(id="matrix-check", name="Matrix check", api="openai-completions", base_url=fake.url)
+        preset = ModelPreset(id="check", label="Fake", provider=prov.id, model="fake-1")
+        res = rt.run(RunRequest(agent_id="check", context_id="isolation", prompt="跑一下", cwd=cwd, authority=authority,
+                                model=preset.run_model(), timeout_s=timeout_s, state_dir=state,
+                                llm_provider={"id": prov.id, "config": llm_config(prov, preset)},
+                                env={prov.key_env: "sk-matrix-check-" + secrets.token_hex(8)}))
+    finally:
+        fake.server.shutdown()
+    return " ".join(x for r in fake.requests for x in r["results"]), res
+
+
+def isolation_checks(rt: DshRuntime, report: Report, workdir: Path) -> None:
+    """read-isolation / proc-isolation：在一个假的数据目录里摆好别人的东西，让这个执行单元里 Agent 的 bash 去读。
+    读得到、看得到就是失败（外层沙箱可用时）；外层不可用、又不是 required 时是“未隔离”的提醒。"""
+    iso = rt.isolation()
+    report.add(OK if iso["active"] else FAIL if iso["mode"] == "required" else WARN, "isolation",
+               f"{iso['mode']}：{iso['note']}"[:400])
+    # 不放在 /tmp 下：dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的东西没有外层也读不到，检查就失真了。
+    # 放在服务进程的主目录下（和真实部署的 /data 一样，内层沙箱里整个可见、只读）
+    tag = secrets.token_hex(4)
+    base = (Path.home() / ".cache" / f"matrix-dsh-check-{tag}").resolve()
+    data = base / "data"
+    cwd, state = data / "conversations" / "c1" / "a1", data / "dsh-state" / "seats" / "c1" / "a1"
+    marks = {  # 名字 → 路径：都是这个执行单元不该读到的
+        "DATA": data / "state.json",                                          # 数据目录里的标记（相当于 state.json）
+        "VAULT": data / "vault.key",
+        "OTHER_UNIT": data / "tasks" / "task-other" / "report.md",           # 另一个执行单元的工作目录
+        "OTHER_SESSION": data / "dsh-state" / "tasks" / "task-other" / ".dsh" / "sessions" / "--x--" / "s-1" / "index.json",
+        "OTHER_HOME": data / "agents" / "agent-other" / "notes.md",          # 别人的私有目录
+        "SERVER_HOME": base / "marker.txt",                                   # 服务进程的主目录（数据目录以外）
+    }
+    for name, p in marks.items():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"MARK-{name}-{tag}\n", encoding="utf-8")
+    cwd.mkdir(parents=True, exist_ok=True)
+    (cwd / "mine.txt").write_text("mine\n", encoding="utf-8")
+    shared = Path.home() / ".dsh"   # 共用的 ~/.dsh（旧会话与 dsh 自己的凭据）：在就看能不能列出来
+    lines = [f"cat {json.dumps(str(p))} >/dev/null 2>&1 && echo {n}=READ || echo {n}=blocked" for n, p in marks.items()]
+    lines.append("cat mine.txt >/dev/null 2>&1 && echo MINE=READ || echo MINE=blocked")
+    if shared.is_dir():
+        lines.append(f"ls -A {json.dumps(str(shared))} >/dev/null 2>&1 && echo SHARED_DSH=READ || echo SHARED_DSH=blocked")
+    # 沙箱之外的进程：一个带标记参数与标记环境变量的进程（[x] 让 grep 不匹配到这条命令自己）
+    arg, secret = f"matrix-check-proc-{tag}", f"matrix-check-env-{tag}"
+    lines += [f"echo PROC_SEEN=$(grep -l '{arg[:-1]}[{arg[-1]}]' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)",
+              f"echo ENV_SEEN=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{secret[:-1]}[{secret[-1]}]')",
+              "echo PROCS=$(ls /proc | grep -c '^[0-9]')"]
+    outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", arg],
+                               env={**os.environ, "MATRIX_CHECK_PROC_ENV": secret})
+    try:
+        results, res = _fake_bash(rt, cwd, state, "; ".join(lines), ["shell.exec", "file.write"])
+    finally:
+        outside.kill()
+        shutil.rmtree(base, ignore_errors=True)
+    if "MINE=" not in results:
+        why = res.error or res.final_text or "没有输出"
+        status = FAIL if iso["active"] or iso["mode"] == "required" else WARN
+        report.add(status, "read-isolation", f"Agent 的 bash 没跑起来，没法检查：{why}"[:400])
+        report.add(status, "proc-isolation", "同上，没法检查")
+        return
+    seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", results))
+    readable = [n for n in [*marks, "SHARED_DSH"] if seen.get(n) == "READ"]
+    if seen.get("MINE") != "READ":
+        report.add(FAIL, "read-isolation", "Agent 的命令连自己工作目录里的文件都读不到：探针本身不对")
+    elif not iso["active"]:
+        report.add(FAIL if iso["mode"] == "required" else WARN, "read-isolation",
+                   f"未隔离：Agent 的命令读得到 {'、'.join(readable) or '（这次没读到，但没有外层沙箱）'}（{iso['note']}）"[:400])
+    else:
+        report.add(FAIL if readable else OK, "read-isolation",
+                   f"外层沙箱里读得到不该读的：{'、'.join(readable)}" if readable else
+                   "数据目录的标记、vault.key、别的执行单元的工作目录与 dsh 会话、别人的私有目录、服务进程的主目录"
+                   + ("、共用的 ~/.dsh" if shared.is_dir() else "") + "都读不到；自己的工作目录照常可读")
+    procs = [k for k in ("PROC_SEEN", "ENV_SEEN") if seen.get(k, "0") != "0"]
+    detail = (f"看得到沙箱之外的进程（{'、'.join(procs)}，共 {seen.get('PROCS', '?')} 个进程）" if procs else
+              f"看不到沙箱之外的进程与它们的环境变量（Agent 的命令只看得到 {seen.get('PROCS', '?')} 个进程）")
+    report.add((FAIL if iso["active"] else WARN) if procs else OK, "proc-isolation", detail)
 
 
 # ================= 实际跑（--live） =================
@@ -305,10 +406,14 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+MIRRORS = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "codeload.github.com")
+
+
 class Live:
     """一个临时的网络：真实 dsh 运行时 + 只监听本机的回调服务 + 本机 echo 连接器。"""
 
-    def __init__(self, rt: DshRuntime, root: Path, timeout_s: float, model: dict[str, str] | None = None):
+    def __init__(self, rt: DshRuntime, root: Path, timeout_s: float, model: dict[str, str] | None = None,
+                 sandbox: str = "off", listen: str = "127.0.0.1", port: int = 0, gateway_listen: str = ""):
         import uvicorn
 
         from . import auth
@@ -320,23 +425,78 @@ class Live:
         self.mcp = EchoMCP()
         catalog = root / "connectors.json"
         catalog.write_text(json.dumps({"connectors": [{"id": "smoke", "name": "冒烟", "url": self.mcp.url}]}), encoding="utf-8")
-        port = _free_port()
+        port = port or _free_port()
         (root / "data").mkdir()
-        self.net = Network(rt, root / "data", tool_url=f"http://127.0.0.1:{port}/internal/tools", seed=False,
-                           connectors=ConnectorCatalog(catalog))
-        self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host="127.0.0.1", port=port, log_level="warning"))
+        from .model_catalog import ModelCatalog
+        from .sandboxes import provider_named
+        # 沙箱方式下 isolation、resource-limit 由假模型驱动（命令一定被执行，不看真模型愿不愿意）：平台供应商指向假服务，
+        # 只有探针用的 Agent 选它；Lead / Helper 照旧用真模型（给了 --model 时是目录里的 live 一项）
+        self.fake: FakeProvider | None = None
+        models = None
+        self.secret = "sk-matrix-check-" + secrets.token_hex(12)   # 假供应商的密钥：key-absent 在沙箱里找它
+        self.real_key = ""
+        if sandbox != "off":
+            # 出口网关（阶段 2a）下沙箱方式只支持平台供应商：真模型也配成平台供应商（地址与模型可用环境变量改），
+            # 密钥进 vault，经网关使用；假模型服务在核心这边（网关从核心连它）
+            self.fake = FakeProvider("true")
+            real = {"id": "live-real", "name": "Live", "api": os.environ.get("MATRIX_CHECK_LLM_API", "openai-completions"),
+                    "base_url": os.environ.get("MATRIX_CHECK_LLM_BASE_URL", "https://api.deepseek.com")}
+            self.real_key = os.environ.get("MATRIX_CHECK_LLM_KEY") or os.environ.get("DEEPSEEK_API_KEY") or ""
+            live = model["model"] if model else os.environ.get("MATRIX_CHECK_LLM_MODEL", "deepseek-flash")
+            presets = [{"id": "probe", "label": "Fake", "provider": "matrix-check", "model": "fake-1"},
+                       {"id": "live", "label": "Live", "provider": "live-real", "model": live}]
+            (root / "models.json").write_text(json.dumps({"models": presets, "providers": [
+                {"id": "matrix-check", "name": "Matrix check", "api": "openai-completions", "base_url": self.fake.url},
+                real]}), encoding="utf-8")
+            models = ModelCatalog(root / "models.json")
+        # docker 后端：沙箱在自己的网络里，连回来的地址是管理器配置里的 connect_url，服务要监听在那个网络能到的地址上
+        self.net = Network(rt, root / "data", tool_url=f"http://{listen}:{port}/internal/tools", seed=False,
+                           connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox), models=models,
+                           sandbox_url=f"ws://{listen}:{port}/api/sandbox/connect",
+                           sandbox_limits={"gateway_listen": gateway_listen or "127.0.0.1:0",
+                                           # 检查用的包镜像源：egress-tools 经网关去这些主机（只读）
+                                           "gateway_mirrors": os.environ.get("MATRIX_CHECK_MIRRORS", ",".join(MIRRORS))})
+        self.sandbox = sandbox
+        self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host=listen, port=port, log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
         while not self.server.started:
             time.sleep(0.05)
         self.uid = auth.register(self.net.store, "smoke@matrix.local", secrets.token_urlsafe(18))[0].id
         mk = self.net.create_agent
+        pick = {"model_preset": "live"} if models is not None else {"model": model}
         self.lead = mk("Lead", "冒烟检查：主执行者", [], ["delegate", "file.write", "shell.exec", "connector.use"],
-                       model=model, actor=self.uid)
-        self.helper = mk("Helper", "冒烟检查：被委托的成员", [], [], model=model, actor=self.uid)
+                       actor=self.uid, **pick)
+        self.helper = mk("Helper", "冒烟检查：被委托的成员", [], ["file.write", "shell.exec"] if sandbox != "off" else [],
+                         actor=self.uid, **pick)
+        if self.fake is not None:
+            from .engine import _provider_vault
+            self.net.vault.put(_provider_vault("matrix-check"), {"api_key": self.secret})
+            if self.real_key:
+                self.net.vault.put(_provider_vault("live-real"), {"api_key": self.real_key})
         self.project = self.net.create_project("dsh 冒烟检查", "", [self.lead.id, self.helper.id], actor=self.uid)
         self.chat = self.net.project_chat(self.project.id, actor=self.uid)
-        self.outside = root / "outside"
-        self.outside.mkdir()
+        # 审批检查写的“工作目录以外”：不能放在 /tmp 下。dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的路径在 Agent 的 bash 里
+        # 不存在，写入报 ENOENT 而不是只读，dsh 不当它是沙箱拒绝、不发起升权，这一项就时好时坏（2026-11-11 在 runc 与 gVisor 下都复现）。
+        # 主目录下的路径在沙箱里可见但只读：写入报 EROFS，稳定地走到升权申请；批准后写在主目录里也写得成。
+        cache = Path.home() / ".cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        self.outside = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-outside-", dir=cache))
+
+    def probe(self, command: str, authority: tuple[str, ...] = ("shell.exec", "file.write")) -> str:
+        """假模型驱动：新建一个用假供应商的 Agent，在它的私聊里让它的 bash 执行 command，返回工具结果（假服务收到的）。
+        每次新建 Agent：假服务只在会话里还没有工具结果时下指令。"""
+        assert self.fake is not None
+        a = self.net.create_agent(f"Probe{secrets.token_hex(3)}", "冒烟检查：假模型驱动的探针", [],
+                                  list(authority), model_preset="probe", actor=self.uid)
+        self.fake.probe, n = command, len(self.fake.requests)
+        conv = self.net.direct_chat(a.id, actor=self.uid)
+        self.net.send_message(conv.id, "跑一下", actor=self.uid)
+        self.net.wait_quiet(self.timeout_s)
+        reqs = self.fake.requests[n:]
+        if not reqs:
+            fails = [m.text for m in conv.messages if m.role == "system"]
+            raise RuntimeError("假模型没收到请求" + (f"：{fails[-1][:200]}" if fails else ""))
+        return " ".join(x for r in reqs for x in r["results"])
 
     def ask(self, text: str, approve: bool = False) -> tuple[str, list[Any]]:
         """@Lead 说一句，等到对话安静下来（委托也都有了结果）。返回 Lead 最后一条回复与这期间出现的审批申请。"""
@@ -420,14 +580,18 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return (OK, "连接器桥、网络代调用正常") if f"ECHO-{code}" in text else (WARN, f"调用了，但回复没照抄结果：{text[:120]!r}")
 
     def approval() -> tuple[str, str]:
+        # 云侧不审批（不变量 14）：工作目录以外写不进，升权申请没有应答者（dsh 回 unavailable），网络也不建审批记录。
+        # 让模型去申请：万一覆盖层又带上了应答者，这里会自动批准，文件写出来或有了记录就变红
         target = live.outside / f"smoke-{nonce()}.txt"
-        text, asked = live.ask(f"用 bash 执行 `echo hi > {target}`。这个路径在工作目录以外，沙箱会拒绝；"
-                               "被拒绝时按提示带上理由申请升权，重试同一条命令一次。完成后只回复 DONE。", approve=True)
-        if not asked:
-            return (FAIL, "没申请升权就写到了工作目录以外：沙箱没起作用") if target.exists() \
-                else (FAIL, f"没有出现升权申请（模型没申请，或审批应答者没装上）：{text[:120]!r}")
-        return (OK, f"沙箱拦住了工作目录以外的写，升权申请转到网络，批准后写成（{asked[0].tool}）") if target.exists() \
-            else (FAIL, "申请批准了，但文件没写出来")
+        text, _ = live.ask(f"用 bash 执行 `echo hi > {target}`。这个路径在工作目录以外，沙箱会拒绝；"
+                           "被拒绝时按提示带上理由申请升权，重试同一条命令一次；还是不行就停下。完成后只回复 DONE。",
+                           approve=True)
+        records = [a for a in live.net.store.approvals.values() if a.kind not in ("connector", "connector_write")]
+        if target.exists():
+            return FAIL, "写到了工作目录以外：沙箱没起作用，或升权申请被批准了"
+        if records:
+            return FAIL, f"产生了审批记录（{len(records)} 条）：云侧不该再审批，覆盖层不该有应答者"
+        return OK, "工作目录以外写不进，也没有产生审批记录（云侧不审批）"
 
     def question() -> tuple[str, str]:
         a, b = f"甲-{nonce()}", f"乙-{nonce()}"
@@ -439,13 +603,228 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return (OK, "提问工具、应答者、网络转给人、回答回到原来的调用都通") if b in text \
             else (FAIL, f"问了，但回答没回到模型：{text[:120]!r}")
 
-    return [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
-            ("connector", connector), ("approval", approval), ("question", question)]
+    def home() -> tuple[str, str]:
+        code = nonce()
+        text, _ = live.ask(f"用 bash 执行 `echo HOME-{code} > agent-home/smoke-note.md`，然后只回复 DONE。")
+        f = live.net.agent_home(live.lead.id) / "smoke-note.md"
+        if not f.is_file() or code not in f.read_text(encoding="utf-8"):
+            return FAIL, f"私有目录没写回：{text[:120]!r}"
+        labels = json.loads((live.net.store.root / "flow" / f"{live.lead.id}.json").read_text(encoding="utf-8"))
+        return (OK, "私有目录写回、记了来源标签") if "smoke-note.md" in labels else (FAIL, "写回了但没有来源标签")
+
+    def send_file() -> tuple[str, str]:
+        code = nonce()
+        text, _ = live.ask(f"用 bash 执行 `echo FILE-{code} > smoke-file.txt`，再调用网络工具 send_file 把 smoke-file.txt 发出来，"
+                           "然后只回复 SENT。")
+        att = [a for m in live.chat.messages if m.role == "agent" for a in m.attachments if a["name"] == "smoke-file.txt"]
+        if not att:
+            return FAIL, f"没有附上文件：{text[:120]!r}"
+        data = (live.net.store.attachment_dir(live.chat.id) / att[-1]["sha"]).read_text(encoding="utf-8")
+        return (OK, "send_file 回读工作目录里的文件") if code in data else (FAIL, f"附件内容不对：{data[:80]!r}")
+
+    def deliver() -> tuple[str, str]:
+        # 委托交付的产物进委托方的工作目录（沙箱方式下读执行者的检查点，作为材料放进委托方的 deliveries/）
+        code = nonce()
+        text, _ = live.ask(f"用网络工具 delegate 委托 Helper，authority 授予 [\"file.write\", \"shell.exec\"]：让它用 bash 执行 `echo D-{code} > smoke-deliver.txt`，"
+                           "然后只回复 DONE。等它交付后验收，再用 bash 执行 `cat deliveries/*/smoke-deliver.txt`，只回复命令的输出。")
+        tasks = [t for t in live.net.store.tasks.values() if t.delegatee_id == live.helper.id
+                 and "smoke-deliver.txt" in (t.result or {}).get("files", [])]
+        if not tasks:
+            return FAIL, f"交付里没有产物 smoke-deliver.txt：{text[:120]!r}"
+        return (OK, "执行者的产物随交付进了委托方的工作目录") if f"D-{code}" in text \
+            else (FAIL, f"产物交了，但委托方读不到：{text[:120]!r}")
+
+    def restore() -> tuple[str, str]:
+        # 沙箱重建：让 Agent 记住编号、写产物，再把这个执行单元的沙箱连目录销毁，下一轮从检查点恢复
+        code = nonce()
+        live.ask(f"记住这个编号：R-{code}。用 bash 执行 `echo R-{code} > smoke-restore.txt`，然后只回复 OK。")
+        unit = f"seat:{live.chat.id}/{live.lead.id}"
+        live.net.sandbox.destroy(unit)
+        text, _ = live.ask("先用 bash 执行 `cat smoke-restore.txt`。然后回复：上一轮让你记住的编号，以及文件里的内容。")
+        ck = live.net.checkpoints.load(unit)
+        if f"R-{code}" not in text:
+            return FAIL, f"重建后不记得编号或产物没恢复：{text[:160]!r}"
+        return OK, f"沙箱销毁后从检查点恢复：记得编号、产物在（会话包 {len(ck.sessions) if ck else 0} 份）"
+
+    def isolation() -> tuple[str, str]:
+        # 阶段 0 的读隔离、进程隔离在沙箱里照样成立：假模型让 Agent 的 bash 读数据目录与别的单元、看别的进程
+        data = live.net.store.root
+        tag = nonce()
+        marks = {"DATA": data / "state.json", "VAULT": data / "vault.key", "HOME_OTHER": data / "agents" / "x" / "n.md",
+                 "OTHER_UNIT": data / "tasks" / "task-other" / "r.md", "SERVER_HOME": Path.home() / f".matrix-check-{tag}"}
+        for p in marks.values():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.exists():
+                p.write_text(f"MARK-{tag}", encoding="utf-8")
+        arg = f"matrix-check-proc-{tag}"
+        outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", arg])
+        probe = "; ".join([f"cat {json.dumps(str(p))} >/dev/null 2>&1 && echo {n}=READ || echo {n}=blocked"
+                           for n, p in marks.items()] +
+                          [f"echo PROC_SEEN=$(grep -l '{arg[:-1]}[{arg[-1]}]' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)",
+                           "echo INNER=$(tr '\\0' ' ' </proc/1/cmdline | cut -d' ' -f1 | xargs basename)"])
+        try:
+            text = live.probe(probe)
+        finally:
+            outside.kill()
+            marks["SERVER_HOME"].unlink(missing_ok=True)
+        seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", text))
+        if not any(k in seen for k in marks):
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        bad = [k for k in marks if seen.get(k) == "READ"] + (["PROC"] if seen.get("PROC_SEEN", "0") != "0" else [])
+        inner = re.search(r"INNER=([\w.-]+)", text)
+        if bad:
+            return FAIL, f"沙箱里读得到 / 看得到：{'、'.join(bad)}"
+        if not inner or inner.group(1) != "bwrap":
+            return FAIL, (f"Agent 的命令不在 dsh 的内层 bwrap 里（1 号进程：{inner.group(1) if inner else '看不到'}）："
+                          "dsh 退到了更弱的沙箱。runc 档要放开 seccomp 与 /proc 遮挡，或改用 gVisor")
+        return OK, ("数据目录、vault.key、别人的私有目录、别的执行单元、服务主目录都读不到，看不到沙箱之外的进程；"
+                    "Agent 的命令在 dsh 的内层 bwrap 里")
+
+    def resource_limit() -> tuple[str, str]:
+        # 配额（第 8 节验收表的 resource-limit）：超额申请内存、无限起进程，被沙箱的上限挡住；之后别的执行单元照常运行。
+        # 申请多少按管理器报的默认配额来（配额 + 余量），宿主可用内存不够时提醒并跳过，不硬上（2026-11-17 一台 1.8 GB 的测试机被压垮过）
+        import base64
+
+        from .sandboxd import meminfo_mb
+        skip, mem_mb, n_pids = resource_plan(live.net.sandbox_report(), meminfo_mb("MemAvailable"))
+        if skip:
+            return WARN, skip
+        mem_py = (f'b = bytearray({mem_mb} << 20)\nb[::4096] = b"x" * len(b[::4096])\nprint("MEM=allocated")\n')
+        pid_py = (f'import subprocess as s\nps = []\ntry:\n    for _ in range({n_pids}):\n        ps.append(s.Popen(["sleep", "30"]))\n'
+                  f'except OSError:\n    pass\nprint("PIDS=" + ("limited" if len(ps) < {n_pids} else "unlimited"), len(ps))\n'
+                  'for p in ps:\n    p.kill()\n')
+        b64 = lambda t: base64.b64encode(t.encode()).decode()  # noqa: E731 —— 一个词，模型照抄不会抄错
+        probe = (f"echo {b64(mem_py)} | base64 -d | python3 2>/dev/null; echo MEMRC=$?; "
+                 f"echo {b64(pid_py)} | base64 -d | python3 2>&1 | tail -1")
+        text = live.probe(probe)
+        mem, pids = re.search(r"MEMRC=(\d+)", text), re.search(r"PIDS=(\w+)", text)
+        if not mem or not pids:
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        limited = mem.group(1) != "0" and not re.search(r"(?m)^MEM=allocated", text) and pids.group(1) == "limited"
+        code = nonce()   # 别的执行单元不受影响：另一个执行单元照常跑完一条命令
+        others_ok = f"ALIVE-{code}" in live.probe(f"echo ALIVE-{code}")
+        detail = (f"申请 {mem_mb} MB 内存退出码 {mem.group(1)}，起 {n_pids} 个进程 {pids.group(1)}；"
+                  f"之后别的执行单元{'照常' if others_ok else '没跑通'}")
+        return (OK, f"超额内存与无限起进程都被挡住：{detail}") if limited and others_ok else (FAIL, detail)
+
+    def net_isolation() -> tuple[str, str]:
+        # 阶段 2a（第 8 节验收表）：Agent 的 bash 连控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网，连得上就失败；
+        # 经网关的代理去连内网与元数据地址也要被拒。假模型驱动
+        gw = live.net.gateway
+        if gw is None:
+            return WARN, "这个后端没有出口网关"
+        live.probe("true")   # 先起一个别的沙箱，后面去连它
+        others = [ip for u, ip in gw._ips.items()] or ["10.213.255.254"]
+        core = live.server.config.host, live.server.config.port
+        gw_host = live.net.gateway_address[0]
+        tries = {
+            "CORE_API": f"--noproxy '*' http://{core[0]}:{core[1]}/api/me",
+            "CORE_VIA_GW_IP": f"--noproxy '*' http://$GWH:{core[1]}/api/me",
+            "GW_OTHER_API": "--noproxy '*' http://$GW/api/me",
+            "OTHER_SANDBOX": f"--noproxy '*' http://{others[0]}:80/",
+            "INTERNAL": "--noproxy '*' http://172.17.0.1:22/",
+            "METADATA": "--noproxy '*' http://169.254.169.254/latest/meta-data/",
+            "PUBLIC_DIRECT": "--noproxy '*' https://example.com/",
+            "METADATA_VIA_GW": "http://169.254.169.254/latest/meta-data/",
+            "INTERNAL_VIA_GW": "http://10.1.2.3/",
+        }
+        lines = ['GW=$(printf %s "$HTTPS_PROXY" | sed "s#.*@##"); GWH=${GW%%:*}']
+        lines += [f"c=$(curl -s -m 5 -o /dev/null -w '%{{http_code}}' {args}); "
+                  f"case $c in 000|403|404|407) echo {n}=blocked;; *) echo {n}=OPEN:$c;; esac" for n, args in tries.items()]
+        lines.append("getent hosts example.com >/dev/null 2>&1 && echo DNS=OPEN || echo DNS=blocked")
+        text = live.probe("; ".join(lines))
+        seen = dict(re.findall(r"(\w+)=(OPEN\S*|blocked)", text))
+        if len(seen) < len(tries):
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        open_ = [f"{k}({v})" for k, v in seen.items() if v.startswith("OPEN")]
+        enforced = bool(live.net.sandbox_report().get("net_enforced"))
+        if not open_ and gw.ca is not None:
+            # 2b：有 web.research 的探针经网关：公网 GET 放行（沙箱信任出网 CA）、POST 被拒、超过出网预算后公网读被拒
+            q = "q=" + "x" * 1900
+            text2 = live.probe("; ".join([
+                "echo GET=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://example.com/)",
+                "echo POST=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -d 'a=1' https://example.com/)",
+                f"n=0; for i in $(seq 1 60); do c=$(curl -s -m 10 -o /dev/null -w '%{{http_code}}' 'https://example.com/?{q}&i='$i); "
+                "[ \"$c\" = 403 ] && break; n=$((n+1)); done; echo BUDGET_OK=$n; echo AFTER=$c"]),
+                authority=("web.research", "shell.exec"))
+            got = dict(re.findall(r"(\w+)=(\d+)", text2))
+            bad = []
+            if got.get("GET") != "200":
+                bad.append(f"公网 GET 经网关不通（{got.get('GET')}）")
+            if got.get("POST") != "403":
+                bad.append(f"公网 POST 没被拒（{got.get('POST')}）")
+            if got.get("AFTER") != "403" or not 0 < int(got.get("BUDGET_OK", "0")) < 60:
+                bad.append(f"出网预算没生效（放行了 {got.get('BUDGET_OK')} 次，之后 {got.get('AFTER')}）")
+            if bad:
+                return FAIL, "；".join(bad)
+            return OK, ("控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网、DNS 都连不上；经网关去内网与元数据地址被拒；"
+                        f"公网 GET 放行、POST 被拒、超过出网预算（{got['BUDGET_OK']} 次长 URL 之后）公网读被拒")
+        if not open_:
+            return OK, "控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网、DNS 都连不上；经网关去内网与元数据地址被拒"
+        if not enforced:
+            return WARN, f"这个后端做不到强制断网（共用宿主网络）：连得上 {'、'.join(open_)}"
+        return FAIL, f"沙箱里连得上：{'、'.join(open_)}"
+
+    def key_absent() -> tuple[str, str]:
+        # 阶段 2a：沙箱里没有模型密钥（环境变量、文件、进程），拿沙箱的网关令牌请求一个没分配给这一轮的模型要被拒
+        keys = [k for k in (live.secret, live.real_key) if len(k) >= 16]
+        pats = [k[:-1] + "[" + k[-1] + "]" for k in keys]   # [x] 让 grep 不匹配到这条命令自己
+        lines = []
+        for i, pt in enumerate(pats):
+            lines += [f"echo ENV{i}=$(env | grep -c '{pt}')",
+                      f"echo PROC{i}=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{pt}')",
+                      f"echo FILE{i}=$(grep -rlI '{pt}' \"$HOME\" . /tmp 2>/dev/null | wc -l)"]
+        lines += ['GW=$(printf %s "$HTTPS_PROXY" | sed "s#.*@##"); T=$(printf %s "$HTTPS_PROXY" | sed "s#.*sbx:##; s#@.*##")',
+                  "echo OTHER_MODEL=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer $T\" "
+                  "-H 'Content-Type: application/json' -d '{\"model\":\"not-assigned\",\"messages\":[]}' "
+                  "http://$GW/llm/matrix-check/chat/completions)"]
+        text = live.probe("; ".join(lines))
+        seen = dict(re.findall(r"(\w+)=(\d+)", text))
+        if "OTHER_MODEL" not in seen:
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        found = [k for k, v in seen.items() if k != "OTHER_MODEL" and v != "0"]
+        if found:
+            return FAIL, f"沙箱里找得到模型密钥：{'、'.join(found)}"
+        if seen["OTHER_MODEL"] == "200":
+            return FAIL, "拿沙箱的令牌请求没分配给这一轮的模型，网关放行了"
+        return OK, (f"环境变量、进程、主目录与工作目录里都没有模型密钥；没分配的模型网关回 {seen['OTHER_MODEL']}"
+                    + ("" if live.real_key else "（没设真模型的密钥，只查了假供应商的）"))
+
+    def egress_tools() -> tuple[str, str]:
+        # 2b：沙箱里常用工具经网关访问包镜像源（只读）都能用，Node 也信任出网 CA。只有 shell.exec，没有 web.research
+        cmds = {
+            "CURL": "curl -s -m 30 -o /dev/null -w '%{http_code}' https://pypi.org/simple/six/ | grep -q 200",
+            "GIT": "rm -rf /tmp/hw && git clone -q --depth 1 https://github.com/octocat/Hello-World.git /tmp/hw",
+            "PIP": "command -v pip3 >/dev/null || exit 9; pip3 download -q --no-deps -d /tmp/pp six",
+            "UV": "command -v uv >/dev/null || exit 9; rm -rf /tmp/uvt && uv pip install -q --target /tmp/uvt six",
+            "NPM": "command -v npm >/dev/null || exit 9; npm view left-pad version --cache /tmp/npmc",
+            "NODE": "node -e \"fetch('https://registry.npmjs.org/left-pad').then(r=>process.exit(r.status==200?0:1),()=>process.exit(1))\"",
+            "PUBLIC_DENIED": "c=$(curl -s -m 15 -o /dev/null -w '%{http_code}:%{http_connect}' https://example.com/); "
+                             "case $c in *403*) exit 0;; *) exit 1;; esac",
+        }
+        text = live.probe("; ".join(f"( {c} ) >/dev/null 2>&1; echo {n}=$?" for n, c in cmds.items()))
+        got = dict(re.findall(r"(\w+)=(\d+)", text))
+        if len(got) < len(cmds):
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        fail = [n for n, v in got.items() if v not in ("0", "9")]
+        skip = [n for n, v in got.items() if v == "9"]
+        ok_ = [n for n, v in got.items() if v == "0"]
+        detail = f"通：{'、'.join(ok_) or '无'}" + (f"；这个环境里没有：{'、'.join(skip)}" if skip else "")
+        return (FAIL, f"不通：{'、'.join(fail)}；{detail}") if fail else (OK, detail)
+
+    out = [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
+           ("connector", connector), ("approval", approval), ("question", question)]
+    if live.sandbox != "off":
+        out += [("home", home), ("send-file", send_file), ("deliver", deliver), ("restore", restore),
+                ("isolation", isolation), ("resource-limit", resource_limit), ("net-isolation", net_isolation),
+                ("key-absent", key_absent), ("egress-tools", egress_tools)]
+    return out
 
 
 def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, only: set[str],
-                model: dict[str, str] | None = None) -> None:
-    live = Live(rt, root, timeout_s, model)
+                model: dict[str, str] | None = None, sandbox: str = "off", listen: str = "127.0.0.1",
+                port: int = 0, gateway_listen: str = "") -> None:
+    live = Live(rt, root, timeout_s, model, sandbox, listen, port, gateway_listen)
     try:
         for name, fn in _scenarios(live):
             if only and name not in only:
@@ -463,8 +842,33 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
                 print("  其余实际检查跳过。")
                 break
     finally:
+        if live.net.sandbox is not None:
+            for unit in list(live.net.store.sandboxes):
+                live.net.sandbox.stop(unit)
         live.server.should_exit = True
         live.mcp.server.shutdown()
+        if live.fake is not None:
+            live.fake.server.shutdown()
+        shutil.rmtree(live.outside, ignore_errors=True)
+
+
+RESOURCE_MARGIN_MB = 256    # resource-limit 探针比配额多申请这么多
+RESOURCE_HOST_SPARE_MB = 512  # 宿主可用内存至少要比“配额 + 余量”再多这么多，才跑超额申请
+
+
+def resource_plan(report: dict, avail_mb: int | None) -> tuple[str, int, int]:
+    """resource-limit 探针的大小：（跳过的原因（空 = 照跑）, 申请多少 MB 内存, 起多少个进程）。
+    按后端报的默认配额来：内存是配额 + RESOURCE_MARGIN_MB，进程数是 pids 配额 + 100；没有配额的后端不跑（超额申请会直接压到宿主），
+    宿主可用内存不到“配额 + 余量 + RESOURCE_HOST_SPARE_MB”时也不跑。"""
+    q = report.get("quota_default") or {}
+    mem = int(q.get("memory_mb") or 2048) + RESOURCE_MARGIN_MB
+    pids = int(q.get("pids") or 512) + 100
+    if not report.get("quota"):
+        return "这个后端没有配额：不跑超额申请（没有上限时会直接压到宿主）", mem, pids
+    if avail_mb is not None and avail_mb < mem + RESOURCE_HOST_SPARE_MB:
+        return (f"宿主可用内存 {avail_mb} MB，不到“配额 + 余量 + {RESOURCE_HOST_SPARE_MB} MB”＝{mem + RESOURCE_HOST_SPARE_MB} MB："
+                "跳过超额申请，免得配额起作用前宿主先被耗尽"), mem, pids
+    return "", mem, pids
 
 
 def main() -> None:
@@ -474,32 +878,53 @@ def main() -> None:
     p.add_argument("--dsh-bin", default="dsh")
     p.add_argument("--profile", default="headless")
     p.add_argument("--live", action="store_true", help="实际跑几轮（要调模型）")
-    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question")
+    p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question；"
+                        "--sandbox 时另有 home,send-file,deliver,restore,isolation,resource-limit,net-isolation,key-absent,egress-tools")
     p.add_argument("--model", default="", help="实际检查的 Agent 用这个模型，provider/model（默认用 dsh 的默认模型），"
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
     p.add_argument("--keep", action="store_true", help="保留临时数据目录")
+    p.add_argument("--listen", default="127.0.0.1", help="--live 的临时服务监听在哪（docker 后端：沙箱网络能到的地址，"
+                   "如沙箱网络的网关；和管理器配置的 connect_url 一致）")
+    p.add_argument("--port", type=int, default=0, help="--live 的临时服务端口（默认随机；docker 后端要和 connect_url 一致）")
+    p.add_argument("--gateway-listen", default="", help="沙箱方式：出口网关监听在哪（主机:端口；docker 后端要和管理器配置的 "
+                   "connect_url 端口一致，并且是执行单元网络能到的地址，通常 0.0.0.0:<端口>）；默认 127.0.0.1 随机端口")
+    p.add_argument("--root", default="", help="临时数据放在哪个目录下（docker 后端：数据目录要落在管理器允许的前缀下）")
+    p.add_argument("--sandbox", choices=["off", "local", "docker"], default="off",
+                   help="--live 用云侧执行面的沙箱方式跑（local 后端：本机子进程 + 外层 bwrap），另加 home、send-file、"
+                        "restore（沙箱销毁后从检查点恢复）、isolation（沙箱里的读隔离与进程隔离）")
+    p.add_argument("--isolation", choices=["required", "preferred", "off"], default="",
+                   help="云侧外层沙箱的档位（默认读 MATRIX_CLOUD_ISOLATION，没有就是 preferred）")
     args = p.parse_args()
 
     if shutil.which(args.dsh_bin) is None and not Path(args.dsh_bin).is_file():
         raise SystemExit(f"找不到 dsh：{args.dsh_bin}")
-    rt = DshRuntime(args.dsh_bin, args.profile)
-    root = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-"))
+    rt = DshRuntime(args.dsh_bin, args.profile, isolation=args.isolation or None)
+    if not args.root and args.sandbox != "off":
+        # 沙箱方式下执行单元的状态目录在数据目录里：不能放在 /tmp 下（dsh 的内层沙箱把 /tmp 换成空的 tmpfs，
+        # 放在那里的出网 CA 证书包在 Agent 的命令里就不存在了）
+        args.root = str(Path.home() / ".cache" / "matrix-dsh-check")
+    if args.root:
+        Path(args.root).mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-", dir=args.root or None))
     report = Report()
     ok = static_checks(rt, report, root)
     if ok:
         provider_checks(rt, report, root)
+        isolation_checks(rt, report, root)
     if args.live and ok:
         provider, _, name = args.model.partition("/")
         live_checks(rt, report, root, args.timeout, {x.strip() for x in args.only.split(",") if x.strip()},
-                    {"provider": provider, "model": name} if name else None)
+                    {"provider": provider, "model": name} if name else None, args.sandbox, args.listen, args.port,
+                    args.gateway_listen)
     elif args.live:
         print("静态检查没过，不跑实际检查。")
     if report.failed or args.keep:
         print(f"\n临时数据：{root}（各轮的 dsh 事件在 data/conversations/*/ 下的 dsh-events.jsonl）")
     else:
         shutil.rmtree(root, ignore_errors=True)
-    print(f"\n{'有检查没过' if report.failed else '全部通过'}：" + "  ".join(f"{MARK[s]}{n}" for s, n, _ in report.rows))
+    verdict = "有检查没过" if report.failed else "没有失败，但有提醒" if any(s == WARN for s, _, _ in report.rows) else "全部通过"
+    print(f"\n{verdict}：" + "  ".join(f"{MARK[s]}{n}" for s, n, _ in report.rows))
     sys.exit(1 if report.failed else 0)
 
 

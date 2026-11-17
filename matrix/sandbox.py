@@ -8,6 +8,10 @@
 - 资源上限（setrlimit）：地址空间、打开文件数、单个文件大小、CPU 时间；不生成 core。
 没有 bwrap、或者 bwrap 在这台机器上跑不起来（比如容器禁了用户命名空间）时 `available()` 为假：主持人上传的托管插件拒绝安装，
 目录里的照旧由网络直接托管（部署方审核过）。`MATRIX_PLUGIN_SANDBOX=off` 关掉。
+
+云侧 dsh 的外层沙箱（docs/cloud-runtime.md 第 8 节阶段 0）也用这里的 `wrap`：共享网络、里面还要再起 dsh 自己的 bwrap
+（`nested=True`），能不能用由 `available("nested")` 真跑一次“外层套内层”来判断。不套 `limits()`：Node 预留的虚拟地址空间
+远超地址空间上限，dsh 会直接起不来；只用 `dsh_limits()`。
 """
 
 from __future__ import annotations
@@ -29,8 +33,9 @@ _SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64")
 _ETC = ("/etc/ld.so.cache", "/etc/localtime", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group")
 _ETC_NET = ("/etc/resolv.conf", "/etc/hosts", "/etc/ssl", "/etc/ca-certificates", "/etc/pki")
 
+FILE_SIZE_DSH = 4 << 30   # 云侧 dsh 的外层沙箱里单个文件最大
 _lock = threading.Lock()
-_probe: tuple[bool, str] | None = None
+_probe: dict[str, tuple[bool, str]] = {}   # 种类（plugin / nested）→（能不能用, 说明）
 
 
 def _bwrap() -> str | None:
@@ -73,11 +78,22 @@ def _symlink_hops(path: str) -> list[tuple[str, str]]:
     return list(dict.fromkeys(out))
 
 
-def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = False) -> list[str]:
-    """把一条命令包进 bwrap。rw[0] 是工作目录。"""
+def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = False, nested: bool = False,
+         binds: list[tuple[Path, Path]] | None = None, chdir: Path | None = None) -> list[str]:
+    """把一条命令包进 bwrap。rw[0] 是工作目录（chdir 没给时）。ro 里可以有单个文件（如 CA 证书）。
+    binds：（宿主上的目录, 沙箱里的路径）——云侧沙箱的工作目录挂在它原来的绝对路径上（docs/cloud-runtime.md 4.3）。
+
+    nested：里面的程序还要自己起 bwrap（dsh 的内层沙箱）。以 root 运行时 bwrap 默认不建用户命名空间，去掉全部特权后
+    内层建不了命名空间（实测 “Creating new namespace failed”）；这时显式建一个用户命名空间（uid 0 映射到自己），特权只在
+    这个命名空间里有效，内层照常能建命名空间、挂 /proc，外面的设备与内核接口仍然碰不到。非 root 时 bwrap 本来就用用户命名空间，
+    照旧去掉全部特权（部署镜像里实测外层套内层可行）。"""
     exe = _bwrap()
     assert exe is not None
-    cmd = [exe, "--die-with-parent", "--new-session", "--unshare-all", "--cap-drop", "ALL"]
+    cmd = [exe, "--die-with-parent", "--new-session", "--unshare-all"]
+    if nested and _is_root():
+        cmd += ["--unshare-user", "--uid", "0", "--gid", "0"]
+    else:
+        cmd += ["--cap-drop", "ALL"]
     if network:
         cmd.append("--share-net")
     cmd += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
@@ -106,8 +122,15 @@ def wrap(argv: list[str], *, ro: list[Path], rw: list[Path], network: bool = Fal
     for p in rw:
         p.mkdir(parents=True, exist_ok=True)
         cmd += ["--bind", str(p), str(p)]
-    cmd += ["--chdir", str(rw[0]), "--", *argv]
+    for src, dest in binds or []:
+        src.mkdir(parents=True, exist_ok=True)
+        cmd += ["--bind", str(src), str(dest)]
+    cmd += ["--chdir", str(chdir or rw[0]), "--", *argv]
     return cmd
+
+
+def _is_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def limits() -> None:
@@ -123,34 +146,57 @@ def limits() -> None:
             pass
 
 
-def available() -> tuple[bool, str]:
-    """这台机器上有没有能用的沙箱：（能不能用, 说明）。第一次调用时真跑一次探测，之后用缓存。"""
-    global _probe
-    if (compat.env("PLUGIN_SANDBOX") or "").lower() in ("off", "0", "false", "no"):
+def dsh_limits() -> None:
+    """云侧 dsh 外层沙箱的资源上限（preexec_fn）：不生成 core、单个文件最大 FILE_SIZE_DSH。
+    不设地址空间上限（Node/V8 预留的虚拟地址空间很大，设了 dsh 起不来），也不设 CPU 秒数（长轮次会被系统停掉）、
+    打开文件数（Node 与 MCP 服务要的多）。进程数、内存、磁盘总量的上限要 cgroup，阶段 1 再做。"""
+    import resource
+    for res, value in ((resource.RLIMIT_FSIZE, FILE_SIZE_DSH), (resource.RLIMIT_CORE, 0)):
+        try:
+            _, hard = resource.getrlimit(res)
+            resource.setrlimit(res, (value if hard == resource.RLIM_INFINITY else min(value, hard), hard))
+        except (ValueError, OSError):
+            pass
+
+
+# 探测“外层套内层”用的内层参数：dsh 0.2.x 在 Linux 上起 bwrap 的原样参数（docs/cloud-runtime.md 第 11 节第 2 项）
+_INNER_PROBE = ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-pid", "--proc", "/proc", "--die-with-parent",
+                "--tmpfs", "/tmp", "--", "true"]
+
+
+def available(kind: str = "plugin") -> tuple[bool, str]:
+    """这台机器上有没有能用的沙箱：（能不能用, 说明）。第一次调用时真跑一次探测，之后用缓存。
+    kind="plugin"：插件服务的沙箱（不联网），部署方可用 MATRIX_PLUGIN_SANDBOX=off 关掉；
+    kind="nested"：云侧 dsh 的外层沙箱（共享网络，里面再起一层 bwrap），开关是 MATRIX_CLOUD_ISOLATION（runtime.py）。"""
+    if kind == "plugin" and (compat.env("PLUGIN_SANDBOX") or "").lower() in ("off", "0", "false", "no"):
         return False, "部署方关掉了沙箱（MATRIX_PLUGIN_SANDBOX=off）"
     with _lock:
-        if _probe is not None:
-            return _probe
+        if kind in _probe:
+            return _probe[kind]
         exe = _bwrap()
         if exe is None:
-            _probe = (False, "这台机器上没有 bubblewrap（bwrap）：目前只支持 Linux" if sys.platform.startswith("linux")
-                      else "沙箱目前只支持 Linux（bubblewrap）")
-            return _probe
+            _probe[kind] = (False, "这台机器上没有 bubblewrap（bwrap）：目前只支持 Linux" if sys.platform.startswith("linux")
+                            else "沙箱目前只支持 Linux（bubblewrap）")
+            return _probe[kind]
         import tempfile
         with tempfile.TemporaryDirectory(prefix="matrix-sandbox-probe-") as tmp:
+            if kind == "nested":
+                argv = [exe, *_INNER_PROBE]
+                cmd = wrap(argv, ro=[], rw=[Path(tmp)], network=True, nested=True)
+            else:
+                cmd = wrap([sys.executable, "-c", "print('ok')"], ro=python_dirs(), rw=[Path(tmp)])
             try:
-                r = subprocess.run(wrap([sys.executable, "-c", "print('ok')"], ro=python_dirs(), rw=[Path(tmp)]),
-                                   capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
-                ok = r.returncode == 0 and r.stdout.strip() == "ok"
+                r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+                ok = r.returncode == 0 and (kind == "nested" or r.stdout.strip() == "ok")
                 why = "" if ok else (r.stderr.strip().splitlines() or [f"退出码 {r.returncode}"])[-1]
             except (OSError, subprocess.TimeoutExpired) as e:
                 ok, why = False, str(e)
-        _probe = (True, "bubblewrap") if ok else (False, f"bubblewrap 在这台机器上跑不起来：{why}")
-        return _probe
+        what = "外层沙箱里再起一层 bwrap" if kind == "nested" else "bubblewrap"
+        _probe[kind] = (True, "bubblewrap") if ok else (False, f"{what}，在这台机器上跑不起来：{why}")
+        return _probe[kind]
 
 
 def reset_probe() -> None:
     """测试用：清掉探测缓存。"""
-    global _probe
     with _lock:
-        _probe = None
+        _probe.clear()

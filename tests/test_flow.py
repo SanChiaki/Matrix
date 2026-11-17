@@ -10,14 +10,26 @@ from matrix import flow
 from matrix.engine import Network, NetworkError
 from matrix.models import TaskStatus
 from matrix.runtime import ScriptCall, ScriptedRuntime
+from tests.channels import CHANNELS, make_net
 from tests.test_users import client, joint, users
+
+CHANNEL = "classic"
+
+
+@pytest.fixture(autouse=True, params=CHANNELS)
+def channel(request):
+    """不变量 22 的测试两种通道都跑：云侧旧方式，与沙箱方式（私有目录由网络持有：材料进、改动出）。"""
+    global CHANNEL
+    CHANNEL = request.param
+    yield request.param
+    CHANNEL = "classic"
 
 HOME = "agent-home"
 
 
 def setup(tmp_path: Path, handler, authority=("file.write", "web.research")):
     """alice 的 A（她的助理）在只有她的项目 Q 里写过一条笔记；A 也在 bob 主持的共享项目 J 里。"""
-    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    net = make_net(ScriptedRuntime(handler), tmp_path, CHANNEL, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], list(authority), actor=alice)
     q = net.create_project("Q", "", [a.id], actor=alice)
@@ -242,7 +254,7 @@ def test_delivery_is_held_and_workdir_hidden(tmp_path: Path):
             return "建议 " + ("50 万" if "50 万" in call.tool("open_note", path="q.md") else "?")
         return "ok"
 
-    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    net = make_net(ScriptedRuntime(handler), tmp_path, CHANNEL, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], ["file.write"], actor=alice)
     q = net.create_project("Q", "", [a.id], actor=alice)
@@ -267,14 +279,14 @@ def test_held_survives_restart(tmp_path: Path):
     """不变量 22：等确认的输出持久化；重启后还在，等交付的任务不判失败。"""
     net, alice, bob, a, q, g, chat = setup(tmp_path, leaky)
     net.send_message(chat.id, "@A 能便宜吗", actor=bob, background=False)
-    again = Network(ScriptedRuntime(leaky), tmp_path, seed=False)
+    again = make_net(ScriptedRuntime(leaky), tmp_path, CHANNEL, seed=False)
     assert [h["text"] for h in again.board(alice)["held"]] == ["底线是 50 万"]
 
 
 # ================= 项目共享 =================
 def test_invite_from_any_project_starts_sharing(tmp_path: Path):
     """不变量 16：任何项目都能邀请；第一次邀请时群聊席位换新会话，项目会话不动。"""
-    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    net = make_net(ScriptedRuntime(lambda call: "ok"), tmp_path, CHANNEL, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     g = net.create_project("P", "", [a.id], actor=alice)

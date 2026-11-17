@@ -39,7 +39,7 @@
   Claude Code、Codex 三个驱动，已用本机 dsh 与 Claude Code 跑通端到端，dsh 与 Codex 也在 Windows 与 WSL 上跑通
   （Windows 上 npm 装的 harness 是 `.cmd` 包装，`runtime.argv` 直接用 node 跑；Windows 的后台服务是任务计划程序里的登录任务，用 pythonw 跑、日志写文件）。**端侧其余部分也已实现**：
   设备管理页（配对 / 吊销、在线状态、harness 列表）、Agent 绑定“设备 + harness”与能力缺口展示、材料下发（清单 + 本机缓存，见下文“材料”）
-  与 `publish_file` 回传（`file.fetch`）、设备码配对与后台服务（需求 #41）。**还没有**：云侧的读隔离（需求 #34）。
+  与 `publish_file` 回传（`file.fetch`）、设备码配对与后台服务（需求 #41）。云侧的读隔离做到了阶段 0（下文“云侧与端侧的差异”，需求 #34、#59）。
 
 ## 材料：清单 + 本机缓存（只传缺的）
 
@@ -58,21 +58,58 @@
 - 结果：没变的档案文件、附件第二轮起一个字节都不传，新附件每台设备只传一次（`tests/test_device_materials.py`）。
   每轮开始先清掉上一轮的只读副本（`project/`、`attachments/`、`skills/`、`releases/`、`plugins/`）。
 
+<a id="cloud-sandbox"></a>
+## 云侧沙箱方式（阶段 1a，开关后面，默认关）
+
+`MATRIX_CLOUD_SANDBOX=local`（或 `matrix --sandbox local`）时，云侧 Agent 的一轮不再是服务的子进程，而是跑在这个执行单元
+（席位或委托）自己的沙箱里，沙箱里是端侧客户端的同一套代码（`matrix/connector/sandbox.py` 的 `SandboxConnector`，`Connector` 的薄子类）
+与同一套协议。设计与 1a 的实现说明见 [cloud-runtime.md](../cloud-runtime.md) 第 8 节“阶段 1a 的实现”。和端侧的差别：
+
+- **接入**：不是用户设备。新端点 `/api/sandbox/connect`，一次性启动令牌（stdin 给客户端，用过即废、120 秒过期）换执行单元凭证
+  （只在客户端内存里，断线重连用）；不走设备配对、不出现在“设备”页、不受配对上限影响。一条沙箱连接只接受派给它那个执行单元的运行
+  （`DeviceRuntime.unit`），材料只能取这一轮清单里的。
+- **协议只做加法**（只在沙箱连接上出现，旧的端侧客户端永远收不到）：`blob.put`（分块交内容，服务端校验 sha256，单份与每轮有上限）、
+  `connector.call`（云端连接器经连接代调用）、`file.fetch` 的 `dir: "zip"`；`run.request` 另带 `home: net-rw | net-ro`、`checkpoint`、
+  `llm_provider` / `env`、`fetch`、`cloud_connectors`；`run.result` 另带 `outputs`、`home_changes`、`session_pack`。
+- **材料**：和端侧一样只给清单、按 sha 缓存（缓存在单元的状态目录里）；另外 `DELEGATION.json`、`shared/`、别人交来的 `deliveries/<任务>/`
+  也是材料。私有目录多一种方式“由网络持有：材料进、改动出”：可挂的部分（按来源场合，不变量 22）作为材料下发到 `agent-home/`，
+  轮次结束客户端只报改过、删过的文件，控制面校验（路径不越界、不是链接、内容真交上来了、单个 100 MB / 每轮 500 MB / 5000 个以内）后
+  落进暂存副本，再用原来的 `homedir.sync_back` 三方合并、更新来源标签。
+- **产物检查点**：每轮按 `workdir.outputs` 的口径报产物清单，有变化的才交内容，存进内容存储（`<data>/content/`，按 sha），
+  记为单元的最新检查点（`<data>/checkpoints/`，总量默认 1 GB，超出只记清单）；当前 dsh 会话打成包一起交，只存最新两份。
+  委托交付读执行者的检查点、作为材料放进委托方的 `deliveries/`；人浏览与下载工作目录读检查点（只记了清单的经活着的沙箱回读）；
+  `publish_file` / `send_file` 经客户端回读。沙箱（连目录）没了，下一轮从检查点恢复产物与会话。
+- **dsh 事件**存在控制面 `<data>/run-logs/` 下，不在工作目录里。
+- **台账与对账**：`state.json` 的 `sandboxes` 记每个单元应有的状态与代数；启动时与每分钟对账（没有记录或代数过期的沙箱结束掉，
+  记录是运行中而沙箱不在的那一轮按传输错误结束：云侧委托判失败可续接，不变量 12）；空闲 10 分钟停（目录保留），执行单元结束
+  （委托验收 / 被拒、对话或 Agent 没了）7 天后销毁。
+- **docker 后端（阶段 1b）**：每个单元一个容器（默认 gVisor），由沙箱管理器 `matrix-sandboxd` 创建与销毁；Matrix 服务只经 Unix socket 提
+  只含 id、配额、启动令牌、逻辑工作目录的请求，镜像、运行时、安全选项、网络、挂载都在管理器的配置里。容器非 root、去掉全部特权、只读根，
+  CPU / 内存 / 进程数有配额，工作目录卷挂在原来的绝对路径上；沙箱在专用网络里（容器间不通），经网关连回 Matrix。`insecure-runc` 档
+  （用 runc）要放开 seccomp 与 `/proc` 遮挡、标“未达到生产隔离”。启动令牌经环境变量 `MATRIX_BOOT_TOKEN` 给客户端。部署见
+  `deploy/compose.sandbox.yml` 与 [deploy/README.md](../../deploy/README.md)。
+- **local 后端**：每个单元一个本机子进程，外层 bwrap（阶段 0 的同一套）里只读挂系统目录、Python 与 Matrix 代码、dsh 与 node、CA 证书，
+  可写的只有单元的工作目录（挂在原来的绝对路径上，dsh 会话续得上）与状态目录。没有 bwrap 时起不来（不退回不隔离的子进程）；
+  没有 cgroup 配额，网络与内核仍和服务器共用。
+
 <a id="cloud-vs-device"></a>
 ## 云侧与端侧的差异
 
-网络对两者同等看待（席位、委托、审批、提问、知识、项目成员的语义一样），差异只在“执行面在哪、怎么拿到东西、靠什么隔离”：
+网络对两者同等看待（席位、委托、提问、知识、项目成员的语义一样），差异只在“执行面在哪、怎么拿到东西、靠什么隔离”，
+以及工作目录以外的写：云侧一律不可写、不审批，端侧由所有者逐次批准（不变量 14）：
 
 | | 云侧（服务器上的 dsh） | 端侧（用户电脑上的 harness） |
 | --- | --- | --- |
-| 进程 | Matrix 服务的子进程：同一台机器、同一个操作系统用户；所有用户的云侧 Agent 都在这里 | 用户电脑上连接器（`matrix-connect`）起的 dsh / Claude Code / Codex，以用户本人身份运行 |
+| 进程 | Matrix 服务的子进程：同一台机器、同一个操作系统用户；所有用户的云侧 Agent 都在这里。外层沙箱可用时每一轮包在一层 bwrap 里（新的 PID / 挂载 / IPC 命名空间，网络与内核共用） | 用户电脑上连接器（`matrix-connect`）起的 dsh / Claude Code / Codex，以用户本人身份运行 |
 | 工作目录 | 在数据目录里：`<data>/conversations/<对话>/…`、`<data>/tasks/<任务>/` | `<工作根目录>/<agent>/<场合>`，在用户电脑上 |
 | 只读材料（档案文件、附件、订阅、技能、插件挂载） | 每轮从数据目录整份拷进工作目录，运行后丢弃（`_run` 里的 `_mount_*`） | 清单 + 本机缓存，只传缺的（上一节） |
 | 私有目录 | `<data>/agents/<id>/` 每轮整份拷进 `agent-home/`，运行后按文件三方合并写回；越界来源的笔记不挂（不变量 22） | 留在用户电脑 `<根目录>/.homes/<agent>/`，连接器按同样的语义挂载与写回，网络碰不到；还没有来源标签，有别人的项目里不挂 |
-| 沙箱 | dsh 的 bwrap：**只管写不管读**，写只能写工作目录 | 看 harness：dsh 同云侧；Codex `workspace-write`；Claude Code 没有（权限按 `advisory` 收窄）。读的是用户自己的电脑 |
-| 网络工具 / 审批 / 提问 | stdio MCP 回调本机 `/internal/*`，凭一次性令牌 | 本机小桥（`connector/bridge.py`）→ WebSocket → 同一套逻辑，凭 `run_id` |
+| 沙箱 | 两层：dsh 自己的 bwrap 管写（只能写工作目录、权限覆盖层）；外面一层 bwrap 管读（阶段 0，`MATRIX_CLOUD_ISOLATION`）：外层里只有系统目录、Python 与 Matrix 代码、dsh 与 node（只读），这个执行单元的工作目录（原绝对路径）和它的 dsh 状态目录（读写）。外层不可用且不是 `required` 时只剩内层：**只管写不管读** | 看 harness：dsh 只有它自己的那层；Codex `workspace-write`；Claude Code 没有（权限按 `advisory` 收窄）。读的是用户自己的电脑 |
+| dsh 会话 | 每个执行单元（席位、委托）一个状态目录 `<data>/dsh-state/{seats/<对话>/<Agent>,tasks/<任务>}/` 当那一轮 dsh 的 HOME；共用的 `~/.dsh` 不再给云侧用，旧会话第一次在新方式下运行时搬进来（两处文件，搬不了就开新会话） | dsh 用用户自己的 `~/.dsh` |
+| 工作目录以外的写 | 一律写不进，也不审批（覆盖层不插应答者，`/internal/approval` 回 `unavailable`）；能力报告 `approval: sandbox-only` | dsh：沙箱拒绝 → 申请升权 → 连接器 → `approval.request` → 所有者逐次批准；Codex、Claude Code 没有审批上行 |
+| 网络工具 / 提问 | stdio MCP 回调本机 `/internal/*`，凭一次性令牌 | 本机小桥（`connector/bridge.py`）→ WebSocket → 同一套逻辑（加上审批），凭 `run_id` |
 | 产物 | 交付时拷进委托方工作目录 `deliveries/`；人可以浏览工作目录 | 留在设备上；要给别人用 `publish_file` / `send_file`，服务器经 `file.fetch` 回读 |
-| 模型凭据 | 平台配的供应商密钥只经那个 dsh 进程的环境变量（名字带 `KEY`，dsh 不传给 Agent 的命令） | harness 自己的登录，Matrix 不下发任何密钥 |
+| 模型凭据 | 平台配的供应商密钥只经那个 dsh 进程的环境变量（名字带 `KEY`，dsh 不传给 Agent 的命令）；服务进程环境里的 `DEEPSEEK_API_KEY` 照常传下去。dsh 自己登录、存在共用 `~/.dsh` 里的凭据云侧不再用 | harness 自己的登录，Matrix 不下发任何密钥 |
 | 不在线 | 不存在 | 任务进入 `WAITING`、不消耗重试，上线后消费积压 |
 
 <a id="cloud-debt"></a>
@@ -80,17 +117,22 @@
 
 云侧是先跑通的那一套，执行面和控制面挤在一起。端侧反而已经是“执行面只拿网络给的副本、只经令牌回调”的形状。云侧要对齐的地方：
 
-1. **读隔离缺失（最要紧）**：沙箱只管写不管读，云侧 Agent 能读到整个 `--data`（别人的私有目录、对话、任务、`vault.key`），
-   插件服务同理。见 [security.md](security.md) 第一条与需求 #59（[plugin-hooks.md](../plugin-hooks.md#isolation-debt)）：
-   控制面与执行面分开、每个执行单元（至少 Agent × 场合）一个沙箱、插件服务同样进沙箱。团队协作、多人部署之前必须完成。
+1. **读隔离只到阶段 0（最要紧）**：外层 bwrap 可用时，云侧 Agent 的命令只看得到自己执行单元的东西；但内核与网络仍和 Matrix 共用，
+   没有外层沙箱的部署（`preferred` 降级、`off`）仍能读到整个 `--data`（别人的私有目录、对话、任务、`vault.key`），目录托管的插件服务同理。
+   见 [security.md](security.md) 第一条与需求 #59（[plugin-hooks.md](../plugin-hooks.md#isolation-debt)）：控制面与执行面分开、
+   每个执行单元一个独立内核级的沙箱、插件服务同样进沙箱（阶段 1）。团队协作、多人部署之前必须完成。
 2. **只读材料每轮整份拷贝**：档案文件、对话里全部可见附件（单个 ≤20 MB）、订阅、技能、插件挂载每轮拷进工作目录再删掉，
    一个对话里每个席位每轮都拷一遍。本机磁盘，不走网络，但量随对话变长线性增长。方向：和端侧一样按 sha 复用——
    做了每执行单元的沙箱后，内容寻址的只读存储直接只读挂进沙箱，不再拷贝。
 3. **私有目录每轮整份拷入、整份比对写回**：开销随私有目录大小增长。方向同上：沙箱里直接挂载（只读 / 读写）。
 4. **工作目录在数据目录里**：执行面的文件和网络的状态放在一起，挪不走也隔不开。方向：执行面单独的目录树（或单独的机器 / 容器）。
-5. **没有资源上限**：只有运行时长（`timeout_s`），没有 CPU、内存、磁盘上限，一个 Agent 能拖垮整台服务器。方向：cgroup 或容器配额。
+5. **没有资源上限**：只有运行时长（`timeout_s`）和外层沙箱里单个文件 4 GB 的上限，没有 CPU、内存、进程数、磁盘总量上限，一个 Agent 能拖垮整台服务器。
+   方向：cgroup 或容器配额（阶段 1）。外层不设地址空间上限：Node 预留的虚拟地址空间远超常见的上限，设了 dsh 起不来。
 6. **模型密钥经 dsh 进程的环境变量**：靠 dsh 按名字过滤挡住 Agent 的命令；没有独立的 PID 命名空间时，Agent 可能经 `/proc` 读到父进程环境
    （`matrix-dsh-check` 的 `key-hidden` 一项检查，部署容器里必须是绿的）。方向：模型调用经网络代理，密钥不进执行面。
 
 需求表里的对应条目：#59（读隔离）、#68（材料与私有目录不再每轮整份拷贝、资源上限）。
+这六条的解决方案（每个执行单元一个沙箱、云侧沙箱复用端侧客户端与协议、出口网关、分阶段）见 [cloud-runtime.md](../cloud-runtime.md)；
+阶段 0（外层 bwrap、执行单元各自的 dsh 状态目录、云侧取消外溢审批）已实现；阶段 1a（沙箱方式：每个执行单元一个沙箱、
+端侧客户端协议、材料清单、私有目录“材料进、改动出”、产物与会话检查点，上一节）已实现、默认关，打开时第 2、3、4 条在云侧消失；其余未实现。
 
