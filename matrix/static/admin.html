@@ -20,6 +20,7 @@
     <a href="#models" data-tab="models">模型</a>
     <a href="#plugins" data-tab="plugins">插件</a>
     <a href="#im" data-tab="im">IM 机器人</a>
+    <a href="#audit" data-tab="audit">审计</a>
   </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
@@ -193,6 +194,15 @@
     <p class="error" id="im-error" role="alert"></p>
     <div id="im-driver-errors"></div>
     <div class="table-wrap"><table id="t-im"></table></div>
+  </div>
+  <div id="audit" data-pane="audit" hidden>
+    <div class="view-head">
+      <div><h1>审计</h1>
+        <p>后台的每次改动（模型与供应商、插件、模板、IM 机器人、重置密码）记一行，只追加：谁、什么时候、改了哪一类、改的是哪个。
+          不记密钥与内容。原始记录在数据目录的 audit.jsonl。</p></div>
+    </div>
+    <p class="error" id="audit-error" role="alert"></p>
+    <div class="table-wrap"><table id="t-audit"></table></div>
   </div>
   <dialog id="im-dialog" class="m-dialog">
     <form id="im-form" method="dialog">

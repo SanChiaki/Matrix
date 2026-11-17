@@ -36,10 +36,16 @@ const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
 const SEND_HINT = `<kbd>${MOD_KEY}</kbd> <kbd>Enter</kbd> 发送`;
 const httpError = (message, status) => Object.assign(new Error(message), { status });
 
+// 跨站防护（matrix/web_guard.py）：改状态的请求带上 CSRF cookie 里的令牌（双提交）。插件页面经 postMessage 让这里转发，同样带上
+const csrfToken = () => decodeURIComponent((document.cookie.match(/(?:^|;\s*)matrix_csrf=([^;]*)/) || [])[1] || "");
+const withCsrf = (opts) => (["GET", "HEAD"].includes((opts.method || "GET").toUpperCase()) ? opts
+  : { ...opts, headers: { ...(opts.headers || {}), "X-Matrix-CSRF": csrfToken() } });
+
 async function api(path, opts = {}) {
   if (opts.body && typeof opts.body !== "string" && !(opts.body instanceof Blob)) {  // 文件（附件上传）原样发送
     opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
   }
+  opts = withCsrf(opts);
   let r;
   try {
     r = await fetch(path, { ...opts, signal: AbortSignal.timeout(opts.timeoutMs || API_TIMEOUT_MS) });
@@ -2718,8 +2724,58 @@ function setupMore() {
     (items) => items.find((b) => b.getAttribute("aria-pressed") === "true") || items[0]);
 }
 
+// 登录与密码：我在哪些地方登录着（不显示令牌）、逐个下线或一键下线其他所有；改密码（其他地方的登录随之退出）
+async function openAccount() {
+  let dlg = $("#account-dlg");
+  if (!dlg) {
+    dlg = Object.assign(document.createElement("dialog"), { id: "account-dlg", className: "preview confirm-card access-dlg" });
+    document.body.append(dlg);
+  }
+  const draw = async (note = "") => {
+    let rows = [];
+    try { rows = await api("/api/auth/sessions"); } catch (e) { note = e.message; }
+    const others = rows.filter((r) => !r.current).length;
+    dlg.innerHTML = `<div class="preview-card account-card" aria-labelledby="acc-title">
+      <h2 id="acc-title">登录与密码</h2>
+      <p class="muted small">这些地方登录着你的账号。闲置 7 天自动退出，最长 30 天要重新登录。不认得的就下线它，再改密码。</p>
+      <table class="assets"><thead><tr><th scope="col">设备</th><th scope="col">来源</th><th scope="col">登录于</th><th scope="col">最近使用</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead>
+        <tbody>${rows.map((r) => `<tr><td>${esc(r.ua || "未知")}${r.current ? ' <span class="tag">这里</span>' : ""}</td><td>${esc(r.ip || "")}</td>
+          <td>${dateTime(r.created_at)}</td><td>${dateTime(r.last_used)}</td>
+          <td>${r.current ? "" : `<button type="button" class="link" data-drop="${esc(r.id)}">下线</button>`}</td></tr>`).join("")}</tbody></table>
+      ${others ? `<div class="actions"><button type="button" class="ghost" id="acc-others">下线其他 ${others} 处</button></div>` : ""}
+      <form id="acc-pass" class="stack" autocomplete="on">
+        <h3>改密码</h3>
+        <div class="field"><label for="acc-old">原密码</label><input id="acc-old" type="password" autocomplete="current-password" required></div>
+        <div class="field"><label for="acc-new">新密码（至少 8 位）</label><input id="acc-new" type="password" autocomplete="new-password" minlength="8" required></div>
+        <p class="muted small">改好后其他地方的登录都会退出，这里保持登录。</p>
+        <p class="error" id="acc-error" role="alert"></p>
+        <p class="ok-note" id="acc-note" role="status">${esc(note)}</p>
+        <div class="actions"><button type="button" class="ghost" id="acc-close">关闭</button><button type="submit">改密码</button></div>
+      </form></div>`;
+    dlg.querySelectorAll("[data-drop]").forEach((b) => b.addEventListener("click", async () => {
+      try { await api(`/api/auth/sessions/${encodeURIComponent(b.dataset.drop)}`, { method: "DELETE" }); draw("已下线。"); }
+      catch (e) { $("#acc-error", dlg).textContent = e.message; }
+    }));
+    $("#acc-others", dlg)?.addEventListener("click", async () => {
+      try { const r = await api("/api/auth/sessions/others", { method: "POST", body: {} }); draw(`已下线 ${r.revoked} 处。`); }
+      catch (e) { $("#acc-error", dlg).textContent = e.message; }
+    });
+    $("#acc-close", dlg).addEventListener("click", () => dlg.close());
+    $("#acc-pass", dlg).addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      try {
+        await api("/api/auth/password", { method: "POST", body: { old: $("#acc-old", dlg).value, new: $("#acc-new", dlg).value } });
+        draw("密码已改好，其他地方的登录都已退出。");
+      } catch (e) { $("#acc-error", dlg).textContent = e.message; }
+    });
+  };
+  await draw();
+  if (!dlg.open) dlg.showModal();
+}
+
 // 账号：管理后台、深浅色、退出。侧栏竖着时在按钮上方弹出（按钮在侧栏最底下），窄屏横着时在下面
 function setupAccount() {
+  $("#account-btn").addEventListener("click", () => { $("#me-menu").hidden = true; openAccount(); });
   const menu = $("#me-menu");
   setupPopover($(".me-wrap"), $("#me-btn"), menu,
     (r, side) => {

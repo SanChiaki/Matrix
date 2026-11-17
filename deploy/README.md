@@ -3,7 +3,17 @@
 `compose.yml` 起两个容器：
 
 - `matrix`：应用本身，只在 compose 内部网络监听 8765，不对宿主机发布端口。
-- `caddy`：唯一对外入口，开 80（跳转）和 443，提供 HTTPS，并在 Matrix 自己的登录前面再加一层 basic auth。`/internal/*` 对外一律返回 404。
+- `caddy`：唯一对外入口，开 80（跳转）和 443，提供 HTTPS，并在 Matrix 自己的登录前面再加一层 basic auth（默认开，可以显式关掉）。`/internal/*` 对外一律返回 404。
+
+Matrix 自己的登录（C0，见 [docs/reference/security.md](../docs/reference/security.md)）：令牌只存哈希、会话闲置 7 天过期 / 最长 30 天、
+改密码后其余会话作废、改状态的请求校验同站来源与 CSRF 令牌、登录与注册限流、后台改动记审计日志（数据卷里的 `audit.jsonl`，后台“审计”页）。
+compose 给 Matrix 设好了 `MATRIX_PUBLIC_URL=https://<MATRIX_SITE>`（cookie 加 Secure、认这个来源），并且只认 Caddy 转来的来源地址与协议：
+内部网络是固定子网（默认 `172.30.77.0/24`），Caddy 固定在 `172.30.77.10`，`FORWARDED_ALLOW_IPS` 只写这个地址，
+限流与“我的会话”按真实来源算；别的容器（含沙箱方式下出口网关转来的连接）带 `X-Forwarded-For` 也不认。
+网段和宿主冲突时在 `.env` 里改 `MATRIX_INTERNAL_SUBNET` / `MATRIX_INTERNAL_RANGE` / `MATRIX_CADDY_IP`。
+换了对外地址（另一个域名、前面还有一层代理）时改 `MATRIX_PUBLIC_URL`。
+
+**升级到这一版（2026-11-17）**：内部网络改成了固定子网，`docker compose up -d` 之前先 `docker compose down`（只删容器与网络，卷保留），否则 compose 会说网络配置对不上。
 
 ## 第一次部署
 
@@ -16,7 +26,12 @@ docker compose up -d --build
 
 服务器的安全组要放行 TCP 80 和 443。
 
-临时关掉 basic auth：在 `.env` 里写 `MATRIX_BASIC_AUTH=off`，然后执行 `docker compose up -d`。关掉时不需要 `MATRIX_BASIC_HASH`，可以不填；只认 `on` / `off`，写成别的值 Caddy 会起不来，不会悄悄放开。关掉之后只剩 Matrix 自己的简易登录（没有 CSRF 防护、没有限流、令牌不过期），而 DSH 能在服务器上执行命令，所以这种状态只适合短时间的演示。
+第一个注册的人是管理员。部署好以后马上去注册，别让别人抢先。
+
+basic auth 默认开着。C0 之后 Matrix 自己的登录已经有会话过期、改密码后其余会话作废、登录限流、CSRF 防护
+（[docs/reference/security.md](../docs/reference/security.md)），部署方确认够用之后可以在 `.env` 里显式写 `MATRIX_BASIC_AUTH=off`
+（这时不需要 `MATRIX_BASIC_HASH`），然后 `docker compose up -d`。只认 `on` / `off`，写成别的值 Caddy 会起不来，不会悄悄放开。
+开着时端侧连接器也要带 basic auth 凭据（见“端侧连接器”）。
 
 ## 配置模型凭据（DSH）
 
@@ -261,8 +276,8 @@ uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
 
 - 连接器**只发出站** WebSocket，不开入站端口；Caddy 的 `reverse_proxy` 自动处理升级，不需要额外配置。
 - 令牌可随时在「设备」页吊销；吊销后连接立即断开，绑在该设备上的 Agent 进入等待。
-- 如果开着 basic auth（`MATRIX_BASIC_AUTH=on`），连接器还要带上 basic auth 凭据，否则握手会被 Caddy 拒绝；
-  简化起见可以在演示时关掉 basic auth，只依赖 Matrix 自己的登录。
+- 如果开着 basic auth（`MATRIX_BASIC_AUTH=on`，默认），连接器还要带上 basic auth 凭据，否则握手会被 Caddy 拒绝；
+  显式关掉以后只靠 Matrix 自己的登录与设备令牌。
 - 设备离线不是故障：任务进入 `waiting`，不消耗重试，连接器重连后继续。
 
 ## 沙箱

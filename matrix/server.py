@@ -28,6 +28,8 @@ import uvicorn
 from pydantic import BaseModel, Field, model_validator
 
 from . import auth, compat
+from .audit import AuditLog
+from .web_guard import CsrfGuard, secure_cookies
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .sandboxes import hello_message as sandbox_hello, provider_named, sandbox_config
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
@@ -502,6 +504,11 @@ class CredentialsIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordIn(BaseModel):
+    old: str = Field(min_length=1, max_length=200)
+    new: str = Field(min_length=1, max_length=200)
+
+
 class ResetCheckIn(BaseModel):
     token: str = Field(min_length=1, max_length=200)
 
@@ -544,6 +551,19 @@ class ToolCallIn(BaseModel):
     token: str
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+
+def ua_summary(ua: str) -> str:
+    """User-Agent 的摘要（“我的会话”里认得出是哪台设备）：浏览器 · 系统。认不出就截一段原文。"""
+    browser = next((n for k, n in (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"),
+                                   ("Safari/", "Safari"), ("curl/", "curl"), ("python", "Python")) if k in ua), "")
+    system = next((n for k, n in (("Windows", "Windows"), ("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iPadOS"),
+                                  ("Mac OS X", "macOS"), ("Linux", "Linux")) if k in ua), "")
+    return " · ".join(x for x in (browser, system) if x) or ua[:60]
+
+
+def session_meta(request: Request) -> dict[str, str]:
+    return {"ip": request.client.host if request.client else "", "ua": ua_summary(request.headers.get("user-agent", ""))}
 
 
 def current_user(request: Request) -> User:
@@ -627,6 +647,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         network.services.stop_all()  # 插件服务进程随服务一起退出（不变量 24）
 
     app = FastAPI(title="Matrix", lifespan=lifespan)
+    app.add_middleware(CsrfGuard)  # 改状态的请求：同站来源 + 双提交的 CSRF 令牌（web_guard.py，C0）
     app.mount("/static", NoCacheStaticFiles(directory=STATIC), name="static")
     store = network.store
 
@@ -639,13 +660,24 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.exception_handler(auth.AuthError)
     async def _auth_err(_: Request, e: auth.AuthError) -> JSONResponse:
+        if isinstance(e, auth.Throttled):   # 限流：429，说明多久后再试（对存在与不存在的账号一样）
+            return JSONResponse({"detail": str(e)}, status_code=429, headers={"Retry-After": str(e.seconds)})
         return JSONResponse({"detail": str(e)}, status_code=400)
 
     app.state.network = network
     app.state.im = im
+    guards = app.state.guards = auth.Guards()   # 登录、注册、重置、改密码的限流（只在内存里）
+    audit = app.state.audit = AuditLog(store.root / "audit.jsonl")   # 后台改动的审计日志（只追加，audit.py）
 
-    def set_cookie(resp: Response, token: str) -> None:
-        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, path="/")
+    def audited(user: User, action: str, target: str = "", **detail: Any) -> None:
+        audit.record(user.id, user.email, action, target, **detail)
+
+    def ip_of(request: Request) -> str:
+        return request.client.host if request.client else ""
+
+    def set_cookie(resp: Response, token: str, request: Request) -> None:
+        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=int(auth.session_limits()[1]), path="/",
+                        secure=secure_cookies(request.url.scheme))
 
     @app.get("/")
     def index() -> FileResponse:
@@ -670,35 +702,58 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
-    def register(body: CredentialsIn, response: Response) -> dict:
-        user, token, first = auth.register(store, body.email, body.password)
-        set_cookie(response, token)
+    def register(body: CredentialsIn, request: Request, response: Response) -> dict:
+        user, token, first = guards.register_user(store, body.email, body.password, ip_of(request), session_meta(request))
+        set_cookie(response, token, request)
         claimed = first and bool(store.agents)
         network.ensure_assistant(user.id)  # 注册即有助理（认领了旧数据、已有 Agent 的不补建）
         return {**store.users[user.id].public(), "claimed_existing": claimed}
 
     @app.post("/api/auth/login")
-    def login(body: CredentialsIn, response: Response) -> dict:
-        user, token = auth.login(store, body.email, body.password)
-        set_cookie(response, token)
+    def login(body: CredentialsIn, request: Request, response: Response) -> dict:
+        user, token = guards.login(store, body.email, body.password, ip_of(request), session_meta(request),
+                                   request.cookies.get(auth.COOKIE))
+        set_cookie(response, token, request)
         return user.public()
 
     # 重置密码：令牌在链接的 # 后面（不进服务器日志与 Referer），页面用 POST 交上来
     @app.post("/api/auth/reset/check")
-    def reset_check(body: ResetCheckIn) -> dict:
-        return {"email": auth.reset_info(store, body.token)}
+    def reset_check(body: ResetCheckIn, request: Request) -> dict:
+        return {"email": guards.reset_with(ip_of(request), auth.reset_info, store, body.token)}
 
     @app.post("/api/auth/reset")
-    def reset(body: ResetIn, response: Response) -> dict:
-        user, token = auth.reset_password(store, body.token, body.password)
-        set_cookie(response, token)
+    def reset(body: ResetIn, request: Request, response: Response) -> dict:
+        user, token = guards.reset_with(ip_of(request), auth.reset_password, store, body.token, body.password,
+                                        session_meta(request))
+        set_cookie(response, token, request)
         return user.public()
 
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response) -> dict:
         auth.logout(store, request.cookies.get(auth.COOKIE))
-        response.delete_cookie(auth.COOKIE, path="/")
+        response.delete_cookie(auth.COOKIE, path="/", secure=secure_cookies(request.url.scheme), httponly=True,
+                               samesite="lax")
         return {"ok": True}
+
+    # 改密码：换新令牌，其余会话全部作废（control-plane.md 第 8 节）
+    @app.post("/api/auth/password")
+    def change_password(body: PasswordIn, request: Request, response: Response, user: Me) -> dict:
+        set_cookie(response, guards.change_password(store, user.id, body.old, body.new, session_meta(request)), request)
+        return {"ok": True}
+
+    # 我的会话：列出自己的登录（不显示令牌），逐个下线或一键下线其他所有
+    @app.get("/api/auth/sessions")
+    def my_sessions(request: Request, user: Me) -> list:
+        return auth.sessions_of(store, user.id, request.cookies.get(auth.COOKIE))
+
+    @app.delete("/api/auth/sessions/{session_id}")
+    def drop_session(session_id: str, user: Me) -> dict:
+        auth.revoke_session(store, user.id, session_id)
+        return {"ok": True}
+
+    @app.post("/api/auth/sessions/others")
+    def drop_other_sessions(request: Request, user: Me) -> dict:
+        return {"revoked": auth.revoke_others(store, user.id, request.cookies.get(auth.COOKIE))}
 
     @app.get("/api/me")
     def whoami(user: Me) -> dict:
@@ -721,6 +776,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         if user_id not in store.users:
             raise HTTPException(404, "unknown user")
         token, expires_at = auth.issue_reset(store, user_id, by=user.id)
+        audited(user, "user.reset_link", user_id)
         return {"token": token, "path": f"/#reset={token}", "expires_at": expires_at}
 
     @app.get("/api/admin/models")
@@ -733,7 +789,10 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
                 "providers": [p.model_dump(exclude={"api_key"}) for p in body.providers]}
         keys = {p.id.strip(): p.api_key.strip() for p in body.providers if p.api_key and p.api_key.strip()}
         try:
-            return network.admin_save_models(user.id, data, body.rev, keys)
+            out = network.admin_save_models(user.id, data, body.rev, keys)
+            audited(user, "models.save", "", models=len(data["models"]), providers=[p["id"] for p in data["providers"]],
+                    keys_set=sorted(keys))   # 只记哪几个供应商换了密钥，不记密钥
+            return out
         except CatalogConflict as e:
             raise HTTPException(409, str(e)) from e
 
@@ -1067,26 +1126,36 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.put("/api/admin/plugins/policy")
     def admin_plugin_policy(body: PluginPolicyIn, user: Me) -> dict:
-        return network.admin_save_plugin_policy(user.id, body.model_dump())
+        out = network.admin_save_plugin_policy(user.id, body.model_dump())
+        audited(user, "plugins.policy")
+        return out
 
     @app.post("/api/admin/plugins/catalog/git")
     def admin_catalog_git(body: CatalogGitIn, user: Me) -> dict:
-        return network.admin_catalog_git(user.id, body.url, body.ref, body.path)
+        out = network.admin_catalog_git(user.id, body.url, body.ref, body.path)
+        audited(user, "plugins.catalog.git", str(out.get("name", "")) if isinstance(out, dict) else "", url=body.url)
+        return out
 
     @app.post("/api/admin/plugins/catalog/upload")
     async def admin_catalog_upload(request: Request, user: Me) -> dict:
         if not network.is_admin(user.id):
             raise HTTPException(404, "unknown admin")
         entries = await plugin_package(request)
-        return await run_in_threadpool(network.admin_catalog_upload, user.id, entries)
+        out = await run_in_threadpool(network.admin_catalog_upload, user.id, entries)
+        audited(user, "plugins.catalog.upload", str(out.get("name", "")) if isinstance(out, dict) else "")
+        return out
 
     @app.post("/api/admin/plugins/catalog/{name}/refresh")
     def admin_catalog_refresh(name: str, user: Me) -> dict:
-        return network.admin_catalog_refresh(user.id, name)
+        out = network.admin_catalog_refresh(user.id, name)
+        audited(user, "plugins.catalog.refresh", name)
+        return out
 
     @app.delete("/api/admin/plugins/catalog/{name}")
     def admin_catalog_remove(name: str, user: Me) -> dict:
-        return network.admin_catalog_remove(user.id, name)
+        out = network.admin_catalog_remove(user.id, name)
+        audited(user, "plugins.catalog.remove", name)
+        return out
 
     @app.get("/api/admin/plugins/submissions/{sid}/file")
     def admin_submission_file(sid: str, user: Me, path: str = Query(..., max_length=500)) -> dict:
@@ -1094,7 +1163,9 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.post("/api/admin/plugins/submissions/{sid}")
     def admin_decide_submission(sid: str, body: DecideIn, user: Me) -> dict:
-        return network.admin_decide_submission(user.id, sid, body.approve, body.note)
+        out = network.admin_decide_submission(user.id, sid, body.approve, body.note)
+        audited(user, "plugins.submission", sid, approve=body.approve)
+        return out
 
     # ---- 角色、插件设置与模板（docs/blueprints.md） ----
     @app.put("/api/projects/{project_id}/roles")
@@ -1139,7 +1210,9 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         if not network.is_admin(user.id):
             raise HTTPException(404, "unknown admin")
         entries = await plugin_package(request, limit=10_000_000)
-        return await run_in_threadpool(network.admin_blueprint_upload, user.id, entries)
+        out = await run_in_threadpool(network.admin_blueprint_upload, user.id, entries)
+        audited(user, "blueprints.upload", str(out.get("name", "")) if isinstance(out, dict) else "")
+        return out
 
     @app.post("/api/projects/{project_id}/plugins/upload")
     async def upload_plugin(project_id: str, request: Request, user: Me, confirm: bool = False,
@@ -1315,7 +1388,13 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.patch("/api/me/im/{channel_id}")
     def patch_im(channel_id: str, body: ImPatch, user: Me) -> dict:
-        return im.update_channel(channel_id, user.id, values=body.values, title=body.title, enabled=body.enabled)
+        c = store.im_channels.get(channel_id)
+        shared = c is not None and c.owner_id is None   # 部署方共用的机器人：管理员的改动，记审计
+        out = im.update_channel(channel_id, user.id, values=body.values, title=body.title, enabled=body.enabled)
+        if shared:
+            audited(user, "im.update", channel_id, values_changed=bool(body.values), title=body.title is not None,
+                    enabled=body.enabled)
+        return out
 
     @app.post("/api/me/im/{channel_id}/reconnect")
     def reconnect_im(channel_id: str, user: Me) -> dict:
@@ -1323,7 +1402,11 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.delete("/api/me/im/{channel_id}")
     def delete_im(channel_id: str, user: Me) -> dict:
+        c = store.im_channels.get(channel_id)
+        shared = c is not None and c.owner_id is None
         im.delete_channel(channel_id, user.id)
+        if shared:
+            audited(user, "im.delete", channel_id)
         return {"ok": True}
 
     @app.post("/api/me/im/{channel_id}/code")
@@ -1346,7 +1429,15 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.post("/api/admin/im")
     def admin_add_im(body: ImIn, user: Me) -> dict:
-        return im.create_channel(body.kind, body.values, user.id, title=body.title, shared=True)
+        out = im.create_channel(body.kind, body.values, user.id, title=body.title, shared=True)
+        audited(user, "im.create", str(out["channel"]["id"]), kind=body.kind)   # values 里有密钥：不记
+        return out
+
+    @app.get("/api/admin/audit")
+    def admin_audit(user: Me, limit: int = Query(200, ge=1, le=2000)) -> dict:
+        if not network.is_admin(user.id):
+            raise HTTPException(404, "unknown admin")
+        return {"entries": audit.recent(limit)}
 
     # ---- 用到别处资料、等所有者确认的回复与交付（不变量 22）：只有 Agent 的所有者能决定，别人一律 404 ----
     @app.post("/api/held/{held_id}")

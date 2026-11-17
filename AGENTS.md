@@ -70,7 +70,9 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型；云侧 `hosted`：执行单元自己的 dsh 状态目录当 HOME、外层 bwrap 读隔离（`outer_argv`，开关 `MATRIX_CLOUD_ISOLATION`）、不插审批应答者，旧会话迁移 `adopt_dsh_session`）；`ScriptedRuntime`；运行时错误分类 |
 | `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
 | `matrix/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
-| `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据；管理员签发的一次性重置密码链接 |
+| `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据；登录令牌只存 sha256、会话过期与轮换、改密码、我的会话；登录 / 注册 / 重置 / 改密码的限流（`Guards`）；管理员签发的一次性重置密码链接 |
+| `matrix/web_guard.py` | 网页入口的跨站防护：`/api/*` 改状态的请求校验同站来源与双提交的 CSRF 令牌（ASGI 中间件）；经 HTTPS 时 cookie 加 Secure |
+| `matrix/audit.py` | 后台改动的审计日志（`<数据目录>/audit.jsonl`，只追加，不记密钥与内容） |
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者（只给端侧驱动；云侧不审批）：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `matrix/dsh_plugins/jobs.mjs` | dsh 后台任务守护：Agent 要收尾时还有后台任务在跑，追加一条消息让它先收完或结束（headless 退出会结束它们） |
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
@@ -212,8 +214,10 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 全文与已知风险见 [security.md](docs/reference/security.md)。
 
-- 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
-- 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
+- 对外只经带 TLS 的反向代理（`deploy/` 的 Caddy）；本机直接跑时服务只监听 `127.0.0.1`，不要直接把 Matrix 的端口暴露到公网。
+- 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌；状态里的登录令牌只存 sha256，不要改回明文。
+- `/api/*` 上改状态的请求都过 `web_guard.CsrfGuard`（同站来源 + CSRF 令牌）：不要给新的端点开例外，前端请求走 `api()`；
+  登录、注册、重置、改密码要经 `auth.Guards` 限流，不要绕过；后台的改动要记审计（`audit.py`），不记密钥与内容。
 - `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准（端侧）、提问应答者替人作答；云侧覆盖层不插审批应答者、`/internal/approval` 对云侧一律 `unavailable`（不变量 14）；覆盖层要一直关掉 dsh 的默认技能根。
 - 云侧 dsh 的外层沙箱里只挂这个执行单元的工作目录与 dsh 状态目录（可写）和运行要的代码（只读）：不要把数据目录、别的执行单元或共用的 `~/.dsh` 挂进去，也不要因为某个功能要读别处就放宽（`outer_argv`，`matrix-dsh-check` 的 `read-isolation` 变红就不能上线）。

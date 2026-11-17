@@ -172,14 +172,21 @@ def test_sandbox_connect_is_spliced_to_core(tmp_path):
     g = Gateway(core.getsockname(), lambda: None, [], upstream_proxy="")
     addr = g.start("127.0.0.1", 0)
 
-    def echo():
+    got: list[bytes] = []
+
+    def echo_seen():
         c, _ = core.accept()
         data = c.recv(65536)
+        got.append(data)
         c.sendall(b"HTTP/1.1 101 OK\r\n\r\n" + data[-5:])
         c.close()
-    threading.Thread(target=echo, daemon=True).start()
-    out = http(addr, b"GET /api/sandbox/connect?token=x HTTP/1.1\r\nUpgrade: websocket\r\n\r\nhello")
+    threading.Thread(target=echo_seen, daemon=True).start()
+    # 沙箱伪造的转发头不带给核心（核心也只认反向代理转来的：FORWARDED_ALLOW_IPS）
+    out = http(addr, b"GET /api/sandbox/connect?token=x HTTP/1.1\r\nUpgrade: websocket\r\nX-Forwarded-For: 1.2.3.4\r\n"
+                     b"x-forwarded-proto: https\r\nForwarded: for=1.2.3.4\r\nX-Real-IP: 1.2.3.4\r\n\r\nhello")
     assert out.startswith(b"HTTP/1.1 101") and out.endswith(b"hello")
+    seen = got[0].lower()
+    assert b"upgrade: websocket" in seen and b"1.2.3.4" not in seen and b"forwarded" not in seen and b"x-real-ip" not in seen
     g.stop()
     core.close()
 

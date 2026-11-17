@@ -1,7 +1,11 @@
-"""用户与登录：邮箱 + 密码（scrypt，仅标准库），登录令牌存在 state.json 里，经 HttpOnly cookie 传递。
+"""用户与登录：邮箱 + 密码（scrypt，仅标准库），登录令牌经 HttpOnly cookie 传递（docs/control-plane.md 第 8 节，C0）。
 
-这是最简实现：没有邮箱验证、令牌过期轮换；令牌在退出登录时作废。忘了密码由管理员发一条一次性的重置链接
-（`issue_reset` / `reset_password`），用户自己设新密码，管理员看不到新密码。
+- 令牌在 state.json 里只存 sha256：库泄露不等于会话泄露。
+- 会话闲置 SESSION_IDLE_S 过期、最长 SESSION_MAX_S（MATRIX_SESSION_IDLE_DAYS / MATRIX_SESSION_MAX_DAYS）；登录、改密码、
+  重置密码都换新令牌，改密码与重置后这个人其余的会话全部作废。“我的会话”可以逐个下线。
+- 登录、注册、重置按账号与来源地址限流（`Throttle`），连续失败后指数退避，限流期间正确的密码也不放行。
+- 忘了密码由管理员发一条一次性的重置链接（`issue_reset` / `reset_password`），用户自己设新密码，管理员看不到新密码。
+没有邮箱验证（没有发信服务）；OIDC 单点登录是 C4。
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import threading
 import time
 from typing import Any
 
+from . import compat
 from .models import Device, User, new_id
 from .store import Store
 
@@ -39,7 +44,24 @@ def _check_password(password: str) -> None:
         raise AuthError("密码至少 8 位")
 
 
-def register(store: Store, email: str, password: str) -> tuple[User, str, bool]:
+def _days(name: str, default: float) -> float:
+    try:
+        v = float(compat.env(name) or default)
+    except ValueError:
+        return default * 86400
+    return (v if v > 0 else default) * 86400
+
+
+def session_limits() -> tuple[float, float]:
+    """（闲置多久过期, 最长多久）秒。"""
+    return _days("SESSION_IDLE_DAYS", 7), _days("SESSION_MAX_DAYS", 30)
+
+
+def token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def register(store: Store, email: str, password: str, meta: dict[str, str] | None = None) -> tuple[User, str, bool]:
     """建用户并登录；返回 (用户, 登录令牌, 是否第一个用户)。第一个用户认领所有无主的旧数据。"""
     email = normalize_email(email)
     if not EMAIL_RE.match(email):
@@ -54,36 +76,214 @@ def register(store: Store, email: str, password: str) -> tuple[User, str, bool]:
         store.users[user.id] = user
         if first:
             store.claim_orphans(user.id)
-        token = _new_session(store, user.id)
+        token = _new_session(store, user.id, meta)
         store.save()
     return user, token, first
 
 
-def login(store: Store, email: str, password: str) -> tuple[User, str]:
+def _verify(user: User | None, password: str) -> bool:
+    # 不存在的邮箱也算一次哈希，不让响应时间暴露邮箱是否注册过
+    expected = user.password_hash if user else _hash(password, b"0" * 16)
+    got = _hash(password, bytes.fromhex(user.salt) if user else b"1" * 16)
+    return user is not None and hmac.compare_digest(expected, got)
+
+
+def login(store: Store, email: str, password: str, meta: dict[str, str] | None = None,
+          old_token: str | None = None) -> tuple[User, str]:
+    """登录换一个新令牌；带着旧 cookie 来登录的，旧的那个会话作废（不叠着留）。"""
     email = normalize_email(email)
     with store.lock:
         user = next((u for u in store.users.values() if u.email == email), None)
-        # 不存在的邮箱也算一次哈希，不让响应时间暴露邮箱是否注册过
-        expected = user.password_hash if user else _hash(password, b"0" * 16)
-        got = _hash(password, bytes.fromhex(user.salt) if user else b"1" * 16)
-        if user is None or not hmac.compare_digest(expected, got):
+        if not _verify(user, password):
             raise AuthError("邮箱或密码不对")
-        token = _new_session(store, user.id)
+        assert user is not None
+        if old_token:
+            store.sessions.pop(token_hash(old_token), None)
+        token = _new_session(store, user.id, meta)
         store.save()
     return user, token
 
 
 def logout(store: Store, token: str | None) -> None:
     with store.lock:
-        if token and store.sessions.pop(token, None) is not None:
+        if token and store.sessions.pop(token_hash(token), None) is not None:
             store.save()
 
 
-def user_of(store: Store, token: str | None) -> User | None:
+TOUCH_S = 300   # 最近使用时间多久写一次盘（每个请求都写 state.json 太贵；闲置按天算，差几分钟无所谓）
+
+
+def user_of(store: Store, token: str | None, now: float | None = None) -> User | None:
+    """cookie 里的令牌 → 用户。过期（闲置太久或到了最长期限）的会话删掉、按没登录处理。"""
     if not token:
         return None
-    s = store.sessions.get(token)
-    return store.users.get(s["user_id"]) if s else None
+    now = time.time() if now is None else now
+    h = token_hash(token)
+    with store.lock:
+        s = store.sessions.get(h)
+        if s is None:
+            return None
+        idle, longest = session_limits()
+        if now - s["last_used"] > idle or now - s["created_at"] > longest or s["user_id"] not in store.users:
+            del store.sessions[h]
+            store.save()
+            return None
+        if now - s["last_used"] > TOUCH_S:
+            s["last_used"] = now
+            store.save()
+        return store.users[s["user_id"]]
+
+
+def sessions_of(store: Store, user_id: str, current: str | None) -> list[dict[str, Any]]:
+    """“我的会话”：不含令牌与哈希，只有会话 id、时间与来源。"""
+    me = token_hash(current) if current else ""
+    with store.lock:
+        rows = [{"id": s["id"], "created_at": s["created_at"], "last_used": s["last_used"], "ip": s.get("ip", ""),
+                 "ua": s.get("ua", ""), "current": h == me} for h, s in store.sessions.items() if s["user_id"] == user_id]
+    return sorted(rows, key=lambda r: (not r["current"], -r["last_used"]))
+
+
+def revoke_session(store: Store, user_id: str, session_id: str) -> None:
+    with store.lock:
+        h = next((h for h, s in store.sessions.items() if s["user_id"] == user_id and s["id"] == session_id), None)
+        if h is None:
+            raise AuthError("会话不存在")
+        del store.sessions[h]
+        store.save()
+
+
+def revoke_others(store: Store, user_id: str, keep: str | None) -> int:
+    """下线这个人除 keep 以外的所有会话；返回下线了几个。"""
+    k = token_hash(keep) if keep else ""
+    with store.lock:
+        gone = [h for h, s in store.sessions.items() if s["user_id"] == user_id and h != k]
+        for h in gone:
+            del store.sessions[h]
+        if gone:
+            store.save()
+    return len(gone)
+
+
+def change_password(store: Store, user_id: str, old: str, new: str, meta: dict[str, str] | None = None) -> str:
+    """改密码：核对旧密码，换新令牌，这个人其余的会话（含发起的这一个的旧令牌）全部作废；返回新的登录令牌。"""
+    _check_password(new)
+    salt = secrets.token_bytes(16)
+    digest = _hash(new, salt)
+    with store.lock:
+        user = store.users.get(user_id)
+        if not _verify(user, old):
+            raise AuthError("原密码不对")
+        assert user is not None
+        user.password_hash, user.salt = digest, salt.hex()
+        store.sessions = {h: s for h, s in store.sessions.items() if s["user_id"] != user_id}
+        token = _new_session(store, user_id, meta)
+        store.save()
+    return token
+
+
+# ---- 限流：按账号与按来源地址分别记连续失败，超过免费次数后指数退避（control-plane.md 第 8 节） ----
+class Throttle:
+    """每个键（账号、来源地址）记连续失败。前 free 次不限；之后每多一次，要等 base × 2^(多出的次数) 秒，最多 cap 秒。
+    等待期间一律不受理（正确的密码也不放行，防爆破）；成功（ok）清零；forget 秒内没有新的失败也清零。只在内存里：
+    重启清零（单进程控制面，第 2 节）。"""
+
+    def __init__(self, free: int, base: float = 2.0, cap: float = 900.0, forget: float = 3600.0):
+        self.free, self.base, self.cap, self.forget = free, base, cap, forget
+        self._lock = threading.Lock()
+        self._fails: dict[str, tuple[int, float, float]] = {}   # 键 → (连续失败次数, 最近一次失败, 到什么时候之前不受理)
+
+    def wait(self, key: str) -> float:
+        """还要等几秒；0 = 现在可以试。"""
+        now = time.time()
+        with self._lock:
+            n, last, until = self._fails.get(key, (0, 0.0, 0.0))
+            if n and now - last > max(self.forget, until - last):
+                self._fails.pop(key, None)
+                return 0.0
+            return max(0.0, until - now)
+
+    def fail(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            n, last, _ = self._fails.get(key, (0, 0.0, 0.0))
+            if n and now - last > self.forget:
+                n = 0
+            n += 1
+            until = now + min(self.cap, self.base * 2 ** (n - self.free - 1)) if n > self.free else 0.0
+            self._fails[key] = (n, now, until)
+            if len(self._fails) > 100_000:   # 防止被大量不同的键撑大：丢掉最旧的一半
+                for k, _ in sorted(self._fails.items(), key=lambda kv: kv[1][1])[:50_000]:
+                    self._fails.pop(k, None)
+
+    def ok(self, key: str) -> None:
+        with self._lock:
+            self._fails.pop(key, None)
+
+
+class Throttled(AuthError):
+    def __init__(self, seconds: float):
+        self.seconds = max(1, int(seconds + 0.999))
+        super().__init__(f"尝试太频繁，请 {self.seconds} 秒后再试")
+
+
+class Guards:
+    """登录、注册、重置、改密码的限流。账号与来源地址分开记：换地址试同一个账号、或同一个地址试很多账号都挡得住。
+    限流的说明对存在与不存在的账号一样（键是输入的邮箱，不看它注册过没有）。"""
+
+    def __init__(self) -> None:
+        self.account = Throttle(free=5)               # 同一个账号连续输错 5 次后：2、4、8 … 秒，最多 15 分钟
+        self.address = Throttle(free=20)              # 同一个来源地址（NAT 后面的人多，放宽）
+        self.register = Throttle(free=5, base=60, forget=3600)   # 同一个地址一小时内注册 5 个以上：退避
+        self.reset = Throttle(free=10)                # 重置链接的令牌：按地址
+
+    def check(self, *pairs: tuple[Throttle, str]) -> None:
+        wait = max((t.wait(k) for t, k in pairs), default=0.0)
+        if wait > 0:
+            raise Throttled(wait)
+
+    def login(self, store: Store, email: str, password: str, ip: str, meta: dict[str, str] | None = None,
+              old_token: str | None = None) -> tuple[User, str]:
+        acct, addr = f"acct:{normalize_email(email)}", f"ip:{ip}"
+        self.check((self.account, acct), (self.address, addr))
+        try:
+            got = login(store, email, password, meta, old_token)
+        except AuthError:
+            self.account.fail(acct)
+            self.address.fail(addr)
+            raise
+        self.account.ok(acct)
+        return got
+
+    def register_user(self, store: Store, email: str, password: str, ip: str,
+                      meta: dict[str, str] | None = None) -> tuple[User, str, bool]:
+        addr = f"ip:{ip}"
+        self.check((self.register, addr))
+        self.register.fail(addr)   # 每次注册（成没成）都算一次：一小时内第 6 次起要等
+        self.check((self.register, addr))
+        return register(store, email, password, meta)
+
+    def reset_with(self, ip: str, fn: Any, *args: Any) -> Any:
+        addr = f"ip:{ip}"
+        self.check((self.reset, addr))
+        try:
+            return fn(*args)
+        except Throttled:
+            raise
+        except AuthError:
+            self.reset.fail(addr)
+            raise
+
+    def change_password(self, store: Store, user_id: str, old: str, new: str, meta: dict[str, str] | None = None) -> str:
+        acct = f"user:{user_id}"
+        self.check((self.account, acct))
+        try:
+            token = change_password(store, user_id, old, new, meta)
+        except AuthError as e:
+            if str(e) == "原密码不对":
+                self.account.fail(acct)
+            raise
+        self.account.ok(acct)
+        return token
 
 
 # ---- 管理员重置密码：一次性链接，用户自己设新密码 ----
@@ -131,7 +331,7 @@ def reset_info(store: Store, token: str) -> str:
         return _reset_entry(store, token)[1].email
 
 
-def reset_password(store: Store, token: str, password: str) -> tuple[User, str]:
+def reset_password(store: Store, token: str, password: str, meta: dict[str, str] | None = None) -> tuple[User, str]:
     """用重置令牌设新密码：令牌作废、这个人原有的登录全部失效，再登录一次；返回 (用户, 新的登录令牌)。"""
     _check_password(password)
     salt = secrets.token_bytes(16)
@@ -141,7 +341,7 @@ def reset_password(store: Store, token: str, password: str) -> tuple[User, str]:
         del store.resets[h]
         user.password_hash, user.salt = digest, salt.hex()
         store.sessions = {t: s for t, s in store.sessions.items() if s["user_id"] != user.id}
-        session = _new_session(store, user.id)
+        session = _new_session(store, user.id, meta)
         store.save()
     return user, session
 
@@ -289,8 +489,11 @@ def _email(store: Store, user_id: str) -> str:
     return u.email if u is not None else ""
 
 
-def _new_session(store: Store, user_id: str) -> str:
-    """调用方持有锁。"""
+def _new_session(store: Store, user_id: str, meta: dict[str, str] | None = None) -> str:
+    """调用方持有锁。令牌明文只返回这一次，状态里只存哈希。meta：来源地址与 User-Agent 摘要（给“我的会话”看）。"""
     token = secrets.token_urlsafe(32)
-    store.sessions[token] = {"user_id": user_id, "created_at": time.time()}
+    now = time.time()
+    m = meta or {}
+    store.sessions[token_hash(token)] = {"id": secrets.token_hex(8), "user_id": user_id, "created_at": now,
+                                         "last_used": now, "ip": str(m.get("ip", ""))[:64], "ua": str(m.get("ua", ""))[:120]}
     return token

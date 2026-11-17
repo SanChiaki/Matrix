@@ -7,9 +7,9 @@
 	default_sni {$MATRIX_SITE}
 }
 
-# Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
-# 片段只在被 import 时才解析：MATRIX_BASIC_AUTH=off 时不需要 MATRIX_BASIC_HASH
-# （只剩 Matrix 自己的登录，不安全，只用于临时演示）。
+# 在 Matrix 自己的登录前面再加一层 basic auth（默认开）。Matrix 自己的登录已经有会话过期、限流、CSRF 防护
+# （docs/reference/security.md），部署方确认之后可以显式写 MATRIX_BASIC_AUTH=off。
+# 片段只在被 import 时才解析：off 时不需要 MATRIX_BASIC_HASH。
 (basic-auth-on) {
 	basic_auth {
 		{$MATRIX_BASIC_USER:matrix} {$MATRIX_BASIC_HASH}
