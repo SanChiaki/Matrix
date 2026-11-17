@@ -1007,10 +1007,17 @@ const ICON = {
   copy: svgIcon('<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/>'),
   upload: svgIcon('<path d="M12 20V9"/><path d="m7 13 5-5 5 5"/><path d="M5 4h14"/>'),
   skill: svgIcon('<path d="M5 3h10l4 4v14H5z"/><path d="M8.5 10h7M8.5 13.5h7M8.5 17h4"/>'),
+  folder: svgIcon('<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>'),
+  lock: svgIcon('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  move: svgIcon('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
   plug: svgIcon('<path d="M9 2.5v4M15 2.5v4"/><path d="M6 6.5h12v4a6 6 0 0 1-12 0z"/><path d="M12 16.5v5"/>'),
 };
 const fileIcon = (ext) => `<span class="file-ico ${FILE_KIND[ext] || "other"}">${ICON.file}</span>`;
-const fileUrl = (pid, name) => `/api/projects/${encodeURIComponent(pid)}/files/${encodeURIComponent(name)}`;
+const pathUrl = (p) => String(p).split("/").map(encodeURIComponent).join("/");  // 资料可以在目录里：每一段分别编码
+const fileUrl = (pid, name) => `/api/projects/${encodeURIComponent(pid)}/files/${pathUrl(name)}`;
+const baseName = (p) => String(p).split("/").pop();
+const parentDir = (p) => (String(p).includes("/") ? String(p).slice(0, String(p).lastIndexOf("/")) : "");
+const joinPath = (dir, name) => (dir ? `${dir}/${name}` : name);
 const isTextFile = (file) => file.type.startsWith("text/") || file.type === "application/json" || TEXT_EXT.includes(fileExt(file.name));
 const assetWho = (d) => (f) => f.by_agent ? aname(f.by_agent) : !f.by_user ? "—" : f.by_user === S.me?.id ? "你"
   : f.by_user === d.owner_id ? d.host : d.participant_emails?.[f.by_user] || "—";
@@ -1026,7 +1033,7 @@ async function renderProjectPage(force = false) {
   const d = await api(`/api/projects/${g.id}`).catch(() => null);
   if (!d || S.projectSel !== g.id) return;
   const st = S.assets = S.assets?.pid === g.id ? S.assets
-    : { pid: g.id, tab: "chat", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [] };
+    : { pid: g.id, tab: "chat", q: "", type: "", by: "updated_at", asc: false, note: "", bad: false, fresh: [], dir: "" };
   if (S.pendingTab) { st.tab = S.pendingTab; S.pendingTab = null; }
   st.tab = { refs: "files", needs: "connectors" }[st.tab] || st.tab;  // 旧的标签名（资源引用并进资料，需要的连接器换成连接器面板）
   // 网络里每来一个事件都会走到这里：数据和视图状态都没变就不动 DOM，不打断悬停、焦点与滚动
@@ -1043,7 +1050,7 @@ async function renderProjectPage(force = false) {
   const sig = JSON.stringify(st.tab === "chat" ? [g.name, g.description, g.shared, st.tab, n, plugins.map((p) => [p.name, p.tabs]), embeds]
     : st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
     ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
-    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.rolesEdit, st.bpDraft, g.roles, g.setup_steps, g.blueprint, st.needKind, st.editNeed,
+    : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.dir, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.rolesEdit, st.bpDraft, g.roles, g.setup_steps, g.blueprint, st.needKind, st.editNeed,
        st.relForm, st.relEdit]);
   if (page.dataset.sig === sig) {  // 页头没变：对话标签照样要确认对话栏挂着、开的是对的对话（可能刚从别的视图回来）
     if (st.tab === "chat") showProjectChat(g, $("#pp-panel", page));
@@ -1184,63 +1191,142 @@ function renderBriefTab(box, d, st) {
 
 const assetNote = (st) => st.note ? `<p class="asset-note ${st.bad ? "bad" : ""}" role="status">${esc(st.note)}</p>` : "";
 
+// 可见范围（不变量 26）：资料（文件、目录）与项目技能默认所有成员 Agent 都看得到，主持人可以收窄到某些角色、某些成员。
+// 管的是 Agent 拿到什么；项目里的人照常都看得到。目录的范围管到里面的每个文件，层层只收窄
+function accessText(g, rule) {
+  if (!rule || !((rule.roles || []).length || (rule.agents || []).length)) return "所有成员可见";
+  const who = [...(rule.roles || []).map((r) => `角色「${g?.roles?.[r]?.name || r}」`), ...(rule.agents || []).map((a) => aname(a))];
+  return `仅 ${who.join("、")} 可见`;
+}
+function accessTag(g, rule, inherited = "") {
+  if (rule) return `<span class="tag lock" title="${esc(accessText(g, rule))}（只管 Agent，项目里的人都看得到）">${ICON.lock}${esc(accessText(g, rule).replace(/ 可见$/, ""))}</span>`;
+  return inherited ? `<span class="tag lock inherited" title="${esc(`跟着上级目录 ${inherited}/：${accessText(g, null)}`)}">${ICON.lock}跟随 ${esc(baseName(inherited))}/</span>` : "";
+}
+
+function editAccess(g, title, rule) {
+  return new Promise((resolve) => {
+    let dlg = $("#access-edit");
+    if (!dlg) { dlg = Object.assign(document.createElement("dialog"), { id: "access-edit", className: "preview confirm-card access-dlg" }); document.body.append(dlg); }
+    const roles = Object.entries(g?.roles || {}), members = g?.member_ids || [];
+    const on = (list, v) => (list || []).includes(v) ? "checked" : "";
+    dlg.innerHTML = `<form method="dialog" class="preview-card access-form" aria-labelledby="ae-title">
+      <h2 id="ae-title">${esc(title)}</h2>
+      <p class="muted small">都不勾 = 所有成员 Agent 可见。勾了就只有勾到的角色、成员能在工作目录和提示词里拿到它；项目里的人照常都看得到。</p>
+      <fieldset class="checks"><legend>角色</legend>${roles.map(([k, r]) => `<label class="check"><input type="checkbox" name="roles" value="${esc(k)}" ${on(rule?.roles, k)}>
+        ${esc(r.name)} <span class="muted small">${esc(r.members.map(aname).join("、") || "没人")}</span></label>`).join("")
+        || '<span class="muted small">项目还没有角色：在“说明”里加。</span>'}</fieldset>
+      <fieldset class="checks"><legend>成员</legend>${members.map((a) => `<label class="check"><input type="checkbox" name="agents" value="${esc(a)}" ${on(rule?.agents, a)}>${esc(aname(a))}</label>`).join("")
+        || '<span class="muted small">项目里还没有成员。</span>'}</fieldset>
+      <div class="actions"><button type="submit" class="ghost" value="no">取消</button><button type="button" class="ghost" data-public>设为所有成员可见</button><button type="submit" value="ok">保存</button></div></form>`;
+    dlg.returnValue = "";
+    $("[data-public]", dlg).addEventListener("click", () => { dlg.querySelectorAll("input[type=checkbox]").forEach((x) => { x.checked = false; }); dlg.close("ok"); });
+    dlg.addEventListener("close", () => {
+      if (dlg.returnValue !== "ok") return resolve(null);
+      const all = (n) => [...dlg.querySelectorAll(`input[name="${n}"]:checked`)].map((x) => x.value);
+      resolve({ roles: all("roles"), agents: all("agents") });
+    }, { once: true });
+    dlg.showModal();
+  });
+}
+
 function renderFilesTab(box, d, st) {
-  const host = d.is_host, who = assetWho(d);
+  const host = d.is_host, who = assetWho(d), g = proj(d.id);
+  const folders = d.folders || [];
+  if (st.dir && !folders.some((f) => f.name === st.dir)) st.dir = "";  // 所在目录被删了、移走了：回到顶层
+  const rules = Object.fromEntries([...d.files, ...folders].filter((x) => x.access).map((x) => [x.name, x.access]));
+  const inheritedFrom = (p) => { let x = parentDir(p); while (x) { if (rules[x]) return x; x = parentDir(x); } return ""; };
+  const searching = !!(st.q || st.type);
   const types = [...new Set(d.files.map((f) => fileExt(f.name)))].sort();
   const total = d.files.reduce((n, f) => n + f.size, 0);
-  const rows = () => d.files.filter((f) => (!st.type || fileExt(f.name) === st.type) && f.name.toLowerCase().includes(st.q.toLowerCase()))
-    .sort((a, b) => (st.asc ? 1 : -1) * ASSET_SORT[st.by](a, b));
+  const under = (dir) => d.files.filter((f) => f.name.startsWith(`${dir}/`));
+  const rows = () => d.files.filter((f) => (searching ? (!st.type || fileExt(f.name) === st.type) && f.name.toLowerCase().includes(st.q.toLowerCase())
+    : parentDir(f.name) === st.dir)).sort((a, b) => (st.asc ? 1 : -1) * ASSET_SORT[st.by](a, b));
+  const dirs = () => searching ? [] : folders.filter((f) => parentDir(f.name) === st.dir).sort((a, b) => a.name.localeCompare(b.name));
+  const where = st.dir ? `「${baseName(st.dir)}」` : `「${d.name}」`;
   const upBtn = (cls = "") => `<label class="button ${cls} file-up" title="文本文件（md、txt、csv、json…），单个不超过 ${ASSET_LIMIT / 1000} KB；也可以把文件拖进列表">
-    ${ICON.upload}上传文件<input type="file" multiple hidden data-up></label>`;
+    ${ICON.upload}上传${st.dir ? "到这里" : "文件"}<input type="file" multiple hidden data-up></label>`;
+  const acts = (name, isDir) => host ? `<button type="button" class="icon-btn" data-access="${esc(name)}" data-dir="${isDir ? 1 : 0}" title="可见范围" aria-label="设置 ${esc(name)} 的可见范围">${ICON.lock}</button>
+    <button type="button" class="icon-btn" data-mv="${esc(name)}" title="移动 / 改名" aria-label="移动或改名 ${esc(name)}">${ICON.move}</button>
+    <button type="button" class="icon-btn bad" data-rmasset="${esc(name)}" data-dir="${isDir ? 1 : 0}" title="删除" aria-label="删除 ${esc(name)}">${ICON.trash}</button>` : "";
   const body = () => {
-    const list = rows();
-    if (list.length) return list.map((f) => `<tr class="${st.fresh.includes(f.name) ? "fresh" : ""}">
-      <td class="name"><div class="cell">${fileIcon(fileExt(f.name))}<button type="button" class="file-open" data-open="${esc(f.name)}" title="预览 ${esc(f.name)}">${esc(f.name)}</button></div></td>
+    const list = rows(), sub = dirs();
+    const dirRows = sub.map((f) => { const inside = under(f.name); return `<tr class="folder">
+      <td class="name"><div class="cell"><span class="file-ico folder">${ICON.folder}</span><button type="button" class="file-open" data-cd="${esc(f.name)}" title="打开目录 ${esc(f.name)}">${esc(baseName(f.name))}/</button>${accessTag(g, f.access, inheritedFrom(f.name))}</div></td>
+      <td>目录</td><td class="muted">—</td><td class="muted">—</td><td>${inside.length} 个文件</td>
+      <td class="row-act">${acts(f.name, true)}</td></tr>`; }).join("");
+    const fileRows = list.map((f) => `<tr class="${st.fresh.includes(f.name) ? "fresh" : ""}">
+      <td class="name"><div class="cell">${fileIcon(fileExt(f.name))}<button type="button" class="file-open" data-open="${esc(f.name)}" title="预览 ${esc(f.name)}">${esc(searching ? f.name : baseName(f.name))}</button>${accessTag(g, f.access, inheritedFrom(f.name))}</div></td>
       <td>${esc(fileExt(f.name))}</td><td>${esc(who(f))}</td>
       <td title="${esc(new Date(f.updated_at * 1000).toLocaleString())}">${dateTime(f.updated_at)}</td><td>${fmtSize(f.size)}</td>
-      <td class="row-act"><a class="icon-btn" href="${fileUrl(d.id, f.name)}" download title="下载" aria-label="下载 ${esc(f.name)}">${ICON.down}</a>${host
-        ? `<button type="button" class="icon-btn bad" data-rmasset="${esc(f.name)}" title="删除" aria-label="删除 ${esc(f.name)}">${ICON.trash}</button>` : ""}</td></tr>`).join("");
-    if (d.files.length) return `<tr><td colspan="6" class="empty">没有匹配的文件 · <button type="button" class="link" data-clear>清除筛选</button></td></tr>`;
+      <td class="row-act"><a class="icon-btn" href="${fileUrl(d.id, f.name)}" download title="下载" aria-label="下载 ${esc(f.name)}">${ICON.down}</a>${acts(f.name, false)}</td></tr>`).join("");
+    if (dirRows || fileRows) return dirRows + fileRows;
+    if (searching) return `<tr><td colspan="6" class="empty">没有匹配的文件 · <button type="button" class="link" data-clear>清除筛选</button></td></tr>`;
+    if (st.dir) return `<tr><td colspan="6" class="empty">这个目录是空的${host ? "：把文件拖到这里，或者上传" : ""}。</td></tr>`;
     return `<tr><td colspan="6" class="empty"><div class="empty-state">${fileIcon("")}<b>还没有文件</b>
-      <span>在群聊里让 Agent 把产出发布到项目${host ? "，或者把文件拖到这里" : ""}。发布进来的文件所有成员都能看到。</span>${host ? upBtn() : ""}</div></td></tr>`;
+      <span>在群聊里让 Agent 把产出发布到项目${host ? "，或者把文件拖到这里" : ""}。发布进来的文件默认所有成员都能看到。</span>${host ? upBtn() : ""}</div></td></tr>`;
   };
   const th = (key, label) => `<th aria-sort="${st.by === key ? (st.asc ? "ascending" : "descending") : "none"}"><button type="button" class="sort" data-sort="${key}">
     ${label}<span aria-hidden="true">${st.by === key ? (st.asc ? "↑" : "↓") : "↕"}</span></button></th>`;
-  box.innerHTML = `<p class="muted tab-intro">这个项目的材料：文件存在这里，链接指向别处。成员 Agent 每一轮都拿得到文件的只读副本，
-      链接作为背景告诉它们${d.shared ? "；共享项目里所有参与者都看得到" : ""}。</p>
+  const segs = st.dir ? st.dir.split("/") : [];
+  const crumbs = `<nav class="dir-crumbs" aria-label="所在目录"><button type="button" class="link" data-cd="">全部资料</button>${segs.map((x, i) => `<span aria-hidden="true">/</span>${
+    i === segs.length - 1 ? `<span class="here" aria-current="location">${esc(x)}</span>` : `<button type="button" class="link" data-cd="${esc(segs.slice(0, i + 1).join("/"))}">${esc(x)}</button>`}`).join("")}
+    ${st.dir ? accessTag(g, rules[st.dir], inheritedFrom(st.dir)) : ""}</nav>`;
+  box.innerHTML = `<p class="muted tab-intro">这个项目的材料：文件存在这里（可以分目录），链接指向别处。成员 Agent 每一轮都拿得到文件的只读副本，
+      链接作为背景告诉它们${d.shared ? "；共享项目里所有参与者都看得到" : ""}。主持人可以把文件或目录设成只给某些角色、成员的 Agent 看（带锁的标记）。</p>
     <h3 class="sec-h">文件 · ${d.files.length}</h3>
     <div class="asset-bar">
-      ${host && d.files.length ? upBtn("ghost") : ""}
+      ${host && (d.files.length || folders.length) ? upBtn("ghost") : ""}${host ? `<button type="button" class="ghost" id="asset-mkdir">${ICON.folder}新建目录</button>` : ""}
       <span class="muted">${d.files.length} 个文件 · ${fmtSize(total)}</span>
       <span class="grow"></span>
       ${d.files.length > 1 || st.q || st.type ? `<label class="sr-only" for="asset-type">文件类型</label>
         <select id="asset-type"><option value="">全部类型</option>${types.map((t) => `<option ${t === st.type ? "selected" : ""}>${esc(t)}</option>`).join("")}</select>
-        <label class="sr-only" for="asset-q">搜索文件</label><input id="asset-q" type="search" placeholder="搜索文件名" value="${esc(st.q)}">` : ""}
+        <label class="sr-only" for="asset-q">搜索文件</label><input id="asset-q" type="search" placeholder="搜索全部目录里的文件" value="${esc(st.q)}">` : ""}
     </div>
+    ${searching ? "" : crumbs}
     ${assetNote(st)}
     <div class="table-wrap"><table class="assets"><thead><tr>${th("name", "名称")}<th>类型</th><th>更新人</th>${th("updated_at", "更新时间")}${th("size", "大小")}
       <th><span class="sr-only">操作</span></th></tr></thead><tbody>${body()}</tbody></table>
-      ${host ? `<div class="drop-mask" aria-hidden="true">${ICON.upload}松开，上传到「${esc(d.name)}」</div>` : ""}</div>
+      ${host ? `<div class="drop-mask" aria-hidden="true">${ICON.upload}松开，上传到${esc(where)}</div>` : ""}</div>
     <section class="links-sec" id="pp-links" aria-labelledby="pp-links-h"></section>`;
   renderLinks($("#pp-links", box), d, st);
   st.fresh = [];  // 刚上传的行只高亮这一次
+  const act = async (path, opts, msg) => {
+    try { await api(path, opts); st.note = msg; st.bad = false; } catch (e) { st.note = e.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
+  };
   const bindRows = () => {
     box.querySelectorAll("[data-open]").forEach((b) => b.addEventListener("click", () => previewAsset(d, d.files.find((f) => f.name === b.dataset.open))));
+    box.querySelectorAll("[data-cd]").forEach((b) => b.addEventListener("click", () => { st.dir = b.dataset.cd; st.note = ""; renderProjectPage(true); }));
     box.querySelectorAll("[data-rmasset]").forEach((b) => b.addEventListener("click", async () => {
-      const name = b.dataset.rmasset;
-      if (!confirm(`删除 ${name}？成员之后看不到它，Agent 下一轮也拿不到。`)) return;
-      try { await api(fileUrl(d.id, name), { method: "DELETE" }); st.note = `已删除 ${name}`; st.bad = false; }
-      catch (e) { st.note = `删除失败：${e.message}`; st.bad = true; }
-      await reload();
+      const name = b.dataset.rmasset, dir = b.dataset.dir === "1";
+      if (!confirm(dir ? `删除目录 ${name}/ 和里面的 ${under(name).length} 个文件？成员之后看不到它们，Agent 下一轮也拿不到。`
+        : `删除 ${name}？成员之后看不到它，Agent 下一轮也拿不到。`)) return;
+      act(fileUrl(d.id, name), { method: "DELETE" }, `已删除 ${name}${dir ? "/" : ""}`);
+    }));
+    box.querySelectorAll("[data-mv]").forEach((b) => b.addEventListener("click", () => {
+      const src = b.dataset.mv, dst = prompt(`把 ${src} 移到（写完整路径，用 / 分目录；可见范围的设置跟着走）：`, src);
+      if (dst && dst.trim() && dst.trim() !== src) act(`/api/projects/${d.id}/moves`, { method: "POST", body: { src, dst: dst.trim() } }, `已移到 ${dst.trim()}`);
+    }));
+    box.querySelectorAll("[data-access]").forEach((b) => b.addEventListener("click", async () => {
+      const name = b.dataset.access, dir = b.dataset.dir === "1";
+      const up = inheritedFrom(name);
+      const rule = await editAccess(g, `谁的 Agent 看得到${dir ? "目录" : ""}「${baseName(name)}${dir ? "/" : ""}」`
+        + (up ? `（上级目录 ${up}/ 已经${accessText(g, rules[up])}，这里只能再收窄）` : ""), rules[name]);
+      if (rule) act(`/api/projects/${d.id}/file-access`, { method: "PUT", body: { path: name, ...rule } }, `${name}${dir ? "/" : ""}：${accessText(g, rule)}`);
     }));
     box.querySelectorAll("[data-up]").forEach((inp) => inp.addEventListener("change", () => { uploadAssets(d, st, [...inp.files]); inp.value = ""; }));
     $("[data-clear]", box)?.addEventListener("click", () => {
-      st.q = ""; st.type = ""; $("#asset-q", box).value = ""; $("#asset-type", box).value = ""; refresh();
+      st.q = ""; st.type = ""; renderProjectPage(true);
     });
   };
   const refresh = () => { $("tbody", box).innerHTML = body(); bindRows(); };
-  $("#asset-q", box)?.addEventListener("input", (e) => { st.q = e.target.value; refresh(); });
-  $("#asset-type", box)?.addEventListener("change", (e) => { st.type = e.target.value; refresh(); });
+  // 搜索框与目录导航切换时要重绘整块（面包屑），其余只换表体
+  $("#asset-q", box)?.addEventListener("input", (e) => { const was = searching; st.q = e.target.value; if (!!(st.q || st.type) !== was) renderProjectPage(true).then(() => { const q = $("#asset-q"); q?.focus(); q?.setSelectionRange(q.value.length, q.value.length); }); else refresh(); });
+  $("#asset-type", box)?.addEventListener("change", (e) => { st.type = e.target.value; renderProjectPage(true); });
+  $("#asset-mkdir", box)?.addEventListener("click", () => {
+    const name = prompt(st.dir ? `在 ${st.dir}/ 下新建目录（可以写 a/b 建多级）：` : "新建目录（可以写 a/b 建多级）：");
+    if (name && name.trim()) act(`/api/projects/${d.id}/folders`, { method: "POST", body: { path: joinPath(st.dir, name.trim()) } }, `已新建目录 ${joinPath(st.dir, name.trim())}/`);
+  });
   box.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
     st.asc = st.by === b.dataset.sort ? !st.asc : b.dataset.sort === "name"; st.by = b.dataset.sort;
     renderProjectPage(true).then(() => $(`[data-sort="${st.by}"]`)?.focus());
@@ -1263,7 +1349,8 @@ function renderFilesTab(box, d, st) {
 
 async function uploadAssets(d, st, files) {
   if (!files.length) return;
-  const dup = files.filter((f) => d.files.some((x) => x.name === f.name)).map((f) => f.name);
+  const dir = st.q || st.type ? "" : st.dir || "";  // 传到当前目录；搜索时在顶层
+  const dup = files.filter((f) => d.files.some((x) => x.name === joinPath(dir, f.name))).map((f) => joinPath(dir, f.name));
   if (dup.length && !confirm(`已经有同名文件：${dup.join("、")}。覆盖它们？`)) return;
   const ok = [], bad = [];
   const bar = $("#project-page .asset-bar");
@@ -1271,7 +1358,8 @@ async function uploadAssets(d, st, files) {
   for (const file of files) {
     if (!isTextFile(file)) { bad.push(`${file.name}（只支持文本文件）`); continue; }
     if (file.size > ASSET_LIMIT) { bad.push(`${file.name}（超过 ${ASSET_LIMIT / 1000} KB）`); continue; }
-    try { await api(`/api/projects/${d.id}/files`, { method: "POST", body: { name: file.name, content: await file.text() } }); ok.push(file.name); }
+    const name = joinPath(dir, file.name);
+    try { await api(`/api/projects/${d.id}/files`, { method: "POST", body: { name, content: await file.text() } }); ok.push(name); }
     catch (e) { bad.push(`${file.name}（${e.message}）`); }
   }
   st.note = [ok.length ? `已上传 ${ok.join("、")}` : "", bad.length ? `没有上传：${bad.join("、")}` : ""].filter(Boolean).join("；");
@@ -1334,7 +1422,7 @@ function renderLinks(box, d, st) {
 function renderSkillsTab(box, d, st) {
   const host = d.is_host, list = d.skill_list || [];
   const pend = d.suggestions.filter((x) => x.kind === "skill" && x.status === "pending");
-  box.innerHTML = `<p class="muted tab-intro">这个项目里大家约定的做法。成员 Agent 每一轮都会拿到，和它们自己技能库里的重名时用项目的。${host ? "" : "由主持人维护；Agent 可以提议，主持人批准后才生效。"}</p>
+  box.innerHTML = `<p class="muted tab-intro">这个项目里大家约定的做法。成员 Agent 每一轮都会拿到（带锁标记的只有可见范围里的拿得到），和它们自己技能库里的重名时用项目的。${host ? "" : "由主持人维护；Agent 可以提议，主持人批准后才生效。"}</p>
     ${assetNote(st)}
     ${pend.length ? `<section class="pending-skills" aria-label="等主持人决定的技能提议"><h3>提议 · ${pend.length}</h3><ul class="suggestions">${pend.map((x) => `<li>
       <div class="who"><b>${esc(x.by_agent ? aname(x.by_agent) : d.participant_emails?.[x.by_user] || "")}</b> 提议新增技能 <code>${esc(x.skill_name)}</code></div>
@@ -1342,11 +1430,12 @@ function renderSkillsTab(box, d, st) {
       <details><summary>做法</summary><div class="md">${renderMarkdown(x.text)}</div></details>
       ${host ? `<div class="actions"><button type="button" data-sug="${esc(x.id)}" data-ok="1">批准</button><button type="button" class="ghost" data-sug="${esc(x.id)}" data-ok="0">不批准</button></div>` : ""}
       </li>`).join("")}</ul></section>` : ""}
-    <div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>什么时候用</th><th>作者</th><th>更新</th></tr></thead><tbody>
+    <div class="table-wrap"><table class="assets"><thead><tr><th>名字</th><th>什么时候用</th><th>作者</th><th>更新</th>${host ? '<th><span class="sr-only">操作</span></th>' : ""}</tr></thead><tbody>
       ${list.map((k) => `<tr class="${st.skill === k.name ? "selected" : ""}"><td class="name"><div class="cell"><span class="file-ico ref">${ICON.skill}</span>
-        <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button></div></td>
-        <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td></tr>`).join("")
-      || `<tr><td colspan="4" class="empty">还没有项目技能${host ? "，上传一个技能（zip 或文件夹）" : ""}。</td></tr>`}
+        <button type="button" class="link" data-skill="${esc(k.name)}">${esc(k.name)}</button>${accessTag(proj(d.id), k.access)}</div></td>
+        <td>${esc(k.description)}</td><td>${esc(k.author || "—")}</td><td class="muted">${dateTime(k.updated_at)}</td>${host
+          ? `<td class="row-act"><button type="button" class="icon-btn" data-skaccess="${esc(k.name)}" title="可见范围" aria-label="设置技能 ${esc(k.name)} 的可见范围">${ICON.lock}</button></td>` : ""}</tr>`).join("")
+      || `<tr><td colspan="${host ? 5 : 4}" class="empty">还没有项目技能${host ? "，上传一个技能（zip 或文件夹）" : ""}。</td></tr>`}
     </tbody></table></div>
     ${host ? '<div class="actions"><button type="button" class="ghost" id="ps-new">上传技能（zip）</button><button type="button" class="ghost" id="ps-new-dir">上传文件夹</button></div>' : ""}
     <div id="ps-detail"></div>`;
@@ -1358,6 +1447,14 @@ function renderSkillsTab(box, d, st) {
   };
   box.querySelectorAll("[data-skill]").forEach((b) => b.addEventListener("click", () => {
     st.skill = st.skill === b.dataset.skill ? null : b.dataset.skill; st.skillNew = false; st.note = ""; renderProjectPage(true);
+  }));
+  box.querySelectorAll("[data-skaccess]").forEach((b) => b.addEventListener("click", async () => {
+    const k = list.find((x) => x.name === b.dataset.skaccess), g = proj(d.id);
+    const rule = await editAccess(g, `谁的 Agent 用得到技能「${k.name}」`, k.access);
+    if (!rule) return;
+    try { await api(`${base}/${encodeURIComponent(k.name)}/access`, { method: "PUT", body: rule }); st.note = `${k.name}：${accessText(g, rule)}`; st.bad = false; }
+    catch (e) { st.note = e.message; st.bad = true; }
+    await reload(); renderProjectPage(true);
   }));
   const up = (folder) => pickSkillPackage(base, folder).then((x) => x && done("saved", x.name))
     .catch((e) => { st.note = e.message; st.bad = true; renderProjectPage(true); });
@@ -1954,7 +2051,7 @@ async function previewAsset(d, f) {
 const REL_KIND = { method: "技能包（旧）", fact: "对外页面" };
 const relKindPill = (r) => `<span class="pill rel-${esc(r.kind)}" title="${r.kind === "method" ? "旧的技能包，已经并进模板" : "一组档案文件的快照：订阅后只读挂给 Agent"}">${REL_KIND[r.kind] || esc(r.kind)}</span>`;
 const relWhen = (r) => r.snapshot_at ? `快照于 ${dateTime(r.snapshot_at)}` : r.published_at ? `发布于 ${dateTime(r.published_at)}` : "";
-const relFileUrl = (rid, name) => `/api/releases/${encodeURIComponent(rid)}/files/${encodeURIComponent(name)}`;
+const relFileUrl = (rid, name) => `/api/releases/${encodeURIComponent(rid)}/files/${pathUrl(name)}`;
 const splitEmails = (text) => String(text || "").split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean);
 
 // ---------- 模板（docs/blueprints.md）：别人跑通的项目的配方；用它建项目，建出来是一份拷贝 ----------

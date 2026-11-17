@@ -192,13 +192,14 @@ TOOLS = [
     },
     {
         "name": "publish_file",
-        "description": ("把当前工作目录里的一个文件发布进项目档案（同名覆盖）。项目所有成员此后都能在 ./project/ 读到。"
+        "description": ("把当前工作目录里的一个文件发布进项目档案（同名覆盖）。项目成员此后能在 ./project/ 读到"
+                        "（主持人给那个目录设了可见范围的，只有范围里的成员读得到）。"
                         "只发布与工作有关、验收过的内容。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "工作目录里的相对路径；是目录时打成一个 zip 发布"},
-                "name": {"type": "string", "description": "可选：在档案里的文件名"},
+                "name": {"type": "string", "description": "可选：在档案里的文件名，可以带目录，如 设计/方案.md"},
             },
             "required": ["path"],
             "additionalProperties": False,

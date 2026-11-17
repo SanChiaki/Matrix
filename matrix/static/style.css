@@ -848,6 +848,18 @@ table.assets td.empty { color: var(--muted); white-space: normal; text-align: ce
 .file-ico.code { background: var(--file-code); }
 .file-ico.image { background: var(--file-image); }
 .file-ico.ref { background: var(--surface-3); color: var(--text-2); }
+.file-ico.folder { background: var(--surface-3); color: var(--text-2); }
+/* 资料的目录层级与可见范围 */
+.dir-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--fs-md); color: var(--muted); margin: 0 0 8px; }
+.dir-crumbs .here { color: var(--text); font-weight: 500; }
+.tag.lock { gap: 4px; margin-left: 6px; white-space: nowrap; color: var(--human); background: color-mix(in srgb, var(--human) 8%, transparent); border-color: color-mix(in srgb, var(--human) 20%, transparent); }
+.tag.lock.inherited { color: var(--muted); background: transparent; border-style: dashed; border-color: var(--border); }
+.tag.lock svg { width: 11px; height: 11px; }
+.asset-bar button svg, .asset-bar .button svg { width: 14px; height: 14px; }
+dialog.preview.access-dlg { width: min(560px, calc(100vw - 32px)); }
+dialog.preview.access-dlg .preview-card { width: auto; }
+tr.folder .file-open { white-space: nowrap; }
+.access-form .checks { margin-top: 12px; }
 .ref-add { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .ref-add input { flex: 1 1 160px; width: auto; }
 .ref-add input#pr-loc { flex-basis: 260px; }
