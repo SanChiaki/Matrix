@@ -32,7 +32,9 @@ services:
         NODE_TARBALL: ${MATRIX_NODE_TARBALL:-}
     image: matrix-sandboxd:local
     restart: unless-stopped
-    command: ["matrix-sandboxd", "--socket-mode", "666"]   # 这个目录只挂给 matrix，权限由卷来管
+    # socket 0660、属组是 matrix 服务的用户组（gid 1000）：只有它连得上。管理器进程加进这个组，改属组不需要 CHOWN 特权
+    command: ["matrix-sandboxd", "--socket-mode", "660", "--socket-group", "1000"]
+    group_add: ["1000"]
     environment:
       MATRIX_SANDBOXD_CONFIG: /etc/matrix/sandboxd.json
       DOCKER_CONFIG: /tmp/.docker

@@ -426,13 +426,15 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, _UnixBase):
         return req, ("unix", 0)
 
 
-def serve(manager: Manager, path: str, mode: int = 0o660) -> UnixHTTPServer:
-    """管理器只在 Linux 上跑（要 Docker）。"""
+def serve(manager: Manager, path: str, mode: int = 0o660, group: int | None = None) -> UnixHTTPServer:
+    """管理器只在 Linux 上跑（要 Docker）。group：socket 的属组（给 Matrix 服务的用户组，配 0660 只让它连）。"""
     if os.path.exists(path):
         os.unlink(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     handler = type("Handler", (_Handler,), {"manager": manager})
     srv = UnixHTTPServer(path, handler)
+    if group is not None:
+        os.chown(path, -1, group)   # 进程在这个组里时不需要 CHOWN 特权（compose 里用 group_add）
     os.chmod(path, mode)
     return srv
 
@@ -443,14 +445,15 @@ def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="matrix-sandboxd", description="Matrix 沙箱管理器（唯一持有 Docker 权限）")
     p.add_argument("--config", default=os.environ.get("MATRIX_SANDBOXD_CONFIG"), help="沙箱模板的 JSON 配置")
     p.add_argument("--socket", default=os.environ.get("MATRIX_SANDBOXD_SOCKET", "/run/matrix-sandboxd/sandboxd.sock"))
-    p.add_argument("--socket-mode", default="660", help="socket 文件权限（八进制）；只给 Matrix 服务挂这个目录")
+    p.add_argument("--socket-mode", default="660", help="socket 文件权限（八进制）")
+    p.add_argument("--socket-group", type=int, default=None, help="socket 的属组 gid（Matrix 服务的用户组，镜像里是 1000）")
     args = p.parse_args(argv)
     conf = DockerConfig.load(args.config)
     m = Manager(conf)
     rep = m.report()
     print(f"[sandboxd] {json.dumps({**asdict(conf), 'env': sorted(conf.env)}, ensure_ascii=False)}", flush=True)
     print(f"[sandboxd] {rep['note']}", flush=True)
-    srv = serve(m, args.socket, int(args.socket_mode, 8))
+    srv = serve(m, args.socket, int(args.socket_mode, 8), args.socket_group)
     print(f"[sandboxd] 监听 {args.socket}", flush=True)
     try:
         srv.serve_forever()

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 from pathlib import Path
@@ -194,7 +195,8 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
     """控制面经 Unix socket 调管理器：合法请求照办，带了镜像的请求被拒（400），运行时不在时是 ISOLATION。"""
     d = FakeDocker()
     sock = str(tmp_path / "sbx.sock")
-    srv = serve(Manager(DockerConfig(), run=d), sock)
+    srv = serve(Manager(DockerConfig(), run=d), sock, 0o660, os.getgid())
+    assert oct(os.stat(sock).st_mode & 0o777) == "0o660" and os.stat(sock).st_gid == os.getgid()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         prov = DockerSandboxes(sock)

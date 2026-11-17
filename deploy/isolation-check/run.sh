@@ -219,7 +219,7 @@ t8() {  # docker 后端（阶段 1b）：沙箱管理器 + 每个执行单元一
     --label dev.matrix.isochk=1 isochk-sandbox > /dev/null || { say "[t8] 建不了沙箱网络"; return; }
   local rts=(insecure-runc); have_runsc && rts+=(runsc) || say "[t8-runsc] SKIPPED（Docker 没注册 runsc）"
   for rt in "${rts[@]}"; do
-    local dir; dir=$(mktemp -d); chmod 777 "$dir"
+    local dir; dir=$(mktemp -d); chmod 755 "$dir"
     cat > "$dir/sandboxd.json" <<JSON
 {"namespace": "isochk", "image": "matrix-sandbox:isochk", "runtime": "$rt", "network": "isochk-sandbox",
  "connect_url": "ws://$gw:$port/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
@@ -227,10 +227,10 @@ t8() {  # docker 后端（阶段 1b）：沙箱管理器 + 每个执行单元一
 JSON
     chmod 644 "$dir/sandboxd.json"
     docker rm -f isochk-sandboxd > /dev/null 2>&1
-    docker run -d --name isochk-sandboxd --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+    docker run -d --name isochk-sandboxd --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --group-add 1000 \
       -e DOCKER_CONFIG=/tmp/.docker -e MATRIX_SANDBOXD_CONFIG=/etc/matrix/sandboxd.json \
       -v /var/run/docker.sock:/var/run/docker.sock -v "$dir":/run/matrix-sandboxd \
-      -v "$dir/sandboxd.json":/etc/matrix/sandboxd.json:ro matrix-sandboxd:isochk matrix-sandboxd --socket-mode 666 > /dev/null
+      -v "$dir/sandboxd.json":/etc/matrix/sandboxd.json:ro matrix-sandboxd:isochk matrix-sandboxd --socket-mode 660 --socket-group 1000 > /dev/null
     sleep 3
     docker logs isochk-sandboxd > "$OUT/t8-$rt-sandboxd.log" 2>&1
     # 控制面（matrix-dsh-check 里的临时服务）跑在部署镜像里，监听沙箱网络的网关；它自己不碰 docker.sock
