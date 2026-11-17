@@ -29,6 +29,25 @@ def _known(cls: type, d: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if k in names}
 
 
+def _load_sessions(raw: dict[str, Any], users: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], bool]:
+    """登录会话。旧版以明文令牌作键（`secrets.token_urlsafe`，43 个字符）；现在的键是令牌的 sha256（64 位十六进制）。
+    返回（会话, 有没有换掉明文）。"""
+    import hashlib
+    import re
+    import secrets
+    out: dict[str, dict[str, Any]] = {}
+    plain = False
+    for k, v in raw.items():
+        if not isinstance(v, dict) or v.get("user_id") not in users:
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}", k):
+            k, plain = hashlib.sha256(k.encode()).hexdigest(), True
+        created = float(v.get("created_at") or time.time())
+        out[k] = {"id": v.get("id") or secrets.token_hex(8), "user_id": v["user_id"], "created_at": created,
+                  "last_used": float(v.get("last_used") or created), "ip": v.get("ip") or "", "ua": v.get("ua") or ""}
+    return out, plain
+
+
 def _load_conversation(c: dict[str, Any]) -> Conversation:
     msgs = [Message(**_known(Message, m)) for m in c.pop("messages", [])]
     if "kind" in c:
@@ -205,7 +224,8 @@ class Store:
         self.knowledge: dict[str, KnowledgeItem] = {}
         self.proposals: dict[str, Proposal] = {}
         self.users: dict[str, User] = {}
-        self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
+        # 登录会话：令牌的 sha256 → {id, user_id, created_at, last_used, ip, ua}。只存哈希：库泄露不等于会话泄露（auth.py）
+        self.sessions: dict[str, dict[str, Any]] = {}
         self.resets: dict[str, dict[str, Any]] = {}     # 重置密码令牌的 sha256 → {user_id, by, created_at, expires_at}
         self.approvals: dict[str, Approval] = {}
         self.questions: dict[str, Question] = {}  # Agent 在运行中提的问题（等人或委托方回答）
@@ -414,7 +434,8 @@ class Store:
             self.proposals[p["id"]] = Proposal(**_known(Proposal, p))
         for u in raw.get("users", []):
             self.users[u["id"]] = User(**_known(User, u))
-        self.sessions = {t: s for t, s in (raw.get("sessions") or {}).items() if s.get("user_id") in self.users}
+        self.sessions, plain = _load_sessions(raw.get("sessions") or {}, self.users)
+        migrated = migrated or plain  # 旧版的明文令牌：就地换成哈希马上写回（令牌本身不变，不用重新登录）
         now = time.time()
         self.resets = {h: r for h, r in (raw.get("password_resets") or {}).items()
                        if r.get("user_id") in self.users and float(r.get("expires_at") or 0) > now}

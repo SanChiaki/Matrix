@@ -502,6 +502,11 @@ class CredentialsIn(BaseModel):
     password: str = Field(min_length=1, max_length=200)
 
 
+class PasswordIn(BaseModel):
+    old: str = Field(min_length=1, max_length=200)
+    new: str = Field(min_length=1, max_length=200)
+
+
 class ResetCheckIn(BaseModel):
     token: str = Field(min_length=1, max_length=200)
 
@@ -544,6 +549,19 @@ class ToolCallIn(BaseModel):
     token: str
     tool: str
     args: dict[str, Any] = Field(default_factory=dict)
+
+
+def ua_summary(ua: str) -> str:
+    """User-Agent 的摘要（“我的会话”里认得出是哪台设备）：浏览器 · 系统。认不出就截一段原文。"""
+    browser = next((n for k, n in (("Edg/", "Edge"), ("OPR/", "Opera"), ("Firefox/", "Firefox"), ("Chrome/", "Chrome"),
+                                   ("Safari/", "Safari"), ("curl/", "curl"), ("python", "Python")) if k in ua), "")
+    system = next((n for k, n in (("Windows", "Windows"), ("Android", "Android"), ("iPhone", "iOS"), ("iPad", "iPadOS"),
+                                  ("Mac OS X", "macOS"), ("Linux", "Linux")) if k in ua), "")
+    return " · ".join(x for x in (browser, system) if x) or ua[:60]
+
+
+def session_meta(request: Request) -> dict[str, str]:
+    return {"ip": request.client.host if request.client else "", "ua": ua_summary(request.headers.get("user-agent", ""))}
 
 
 def current_user(request: Request) -> User:
@@ -645,7 +663,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     app.state.im = im
 
     def set_cookie(resp: Response, token: str) -> None:
-        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, path="/")
+        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=int(auth.session_limits()[1]), path="/")
 
     @app.get("/")
     def index() -> FileResponse:
@@ -670,16 +688,16 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
-    def register(body: CredentialsIn, response: Response) -> dict:
-        user, token, first = auth.register(store, body.email, body.password)
+    def register(body: CredentialsIn, request: Request, response: Response) -> dict:
+        user, token, first = auth.register(store, body.email, body.password, session_meta(request))
         set_cookie(response, token)
         claimed = first and bool(store.agents)
         network.ensure_assistant(user.id)  # 注册即有助理（认领了旧数据、已有 Agent 的不补建）
         return {**store.users[user.id].public(), "claimed_existing": claimed}
 
     @app.post("/api/auth/login")
-    def login(body: CredentialsIn, response: Response) -> dict:
-        user, token = auth.login(store, body.email, body.password)
+    def login(body: CredentialsIn, request: Request, response: Response) -> dict:
+        user, token = auth.login(store, body.email, body.password, session_meta(request), request.cookies.get(auth.COOKIE))
         set_cookie(response, token)
         return user.public()
 
@@ -689,8 +707,8 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         return {"email": auth.reset_info(store, body.token)}
 
     @app.post("/api/auth/reset")
-    def reset(body: ResetIn, response: Response) -> dict:
-        user, token = auth.reset_password(store, body.token, body.password)
+    def reset(body: ResetIn, request: Request, response: Response) -> dict:
+        user, token = auth.reset_password(store, body.token, body.password, session_meta(request))
         set_cookie(response, token)
         return user.public()
 
@@ -699,6 +717,26 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         auth.logout(store, request.cookies.get(auth.COOKIE))
         response.delete_cookie(auth.COOKIE, path="/")
         return {"ok": True}
+
+    # 改密码：换新令牌，其余会话全部作废（control-plane.md 第 8 节）
+    @app.post("/api/auth/password")
+    def change_password(body: PasswordIn, request: Request, response: Response, user: Me) -> dict:
+        set_cookie(response, auth.change_password(store, user.id, body.old, body.new, session_meta(request)))
+        return {"ok": True}
+
+    # 我的会话：列出自己的登录（不显示令牌），逐个下线或一键下线其他所有
+    @app.get("/api/auth/sessions")
+    def my_sessions(request: Request, user: Me) -> list:
+        return auth.sessions_of(store, user.id, request.cookies.get(auth.COOKIE))
+
+    @app.delete("/api/auth/sessions/{session_id}")
+    def drop_session(session_id: str, user: Me) -> dict:
+        auth.revoke_session(store, user.id, session_id)
+        return {"ok": True}
+
+    @app.post("/api/auth/sessions/others")
+    def drop_other_sessions(request: Request, user: Me) -> dict:
+        return {"revoked": auth.revoke_others(store, user.id, request.cookies.get(auth.COOKIE))}
 
     @app.get("/api/me")
     def whoami(user: Me) -> dict:
