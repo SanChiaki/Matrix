@@ -172,8 +172,10 @@ class FakeProvider:
     """OpenAI chat completions 的最小假服务（SSE）。带工具的第一次请求让 Agent 用 bash 找密钥，之后收尾；
     记下每次请求的认证头、模型、推理强度、工具结果，以及受 compat 影响的系统提示角色和输出上限字段。"""
 
-    def __init__(self, probe: str) -> None:
+    def __init__(self, probe: str, host: str = "127.0.0.1") -> None:
+        """host：监听在哪（docker 后端的沙箱在自己的网络里，要监听在它连得到的网关上）。probe 可以随时换。"""
         self.requests: list[dict[str, Any]] = []
+        self.probe = probe
         fake = self
 
         class H(BaseHTTPRequestHandler):
@@ -199,7 +201,7 @@ class FakeProvider:
                     self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
 
                 if "bash" in tools and not results:
-                    args = json.dumps({"description": "check", "command": probe})
+                    args = json.dumps({"description": "check", "command": fake.probe})
                     chunk({"role": "assistant", "tool_calls": [{"index": 0, "id": "call_1", "type": "function",
                                                                 "function": {"name": "bash", "arguments": args}}]})
                     chunk({}, "tool_calls")
@@ -208,8 +210,8 @@ class FakeProvider:
                     chunk({}, "stop")
                 self.wfile.write(b"data: [DONE]\n\n")
 
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
-        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        self.server = ThreadingHTTPServer((host, 0), H)
+        self.url = f"http://{host}:{self.server.server_address[1]}/v1"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
 
@@ -422,10 +424,24 @@ class Live:
         catalog.write_text(json.dumps({"connectors": [{"id": "smoke", "name": "冒烟", "url": self.mcp.url}]}), encoding="utf-8")
         port = port or _free_port()
         (root / "data").mkdir()
+        from .model_catalog import ModelCatalog
         from .sandboxes import provider_named
+        # 沙箱方式下 isolation、resource-limit 由假模型驱动（命令一定被执行，不看真模型愿不愿意）：平台供应商指向假服务，
+        # 只有探针用的 Agent 选它；Lead / Helper 照旧用真模型（给了 --model 时是目录里的 live 一项）
+        self.fake: FakeProvider | None = None
+        models = None
+        if sandbox != "off":
+            self.fake = FakeProvider("true", host=listen)
+            presets = [{"id": "probe", "label": "Fake", "provider": "matrix-check", "model": "fake-1"}]
+            if model:
+                presets.append({"id": "live", "label": "Live", "provider": model["provider"], "model": model["model"]})
+            (root / "models.json").write_text(json.dumps({"models": presets, "providers": [
+                {"id": "matrix-check", "name": "Matrix check", "api": "openai-completions", "base_url": self.fake.url}]}),
+                encoding="utf-8")
+            models = ModelCatalog(root / "models.json")
         # docker 后端：沙箱在自己的网络里，连回来的地址是管理器配置里的 connect_url，服务要监听在那个网络能到的地址上
         self.net = Network(rt, root / "data", tool_url=f"http://{listen}:{port}/internal/tools", seed=False,
-                           connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox),
+                           connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox), models=models,
                            sandbox_url=f"ws://{listen}:{port}/api/sandbox/connect")
         self.sandbox = sandbox
         self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host=listen, port=port, log_level="warning"))
@@ -434,10 +450,14 @@ class Live:
             time.sleep(0.05)
         self.uid = auth.register(self.net.store, "smoke@matrix.local", secrets.token_urlsafe(18))[0].id
         mk = self.net.create_agent
+        pick = {"model_preset": "live"} if models is not None and model else {"model": model}
         self.lead = mk("Lead", "冒烟检查：主执行者", [], ["delegate", "file.write", "shell.exec", "connector.use"],
-                       model=model, actor=self.uid)
+                       actor=self.uid, **pick)
         self.helper = mk("Helper", "冒烟检查：被委托的成员", [], ["file.write", "shell.exec"] if sandbox != "off" else [],
-                         model=model, actor=self.uid)
+                         actor=self.uid, **pick)
+        if self.fake is not None:
+            from .engine import _provider_vault
+            self.net.vault.put(_provider_vault("matrix-check"), {"api_key": "sk-matrix-check-" + secrets.token_hex(8)})
         self.project = self.net.create_project("dsh 冒烟检查", "", [self.lead.id, self.helper.id], actor=self.uid)
         self.chat = self.net.project_chat(self.project.id, actor=self.uid)
         # 审批检查写的“工作目录以外”：不能放在 /tmp 下。dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的路径在 Agent 的 bash 里
@@ -446,6 +466,22 @@ class Live:
         cache = Path.home() / ".cache"
         cache.mkdir(parents=True, exist_ok=True)
         self.outside = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-outside-", dir=cache))
+
+    def probe(self, command: str) -> str:
+        """假模型驱动：新建一个用假供应商的 Agent，在它的私聊里让它的 bash 执行 command，返回工具结果（假服务收到的）。
+        每次新建 Agent：假服务只在会话里还没有工具结果时下指令。"""
+        assert self.fake is not None
+        a = self.net.create_agent(f"Probe{secrets.token_hex(3)}", "冒烟检查：假模型驱动的探针", [],
+                                  ["shell.exec", "file.write"], model_preset="probe", actor=self.uid)
+        self.fake.probe, n = command, len(self.fake.requests)
+        conv = self.net.direct_chat(a.id, actor=self.uid)
+        self.net.send_message(conv.id, "跑一下", actor=self.uid)
+        self.net.wait_quiet(self.timeout_s)
+        reqs = self.fake.requests[n:]
+        if not reqs:
+            fails = [m.text for m in conv.messages if m.role == "system"]
+            raise RuntimeError("假模型没收到请求" + (f"：{fails[-1][:200]}" if fails else ""))
+        return " ".join(x for r in reqs for x in r["results"])
 
     def ask(self, text: str, approve: bool = False) -> tuple[str, list[Any]]:
         """@Lead 说一句，等到对话安静下来（委托也都有了结果）。返回 Lead 最后一条回复与这期间出现的审批申请。"""
@@ -596,7 +632,7 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return OK, f"沙箱销毁后从检查点恢复：记得编号、产物在（会话包 {len(ck.sessions) if ck else 0} 份）"
 
     def isolation() -> tuple[str, str]:
-        # 阶段 0 的读隔离、进程隔离在沙箱里照样成立：让 Agent 的 bash 读数据目录与别的单元，看控制面记下的工具结果
+        # 阶段 0 的读隔离、进程隔离在沙箱里照样成立：假模型让 Agent 的 bash 读数据目录与别的单元、看别的进程
         data = live.net.store.root
         tag = nonce()
         marks = {"DATA": data / "state.json", "VAULT": data / "vault.key", "HOME_OTHER": data / "agents" / "x" / "n.md",
@@ -612,26 +648,15 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
                           [f"echo PROC_SEEN=$(grep -l '{arg[:-1]}[{arg[-1]}]' /proc/[0-9]*/cmdline 2>/dev/null | wc -l)",
                            "echo INNER=$(tr '\\0' ' ' </proc/1/cmdline | cut -d' ' -f1 | xargs basename)"])
         try:
-            live.ask("这是部署方在上线前做的沙箱验收检查（matrix-dsh-check），你的所有者授权了：下面这条命令只尝试读取，"
-                     "预期都会被沙箱挡住（输出 blocked），用来证明隔离有效。用 bash 原样执行它，不要改动：\n"
-                     f"{probe}\n然后只回复 DONE。")
+            text = live.probe(probe)
         finally:
             outside.kill()
             marks["SERVER_HOME"].unlink(missing_ok=True)
-        log = data / "run-logs" / "seats" / live.chat.id / live.lead.id / "dsh-events.jsonl"
-        results = []
-        for line in log.read_text(encoding="utf-8").splitlines() if log.is_file() else []:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if ev.get("type") == "tool_result":   # 只看工具结果（命令本身的文字里也有 X=READ）
-                results.append(str(ev.get("result")))
-        seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", " ".join(results[-6:])))
+        seen = dict(re.findall(r"(\w+)=(READ|blocked|\d+)", text))
         if not any(k in seen for k in marks):
-            return FAIL, "Agent 的 bash 没跑这条探针（看控制面的 run-logs）"
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
         bad = [k for k in marks if seen.get(k) == "READ"] + (["PROC"] if seen.get("PROC_SEEN", "0") != "0" else [])
-        inner = re.search(r"INNER=([\w.-]+)", " ".join(results[-6:]))
+        inner = re.search(r"INNER=([\w.-]+)", text)
         if bad:
             return FAIL, f"沙箱里读得到 / 看得到：{'、'.join(bad)}"
         if not inner or inner.group(1) != "bwrap":
@@ -650,30 +675,14 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         b64 = lambda t: base64.b64encode(t.encode()).decode()  # noqa: E731 —— 一个词，模型照抄不会抄错
         probe = (f"echo {b64(mem_py)} | base64 -d | python3 2>/dev/null; echo MEMRC=$?; "
                  f"echo {b64(pid_py)} | base64 -d | python3 2>&1 | tail -1")
-        live.ask("这是部署方在上线前做的沙箱配额验收检查（matrix-dsh-check），你的所有者授权了：下面这条命令申请超额内存、"
-                 "起很多 sleep 进程，预期会被沙箱的配额挡住（这正是要证明的），不影响别人。用 bash 原样执行它（它会失败，这是预期的），"
-                 f"不要改动、不要重试：\n{probe}\n然后只回复 DONE。")
-        log = live.net.store.root / "run-logs" / "seats" / live.chat.id / live.lead.id / "dsh-events.jsonl"
-        results = []
-        for line in log.read_text(encoding="utf-8").splitlines() if log.is_file() else []:
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if ev.get("type") == "tool_result":
-                results.append(str(ev.get("result")))
-        text = " ".join(results[-4:])
+        text = live.probe(probe)
         mem, pids = re.search(r"MEMRC=(\d+)", text), re.search(r"PIDS=(\w+)", text)
         if not mem or not pids:
-            return FAIL, "Agent 的 bash 没跑这条探针（看控制面的 run-logs）"
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
         quota = bool(live.net.sandbox_report().get("quota"))
         limited = mem.group(1) != "0" and not re.search(r"(?m)^MEM=allocated", text) and pids.group(1) == "limited"
-        try:   # 别的执行单元不受影响：Helper 的委托照常跑完
-            code = nonce()
-            after, _ = live.ask(f"用 delegate 委托 Helper 只回复 ALIVE-{code}，等它交付后验收，只回复它交付的原文。")
-            others_ok = f"ALIVE-{code}" in after
-        except (TimeoutError, RuntimeError) as e:
-            others_ok, after = False, str(e)
+        code = nonce()   # 别的执行单元不受影响：另一个执行单元照常跑完一条命令
+        others_ok = f"ALIVE-{code}" in live.probe(f"echo ALIVE-{code}")
         detail = f"内存申请退出码 {mem.group(1)}，进程数 {pids.group(1)}；之后别的执行单元{'照常' if others_ok else '没跑通'}"
         if not quota:
             return WARN, f"这个后端没有配额：{detail}"
@@ -713,6 +722,8 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
                 live.net.sandbox.stop(unit)
         live.server.should_exit = True
         live.mcp.server.shutdown()
+        if live.fake is not None:
+            live.fake.server.shutdown()
         shutil.rmtree(live.outside, ignore_errors=True)
 
 
