@@ -126,17 +126,21 @@ class DockerConfig:
         return self.max_memory_mb or 8192
 
 
-def host_memory_mb(path: str = "/proc/meminfo") -> int | None:
-    """宿主内存总量（MB），读 /proc/meminfo 的 MemTotal；取不到（不是 Linux、读不了）返回 None。
-    管理器跑在容器里时读到的也是宿主的（没有 lxcfs 之类改写 /proc 的话）。"""
+def meminfo_mb(key: str, path: str = "/proc/meminfo") -> int | None:
+    """/proc/meminfo 里的一项（MB），例如 MemTotal、MemAvailable；取不到（不是 Linux、读不了）返回 None。"""
     try:
         with open(path, encoding="ascii") as f:
             for line in f:
-                if line.startswith("MemTotal:"):
+                if line.startswith(key + ":"):
                     return int(line.split()[1]) // 1024
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def host_memory_mb(path: str = "/proc/meminfo") -> int | None:
+    """宿主内存总量（MB）。管理器跑在容器里时读到的也是宿主的（没有 lxcfs 之类改写 /proc 的话）。"""
+    return meminfo_mb("MemTotal", path)
 
 
 def fit_host(conf: DockerConfig, total_mb: int | None) -> tuple[DockerConfig, str]:

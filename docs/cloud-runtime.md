@@ -119,7 +119,7 @@ Matrix 的共享群聊里几个人的消息进同一个席位、同一个沙箱�
   内存是上限不是预留：实测一轮普通运行（dsh + 网络工具的 MCP 服务）峰值约 250 MB，dsh 每轮一个进程、轮次之间不占内存（第 11 节第 6 项）。
   gVisor 下一轮（委托时同时两个 dsh）宿主看到的峰值约 440 MB，比 runc 多约 90 MB；装依赖、跑测试这类重活峰值 300–420 MB；
   空闲沙箱约 10–17 MB 一个（第 11 节）。全局并发默认按 `(宿主内存 − 2 GB) / 512 MB` 估（16 GB 的机器约 28 个）。
-  默认值由沙箱管理器的配置定（控制面不指定配额）。管理器启动时按宿主内存核对：单个沙箱的 `memory_mb` 与 `max_memory_mb` 都不能超过“宿主内存 − `host_reserve_mb`（默认 1024 MB）”，超了拒绝启动并写明怎么改；`max_memory_mb` 不写时自动取这个值（最多 8 GB）。只核对单个沙箱，不核对“配额 × 并发”：配额是上限，按它乘并发会把并发压得过低；几个沙箱同时用满配额仍可能压垮宿主，靠并发上限与宿主余量兜底（2026-11-17：一台 1.8 GB 的测试机在默认 2 GB 配额下被 `resource-limit` 探针压垮，才加的这项核对）。
+  默认值由沙箱管理器的配置定（控制面不指定配额）。管理器启动时按宿主内存核对：单个沙箱的 `memory_mb` 与 `max_memory_mb` 都不能超过“宿主内存 − `host_reserve_mb`（默认 1024 MB）”，超了拒绝启动并写明怎么改；`max_memory_mb` 不写时自动取这个值（最多 8 GB）。只核对单个沙箱，不核对“配额 × 并发”：配额是上限，按它乘并发会把并发压得过低；几个沙箱同时用满配额仍可能压垮宿主，靠并发上限与宿主余量兜底（2026-11-17：一台 1.8 GB 的测试机在默认 2 GB 配额下被 `resource-limit` 探针压垮，才加的这项核对）。`matrix-dsh-check` 的 `resource-limit` 也改成按管理器报的默认配额申请（内存配额 + 256 MB、pids 配额 + 100 个进程，原先写死 3 GB 与 900 个），宿主可用内存不到“配额 + 256 MB + 512 MB”时提醒并跳过；没有配额的后端（local）不跑超额申请。
 - dsh 自己的 bwrap 沙箱**照旧开着**：`build_patch_yaml` 的权限覆盖层、“写只能写工作目录”都不变；外溢审批在云侧取消（7.1）。
   外层沙箱负责读隔离与爆炸半径，内层负责权限词表，两层各管各的。
 
@@ -424,7 +424,7 @@ class SandboxProvider(Protocol):
 - **Matrix 容器**不再跑 dsh，叠加文件把它的安全选项改成只有 `no-new-privileges`（去掉 `seccomp=unconfined` 与 `systempaths=unconfined`）。
 
 验证（本机，Docker 29、cgroup v1、overlayfs，**没有 gVisor**——这台机器的策略不允许装 runsc）：`insecure-runc` 档下
-`matrix-dsh-check --live --sandbox docker` 全部通过，含新加的 `resource-limit`（Agent 申请 3 GB 内存被结束、起 900 个进程被挡在 512 以内、之后别的
+`matrix-dsh-check --live --sandbox docker` 全部通过，含新加的 `resource-limit`（当时 Agent 申请 3 GB 内存被结束、起 900 个进程被挡在 512 以内、之后别的
 执行单元照常）与 `isolation` 里的内层 bwrap 核对（这两项 2026-11-17 起由假模型驱动：真模型常把探针当攻击拒绝执行，结果时好时坏）；工具包 `t8` 在本机按同样的方式跑过（早先几遍偶有一项报 `TRANSPORT device disconnected`，查明是同一个 Docker 上另一套控制面的对账删了沙箱，加了部署名后不再出现）；
 compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API 跑通两轮真实对话（续接记得编号、产物进检查点），Matrix 容器里没有 docker.sock、
 经 socket 发带镜像 / 挂载 / 特权的请求都被拒。**`runsc` 档没在本机验证**，要在装了 gVisor 的机器上跑工具包的 `t8`。

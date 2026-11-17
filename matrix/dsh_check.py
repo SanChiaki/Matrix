@@ -681,11 +681,17 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
                     "Agent 的命令在 dsh 的内层 bwrap 里")
 
     def resource_limit() -> tuple[str, str]:
-        # 配额（第 8 节验收表的 resource-limit）：超额申请内存、无限起进程，被沙箱的上限挡住；之后别的执行单元照常运行
+        # 配额（第 8 节验收表的 resource-limit）：超额申请内存、无限起进程，被沙箱的上限挡住；之后别的执行单元照常运行。
+        # 申请多少按管理器报的默认配额来（配额 + 余量），宿主可用内存不够时提醒并跳过，不硬上（2026-11-17 一台 1.8 GB 的测试机被压垮过）
         import base64
-        mem_py = 'b = bytearray(3 << 30)\nb[::4096] = b"x" * len(b[::4096])\nprint("MEM=allocated")\n'
-        pid_py = ('import subprocess as s\nps = []\ntry:\n    for _ in range(900):\n        ps.append(s.Popen(["sleep", "30"]))\n'
-                  'except OSError:\n    pass\nprint("PIDS=" + ("limited" if len(ps) < 900 else "unlimited"), len(ps))\n'
+
+        from .sandboxd import meminfo_mb
+        skip, mem_mb, n_pids = resource_plan(live.net.sandbox_report(), meminfo_mb("MemAvailable"))
+        if skip:
+            return WARN, skip
+        mem_py = (f'b = bytearray({mem_mb} << 20)\nb[::4096] = b"x" * len(b[::4096])\nprint("MEM=allocated")\n')
+        pid_py = (f'import subprocess as s\nps = []\ntry:\n    for _ in range({n_pids}):\n        ps.append(s.Popen(["sleep", "30"]))\n'
+                  f'except OSError:\n    pass\nprint("PIDS=" + ("limited" if len(ps) < {n_pids} else "unlimited"), len(ps))\n'
                   'for p in ps:\n    p.kill()\n')
         b64 = lambda t: base64.b64encode(t.encode()).decode()  # noqa: E731 —— 一个词，模型照抄不会抄错
         probe = (f"echo {b64(mem_py)} | base64 -d | python3 2>/dev/null; echo MEMRC=$?; "
@@ -694,13 +700,11 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         mem, pids = re.search(r"MEMRC=(\d+)", text), re.search(r"PIDS=(\w+)", text)
         if not mem or not pids:
             return FAIL, f"探针没跑起来：{text[:200]!r}"
-        quota = bool(live.net.sandbox_report().get("quota"))
         limited = mem.group(1) != "0" and not re.search(r"(?m)^MEM=allocated", text) and pids.group(1) == "limited"
         code = nonce()   # 别的执行单元不受影响：另一个执行单元照常跑完一条命令
         others_ok = f"ALIVE-{code}" in live.probe(f"echo ALIVE-{code}")
-        detail = f"内存申请退出码 {mem.group(1)}，进程数 {pids.group(1)}；之后别的执行单元{'照常' if others_ok else '没跑通'}"
-        if not quota:
-            return WARN, f"这个后端没有配额：{detail}"
+        detail = (f"申请 {mem_mb} MB 内存退出码 {mem.group(1)}，起 {n_pids} 个进程 {pids.group(1)}；"
+                  f"之后别的执行单元{'照常' if others_ok else '没跑通'}")
         return (OK, f"超额内存与无限起进程都被挡住：{detail}") if limited and others_ok else (FAIL, detail)
 
     def net_isolation() -> tuple[str, str]:
@@ -846,6 +850,25 @@ def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, on
         if live.fake is not None:
             live.fake.server.shutdown()
         shutil.rmtree(live.outside, ignore_errors=True)
+
+
+RESOURCE_MARGIN_MB = 256    # resource-limit 探针比配额多申请这么多
+RESOURCE_HOST_SPARE_MB = 512  # 宿主可用内存至少要比“配额 + 余量”再多这么多，才跑超额申请
+
+
+def resource_plan(report: dict, avail_mb: int | None) -> tuple[str, int, int]:
+    """resource-limit 探针的大小：（跳过的原因（空 = 照跑）, 申请多少 MB 内存, 起多少个进程）。
+    按后端报的默认配额来：内存是配额 + RESOURCE_MARGIN_MB，进程数是 pids 配额 + 100；没有配额的后端不跑（超额申请会直接压到宿主），
+    宿主可用内存不到“配额 + 余量 + RESOURCE_HOST_SPARE_MB”时也不跑。"""
+    q = report.get("quota_default") or {}
+    mem = int(q.get("memory_mb") or 2048) + RESOURCE_MARGIN_MB
+    pids = int(q.get("pids") or 512) + 100
+    if not report.get("quota"):
+        return "这个后端没有配额：不跑超额申请（没有上限时会直接压到宿主）", mem, pids
+    if avail_mb is not None and avail_mb < mem + RESOURCE_HOST_SPARE_MB:
+        return (f"宿主可用内存 {avail_mb} MB，不到“配额 + 余量 + {RESOURCE_HOST_SPARE_MB} MB”＝{mem + RESOURCE_HOST_SPARE_MB} MB："
+                "跳过超额申请，免得配额起作用前宿主先被耗尽"), mem, pids
+    return "", mem, pids
 
 
 def main() -> None:
