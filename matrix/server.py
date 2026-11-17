@@ -366,8 +366,27 @@ class AssignIn(BaseModel):
 
 
 class FileIn(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=300)   # 可以带目录：设计/方案.md
     content: str = Field(max_length=200_000)
+
+
+class FolderIn(BaseModel):
+    path: str = Field(min_length=1, max_length=300)
+
+
+class MoveIn(BaseModel):
+    src: str = Field(min_length=1, max_length=300)
+    dst: str = Field(min_length=1, max_length=300)
+
+
+class AccessIn(BaseModel):
+    """可见范围：都空 = 所有成员可见。"""
+    roles: list[str] = Field(default_factory=list, max_length=20)
+    agents: list[str] = Field(default_factory=list, max_length=50)
+
+
+class FileAccessIn(AccessIn):
+    path: str = Field(min_length=1, max_length=300)
 
 
 class ProjectPatch(BaseModel):
@@ -844,14 +863,29 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         network.publish_file(project_id, body.name, body.content.encode("utf-8"), actor=user.id)
         return network.project_detail(project_id, actor=user.id)
 
-    @app.get("/api/projects/{project_id}/files/{name}")
+    @app.post("/api/projects/{project_id}/folders")
+    def create_folder(project_id: str, body: FolderIn, user: Me) -> dict:
+        network.create_folder(project_id, body.path, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/moves")
+    def move_file(project_id: str, body: MoveIn, user: Me) -> dict:
+        network.move_file(project_id, body.src, body.dst, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.put("/api/projects/{project_id}/file-access")
+    def set_file_access(project_id: str, body: FileAccessIn, user: Me) -> dict:
+        network.set_file_access(project_id, body.path, {"roles": body.roles, "agents": body.agents}, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
+
+    @app.get("/api/projects/{project_id}/files/{name:path}")
     def read_file(project_id: str, name: str, user: Me) -> FileResponse:
         path = network.project_file(project_id, name, actor=user.id)
         # 一律当作附件下载，不在本站点内渲染（文件可能来自其他参与方或 Agent）
         return FileResponse(path, filename=path.name, content_disposition_type="attachment",
                             headers={"X-Content-Type-Options": "nosniff"})
 
-    @app.delete("/api/projects/{project_id}/files/{name}")
+    @app.delete("/api/projects/{project_id}/files/{name:path}")
     def delete_file(project_id: str, name: str, user: Me) -> dict:
         network.delete_file(project_id, name, actor=user.id)
         return network.project_detail(project_id, actor=user.id)
@@ -875,6 +909,11 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.post("/api/projects/{project_id}/skills/{name}/files")
     def add_project_skill_file(project_id: str, name: str, body: SkillFileIn, user: Me) -> dict:
         return network.add_project_skill_file(project_id, name, body.path, body.content.encode(), actor=user.id)
+
+    @app.put("/api/projects/{project_id}/skills/{name}/access")
+    def set_skill_access(project_id: str, name: str, body: AccessIn, user: Me) -> dict:
+        network.set_skill_access(project_id, name, {"roles": body.roles, "agents": body.agents}, actor=user.id)
+        return network.project_detail(project_id, actor=user.id)
 
     @app.delete("/api/projects/{project_id}/skills/{name}")
     def delete_project_skill(project_id: str, name: str, user: Me) -> dict:
@@ -1166,7 +1205,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def release(release_id: str, user: Me) -> dict:
         return network.release_detail(release_id, actor=user.id)
 
-    @app.get("/api/releases/{release_id}/files/{name}")
+    @app.get("/api/releases/{release_id}/files/{name:path}")
     def release_file(release_id: str, name: str, user: Me) -> FileResponse:
         path = network.release_file(release_id, name, actor=user.id)
         # 同项目文件：一律当作附件下载，不在本站点内渲染
