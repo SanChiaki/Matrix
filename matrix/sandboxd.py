@@ -306,8 +306,12 @@ class Manager:
         else:
             note = ("未达到生产隔离：docker 后端用 runc（insecure-runc），容器与宿主共用内核，而且为了 dsh 的内层沙箱放开了 seccomp 与 "
                     "/proc 遮挡；只用于验证与过渡，生产要装 gVisor")
-        return {"isolation": "sandbox", "production": rt == "runsc", "quota": True, "volume_quota": False,
-                "runtime": rt, "note": note + "；卷没有大小上限（Docker 的 local 卷做不到）"}
+        net = bool(self.conf.gateway_container)
+        return {"isolation": "sandbox", "production": rt == "runsc" and net, "quota": True, "volume_quota": False,
+                "net_enforced": net, "runtime": rt,
+                "note": note + ("；每个沙箱一张 internal 网络，只连得到出口网关" if net else
+                                "；没有配出口网关（gateway_container）：沙箱能直接出网，未达到生产隔离")
+                        + "；卷没有大小上限（Docker 的 local 卷做不到）"}
 
     def _inspect(self, name: str) -> dict[str, Any] | None:
         rc, out, _ = self.run(["docker", "container", "inspect", name])

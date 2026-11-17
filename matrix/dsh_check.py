@@ -410,7 +410,7 @@ class Live:
     """一个临时的网络：真实 dsh 运行时 + 只监听本机的回调服务 + 本机 echo 连接器。"""
 
     def __init__(self, rt: DshRuntime, root: Path, timeout_s: float, model: dict[str, str] | None = None,
-                 sandbox: str = "off", listen: str = "127.0.0.1", port: int = 0):
+                 sandbox: str = "off", listen: str = "127.0.0.1", port: int = 0, gateway_listen: str = ""):
         import uvicorn
 
         from . import auth
@@ -430,19 +430,27 @@ class Live:
         # 只有探针用的 Agent 选它；Lead / Helper 照旧用真模型（给了 --model 时是目录里的 live 一项）
         self.fake: FakeProvider | None = None
         models = None
+        self.secret = "sk-matrix-check-" + secrets.token_hex(12)   # 假供应商的密钥：key-absent 在沙箱里找它
+        self.real_key = ""
         if sandbox != "off":
-            self.fake = FakeProvider("true", host=listen)
-            presets = [{"id": "probe", "label": "Fake", "provider": "matrix-check", "model": "fake-1"}]
-            if model:
-                presets.append({"id": "live", "label": "Live", "provider": model["provider"], "model": model["model"]})
+            # 出口网关（阶段 2a）下沙箱方式只支持平台供应商：真模型也配成平台供应商（地址与模型可用环境变量改），
+            # 密钥进 vault，经网关使用；假模型服务在核心这边（网关从核心连它）
+            self.fake = FakeProvider("true")
+            real = {"id": "live-real", "name": "Live", "api": os.environ.get("MATRIX_CHECK_LLM_API", "openai-completions"),
+                    "base_url": os.environ.get("MATRIX_CHECK_LLM_BASE_URL", "https://api.deepseek.com")}
+            self.real_key = os.environ.get("MATRIX_CHECK_LLM_KEY") or os.environ.get("DEEPSEEK_API_KEY") or ""
+            live = model["model"] if model else os.environ.get("MATRIX_CHECK_LLM_MODEL", "deepseek-flash")
+            presets = [{"id": "probe", "label": "Fake", "provider": "matrix-check", "model": "fake-1"},
+                       {"id": "live", "label": "Live", "provider": "live-real", "model": live}]
             (root / "models.json").write_text(json.dumps({"models": presets, "providers": [
-                {"id": "matrix-check", "name": "Matrix check", "api": "openai-completions", "base_url": self.fake.url}]}),
-                encoding="utf-8")
+                {"id": "matrix-check", "name": "Matrix check", "api": "openai-completions", "base_url": self.fake.url},
+                real]}), encoding="utf-8")
             models = ModelCatalog(root / "models.json")
         # docker 后端：沙箱在自己的网络里，连回来的地址是管理器配置里的 connect_url，服务要监听在那个网络能到的地址上
         self.net = Network(rt, root / "data", tool_url=f"http://{listen}:{port}/internal/tools", seed=False,
                            connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox), models=models,
-                           sandbox_url=f"ws://{listen}:{port}/api/sandbox/connect")
+                           sandbox_url=f"ws://{listen}:{port}/api/sandbox/connect",
+                           sandbox_limits={"gateway_listen": gateway_listen} if gateway_listen else None)
         self.sandbox = sandbox
         self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host=listen, port=port, log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
@@ -450,14 +458,16 @@ class Live:
             time.sleep(0.05)
         self.uid = auth.register(self.net.store, "smoke@matrix.local", secrets.token_urlsafe(18))[0].id
         mk = self.net.create_agent
-        pick = {"model_preset": "live"} if models is not None and model else {"model": model}
+        pick = {"model_preset": "live"} if models is not None else {"model": model}
         self.lead = mk("Lead", "冒烟检查：主执行者", [], ["delegate", "file.write", "shell.exec", "connector.use"],
                        actor=self.uid, **pick)
         self.helper = mk("Helper", "冒烟检查：被委托的成员", [], ["file.write", "shell.exec"] if sandbox != "off" else [],
                          actor=self.uid, **pick)
         if self.fake is not None:
             from .engine import _provider_vault
-            self.net.vault.put(_provider_vault("matrix-check"), {"api_key": "sk-matrix-check-" + secrets.token_hex(8)})
+            self.net.vault.put(_provider_vault("matrix-check"), {"api_key": self.secret})
+            if self.real_key:
+                self.net.vault.put(_provider_vault("live-real"), {"api_key": self.real_key})
         self.project = self.net.create_project("dsh 冒烟检查", "", [self.lead.id, self.helper.id], actor=self.uid)
         self.chat = self.net.project_chat(self.project.id, actor=self.uid)
         # 审批检查写的“工作目录以外”：不能放在 /tmp 下。dsh 的内层沙箱把 /tmp 换成空的 tmpfs，那里的路径在 Agent 的 bash 里
@@ -467,12 +477,12 @@ class Live:
         cache.mkdir(parents=True, exist_ok=True)
         self.outside = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-outside-", dir=cache))
 
-    def probe(self, command: str) -> str:
+    def probe(self, command: str, authority: tuple[str, ...] = ("shell.exec", "file.write")) -> str:
         """假模型驱动：新建一个用假供应商的 Agent，在它的私聊里让它的 bash 执行 command，返回工具结果（假服务收到的）。
         每次新建 Agent：假服务只在会话里还没有工具结果时下指令。"""
         assert self.fake is not None
         a = self.net.create_agent(f"Probe{secrets.token_hex(3)}", "冒烟检查：假模型驱动的探针", [],
-                                  ["shell.exec", "file.write"], model_preset="probe", actor=self.uid)
+                                  list(authority), model_preset="probe", actor=self.uid)
         self.fake.probe, n = command, len(self.fake.requests)
         conv = self.net.direct_chat(a.id, actor=self.uid)
         self.net.send_message(conv.id, "跑一下", actor=self.uid)
@@ -688,18 +698,81 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
             return WARN, f"这个后端没有配额：{detail}"
         return (OK, f"超额内存与无限起进程都被挡住：{detail}") if limited and others_ok else (FAIL, detail)
 
+    def net_isolation() -> tuple[str, str]:
+        # 阶段 2a（第 8 节验收表）：Agent 的 bash 连控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网，连得上就失败；
+        # 经网关的代理去连内网与元数据地址也要被拒。假模型驱动
+        gw = live.net.gateway
+        if gw is None:
+            return WARN, "这个后端没有出口网关"
+        live.probe("true")   # 先起一个别的沙箱，后面去连它
+        others = [ip for u, ip in gw._ips.items()] or ["10.213.255.254"]
+        core = live.server.config.host, live.server.config.port
+        gw_host = live.net.gateway_address[0]
+        tries = {
+            "CORE_API": f"--noproxy '*' http://{core[0]}:{core[1]}/api/me",
+            "CORE_VIA_GW_IP": f"--noproxy '*' http://$GWH:{core[1]}/api/me",
+            "GW_OTHER_API": "--noproxy '*' http://$GW/api/me",
+            "OTHER_SANDBOX": f"--noproxy '*' http://{others[0]}:80/",
+            "INTERNAL": "--noproxy '*' http://172.17.0.1:22/",
+            "METADATA": "--noproxy '*' http://169.254.169.254/latest/meta-data/",
+            "PUBLIC_DIRECT": "--noproxy '*' https://example.com/",
+            "METADATA_VIA_GW": "http://169.254.169.254/latest/meta-data/",
+            "INTERNAL_VIA_GW": "http://10.1.2.3/",
+        }
+        lines = ['GW=$(printf %s "$HTTPS_PROXY" | sed "s#.*@##"); GWH=${GW%%:*}']
+        lines += [f"c=$(curl -s -m 5 -o /dev/null -w '%{{http_code}}' {args}); "
+                  f"case $c in 000|403|404|407) echo {n}=blocked;; *) echo {n}=OPEN:$c;; esac" for n, args in tries.items()]
+        lines.append("getent hosts example.com >/dev/null 2>&1 && echo DNS=OPEN || echo DNS=blocked")
+        text = live.probe("; ".join(lines))
+        seen = dict(re.findall(r"(\w+)=(OPEN\S*|blocked)", text))
+        if len(seen) < len(tries):
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        open_ = [f"{k}({v})" for k, v in seen.items() if v.startswith("OPEN")]
+        enforced = bool(live.net.sandbox_report().get("net_enforced"))
+        if not open_:
+            return OK, "控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网、DNS 都连不上；经网关去内网与元数据地址被拒"
+        if not enforced:
+            return WARN, f"这个后端做不到强制断网（共用宿主网络）：连得上 {'、'.join(open_)}"
+        return FAIL, f"沙箱里连得上：{'、'.join(open_)}"
+
+    def key_absent() -> tuple[str, str]:
+        # 阶段 2a：沙箱里没有模型密钥（环境变量、文件、进程），拿沙箱的网关令牌请求一个没分配给这一轮的模型要被拒
+        keys = [k for k in (live.secret, live.real_key) if len(k) >= 16]
+        pats = [k[:-1] + "[" + k[-1] + "]" for k in keys]   # [x] 让 grep 不匹配到这条命令自己
+        lines = []
+        for i, pt in enumerate(pats):
+            lines += [f"echo ENV{i}=$(env | grep -c '{pt}')",
+                      f"echo PROC{i}=$(cat /proc/[0-9]*/environ 2>/dev/null | tr '\\0' '\\n' | grep -c '{pt}')",
+                      f"echo FILE{i}=$(grep -rlI '{pt}' \"$HOME\" . /tmp 2>/dev/null | wc -l)"]
+        lines += ['GW=$(printf %s "$HTTPS_PROXY" | sed "s#.*@##"); T=$(printf %s "$HTTPS_PROXY" | sed "s#.*sbx:##; s#@.*##")',
+                  "echo OTHER_MODEL=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer $T\" "
+                  "-H 'Content-Type: application/json' -d '{\"model\":\"not-assigned\",\"messages\":[]}' "
+                  "http://$GW/llm/matrix-check/chat/completions)"]
+        text = live.probe("; ".join(lines))
+        seen = dict(re.findall(r"(\w+)=(\d+)", text))
+        if "OTHER_MODEL" not in seen:
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        found = [k for k, v in seen.items() if k != "OTHER_MODEL" and v != "0"]
+        if found:
+            return FAIL, f"沙箱里找得到模型密钥：{'、'.join(found)}"
+        if seen["OTHER_MODEL"] == "200":
+            return FAIL, "拿沙箱的令牌请求没分配给这一轮的模型，网关放行了"
+        return OK, (f"环境变量、进程、主目录与工作目录里都没有模型密钥；没分配的模型网关回 {seen['OTHER_MODEL']}"
+                    + ("" if live.real_key else "（没设真模型的密钥，只查了假供应商的）"))
+
     out = [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
            ("connector", connector), ("approval", approval), ("question", question)]
     if live.sandbox != "off":
         out += [("home", home), ("send-file", send_file), ("deliver", deliver), ("restore", restore),
-                ("isolation", isolation), ("resource-limit", resource_limit)]
+                ("isolation", isolation), ("resource-limit", resource_limit), ("net-isolation", net_isolation),
+                ("key-absent", key_absent)]
     return out
 
 
 def live_checks(rt: DshRuntime, report: Report, root: Path, timeout_s: float, only: set[str],
                 model: dict[str, str] | None = None, sandbox: str = "off", listen: str = "127.0.0.1",
-                port: int = 0) -> None:
-    live = Live(rt, root, timeout_s, model, sandbox, listen, port)
+                port: int = 0, gateway_listen: str = "") -> None:
+    live = Live(rt, root, timeout_s, model, sandbox, listen, port, gateway_listen)
     try:
         for name, fn in _scenarios(live):
             if only and name not in only:
@@ -735,7 +808,7 @@ def main() -> None:
     p.add_argument("--profile", default="headless")
     p.add_argument("--live", action="store_true", help="实际跑几轮（要调模型）")
     p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question；"
-                        "--sandbox 时另有 home,send-file,deliver,restore,isolation,resource-limit")
+                        "--sandbox 时另有 home,send-file,deliver,restore,isolation,resource-limit,net-isolation,key-absent")
     p.add_argument("--model", default="", help="实际检查的 Agent 用这个模型，provider/model（默认用 dsh 的默认模型），"
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
@@ -743,6 +816,8 @@ def main() -> None:
     p.add_argument("--listen", default="127.0.0.1", help="--live 的临时服务监听在哪（docker 后端：沙箱网络能到的地址，"
                    "如沙箱网络的网关；和管理器配置的 connect_url 一致）")
     p.add_argument("--port", type=int, default=0, help="--live 的临时服务端口（默认随机；docker 后端要和 connect_url 一致）")
+    p.add_argument("--gateway-listen", default="", help="沙箱方式：出口网关监听在哪（主机:端口；docker 后端要和管理器配置的 "
+                   "connect_url 端口一致，并且是执行单元网络能到的地址，通常 0.0.0.0:<端口>）；默认 127.0.0.1 随机端口")
     p.add_argument("--root", default="", help="临时数据放在哪个目录下（docker 后端：数据目录要落在管理器允许的前缀下）")
     p.add_argument("--sandbox", choices=["off", "local", "docker"], default="off",
                    help="--live 用云侧执行面的沙箱方式跑（local 后端：本机子进程 + 外层 bwrap），另加 home、send-file、"
@@ -765,7 +840,8 @@ def main() -> None:
     if args.live and ok:
         provider, _, name = args.model.partition("/")
         live_checks(rt, report, root, args.timeout, {x.strip() for x in args.only.split(",") if x.strip()},
-                    {"provider": provider, "model": name} if name else None, args.sandbox, args.listen, args.port)
+                    {"provider": provider, "model": name} if name else None, args.sandbox, args.listen, args.port,
+                    args.gateway_listen)
     elif args.live:
         print("静态检查没过，不跑实际检查。")
     if report.failed or args.keep:

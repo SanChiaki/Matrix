@@ -247,7 +247,8 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
         st = prov.ensure(SandboxSpec("seat:conv-1/agent-1", "user-1", "agent-1", 1, TOKEN))
         assert st.state == "running" and prov.status("seat:conv-1/agent-1").generation == 1
         assert [s.unit_id for s in prov.list()] == ["seat:conv-1/agent-1"]
-        assert prov.report()["production"]
+        rep = prov.report()
+        assert rep["isolation"] == "sandbox" and not rep["production"] and not rep["net_enforced"]  # 没配出口网关
         with pytest.raises(SandboxError, match="拒绝"):
             prov._call("POST", "/ensure", body(image="evil"))
         bad = DockerSandboxes(sock)

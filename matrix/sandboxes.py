@@ -407,9 +407,10 @@ class LocalSandboxes:
         ok, why = bw.available("nested")
         if not ok:
             return {"isolation": "none", "note": f"local 后端起不来：{why}", "quota": False}
-        return {"isolation": "sandbox", "quota": False,
+        return {"isolation": "sandbox", "quota": False, "net_enforced": False,
                 "note": "local 后端：每个执行单元一个本机子进程，外层 bubblewrap 里只有这个单元的工作目录与 dsh 状态；"
-                        "没有 cgroup 配额（进程数、内存、磁盘），网络与内核和服务器共用"}
+                        "模型经出口网关（密钥不进沙箱）；没有 cgroup 配额（进程数、内存、磁盘），网络与内核和服务器共用，"
+                        "做不到强制断网（Agent 的命令不理代理就能直接出网）"}
 
     def _launcher(self) -> None:
         while True:
