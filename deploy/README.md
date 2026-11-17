@@ -306,8 +306,14 @@ MATRIX_SANDBOX_ROOT=                # 执行面目录树，默认 /data/exec
 - 打开后第一次运行的执行单元会把旧工作目录的产物、阶段 0 状态目录（或 `dsh-home`）里的 dsh 会话导入检查点，原目录不删，会话续得上。
 - 新增的数据：`/data/exec/`（沙箱的工作目录与状态，可以不备份，能从检查点重建）、`/data/checkpoints/` 与 `/data/content/`（检查点，**要备份**）、
   `/data/run-logs/`（dsh 事件）。
-- 没做的：配额（local 后端没有 cgroup 配额，docker 后端有，见下一节）、批量建检查点的 `matrix migrate workdirs` 与导出回退。回退就是关掉开关：旧方式照旧用原来的工作目录，
-  沙箱方式期间新写的产物只在检查点里。
+- 配额：local 后端没有 cgroup 配额，docker 后端有（见下一节）。
+- **有存量数据时的步骤**（服务停着跑，`docker compose run --rm matrix matrix migrate …`）：
+  1. 备份 `matrix-data` 与 `dsh-home` 两个卷；
+  2. `matrix migrate workdirs`：给现有的每个席位、委托建第一份检查点（可重复跑，跑到一半断了再跑一遍）；报告里列出超过检查点上限、只记了清单的文件，
+     决定调大 `MATRIX_CHECKPOINT_LIMIT` 后重跑，还是放弃它们；
+  3. 打开开关、起服务；
+  4. **回退**：停服务，`matrix migrate export`（检查点写回原目录、会话放回能续接的位置），关掉开关再起服务；
+  5. 确认不再回退后，`matrix migrate purge-legacy` 先看会删什么，再加 `--yes` 真删。之后只能从备份恢复。
 - 升级 dsh 时加跑 `matrix-dsh-check --live --sandbox local`。
 
 ### 云侧执行面：docker 后端（每个执行单元一个容器）
@@ -332,6 +338,7 @@ cp sandboxd.example.json sandboxd.json       # runtime 默认 runsc；镜像名�
 docker compose -f compose.yml -f compose.sandbox.yml --profile build build
 ```
 
+管理器的 socket 是 0660、属组 gid 1000（Matrix 服务的用户），管理器用 `group_add` 加进这个组，别的进程连不上。
 `sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`network`、`connect_url`（沙箱客户端连回来的地址，和
 `.env` 的 `MATRIX_SANDBOX_GATEWAY` 一致）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`、`tmp_mb`、`env`（不能放密钥，
 名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
@@ -353,7 +360,8 @@ docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # �
   管理后台、Agent 页、启动日志会一直写“未达到生产隔离”。**不要用在多用户部署上**。
 - 配置的运行时不在（比如写了 `runsc` 但没装）：云侧运行一律拒绝并写明原因，不退回 runc。
 - 沙箱经沙箱网络直接出网；服务器只能经代理出网时，代理地址要是沙箱网络能到的（不能是宿主的 127.0.0.1），写进 `sandboxd.json` 的 `env`。
-- 配额：CPU、内存（不给 swap）、进程数由 cgroup 管；**卷没有大小上限**（Docker 的 local 卷做不到）。
+- 配额：CPU、内存（不给 swap）、进程数由 cgroup 管；**卷没有大小上限**（Docker 的 local 卷做不到；按用量停沙箱放在阶段 3）。
+- 控制面不认识的沙箱（比如 `state.json` 从备份恢复后）：运行中的停掉、卷保留，卷过 `MATRIX_SANDBOX_RETAIN`（默认 7 天）才删，日志里写明删了哪个。
 - 数据：沙箱的卷（`matrix-sbx-*`）只是缓存，能从检查点重建，不用备份；`/data/checkpoints/` 与 `/data/content/` 要备份。
 - 升级 dsh：重建沙箱镜像（上面第 2 步），再跑 `deploy/isolation-check` 的 `t8`，或在宿主上
   `matrix-dsh-check --live --sandbox docker --listen <网关> --port <端口> --root <管理器允许的前缀下的目录>`。

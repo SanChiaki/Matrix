@@ -398,7 +398,7 @@ class SandboxProvider(Protocol):
 | 委托方修改自己 `deliveries/` 里的文件 | `deliveries/` 是网络持有的材料，每轮按交付记录重新放（改动不保留） | 交付快照本来就归网络；沙箱重建后也能恢复 |
 | 技能整份拷进 `skills/` | 和端侧一样走材料，合计上限 `SKILLS_TOTAL`（16 MB），超了的跳过 | 复用端侧分支 |
 | 私有目录“改过”的判定 | 客户端按（大小、修改时间）比对，同 `homedir.fingerprint`；内容一样只是被重写过的文件也算改过 | 与旧方式的 `sync_back` 口径一致，不变量 15、22 的行为不变 |
-| `matrix migrate workdirs` / `export` / `purge-legacy` | **没做**：只做了“第一次在沙箱方式下运行时按需导入”（产物、别人交来的 `deliveries/`、阶段 0 状态目录或共用 `~/.dsh` 里的会话），原目录不删 | 这一步的重点是链路；批量建检查点与导出回退留到 1b。在那之前回退办法：关掉开关，旧方式照旧用原目录（沙箱方式里新写的产物只在检查点里，要手工从 `<data>/checkpoints/` + `<data>/content/` 取） |
+| `matrix migrate workdirs` / `export` / `purge-legacy` | 1a 先只做了“第一次在沙箱方式下运行时按需导入”；三条命令 2026-11-17 补上，见第 10 节“实现” | 1a 的重点是链路 |
 | 不变量 26 | **没加进不变量表**：1a 的版本（云侧 Agent 的代码只在沙箱里跑，控制面只经连接给材料、收检查点）只有开关打开时才成立 | 等默认切换成沙箱方式时再加进不变量表并补“两种通道”之外的结构检查 |
 
 **阶段 1b 的实现（2026-11-16，开关后面，默认关）。** `MATRIX_CLOUD_SANDBOX=docker`：每个执行单元一个容器，由沙箱管理器
@@ -408,7 +408,10 @@ class SandboxProvider(Protocol):
 - **管理器**是唯一挂 docker.sock 的进程。Matrix 服务经共享卷里的 Unix socket 调它（本地 HTTP：ensure / stop / destroy / status / list / report），
   请求只有执行单元 id、所有者、Agent、代数、配额、启动令牌、逻辑工作目录；逻辑工作目录必须落在配置允许的前缀下（compose 里是 `/data/conversations/`、
   `/data/tasks/`）。镜像、运行时、安全选项、网络、挂载模板、命令写死在管理器的配置（`sandboxd.json`）里，请求带别的字段一律拒绝（`validate_ensure`）。
-  管理器不存意图，只给容器与卷打部署名、执行单元 id、代数、起动时间的标签；对账照旧由控制面做，没有记录的卷也删掉。
+  管理器不存意图，只给容器与卷打部署名、执行单元 id、代数、起动时间的标签；对账照旧由控制面做：控制面不认识的运行中沙箱过宽限期停掉、卷保留，
+  不认识的卷过保留期（`MATRIX_SANDBOX_RETAIN`，默认 7 天）才删，从第一次发现算起（记进 `state.json` 的 `sandbox_orphans`，重启不重新计时），
+  删之前打一行日志（`state.json` 从备份恢复后，备份之后新建的执行单元没有记录，它们的卷不能立刻清掉）。
+  管理器的 socket 是 0660、属组给 Matrix 服务的用户组（gid 1000），管理器进程用 `group_add` 加进这个组。
   部署名（`namespace`）是本机实测补上的：同一个 Docker 上跑着两套控制面时，一套的对账把另一套正在用的沙箱当成“没有记录”删掉，
   那一轮报 `TRANSPORT device disconnected`；现在管理器只列、只管自己名下的。
 - **容器**（`run_argv`，纯函数）：uid 1000、`--cap-drop ALL`、`no-new-privileges`、只读根、`/tmp` 是 512 MB 的 tmpfs、独立 PID / 挂载 / IPC 命名空间、
@@ -421,7 +424,7 @@ class SandboxProvider(Protocol):
 
 验证（本机，Docker 29、cgroup v1、overlayfs，**没有 gVisor**——这台机器的策略不允许装 runsc）：`insecure-runc` 档下
 `matrix-dsh-check --live --sandbox docker` 全部通过，含新加的 `resource-limit`（Agent 申请 3 GB 内存被结束、起 900 个进程被挡在 512 以内、之后别的
-执行单元照常）与 `isolation` 里的内层 bwrap 核对；工具包 `t8` 在本机按同样的方式跑过（早先几遍偶有一项报 `TRANSPORT device disconnected`，查明是同一个 Docker 上另一套控制面的对账删了沙箱，加了部署名后不再出现）；
+执行单元照常）与 `isolation` 里的内层 bwrap 核对（这两项 2026-11-17 起由假模型驱动：真模型常把探针当攻击拒绝执行，结果时好时坏）；工具包 `t8` 在本机按同样的方式跑过（早先几遍偶有一项报 `TRANSPORT device disconnected`，查明是同一个 Docker 上另一套控制面的对账删了沙箱，加了部署名后不再出现）；
 compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API 跑通两轮真实对话（续接记得编号、产物进检查点），Matrix 容器里没有 docker.sock、
 经 socket 发带镜像 / 挂载 / 特权的请求都被拒。**`runsc` 档没在本机验证**，要在装了 gVisor 的机器上跑工具包的 `t8`。
 
@@ -444,7 +447,7 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
 **阶段 2：出口网关。** 沙箱网络默认全拒，客户端连接、模型调用、网页出网全部改经网关；模型密钥离开执行面；用量由网关记。
 做完这一阶段，`security.md` 的“沙箱只管写、不管读”与信息流那条“可绕过 `open_note` 直接读磁盘”才能删掉，#59 关闭。
 
-**阶段 3：收尾与 #68、#60。** 插件服务迁入；节点级只读内容存储；预热池；管理后台的沙箱页（数量、配额、排队、出网记录）；
+**阶段 3：收尾与 #68、#60。** 卷的用量：管理器定期统计每个执行单元卷的大小，超了上限停沙箱并通知所有者（docker 后端的 local 卷没有大小上限，1b 先接受）；插件服务迁入；节点级只读内容存储；预热池；管理后台的沙箱页（数量、配额、排队、出网记录）；
 连接器凭证注入（#60）。
 
 **阶段 4：集群。** `kubernetes` 后端、多节点调度。调度、预热池、休眠先评估 Kubernetes 的 agent-sandbox，不自己写
@@ -533,14 +536,27 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
 4. **灰度**：沙箱后端先只对部署方点名的用户生效（其余人照旧走 `process`），跑过第 8 节的检查、观察一段时间再全量。
 5. **清理**：原工作目录与 `dsh-home` 不自动删，保留到部署方执行 `matrix migrate purge-legacy`。
 
+**实现（2026-11-17）。** 入口是 `matrix migrate <动作> [--data <目录>]`，服务停着时跑（都改 `state.json`）。只处理云侧 Agent 的执行单元。
+
+- `workdirs`：和第一次在沙箱方式下运行时的按需导入是同一段代码（`Network._sandbox_import`）：产物、别人交来的 `deliveries/`、dsh 会话
+  （阶段 0 的状态目录，或更早的共用 `~/.dsh`）进检查点，台账记成已导入；导入过的跳过，所以可重复、可中断；不动原目录；
+  超过检查点上限的文件不截断，留在原处并列进报告。已结束的委托也覆盖到。
+- `export`：最新检查点里的产物写回原工作目录（覆盖同名文件，不删别的），交给这个单元的委托产物写回它的 `deliveries/`，
+  会话包解到这个单元的 dsh 状态目录（阶段 0 起旧方式用它当 HOME，不是 10.4 原写的共用 `~/.dsh`）。台账记成 exported：再打开沙箱方式时从原目录重新导入。
+- `purge-legacy`：删原工作目录、阶段 0 的状态目录、共用 `~/.dsh` 里这个会话的两处文件；不带 `--yes` 只列出来。只删导入过、检查点完整
+  （没有只记清单的文件）、而且原目录里没有比检查点新的产物（迁移之后旧方式又写过）的。
+
+真实验证（本机、真模型、`local` 后端）：旧方式让 Agent 记住编号并写 `first.txt` → `matrix migrate workdirs` → 沙箱方式写 `second.txt` →
+`matrix migrate export` → 关掉开关、旧方式续接：记得编号，两个文件都在。
+
 ### 10.3 升级那一刻正在进行的事
 
 和现在重启一样（不变量 12）：云侧运行中的轮次判失败、可续接；等待中的审批与提问作废；端侧任务回到等待。没有新的损失。
 
 ### 10.4 回退
 
-清理之前可以回退：`matrix migrate export` 把各执行单元的最新检查点写回原来的工作目录位置，再把后端切回 `process`。
-沙箱里产生的 dsh 会话按 10.2 的两处文件拷回共用的 `~/.dsh` 就能续接（工作目录路径没变）。执行过 `purge-legacy` 之后只能从备份恢复。
+清理之前可以回退：`matrix migrate export` 把各执行单元的最新检查点写回原来的工作目录位置，再把开关关掉。
+沙箱里产生的 dsh 会话按 10.2 的两处文件放回这个执行单元的 dsh 状态目录（阶段 0 起旧方式的 HOME）就能续接（工作目录路径没变）。执行过 `purge-legacy` 之后只能从备份恢复。
 
 ### 10.5 其余
 
