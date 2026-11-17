@@ -43,7 +43,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 模型字段、状态结构、权限词表 | [docs/reference/domain.md](docs/reference/domain.md) |
 | 群聊、项目会话、私聊、@ 唤醒、成员变动、共享项目与可见性、附件与 Agent 发文件（`send_file`） | [docs/reference/conversations.md](docs/reference/conversations.md) |
 | 委托、收件箱、失败与续接、看板与用户任务、运行中提问（`ask_user_question`）、长期目标续跑与后台任务 | [docs/reference/execution.md](docs/reference/execution.md) |
-| 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
+| 项目档案与档案工具、资料的目录层级、资料与技能的可见范围 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)；接企业内部 IM（确认清单、连接方式、写驱动、本地测、上线、真机验收）见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)，样板 `examples/im-driver/`（改了驱动接口要同步改这两处） |
@@ -114,7 +114,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_cloud_isolation.py`（云侧外层沙箱的命令拼装、开关与降级、执行单元的 dsh 状态目录与旧会话迁移）、`test_sandboxd.py`（沙箱管理器：请求校验、docker run 参数、运行时与失败关闭、标签、Unix socket 接口）、`test_migrate.py`（迁移与回退命令）、`test_sandbox_plane.py`（云侧沙箱方式：令牌、单元绑定、材料与检查点、交付、容量、重建恢复、对账、旧数据导入；`channels.py` 让不变量 8、15、22 的测试两种通道都跑）、`test_sandbox.py`（沙箱命令拼装）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_archive_access.py`（资料的目录层级、资料与技能的可见范围，不变量 26）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_cloud_isolation.py`（云侧外层沙箱的命令拼装、开关与降级、执行单元的 dsh 状态目录与旧会话迁移）、`test_sandboxd.py`（沙箱管理器：请求校验、docker run 参数、运行时与失败关闭、标签、Unix socket 接口）、`test_migrate.py`（迁移与回退命令）、`test_sandbox_plane.py`（云侧沙箱方式：令牌、单元绑定、材料与检查点、交付、容量、重建恢复、对账、旧数据导入；`channels.py` 让不变量 8、15、22 的测试两种通道都跑）、`test_sandbox.py`（沙箱命令拼装）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -181,6 +181,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 23. **发布只经主持人，交付件只流向读者**：项目内容离开项目只经发布物；订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效。
 24. **插件服务只来自部署方目录，只经网络、按挂点作用**：一个安装一个进程，不拿凭证；工具、只读挂载、标明来源的上下文、验收后的通知，只在本项目里生效。
 25. **IM 只是绑定的人的入口**：只认核验过绑定码的那个身份在单聊里说的话，推出去的只到他自己的单聊、只是他本来看得到的。
+26. **资料与项目技能只给可见范围里的 Agent**：默认所有成员可见，主持人可收窄到角色 / 成员；目录逐级只收窄，挂载、材料、推送、群聊事件都按它过滤。
 
 ### 二、工作方式
 
@@ -219,5 +220,5 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
   能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
 - IM 机器人的密钥只进 `vault/`；桥只放行绑定的人在单聊里说的话、只往他自己的单聊推，不要放宽；企业微信地址只由部署方经 `MATRIX_WECOM_URL` 改，不要做成用户可填（网络会被当跳板）。
-- 沙箱方式（`MATRIX_CLOUD_SANDBOX`）下沙箱交回来的东西都不可信：产物清单、私有目录改动、会话包只经 `checkpoints.clean_manifest`、`Network._apply_home_changes`、`Uploads`（路径、大小、sha 校验）进入网络的状态，不要绕过；沙箱连接只接受派给它那个执行单元的运行（`DeviceRuntime.unit`），不要放宽。不变量 26（执行面与控制面分离）只在开关打开时成立，所以没进不变量表，等默认切换时再加。
+- 沙箱方式（`MATRIX_CLOUD_SANDBOX`）下沙箱交回来的东西都不可信：产物清单、私有目录改动、会话包只经 `checkpoints.clean_manifest`、`Network._apply_home_changes`、`Uploads`（路径、大小、sha 校验）进入网络的状态，不要绕过；沙箱连接只接受派给它那个执行单元的运行（`DeviceRuntime.unit`），不要放宽。暂定的不变量 27（执行面与控制面分离）只在开关打开时成立，所以没进不变量表，等默认切换时再加。
 - 已知风险：云侧读隔离只做到阶段 0（单机止血，外层 bwrap）：文件读隔离有了，内核与网络仍共用、没有 cgroup 配额、模型密钥仍在 dsh 环境变量里，没有外层沙箱的部署（`preferred` 降级、`off`）仍是“沙箱只管写不管读”，插件服务里目录托管的进程也读得到数据目录。多机部署、接真实账号之前要做完 [cloud-runtime.md](docs/cloud-runtime.md) 的阶段 1–2，至少用 `MATRIX_CLOUD_ISOLATION=required`。

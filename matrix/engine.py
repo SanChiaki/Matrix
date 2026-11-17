@@ -597,10 +597,10 @@ class Network:
             for aid in removed:  # 授权跟着成员身份走：再加回来要重新确认
                 g.flow_grants.pop(aid, None)
 
-    def _people_event(self, g: Project, text: str) -> None:
-        """调用方持有锁。参与者变动写进群聊。"""
+    def _people_event(self, g: Project, text: str, about: str | None = None) -> None:
+        """调用方持有锁。参与者变动写进群聊。about：说的是哪份资料 / 哪个技能（可见范围外的 Agent 收不到，不变量 26）。"""
         conv = self._project_chat(g)
-        conv.messages.append(Message(id=new_id("msg"), role="event", text=text))
+        conv.messages.append(Message(id=new_id("msg"), role="event", text=text, about=about))
         conv.updated_at = time.time()
 
     def _email(self, user_id: str | None) -> str:
@@ -734,11 +734,11 @@ class Network:
         with log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def _archive_saved(self, g: Project, event: str | None = None) -> None:
-        """调用方不持有锁。档案变化的公开事件写进群聊，人和之后被 @ 的成员都看得到。"""
+    def _archive_saved(self, g: Project, event: str | None = None, about: str | None = None) -> None:
+        """调用方不持有锁。档案变化的公开事件写进群聊，人和之后被 @ 的成员都看得到（about 见 _people_event）。"""
         with self._lock:
             if event:
-                self._people_event(g, event)
+                self._people_event(g, event, about)
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
         self._emit_project_chat(g)
@@ -788,13 +788,14 @@ class Network:
                 sug.status = "accepted" if accept else "rejected"
                 event = (f"主持人采纳了 {self._name(sug.by_agent)} 提议的技能「{sug.skill_name}」，项目里的成员此后都能用"
                          if accept else f"主持人没有采纳技能「{sug.skill_name}」的提议")
+                about = f"skill:{sug.skill_name}" if accept else None
             else:
                 sug.status = "accepted" if accept else "rejected"
                 if accept:
                     g.brief, g.brief_updated_at = sug.text, time.time()
                     self._archive_changed(g, "brief.set", by_user=actor, suggestion=sug.id, size=len(sug.text))
-                event = "主持人采纳了纲要修改建议" if accept else "主持人没有采纳纲要修改建议"
-        self._archive_saved(g, event)
+                event, about = "主持人采纳了纲要修改建议" if accept else "主持人没有采纳纲要修改建议", None
+        self._archive_saved(g, event, about)
         return g
 
     def record_decision(self, project_id: str, text: str, reason: str = "", supersedes: str | None = None,
@@ -880,66 +881,239 @@ class Network:
 
     def publish_file(self, project_id: str, name: str, content: bytes, actor: str | None = None,
                      agent_id: str | None = None, source: str | None = None) -> str:
-        """把一份文件发布进项目档案。同名覆盖（日志里留着谁、什么时候）。返回文件名。"""
-        fname = _safe_filename(name)
+        """把一份文件发布进项目档案。名字可以带目录（`设计/方案.md`），目录按需建。同名覆盖（日志里留着谁、什么时候）。
+        Agent 只能写进它看得到的位置（可见范围，不变量 26）。返回档案里的路径。"""
+        fname = _safe_path(name)
         if len(content) > FILE_LIMIT:
             raise NetworkError(f"文件太大：最多 {FILE_LIMIT // 1000} KB")
         with self._lock:
             g = self.visible_project(project_id, actor)
-            (self.store.project_dir(g.id) / fname).write_bytes(content)
+            if agent_id and not self._file_visible(g, fname, agent_id):
+                raise NetworkError(f"不能发布到 {fname}：这个位置你看不到，换个名字或目录")
+            root = self.store.project_dir(g.id)
+            path = root / fname
+            if path.is_dir():
+                raise NetworkError(f"{fname} 是一个目录，换个文件名")
+            for parent in Path(fname).parents:
+                if str(parent) != "." and (root / parent).is_file():
+                    raise NetworkError(f"{parent.as_posix()} 是一个文件，不能当目录用")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
             self._archive_changed(g, "file.publish", by_user=actor, by_agent=agent_id, file=fname,
                                   size=len(content), source=source)
             who = self._name(agent_id) if agent_id else self._email(actor)
-            self._people_event(g, f"{who} 发布了文件 {fname}")
+            self._people_event(g, f"{who} 发布了文件 {fname}", about=f"file:{fname}")
             followed = self._follow_releases(g, fname)  # 开了跟随档案的发布物（不变量 23）
         self._archive_saved(g, "\n".join(followed) or None)
         return fname
 
-    def delete_file(self, project_id: str, name: str, actor: str | None = None) -> Project:
+    def create_folder(self, project_id: str, path: str, actor: str | None = None) -> Project:
+        """主持人在资料里建一个（可以是多级的）空目录，之后往里上传、移动文件。"""
+        rel = _safe_path(path)
         with self._lock:
             g = self.hosted_project(project_id, actor)
-            path = self.store.project_dir(g.id) / _safe_filename(name)
-            self._check(path.is_file(), f"file {name}")
-            path.unlink()
-            self._archive_changed(g, "file.delete", by_user=actor, file=path.name)
-        self._archive_saved(g, f"主持人删除了文件 {path.name}")
+            root = self.store.project_dir(g.id)
+            if (root / rel).exists():
+                raise NetworkError(f"{rel} 已经存在")
+            for parent in Path(rel).parents:
+                if str(parent) != "." and (root / parent).is_file():
+                    raise NetworkError(f"{parent.as_posix()} 是一个文件，不能当目录用")
+            (root / rel).mkdir(parents=True)
+            self._archive_changed(g, "folder.create", by_user=actor, file=rel)
+        self._archive_saved(g, f"主持人新建了目录 {rel}/", about=f"file:{rel}")
         return g
 
-    def project_files(self, g: Project) -> list[dict[str, Any]]:
+    def move_file(self, project_id: str, src: str, dst: str, actor: str | None = None) -> Project:
+        """主持人移动 / 改名一个文件或目录。可见范围的设置跟着走（目录里的也一起）。"""
+        a, b = _safe_path(src), _safe_path(dst)
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            root = self.store.project_dir(g.id)
+            self._check((root / a).exists(), f"file {a}")
+            if a == b:
+                return g
+            if (root / b).exists():
+                raise NetworkError(f"{b} 已经存在")
+            if b.startswith(a + "/"):
+                raise NetworkError("不能把目录移进它自己里面")
+            for parent in Path(b).parents:
+                if str(parent) != "." and (root / parent).is_file():
+                    raise NetworkError(f"{parent.as_posix()} 是一个文件，不能当目录用")
+            hidden = self._file_restricted(g, a) or self._file_restricted(g, b)
+            (root / b).parent.mkdir(parents=True, exist_ok=True)
+            (root / a).rename(root / b)
+            g.file_access = {(b + k[len(a):] if k == a or k.startswith(a + "/") else k): v
+                             for k, v in g.file_access.items()}
+            self._archive_changed(g, "file.move", by_user=actor, file=a, to=b)
+        self._archive_saved(g, "主持人移动了资料里限定可见范围的内容" if hidden else f"主持人把 {a} 移到了 {b}",
+                            about=f"file:{b}")
+        return g
+
+    def delete_file(self, project_id: str, name: str, actor: str | None = None) -> Project:
+        """删一个文件，或一整个目录（连同里面的文件）。"""
+        rel = _safe_path(name)
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            path = self.store.project_dir(g.id) / rel
+            self._check(path.is_file() or path.is_dir(), f"file {name}")
+            folder, hidden = path.is_dir(), self._file_restricted(g, rel)
+            shutil.rmtree(path) if folder else path.unlink()
+            g.file_access = {k: v for k, v in g.file_access.items() if k != rel and not k.startswith(rel + "/")}
+            self._archive_changed(g, "folder.delete" if folder else "file.delete", by_user=actor, file=rel)
+        self._archive_saved(g, "主持人删除了资料里限定可见范围的内容" if hidden
+                            else f"主持人删除了{'目录' if folder else '文件'} {rel}{'/' if folder else ''}")
+        return g
+
+    def _file_log(self, g: Project) -> dict[str, dict[str, Any]]:
+        """档案路径 → 最近一次发布的日志条目（谁更新的）；移动、删除跟着改。"""
         import json
-        d = self.store.project_dir(g.id)
-        by: dict[str, dict[str, Any]] = {}  # 文件名 → 最近一次发布的日志条目（谁更新的）
-        log = d.parent / "log.jsonl"
-        if log.is_file():
-            for line in log.read_text(encoding="utf-8").splitlines():
-                try:
-                    e = json.loads(line)
-                except ValueError:
-                    continue
-                if e.get("action") == "file.publish" and e.get("file"):
-                    by[e["file"]] = e
-                elif e.get("action") == "file.delete":
-                    by.pop(e.get("file"), None)
-        out = []
-        for p in sorted(d.iterdir()):
-            if not p.is_file():
+        by: dict[str, dict[str, Any]] = {}
+        log = self.store.project_dir(g.id).parent / "log.jsonl"
+        if not log.is_file():
+            return by
+        for line in log.read_text(encoding="utf-8").splitlines():
+            try:
+                e = json.loads(line)
+            except ValueError:
                 continue
-            e = by.get(p.name, {})
-            out.append({"name": p.name, "size": p.stat().st_size, "updated_at": p.stat().st_mtime,
-                        "by_agent": e.get("by_agent"), "by_user": e.get("by_user")})
+            act, f = e.get("action"), e.get("file")
+            if not f:
+                continue
+            if act == "file.publish":
+                by[f] = e
+            elif act in ("file.delete", "folder.delete"):
+                by = {k: v for k, v in by.items() if k != f and not k.startswith(f + "/")}
+            elif act == "file.move" and e.get("to"):
+                by = {(e["to"] + k[len(f):] if k == f or k.startswith(f + "/") else k): v for k, v in by.items()}
+        return by
+
+    def project_files(self, g: Project, agent_id: str | None = None) -> list[dict[str, Any]]:
+        """档案里的文件（`name` 是相对路径，如 `设计/方案.md`）。给了 agent_id 就只列它看得到的（不变量 26）。"""
+        by = self._file_log(g)
+        out = []
+        for rel, p in _archive_walk(self.store.project_dir(g.id)):
+            if agent_id and not self._file_visible(g, rel, agent_id):
+                continue
+            e, st = by.get(rel, {}), p.stat()
+            out.append({"name": rel, "size": st.st_size, "updated_at": st.st_mtime,
+                        "by_agent": e.get("by_agent"), "by_user": e.get("by_user"),
+                        "access": g.file_access.get(rel) or None})
+        return out
+
+    def project_folders(self, g: Project) -> list[dict[str, Any]]:
+        """档案里的目录（含空目录）与各自的可见范围。给人看的，不过滤。"""
+        root = self.store.project_dir(g.id)
+        out = []
+        for p in sorted(root.rglob("*")):
+            rel = p.relative_to(root).as_posix()
+            if p.is_dir() and not p.is_symlink() and not any(x.startswith(".") for x in rel.split("/")):
+                out.append({"name": rel, "access": g.file_access.get(rel) or None})
         return out
 
     def project_file(self, project_id: str, name: str, actor: str | None = None) -> Path:
         g = self.visible_project(project_id, actor)
-        path = self.store.project_dir(g.id) / _safe_filename(name)
-        self._check(path.is_file(), f"file {name}")
+        path = self.store.project_dir(g.id) / _safe_path(name)
+        self._check(path.is_file() and not path.is_symlink(), f"file {name}")
         return path
+
+    # ---- 可见范围：资料（文件、目录）与项目技能默认所有成员 Agent 都看得到，主持人可以收窄到某些角色、某些成员（不变量 26）。
+    # 管的是 Agent 拿到什么（工作目录的 project/、skills/，端侧材料，档案推送）；项目里的人照常都看得到。
+    # 目录的范围管到里面的每一个文件，层层只收窄：要同时满足从顶层到文件本身路上的每一条。
+    def _access_allows(self, g: Project, rule: dict[str, Any] | None, agent_id: str) -> bool:
+        if not rule or not (rule.get("roles") or rule.get("agents")):
+            return True
+        if agent_id in (rule.get("agents") or []):
+            return True
+        return any(agent_id in (g.roles.get(r) or {}).get("members", []) for r in rule.get("roles") or [])
+
+    def _file_visible(self, g: Project, rel: str, agent_id: str) -> bool:
+        parts = rel.split("/")
+        return all(self._access_allows(g, g.file_access.get("/".join(parts[:i + 1])), agent_id) for i in range(len(parts)))
+
+    def _skill_visible(self, g: Project, name: str, agent_id: str) -> bool:
+        return self._access_allows(g, g.skill_access.get(name), agent_id)
+
+    def _file_restricted(self, g: Project, rel: str) -> bool:
+        """路径上（含它自己与目录里面）有没有收窄过的范围。"""
+        return any(k == rel or k.startswith(rel + "/") or rel.startswith(k + "/") for k in g.file_access)
+
+    def _about_visible(self, g: Project | None, about: str | None, agent_id: str) -> bool:
+        """一条群聊事件说的那一项，这个 Agent 现在看不看得到（不变量 26）。"""
+        if g is None or not about:
+            return True
+        kind, _, key = about.partition(":")
+        if kind == "file":
+            return self._file_visible(g, key, agent_id)
+        if kind == "skill":
+            return self._skill_visible(g, key, agent_id)
+        return True
+
+    def _clean_access(self, g: Project, rule: Any) -> dict[str, list[str]]:
+        """调用方持有锁。{roles: [角色 key], agents: [成员 id 或名字]}；都空就是公开（返回空）。"""
+        if rule is None:
+            return {}
+        if not isinstance(rule, dict):
+            raise NetworkError("可见范围要是 {roles, agents}")
+        roles = _dedup([str(x).strip() for x in _as_list(rule.get("roles")) if str(x).strip()])
+        missing = [r for r in roles if r not in g.roles]
+        if missing:
+            raise NetworkError(f"项目里没有角色 {'、'.join(missing)}")
+        agents = []
+        for x in _as_list(rule.get("agents")):
+            x = str(x).strip()
+            aid = x if x in g.member_ids else next((m for m in g.member_ids if self._name(m) == x), None)
+            if aid is None:
+                raise NetworkError(f"{x} 不是项目成员")
+            agents.append(aid)
+        agents = _dedup(agents)
+        return {"roles": roles, "agents": agents} if roles or agents else {}
+
+    def _access_text(self, g: Project, rule: dict[str, Any]) -> str:
+        """调用方持有锁。"""
+        if not rule:
+            return "所有成员可见"
+        who = [f"角色「{(g.roles.get(r) or {}).get('name', r)}」" for r in rule.get("roles") or []]
+        who += [self._name(a) for a in rule.get("agents") or []]
+        return f"仅 {'、'.join(who)} 可见"
+
+    def set_file_access(self, project_id: str, path: str, rule: Any, actor: str | None = None) -> Project:
+        """主持人设一个文件或目录的可见范围（空 = 所有成员可见）。"""
+        rel = _safe_path(path)
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            p = self.store.project_dir(g.id) / rel
+            self._check(p.exists(), f"file {path}")
+            clean = self._clean_access(g, rule)
+            if clean:
+                g.file_access[rel] = clean
+            else:
+                g.file_access.pop(rel, None)
+            self._archive_changed(g, "file.access", by_user=actor, file=rel, access=clean or None)
+            text = f"主持人把{'目录' if p.is_dir() else '文件'} {rel}{'/' if p.is_dir() else ''} 设为{self._access_text(g, clean)}"
+        self._archive_saved(g, text, about=f"file:{rel}")
+        return g
+
+    def set_skill_access(self, project_id: str, name: str, rule: Any, actor: str | None = None) -> Project:
+        """主持人设一个项目技能的可见范围（空 = 所有成员可见）。"""
+        with self._lock:
+            g = self.hosted_project(project_id, actor)
+            self._check(name in {i.name for i in skillfs.listing(self.store.project_skills_dir(g.id))}, f"skill {name}")
+            clean = self._clean_access(g, rule)
+            if clean:
+                g.skill_access[name] = clean
+            else:
+                g.skill_access.pop(name, None)
+            self._archive_changed(g, "skill.access", by_user=actor, skill=name, access=clean or None)
+            text = f"主持人把项目技能「{name}」设为{self._access_text(g, clean)}"
+        self._archive_saved(g, text, about=f"skill:{name}")
+        return g
 
     def project_detail(self, project_id: str, actor: str | None = None) -> dict[str, Any]:
         with self._lock:
             g = self.visible_project(project_id, actor)
             d = self._project_dict(g, actor)
             d["files"] = self.project_files(g)
+            d["folders"] = self.project_folders(g)
             d["skill_list"] = self.project_skills(g)
             d["connector_panel"] = self.connector_panel(g, actor)
             d["plugin_list"] = self.project_plugins(g)
@@ -1064,7 +1238,7 @@ class Network:
         for i in skillfs.listing(self.store.project_skills_dir(g.id)):
             meta = g.skills.get(i.name, {})
             out.append({**i.public(), "by_user": meta.get("by_user"), "by_agent": meta.get("by_agent"),
-                        "approved_by": meta.get("approved_by"),
+                        "approved_by": meta.get("approved_by"), "access": g.skill_access.get(i.name) or None,
                         "author": self._name(meta["by_agent"]) if meta.get("by_agent") else self._email(meta.get("by_user"))})
         return out
 
@@ -1100,7 +1274,8 @@ class Network:
         with self._lock:
             g = self.hosted_project(project_id, actor)
             created = self._write_project_skill(g, name, description, body, actor)
-        self._archive_saved(g, f"主持人{'新增' if created else '更新'}了项目技能「{name}」：{_short(description, 80)}")
+        self._archive_saved(g, f"主持人{'新增' if created else '更新'}了项目技能「{name}」：{_short(description, 80)}",
+                            about=f"skill:{name}")
         return self.project_skill(project_id, name, actor)
 
     def upload_project_skill(self, project_id: str, entries: list[tuple[str, bytes]],
@@ -1116,7 +1291,8 @@ class Network:
             created = i.name not in g.skills
             g.skills[i.name] = {"by_user": actor, "by_agent": None, "approved_by": None, "updated_at": time.time()}
             self._archive_changed(g, "skill.create" if created else "skill.update", by_user=actor, skill=i.name)
-        self._archive_saved(g, f"主持人{'上传' if created else '更新'}了项目技能「{i.name}」：{_short(i.description, 80)}")
+        self._archive_saved(g, f"主持人{'上传' if created else '更新'}了项目技能「{i.name}」：{_short(i.description, 80)}",
+                            about=f"skill:{i.name}")
         return i.public()
 
     def add_project_skill_file(self, project_id: str, name: str, rel: str, data: bytes,
@@ -1128,7 +1304,7 @@ class Network:
             except skillfs.SkillError as e:
                 raise NetworkError(str(e)) from e
             self._archive_changed(g, "skill.file", by_user=actor, skill=name, file=rel, size=len(data))
-        self._archive_saved(g, f"主持人给项目技能「{name}」加了文件 {rel}")
+        self._archive_saved(g, f"主持人给项目技能「{name}」加了文件 {rel}", about=f"skill:{name}")
         return self.project_skill(project_id, name, actor)
 
     def delete_project_skill(self, project_id: str, name: str, actor: str | None = None) -> Project:
@@ -1139,9 +1315,11 @@ class Network:
             except skillfs.SkillError as e:
                 raise NetworkError(str(e)) from e
             self._check(gone, f"skill {name}")
+            hidden = bool(g.skill_access.get(name))
             g.skills.pop(name, None)
+            g.skill_access.pop(name, None)
             self._archive_changed(g, "skill.delete", by_user=actor, skill=name)
-        self._archive_saved(g, f"主持人删除了项目技能「{name}」")
+        self._archive_saved(g, "主持人删除了一个限定可见范围的项目技能" if hidden else f"主持人删除了项目技能「{name}」")
         return g
 
     def suggest_skill(self, project_id: str, name: str, description: str, body: str, reason: str = "",
@@ -1179,7 +1357,8 @@ class Network:
         layers: list[skillfs.Layer] = []
         g = self.store.projects.get(ctx.project_id or "")
         if g is not None:
-            layers.append(("项目技能", self.store.project_skills_dir(g.id), None))
+            root = self.store.project_skills_dir(g.id)  # 只挂它看得到的（不变量 26）
+            layers.append(("项目技能", root, [i.name for i in skillfs.listing(root) if self._skill_visible(g, i.name, agent.id)]))
             for name, meta in g.plugins.items():  # 插件自带的技能：排在项目技能之后；停用的不带
                 if meta.get("disabled"):
                     continue
@@ -2101,6 +2280,10 @@ class Network:
             gone = [v[5:] for v in used if v[5:] not in clean]
             if gone:
                 raise NetworkError(f"插件设置还在用角色 {'、'.join(gone)}：先改插件设置")
+            held = sorted({r for rule in [*g.file_access.values(), *g.skill_access.values()]
+                           for r in rule.get("roles") or [] if r not in clean})
+            if held:
+                raise NetworkError(f"资料或技能的可见范围还在用角色 {'、'.join(held)}：先改可见范围")
             g.roles = clean
             self._archive_changed(g, "project.roles", by_user=actor, roles=sorted(clean))
         self._archive_saved(g, "主持人更新了角色：" + ("；".join(
@@ -2499,9 +2682,9 @@ class Network:
                     if a is None:
                         raise pluginfs.PluginError(f"字段 {f.key}：{v} 不是项目成员")
                     return a.id
-                if not (self.store.project_dir(g.id) / _safe_filename(v)).is_file():
+                if not (self.store.project_dir(g.id) / _safe_path(v)).is_file():
                     raise pluginfs.PluginError(f"字段 {f.key}：项目文件里没有 {v}")
-                return _safe_filename(v)
+                return _safe_path(v)
             try:
                 clean = pluginfs.clean_fields(t, values, partial=record_id is not None, check=check)
             except pluginfs.PluginError as e:
@@ -2742,8 +2925,8 @@ class Network:
                                   for f in self.project_files(g)],
                         "refs": [{"name": r.name, "location": r.location, "note": r.note} for r in g.refs]}
             if op == "archive.file":
-                path = self.store.project_dir(g.id) / _safe_filename(str(args.get("name", "")))
-                self._check(path.is_file(), "file")
+                path = self.store.project_dir(g.id) / _safe_path(str(args.get("name", "")))
+                self._check(path.is_file() and not path.is_symlink(), "file")
                 data = path.read_bytes()
                 try:
                     return {"name": path.name, "text": data[:FILE_LIMIT].decode("utf-8")}
@@ -3592,7 +3775,7 @@ class Network:
                           view: Any) -> tuple[list[str], list[str], dict[str, str] | None]:
         """调用方持有锁。校验一份发布物带的内容：技能包只带技能，交付件只带档案文件（可带一个插件视图）。"""
         skills = _dedup([str(x).strip() for x in _as_list(skills) if str(x).strip()])
-        files = _dedup([_safe_filename(str(x)) for x in _as_list(files) if str(x).strip()])
+        files = _dedup([_safe_path(str(x)) for x in _as_list(files) if str(x).strip()])
         if len(skills) > RELEASE_ITEMS or len(files) > RELEASE_ITEMS:
             raise NetworkError(f"一份发布物最多带 {RELEASE_ITEMS} 项")
         if kind == "method":
@@ -3977,7 +4160,7 @@ class Network:
             return {"brief": "", "decisions": [], "refs": [],
                     "files": [{**f, "updated_at": man.get("snapshot_at")} for f in files]}
         if op == "archive.file":
-            f = releasefs.safe_file(vdir, releasefs.FILES_DIR, _safe_filename(str(args.get("name", ""))))
+            f = releasefs.safe_file(vdir, releasefs.FILES_DIR, _safe_path(str(args.get("name", ""))))
             self._check(f is not None, "file")
             try:
                 return {"name": f.name, "text": f.read_bytes()[:FILE_LIMIT].decode("utf-8")}
@@ -4023,7 +4206,7 @@ class Network:
             if why or r.kind != "fact":
                 continue
             d = self._release_vdir(r) / releasefs.FILES_DIR
-            out += [(f"{RELEASES}/{r.name}/{f.name}", f) for f in sorted(d.iterdir()) if f.is_file()] if d.is_dir() else []
+            out += [(f"{RELEASES}/{r.name}/{rel}", f) for rel, f in _archive_walk(d)] if d.is_dir() else []
         return out
 
     def _mount_releases(self, ctx: ExecContext, agent: AgentNode, workdir: Path) -> None:
@@ -4854,6 +5037,7 @@ class Network:
             shared = [k for k in self.store.knowledge.values()
                       if sid in k.visible_to and k.key not in seat.known and k.owner_task_id not in self._own_tasks(sid)]
             fresh = [m for m in fresh if not m.audience or agent.owner_id in m.audience]  # 只给别人看的不送
+            fresh = [m for m in fresh if self._about_visible(project, m.about, agent.id)]  # 范围外的资料、技能（不变量 26）
             mine = {q.id for q in self.store.questions.values() if q.agent_id == agent.id}
             fresh = [m for m in fresh if m.answers not in mine or m.answers is None]  # 回答它提问的消息：那一轮已经拿到
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
@@ -4866,7 +5050,7 @@ class Network:
                             and src.id not in ctx.addressed:
                         ctx.addressed.append(src.id)
             archive_rev = project.archive_rev if project else -1
-            archive = self._archive_text(project) if project and seat.archive_seen != archive_rev else ""
+            archive = self._archive_text(project, agent.id) if project and seat.archive_seen != archive_rev else ""
             state = self._session_state(project, conv.owner_id) if project and conv.kind == "session" else ""
             joint_state = ""
             if home:  # 助理对话：跨项目总览，联合项目单独一块
@@ -4998,7 +5182,7 @@ class Network:
         workdir = self.store.task_path(task.id) if self._sandboxed(agent) else self.store.task_dir(task.id)
         with self._lock:
             archive_rev = g.archive_rev
-            archive = self._archive_text(g) if task.archive_seen != archive_rev else ""
+            archive = self._archive_text(g, agent.id) if task.archive_seen != archive_rev else ""
         if task.dsh_session_id is None:  # 第一次运行（或在拿到会话之前就失败了）：发完整委托
             knowledge = self.visible_knowledge(ctx)
             task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
@@ -5903,23 +6087,35 @@ class Network:
         return res
 
     def _mount_project_files(self, ctx: ExecContext, workdir: Path) -> None:
-        """项目档案的文件区拷进工作目录的 project/（每轮刷新）。发布只能经 publish_file。"""
+        """项目档案的文件区拷进工作目录的 project/（每轮刷新），只拷这个 Agent 看得到的（不变量 26）。发布只能经 publish_file。"""
         discard(workdir / PROJECT_FILES)
         p = self.store.projects.get(ctx.project_id or "")
-        if p is not None:
-            shutil.copytree(self.store.project_dir(p.id), workdir / PROJECT_FILES, symlinks=False)
+        if p is None:
+            return
+        (workdir / PROJECT_FILES).mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            files = self._visible_files(p, ctx.agent_id)
+        for rel, src in files:
+            dst = workdir / PROJECT_FILES / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
-    def _archive_text(self, g: Project) -> str:
-        """调用方持有锁。"""
+    def _visible_files(self, g: Project, agent_id: str) -> list[tuple[str, Path]]:
+        """调用方持有锁。档案里这个 Agent 看得到的文件：(相对路径, 文件)。"""
+        return [(rel, f) for rel, f in _archive_walk(self.store.project_dir(g.id)) if self._file_visible(g, rel, agent_id)]
+
+    def _archive_text(self, g: Project, agent_id: str) -> str:
+        """调用方持有锁。只列这个 Agent 看得到的文件与技能（不变量 26）。"""
         plugins = []
         for name in g.plugins:
             try:
                 plugins.append(self._manifest(g, name))
             except NetworkError:
                 continue
-        return format_archive(g, self._active_decisions(g), [f["name"] for f in self.project_files(g)],
+        return format_archive(g, self._active_decisions(g), [rel for rel, _ in self._visible_files(g, agent_id)],
                               self._name, self._email,
-                              [(i.name, i.description) for i in skillfs.listing(self.store.project_skills_dir(g.id))],
+                              [(i.name, i.description) for i in skillfs.listing(self.store.project_skills_dir(g.id))
+                               if self._skill_visible(g, i.name, agent_id)],
                               plugins)
 
     @staticmethod
@@ -6189,8 +6385,8 @@ class Network:
         out: list[Material] = []
         p = self.store.projects.get(ctx.project_id or "")
         if p is not None:
-            out += [material_file(f"{PROJECT_FILES}/{f.name}", f) for f in sorted(self.store.project_dir(p.id).iterdir())
-                    if f.is_file() and f.stat().st_size <= 2_000_000]
+            out += [material_file(f"{PROJECT_FILES}/{rel}", f) for rel, f in self._visible_files(p, ctx.agent_id)
+                    if f.stat().st_size <= 2_000_000]
         src = self.store.attachment_dir(ctx.conversation_id)
         out += [material_file(attachment_rel(a), src / a["sha"], sha=a["sha"]) for a in self._attachments_for(ctx)
                 if (src / a["sha"]).is_file()]  # 附件按内容寻址：文件名就是 sha，不用再算
@@ -7659,8 +7855,7 @@ class Network:
             else:
                 roles = [{"key": f"role{i + 1}", "name": a.name, "description": a.description, "member": a.id}
                          for i, a in enumerate(agents)]
-            files = sorted(f.name for f in self.store.project_dir(g.id).iterdir() if f.is_file()) \
-                if self.store.project_dir(g.id).is_dir() else []
+            files = [rel for rel, _ in _archive_walk(self.store.project_dir(g.id))]
             mine = [self._bp_view(m, actor) for m in self.blueprints.list() if m.get("project_id") == g.id]
             return {"name": "", "title": g.name[:40], "description": (g.description or g.brief.split("\n")[0])[:500],
                     # 默认带上技能与插件；模板文件默认不带（档案里的文件多半是项目事实），从 options 里挑
@@ -7750,10 +7945,11 @@ class Network:
                         files[rel] = gen(rel, f.read_bytes())
             tmpl = []
             for name in spec.get("files") or []:
-                f = self.store.project_dir(g.id) / _safe_filename(str(name))
+                path = _safe_path(str(name))
+                f = self.store.project_dir(g.id) / path
                 if not f.is_file():
                     raise NetworkError(f"项目文件里没有 {name}")
-                rel = Path(bps.FILES) / f.name
+                rel = Path(bps.FILES) / path
                 files[rel] = gen(rel, f.read_bytes())
                 tmpl.append(rel.as_posix())
             prefs = []
@@ -7805,8 +8001,7 @@ class Network:
             same = {self._name(aid) for aid, k in member_role.items()
                     if self._name(aid) == next((r["name"] for r in roles if r["key"] == k), None)}
             names = [n for n in (self._name(x) for x in g.member_ids) if n not in same] + [self._email(u) for u in g.people]
-            project_files = sorted(f.name for f in self.store.project_dir(g.id).iterdir()) \
-                if self.store.project_dir(g.id).is_dir() else []
+            project_files = [rel for rel, _ in _archive_walk(self.store.project_dir(g.id))]
             readers = self._reader_ids(spec.get("readers") or [], g)
         try:
             bps.check_package(files)
@@ -7911,7 +8106,8 @@ class Network:
                 same = [x for x in skill_list if x in target.skills]
                 if same:
                     items.append(f"技能 {'、'.join(same)}：会覆盖项目里的同名技能")
-                same_files = [Path(f).name for f in file_list if (self.store.project_dir(target.id) / Path(f).name).is_file()]
+                same_files = [p for p in (Path(*Path(f).parts[1:]).as_posix() for f in file_list)
+                              if (self.store.project_dir(target.id) / p).is_file()]
                 if same_files:
                     items.append(f"文件 {'、'.join(same_files)}：会覆盖项目里的同名文件")
         items[:0] = [f"{'装进项目「' + name + '」' if target else '建新项目「' + name + '」'}：" + "、".join(
@@ -7985,7 +8181,8 @@ class Network:
                 self.set_brief(g.id, bps.fill(bps.text(files, bps.BRIEF), params, role_names), actor=uid)
             for rel_s in file_list:
                 rel = Path(rel_s)
-                self.publish_file(g.id, rel.name, bps.fill_bytes(rel, files[rel], params, role_names), actor=uid)
+                self.publish_file(g.id, Path(*rel.parts[1:]).as_posix(), bps.fill_bytes(rel, files[rel], params, role_names),
+                                  actor=uid)
             if skill_list:
                 with self._lock:
                     for sk in skill_list:
@@ -8727,6 +8924,31 @@ def _json_arg(v: Any, what: str) -> dict[str, Any] | None:
     if not isinstance(d, dict):
         raise NetworkError(f"{what} 要是 JSON 对象")
     return d
+
+
+def _safe_path(name: str) -> str:
+    """项目档案里的相对路径（可以带目录，如 `设计/方案.md`）：每一段去掉隐藏前缀与怪字符，空段、`.`、`..` 丢掉，
+    不会写到档案目录以外。最多 8 层、300 字。"""
+    parts = []
+    for seg in str(name or "").replace("\\", "/").split("/"):
+        seg = seg.strip().lstrip(".")
+        clean = "".join(c if c.isalnum() or c in "-_. " or ord(c) > 127 else "_" for c in seg)[:120].strip()
+        if clean:
+            parts.append(clean)
+    rel = "/".join(parts)
+    if not parts or len(parts) > 8 or len(rel) > 300:
+        raise NetworkError("文件名无效（最多 8 层目录、300 字）")
+    return rel
+
+
+def _archive_walk(root: Path) -> list[tuple[str, Path]]:
+    """档案文件区里的全部文件：(相对路径, 文件)。隐藏的、符号链接不算。"""
+    out = []
+    for p in sorted(root.rglob("*")):
+        rel = p.relative_to(root).as_posix()
+        if p.is_file() and not p.is_symlink() and not any(x.startswith(".") for x in rel.split("/")):
+            out.append((rel, p))
+    return out
 
 
 def _safe_filename(name: str) -> str:

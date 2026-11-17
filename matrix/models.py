@@ -303,6 +303,10 @@ class Project:
     flow_grants: dict[str, list[str]] = field(default_factory=dict)
     # 角色（docs/blueprints.md 第 9 节）：{key: {name, description, members: [agent_id]}}。插件设置与触发引用角色而不是名字
     roles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 可见范围（不变量 26）：默认所有成员 Agent 都看得到；写了的只给这些角色 / 成员。{路径或技能名: {roles: [key], agents: [id]}}。
+    # 资料的路径可以是目录，管到里面的每个文件，逐级只收窄。项目里的人不受它限制
+    file_access: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    skill_access: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     blueprint: dict[str, Any] | None = None   # 由模板建的：{id, name, title, version}
     setup_steps: list[dict[str, Any]] = field(default_factory=list)  # 由模板建的项目剩下的手工步骤：[{id, text, done}]
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
@@ -342,6 +346,8 @@ class Message:
     held_id: str | None = None           # event：一条等所有者确认的输出（所有者看到确认卡，别人只看到“等确认”）
     claimed_by: str | None = None        # user：被插件的 route 分派给哪个成员认领（Agent id），每条只能认领一次
     answers: str | None = None           # user：这条消息回答了哪个问题（Question id）；提问的那一轮已经拿到，不再作为新消息送给它
+    about: str | None = None             # event：说的是哪份资料 / 哪个技能（`file:<路径>`、`skill:<名字>`）；
+                                         # 那一项不在某个 Agent 的可见范围里时，这条不送给它（不变量 26）
     ts: float = field(default_factory=time.time)
 
 

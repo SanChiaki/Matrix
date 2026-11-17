@@ -1,6 +1,6 @@
 # 控制面：重启不丢、故障可接管、可分片扩容（设计，未实现）
 
-2026-11-16 定方向。对应需求 #69。执行面（沙箱）的方案在 [cloud-runtime.md](cloud-runtime.md)，那边第 12 节列了控制面挡住的问题，
+2026-11-16 定方向。对应需求 #70。执行面（沙箱）的方案在 [cloud-runtime.md](cloud-runtime.md)，那边第 12 节列了控制面挡住的问题，
 这篇是它们的解法。登录的加固（[reference/security.md](reference/security.md) 第一条）也放在这里，因为它是“生产级”缺的另一块。
 
 ## 0. 结论

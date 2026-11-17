@@ -56,7 +56,8 @@ def snapshot(root: Path, version: int, skills: dict[str, Path], files: dict[str,
                             ignore=shutil.ignore_patterns(".*"))
         if files:
             (tmp / FILES_DIR).mkdir()
-            for name, src in files.items():
+            for name, src in files.items():  # 名字可以带目录（档案里的相对路径）
+                (tmp / FILES_DIR / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(src, tmp / FILES_DIR / name)
         if page is not None and page.is_dir():
             shutil.copytree(page, tmp / PAGE_DIR, symlinks=False, ignore=shutil.ignore_patterns(".*"))
@@ -82,7 +83,8 @@ def prune(root: Path, current: int, keep: int = RELEASE_VERSIONS_KEPT) -> None:
 def listing(d: Path) -> list[dict[str, Any]]:
     """一个版本里的文件（交付件）：名字与大小。"""
     f = d / FILES_DIR
-    return [{"name": p.name, "size": p.stat().st_size} for p in sorted(f.iterdir()) if p.is_file()] if f.is_dir() else []
+    return [{"name": p.relative_to(f).as_posix(), "size": p.stat().st_size} for p in sorted(f.rglob("*"))
+            if p.is_file() and not p.is_symlink()] if f.is_dir() else []
 
 
 def manifest(d: Path) -> dict[str, Any]:
