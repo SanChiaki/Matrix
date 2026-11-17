@@ -26,7 +26,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from http.server import BaseHTTPRequestHandler
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
@@ -68,8 +68,11 @@ class DockerConfig:
     memory_mb: int = 2048
     pids: int = 512
     max_cpus: float = 4.0
-    max_memory_mb: int = 8192
+    max_memory_mb: int = 0                       # 0 = 自动：宿主内存 − host_reserve_mb，最多 8192
     max_pids: int = 2048
+    # 宿主留给控制面、Docker 与系统的内存（MB）。启动时 memory_mb、max_memory_mb 都不能超过“宿主内存 − 它”，超了拒绝启动：
+    # 配额比宿主内存还大时，cgroup 的上限还没起作用宿主就先被耗尽（2026-11-17 在 1.8 GB 的测试机上踩到）
+    host_reserve_mb: int = 1024
     tmp_mb: int = 512                            # /tmp 的 tmpfs 上限
     # 出口网关（阶段 2a）：写了 gateway_container 时，每个执行单元一张自己的 internal 网络（没有对外路由、宿主不在上面、
     # 只有这个沙箱和网关所在的容器），沙箱只连得到网关；connect_url 里的 {gateway} 换成网关在这张网络上的地址。
@@ -116,6 +119,48 @@ class DockerConfig:
     @property
     def production(self) -> bool:
         return self.runtime == "runsc"
+
+    @property
+    def memory_cap(self) -> int:
+        """请求里 memory_mb 的上限：max_memory_mb，没写（0）时 8192（启动时 fit_host 会按宿主内存再压低）。"""
+        return self.max_memory_mb or 8192
+
+
+def host_memory_mb(path: str = "/proc/meminfo") -> int | None:
+    """宿主内存总量（MB），读 /proc/meminfo 的 MemTotal；取不到（不是 Linux、读不了）返回 None。
+    管理器跑在容器里时读到的也是宿主的（没有 lxcfs 之类改写 /proc 的话）。"""
+    try:
+        with open(path, encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def fit_host(conf: DockerConfig, total_mb: int | None) -> tuple[DockerConfig, str]:
+    """按宿主内存核对配额（启动时调一次）。返回（核对后的配置, 一行日志）；配额超过“宿主内存 − host_reserve_mb”时抛 ValueError，
+    错误里写明宿主内存、配额与怎么改。total_mb 是 None（取不到宿主内存）时不核对，只打一行日志。
+    只核对单个沙箱：配额是上限不是预留，并发的总量由控制面的 MATRIX_SANDBOX_MAX 管（docs/cloud-runtime.md 4.3）。"""
+    if total_mb is None:
+        return conf, "读不到宿主内存（/proc/meminfo），跳过配额与宿主内存的核对"
+    limit = total_mb - conf.host_reserve_mb
+    how = (f"在管理器的配置（--config 的 JSON）里把 memory_mb{'、max_memory_mb' if conf.max_memory_mb else ''} 改到 {max(limit, 0)} 以下，"
+           "或调小 host_reserve_mb（不建议低于 512），或换内存更大的宿主")
+    if limit < 256:
+        raise ValueError(f"宿主内存 {total_mb} MB，减去预留 host_reserve_mb={conf.host_reserve_mb} MB 后不到 256 MB，"
+                         f"放不下沙箱：{how}")
+    bad = [f"{k}={v} MB" for k, v in (("memory_mb", conf.memory_mb), ("max_memory_mb", conf.max_memory_mb)) if v > limit]
+    if bad:
+        raise ValueError(f"沙箱内存配额超过了宿主能给的：宿主内存 {total_mb} MB，预留 host_reserve_mb={conf.host_reserve_mb} MB，"
+                         f"单个沙箱最多 {limit} MB，配置里是 {'、'.join(bad)}。配额比宿主还大时，上限还没起作用宿主就先被耗尽。{how}")
+    if conf.max_memory_mb == 0:
+        conf = replace(conf, max_memory_mb=min(8192, limit))
+    if conf.memory_mb > conf.max_memory_mb:
+        raise ValueError(f"memory_mb={conf.memory_mb} 比 max_memory_mb={conf.max_memory_mb} 还大：改小 memory_mb")
+    return conf, (f"宿主内存 {total_mb} MB，预留 {conf.host_reserve_mb} MB：单个沙箱默认 {conf.memory_mb} MB，"
+                  f"上限 {conf.max_memory_mb} MB")
 
 
 def names(unit: str, ns: str = "matrix") -> tuple[str, str, str]:
@@ -167,7 +212,7 @@ def validate_ensure(body: Any, conf: DockerConfig) -> dict[str, Any]:
     if not isinstance(q, dict) or set(q) - QUOTA_KEYS:
         raise RequestError(f"配额只认 {sorted(QUOTA_KEYS)}")
     quota = {"cpus": _num(q.get("cpus", conf.cpus), 0, conf.max_cpus, "cpus", False),
-             "memory_mb": _num(q.get("memory_mb", conf.memory_mb), 63, conf.max_memory_mb, "memory_mb", True),
+             "memory_mb": _num(q.get("memory_mb", conf.memory_mb), 63, conf.memory_cap, "memory_mb", True),
              "pids": _num(q.get("pids", conf.pids), 15, conf.max_pids, "pids", True)}
     return {"unit_id": unit, "owner_id": body.get("owner_id"), "agent_id": body["agent_id"], "generation": int(gen),
             "boot_token": tok, "workdir": wd, "quota": quota}
@@ -309,6 +354,8 @@ class Manager:
         net = bool(self.conf.gateway_container)
         return {"isolation": "sandbox", "production": rt == "runsc" and net, "quota": True, "volume_quota": False,
                 "net_enforced": net, "runtime": rt,
+                # 请求里不写配额时用的默认值（控制面不指定配额；matrix-dsh-check 的 resource-limit 按它定探针的大小）
+                "quota_default": {"cpus": self.conf.cpus, "memory_mb": self.conf.memory_mb, "pids": self.conf.pids},
                 "note": note + ("；每个沙箱一张 internal 网络，只连得到出口网关" if net else
                                 "；没有配出口网关（gateway_container）：沙箱能直接出网，未达到生产隔离")
                         + "；卷没有大小上限（Docker 的 local 卷做不到）"}
@@ -524,7 +571,12 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--socket-mode", default="660", help="socket 文件权限（八进制）")
     p.add_argument("--socket-group", type=int, default=None, help="socket 的属组 gid（Matrix 服务的用户组，镜像里是 1000）")
     args = p.parse_args(argv)
-    conf = DockerConfig.load(args.config)
+    try:
+        conf, note = fit_host(DockerConfig.load(args.config), host_memory_mb())
+    except ValueError as e:
+        print(f"[sandboxd] 拒绝启动：{e}", file=sys.stderr, flush=True)
+        raise SystemExit(2) from None
+    print(f"[sandboxd] {note}", flush=True)
     m = Manager(conf)
     rep = m.report()
     print(f"[sandboxd] {json.dumps({**asdict(conf), 'env': sorted(conf.env)}, ensure_ascii=False)}", flush=True)

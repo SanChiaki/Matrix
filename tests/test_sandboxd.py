@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from matrix.sandboxd import (DockerConfig, Manager, RequestError, Unavailable, init_argv, names, run_argv, serve,
-                             validate_ensure)
+from matrix.sandboxd import (DockerConfig, Manager, RequestError, Unavailable, fit_host, host_memory_mb, init_argv,
+                             main, names, run_argv, serve, validate_ensure)
 from matrix.sandboxes import DockerSandboxes, SandboxError, SandboxHost, SandboxHub, SandboxSpec
 
 TOKEN = "t" * 32
@@ -240,7 +240,7 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
     import tempfile
     short = tempfile.mkdtemp(dir="/tmp")   # Unix socket 路径有长度上限（macOS 约 104 字节），pytest 的临时目录在 macOS 上太长
     sock = os.path.join(short, "sbx.sock")
-    srv = serve(Manager(DockerConfig(), run=d), sock, 0o660, os.getgid())
+    srv = serve(Manager(DockerConfig(memory_mb=768, pids=300), run=d), sock, 0o660, os.getgid())
     assert oct(os.stat(sock).st_mode & 0o777) == "0o660" and os.stat(sock).st_gid == os.getgid()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
@@ -249,9 +249,13 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
                               workdir_of=lambda u: Path("/data/conversations/conv-1/agent-1")))
         st = prov.ensure(SandboxSpec("seat:conv-1/agent-1", "user-1", "agent-1", 1, TOKEN))
         assert st.state == "running" and prov.status("seat:conv-1/agent-1").generation == 1
+        # 控制面不指定配额：用管理器配置里的默认值（按宿主内存核对过的那个），不再固定发 2048 MB
+        run = next(c for c in d.calls if c[1:3] == ["run", "-d"])
+        assert run[run.index("--memory") + 1] == "768m" and run[run.index("--pids-limit") + 1] == "300"
         assert [s.unit_id for s in prov.list()] == ["seat:conv-1/agent-1"]
         rep = prov.report()
         assert rep["isolation"] == "sandbox" and not rep["production"] and not rep["net_enforced"]  # 没配出口网关
+        assert rep["quota_default"] == {"cpus": 2.0, "memory_mb": 768, "pids": 300}
         with pytest.raises(SandboxError, match="拒绝"):
             prov._call("POST", "/ensure", body(image="evil"))
         bad = DockerSandboxes(sock)
@@ -274,3 +278,39 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
 def test_serve_says_clearly_when_socket_path_is_too_long(tmp_path: Path):
     with pytest.raises(ValueError, match="太长"):
         serve(Manager(DockerConfig(), run=FakeDocker()), "/" + "x" * 200 + "/sbx.sock")
+
+
+def test_quota_is_checked_against_host_memory(tmp_path: Path):
+    """配额不能超过“宿主内存 − 预留”：超了拒绝启动，错误里写明宿主内存、配额与怎么改；宿主内存是注入的，不读真机。"""
+    with pytest.raises(ValueError) as e:
+        fit_host(DockerConfig(), 1800)                     # 1.8 GB 的宿主，默认 2048 MB
+    msg = str(e.value)
+    assert "宿主内存 1800 MB" in msg and "memory_mb=2048 MB" in msg and "最多 776 MB" in msg and "改到 776 以下" in msg
+    with pytest.raises(ValueError, match="max_memory_mb=4096 MB"):
+        fit_host(DockerConfig(memory_mb=512, max_memory_mb=4096), 1800)
+    with pytest.raises(ValueError, match="放不下"):
+        fit_host(DockerConfig(memory_mb=128), 1100)
+    with pytest.raises(ValueError, match="比 max_memory_mb"):
+        fit_host(DockerConfig(memory_mb=700, max_memory_mb=600), 4000)
+    conf, note = fit_host(DockerConfig(memory_mb=768, host_reserve_mb=1024), 1800)   # 没写上限：自动压到宿主能给的
+    assert conf.max_memory_mb == 776 and "776" in note
+    with pytest.raises(RequestError):
+        validate_ensure(body(quota={"memory_mb": 1024}), conf)
+    conf, _ = fit_host(DockerConfig(), 64000)                                         # 大宿主：上限还是 8192
+    assert conf.max_memory_mb == 8192 and conf.memory_mb == 2048
+    conf, note = fit_host(DockerConfig(), None)                                        # 读不到：跳过，打一行
+    assert conf.max_memory_mb == 0 and conf.memory_cap == 8192 and "跳过" in note
+    mi = tmp_path / "meminfo"
+    mi.write_text("MemTotal:        1843200 kB\nMemFree:  1 kB\n", encoding="ascii")
+    assert host_memory_mb(str(mi)) == 1800 and host_memory_mb(str(tmp_path / "nope")) is None
+
+
+def test_manager_refuses_to_start_when_quota_exceeds_host(tmp_path: Path, monkeypatch, capsys):
+    cfg = tmp_path / "sandboxd.json"
+    cfg.write_text(json.dumps({"memory_mb": 4096, "max_memory_mb": 4096}), encoding="utf-8")
+    monkeypatch.setattr("matrix.sandboxd.host_memory_mb", lambda: 2000)
+    with pytest.raises(SystemExit) as e:
+        main(["--config", str(cfg), "--socket", str(tmp_path / "s.sock")])
+    assert e.value.code == 2
+    err = capsys.readouterr().err
+    assert "拒绝启动" in err and "宿主内存 2000 MB" in err and "memory_mb=4096 MB" in err

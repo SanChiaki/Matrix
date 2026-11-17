@@ -45,10 +45,11 @@ class SandboxError(RuntimeError):
 
 @dataclass(frozen=True)
 class Quota:
-    """配额（docs/cloud-runtime.md 4.3 的默认值）。local 后端做不到，照实在能力报告里写。"""
-    cpus: float = 2.0
-    memory_mb: int = 2048
-    pids: int = 512
+    """配额。None = 用后端的默认值（docker 后端是管理器配置里的 cpus / memory_mb / pids，按宿主内存核对过；
+    docs/cloud-runtime.md 4.3）。local 后端做不到，照实在能力报告里写。"""
+    cpus: float | None = None
+    memory_mb: int | None = None
+    pids: int | None = None
     disk_gb: int = 10
 
 
@@ -590,7 +591,7 @@ class DockerSandboxes:
             "unit_id": spec.unit_id, "owner_id": spec.owner_id, "agent_id": spec.agent_id,
             "generation": spec.generation, "boot_token": spec.boot_token,
             "workdir": str(self.host.workdir_of(spec.unit_id)),
-            "quota": {"cpus": q.cpus, "memory_mb": q.memory_mb, "pids": q.pids}})
+            "quota": {k: v for k, v in (("cpus", q.cpus), ("memory_mb", q.memory_mb), ("pids", q.pids)) if v is not None}})
         return SandboxStatus(**got)
 
     def stop(self, unit_id: str) -> None:
