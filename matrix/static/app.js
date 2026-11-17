@@ -2742,7 +2742,7 @@ async function openAccount() {
         <tbody>${rows.map((r) => `<tr><td>${esc(r.ua || "未知")}${r.current ? ' <span class="tag">这里</span>' : ""}</td><td>${esc(r.ip || "")}</td>
           <td>${dateTime(r.created_at)}</td><td>${dateTime(r.last_used)}</td>
           <td>${r.current ? "" : `<button type="button" class="link" data-drop="${esc(r.id)}">下线</button>`}</td></tr>`).join("")}</tbody></table>
-      <div class="actions">${others ? `<button type="button" class="ghost" id="acc-others">下线其他 ${others} 处</button>` : ""}</div>
+      ${others ? `<div class="actions"><button type="button" class="ghost" id="acc-others">下线其他 ${others} 处</button></div>` : ""}
       <form id="acc-pass" class="stack" autocomplete="on">
         <h3>改密码</h3>
         <div class="field"><label for="acc-old">原密码</label><input id="acc-old" type="password" autocomplete="current-password" required></div>
