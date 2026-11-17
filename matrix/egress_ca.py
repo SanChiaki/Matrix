@@ -22,6 +22,13 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 LEAF_DAYS = 30
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    """私钥文件：POSIX 上一开始就以 0600 创建（没有先写后改权限的窗口）；Windows 不认这些权限位，照常写。"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0), 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -55,9 +62,8 @@ class EgressCA:
                          .add_extension(x509.SubjectKeyIdentifier.from_public_key(self.key.public_key()), critical=False)
                          .sign(self.key, hashes.SHA256()))
             tmp = kf.with_suffix(".tmp")
-            tmp.write_bytes(self.key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                                   serialization.NoEncryption()))
-            os.chmod(tmp, 0o600)
+            _write_private(tmp, self.key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()))
             os.replace(tmp, kf)
             cf.write_bytes(self.cert.public_bytes(serialization.Encoding.PEM))
 
@@ -98,11 +104,11 @@ class EgressCA:
             leaf_dir = self.root / "leaf"
             leaf_dir.mkdir(exist_ok=True)
             f = leaf_dir / (host.replace(":", "_").replace("/", "_")[:200] + ".pem")
-            f.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                            serialization.NoEncryption())
-                          + cert.public_bytes(serialization.Encoding.PEM)
-                          + self.cert.public_bytes(serialization.Encoding.PEM))
-            os.chmod(f, 0o600)
+            f.unlink(missing_ok=True)
+            _write_private(f, key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                serialization.NoEncryption())
+                           + cert.public_bytes(serialization.Encoding.PEM)
+                           + self.cert.public_bytes(serialization.Encoding.PEM))
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(f)
             ctx.set_alpn_protocols(["http/1.1"])

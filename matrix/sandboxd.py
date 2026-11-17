@@ -502,6 +502,8 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, _UnixBase):
 
 def serve(manager: Manager, path: str, mode: int = 0o660, group: int | None = None) -> UnixHTTPServer:
     """管理器只在 Linux 上跑（要 Docker）。group：socket 的属组（给 Matrix 服务的用户组，配 0660 只让它连）。"""
+    if len(os.fsencode(path)) > 103:   # sockaddr_un 的上限（Linux 108、macOS 104 字节，含结尾）
+        raise ValueError(f"socket 路径太长（{len(os.fsencode(path))} 字节，Unix socket 最多约 103）：换一个短一点的路径：{path}")
     if os.path.exists(path):
         os.unlink(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

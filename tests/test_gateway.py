@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -251,7 +252,8 @@ def test_tls_is_terminated_with_per_host_certs(tmp_path, monkeypatch):
     monkeypatch.setattr("matrix.gateway.ssl.create_default_context", lambda *a, **k: trust)
 
     ca = EgressCA(tmp_path / "egress-ca")
-    assert oct((tmp_path / "egress-ca" / "ca.key").stat().st_mode & 0o777) == "0o600"
+    if os.name != "nt":   # Windows 不支持 POSIX 权限位
+        assert oct((tmp_path / "egress-ca" / "ca.key").stat().st_mode & 0o777) == "0o600"
     g = Gateway(("127.0.0.1", 9), lambda: parse_policy({"allow": ["127.0.0.1/32"]}), [], upstream_proxy="", ca=ca,
                 log_dir=tmp_path / "gw")
     addr = g.start("127.0.0.1", 0)

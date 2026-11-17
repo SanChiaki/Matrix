@@ -236,7 +236,10 @@ def test_missing_runtime_fails_closed():
 def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
     """控制面经 Unix socket 调管理器：合法请求照办，带了镜像的请求被拒（400），运行时不在时是 ISOLATION。"""
     d = FakeDocker()
-    sock = str(tmp_path / "sbx.sock")
+    import shutil
+    import tempfile
+    short = tempfile.mkdtemp(dir="/tmp")   # Unix socket 路径有长度上限（macOS 约 104 字节），pytest 的临时目录在 macOS 上太长
+    sock = os.path.join(short, "sbx.sock")
     srv = serve(Manager(DockerConfig(), run=d), sock, 0o660, os.getgid())
     assert oct(os.stat(sock).st_mode & 0o777) == "0o660" and os.stat(sock).st_gid == os.getgid()
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -264,4 +267,10 @@ def test_unix_socket_api_and_control_plane_client(tmp_path: Path):
     finally:
         srv.shutdown()
         srv.server_close()
-    assert DockerSandboxes(str(tmp_path / "nope.sock")).report()["isolation"] == "none"
+    assert DockerSandboxes(os.path.join(short, "nope.sock")).report()["isolation"] == "none"
+    shutil.rmtree(short, ignore_errors=True)
+
+
+def test_serve_says_clearly_when_socket_path_is_too_long(tmp_path: Path):
+    with pytest.raises(ValueError, match="太长"):
+        serve(Manager(DockerConfig(), run=FakeDocker()), "/" + "x" * 200 + "/sbx.sock")
