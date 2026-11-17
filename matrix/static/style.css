@@ -958,6 +958,12 @@ dialog.confirm-card .preview-card { padding: 20px 20px; width: min(520px, calc(1
 dialog.confirm-card blockquote.draft { margin: 12px 0; padding: 12px 12px; background: var(--bg); border-radius: var(--radius-sm);
   border-left: 3px solid var(--plugin); white-space: pre-wrap; font-size: var(--fs-md); }
 dialog.confirm-card .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+/* 登录与密码：我的会话 + 改密码 */
+dialog.preview.access-dlg .account-card { width: auto; overflow: auto; }
+.account-card table.assets { margin-top: 12px; }
+.account-card form.stack { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); margin-top: 16px; }
+.account-card .error:empty, .account-card .ok-note:empty { display: none; }
+.account-card .ok-note { margin: 0; font-size: var(--fs-md); color: var(--muted); }
 
 /* 项目页：说明 / 资料 / 连接器面板 */
 .brief-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 24px; max-width: 1100px; }
