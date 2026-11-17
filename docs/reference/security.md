@@ -38,10 +38,12 @@
   网关凭这一轮的令牌核对供应商与模型、换上 vault 里的真密钥；沙箱方式下只支持平台配置的供应商（dsh 自带的、靠服务进程环境变量里密钥的供应商明确报错）。
   docker 后端配了 `gateway_container` 时每个沙箱一张自己的 internal 网络，只连得到网关：控制面的其他接口、别的沙箱、宿主、内网、元数据地址、
   不经网关的公网与 DNS 都不通（`matrix-dsh-check` 的 `net-isolation`、`key-absent`）；出网只经网关的代理，按有效权限与主机放行，内网目标只认 `fetch.json` 的 `allow`，
-  每个请求记一行。2a 仍没解决的：网关不解 TLS，放行到主机为止（不分方法、没有出网预算，有 `web.research` 的 Agent 能对放行的主机发任意请求，6.4 的分级是 2b）；
+  每个请求记一行。2b 起网关解开 HTTPS（出网 CA 的私钥只在控制面），逐个请求按方法放行：镜像源与白名单只读，公网只 GET / HEAD、不带请求体、URL ≤ 2 KB，
+  公网写只到写白名单；每轮出网预算（默认 64 KB 请求行与请求头）超了公网读即停并通知所有者；有别人在场的场合记完整 URL。
+  **已知风险（接受）**：有 `web.research` 的 Agent 仍能把少量内容塞进预算以内的 GET URL 带出去（6.4）；解不开的流量直接断；
   local 后端共用宿主网络，做不到强制断网（`net_enforced: false`，检查里是提醒）；网关令牌在沙箱里看得到（它只代表这个执行单元的这一轮）。
   gVisor 档的完整检查（`deploy/isolation-check` 的 `t8`）在写这一版时还没在装了 gVisor 的机器上跑过。
-  接受理由：阶段 1–2 还是开关后面的试用，出网分级（2b）还没做；复查时机：多机部署、多用户部署接真实账号之前，至少要
+  接受理由：阶段 1–2 还是开关后面的试用；复查时机：多机部署、多用户部署接真实账号之前，至少要
   `MATRIX_CLOUD_ISOLATION=required` 并做完阶段 1–2。云侧和端侧在执行面上的全部差异与云侧待优化的地方，见 [device-runtimes.md](device-runtimes.md#cloud-vs-device)。
 - 端侧材料（`material.fetch`）只回**这一轮清单里**的 sha，轮次结束就取不到；连接器在本机再校验路径（不进 `agent-home/`、不越界）、
   大小与 sha256。缓存在 `<工作根目录>/.cache/materials/`，只有这台设备上跑过的轮次给过它的内容（[device-runtimes.md](device-runtimes.md)“材料”）。

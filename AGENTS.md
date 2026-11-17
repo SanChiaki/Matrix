@@ -76,7 +76,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
 | `matrix/sandboxes.py` | 云侧执行面的沙箱方式（阶段 1a，开关 `MATRIX_CLOUD_SANDBOX`，默认关）：`SandboxProvider` 接口与 `SandboxSpec`（只有执行单元 id、所有者、Agent、代数、配额、一次性启动令牌）、`MemorySandboxes`（测试用假后端）、`LocalSandboxes`（本机子进程 + 外层 bwrap，工作目录 bind 到原来的绝对路径）、`SandboxHub`（启动令牌换执行单元凭证，一条连接只服务一个单元）、`SandboxRuntime`；引擎里的台账、对账、容量、材料与检查点在 `engine.py`“云侧执行面：沙箱方式”一节 |
 | `matrix/sandboxd.py` | 沙箱管理器 `matrix-sandboxd`（阶段 1b 的 `docker` 后端）：唯一持有 docker.sock 的进程，Unix socket 上的本地 HTTP；请求校验（只认执行单元 id、所有者、Agent、代数、配额、启动令牌、允许前缀下的逻辑工作目录，`validate_ensure`）、`docker run` 参数（`run_argv`，纯函数：非 root、去掉全部特权、只读根、配额、只挂这个单元的两个卷）、运行时选择与失败关闭（`runsc` / `insecure-runc`）、标签与列举；控制面这边的客户端是 `sandboxes.DockerSandboxes` |
-| `matrix/gateway.py` | 出口网关（阶段 2a）：核心进程里的模块、单独的监听；只转沙箱连接这一个端点、模型代理（令牌认定这一轮，核对供应商与模型，换真密钥，流式透传，记用量）、出网代理（`decide` 纯函数：权限 × 主机 × 地址，连接固定在校验过的地址上）、每个请求留痕 |
+| `matrix/gateway.py` | 出口网关（阶段 2a）：核心进程里的模块、单独的监听；只转沙箱连接这一个端点、模型代理（令牌认定这一轮，核对供应商与模型，换真密钥，流式透传，记用量）、出网代理（`decide` 纯函数：权限 × 主机 × 地址，连接固定在校验过的地址上；2b 解开 HTTPS 后 `check_request` 按方法、URL 与出网预算逐个请求放行）、每个请求留痕 |
+| `matrix/egress_ca.py` | 出网 CA（阶段 2b）：私钥只在控制面，按主机现签叶子证书，网关据此解开沙箱的 HTTPS |
 | `matrix/migrate.py` | `matrix migrate`：给现有工作目录建检查点（`workdirs`）、回退写回原目录（`export`）、清理原目录与旧 dsh 状态（`purge-legacy`，要 `--yes`） |
 | `matrix/checkpoints.py` | 内容存储（按 sha 的本机目录，接口留出换对象存储的余地）、分块收沙箱交来的内容并校验、每个执行单元的检查点（产物清单 + 最新两份 dsh 会话包）、旧工作目录导入、会话打包与解包 |
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`）；云侧沙箱客户端（`sandbox.py`，`Connector` 的薄子类：一个沙箱一个执行单元、私有目录“材料进、改动出”、交检查点与恢复） |

@@ -362,7 +362,11 @@ docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # �
 
 **出网**：沙箱里的命令只能经出口网关的代理出网（环境里已经设好 `HTTPS_PROXY`）。公网要 Agent 有 `web.research`（只到 80 / 443），
 包镜像源写进 `.env` 的 `MATRIX_GATEWAY_MIRRORS`（逗号分隔的主机，有 `shell.exec` 就放行，内网的镜像源也行），别的内网目标只认 `fetch.json` 的 `allow`。
-这一版网关不解 TLS，放行到主机为止；每个请求记在 `/data/gateway/egress.jsonl`（执行单元、主机、端口、字节数、结果）。服务器自己要经代理出网时，
+网关解开 HTTPS（出网 CA 第一次用到时生成在 `/data/gateway/ca/`，私钥只在这里，沙箱只拿到证书；轮换：删掉这个目录、重启 matrix），
+逐个请求放行：镜像源与白名单只读，公网只 GET / HEAD；要 Agent 往某个外部主机写（POST 等）就把它写进 `MATRIX_GATEWAY_WRITE_HOSTS`，
+更好的做法是包成连接器。每轮发往外部主机的请求有出网预算（`MATRIX_GATEWAY_BUDGET`，默认 65536 字节），超了这一轮的公网读即停并告诉所有者。
+证书固定的客户端、非 HTTP 协议走不通。`MATRIX_GATEWAY_TLS=off` 退回只按主机放行的隧道。每个请求记在 `/data/gateway/egress.jsonl`（执行单元、主机、端口、方法、字节数、结果；
+有别人在场的场合记完整 URL）。服务器自己要经代理出网时，
 在 `.env` 里给 matrix 设 `HTTPS_PROXY`（网关转发模型请求与出网时用它）。
 
 - **`insecure-runc`**：没装 gVisor 时可以先用 runc 试（`sandboxd.json` 写 `"runtime": "insecure-runc"`）。这一档沙箱容器与宿主共用内核，

@@ -1,4 +1,4 @@
-# 云侧执行面：生产级方案（阶段 0、1a、1b、2a 已实现，1a 起都在开关后面；其余是设计）
+# 云侧执行面：生产级方案（阶段 0、1a、1b、2a、2b 已实现，1a 起都在开关后面；其余是设计）
 
 2026-11-10 定方向。2026-11-16 实现了阶段 0（单机止血）与云侧取消外溢审批，实现与设计的出入见第 8 节“阶段 0 的实现”；同日实现了阶段 1 的前半（1a：云侧 Agent 改走端侧客户端的协议、在沙箱里运行、数据进出做成材料清单与检查点，开关后面、默认关），见第 8 节“阶段 1a 的实现”。解决需求 #59（Matrix 与云端 Agent 隔离、云端 Agent 之间隔离）与 #68（材料不再每轮整份拷贝、资源上限、
 模型密钥不进执行面），并为 #60（出口代理注入连接器凭证）提供前提。现状与逐条欠账见
@@ -470,7 +470,26 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
 `--live --sandbox docker` 27 项全过；`--sandbox local` 除 `resource-limit`、`net-isolation` 两项提醒（这个后端做不到）外全过；compose 形态两轮真实对话通过。
 
 和设计不一样的地方：网关不是独立进程（这一步的要求就是核心里的模块，以后能拆）；网络形状是“每个执行单元一张 internal 网络 + 网关所在容器接上去”，
-不是设计里的“一张 internal 网络 + 双网卡网关”（同一张网络上容器之间要么全通、要么连网关也不通，做不到只连网关）；没做的：只 GET / 预算 / 解 TLS（2b）。
+不是设计里的“一张 internal 网络 + 双网卡网关”（同一张网络上容器之间要么全通、要么连网关也不通，做不到只连网关）；只 GET / 预算 / 解 TLS 见下面的 2b。
+
+**阶段 2b 的实现（2026-11-17，开关后面）。** 网关解开沙箱的 HTTPS，出网分级到方法与预算（6.4）：
+
+- **出网 CA**（`matrix/egress_ca.py`）：第一次用到时生成，私钥只在控制面（`<data>/gateway/ca/ca.key`，0600），不进仓库、不进沙箱；按主机现签叶子证书
+  （30 天，只说 HTTP/1.1），只用已有依赖 `cryptography`。轮换：删掉 `<data>/gateway/ca/` 重启。沙箱每轮从 `run.request.gateway_ca` 拿到 CA 证书，
+  dsh 驱动把它和系统证书库合成一个包，设好 `SSL_CERT_FILE`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`GIT_SSL_CAINFO`、`PIP_CERT`、`NODE_EXTRA_CA_CERTS`。
+- **逐个请求放行**（`gateway.check_request`，纯函数）：包镜像源与 `fetch.json` 白名单只读（GET / HEAD）；公网读（要 `web.research`）只 GET / HEAD、不带请求体、
+  URL ≤ 2 KB；公网写默认不允许，只到写白名单（`MATRIX_GATEWAY_WRITE_HOSTS`）。镜像源上 git 的 `git-upload-pack` POST 认作只读的取包请求（公网主机不认）。
+  转给目标时用真的 TLS、校验目标证书。解不开的流量（证书固定的客户端、非 TLS / 非 HTTP 协议）这条连接直接断。明文 HTTP 同样按方法放行。
+- **出网预算**：每一轮发往非白名单主机的请求行与请求头累计（`MATRIX_GATEWAY_BUDGET`，默认 64 KB），超了这一轮的公网读即停，并在对话里告诉所有者一次。
+- **留痕加细**：场合里有别人、或会话记过别处来源的执行单元，公网请求在 `egress.jsonl` 记完整 URL，平时只记主机。
+- 代理请求没带凭证时回 407 质询（git 等客户端等质询才带凭证）。沙箱里各家工具的缓存放到 `/tmp`（Agent 的命令里 HOME 只读）。
+- `MATRIX_GATEWAY_TLS=off` 退回 2a 的按主机隧道。
+
+检查：`net-isolation` 另查公网 GET 经网关放行、POST 被拒、超过预算后公网读被拒；新增 `egress-tools`（只有 `shell.exec`，经网关访问包镜像源：
+curl、git clone、pip、uv、npm、Node 的 fetch 都要通，公网要被拒）。验证（本机）：`--live --sandbox docker`（insecure-runc，工具包 t8 的方式）28 项全过；
+`--sandbox local` 除 `resource-limit`、`net-isolation`（这个后端做不到）两项提醒外全过；compose 形态两轮真实对话通过。
+**没做的**：按主机注入凭证的最小形态（让 dsh 自带的供应商在沙箱方式下可用）这一版没做，沙箱方式下照旧只支持平台供应商；HTTP/2 只按 HTTP/1.1 说；
+公网读预算只算请求行与请求头，不限响应大小。
 
 **阶段 2：出口网关。** 沙箱网络默认全拒，客户端连接、模型调用、网页出网全部改经网关；模型密钥离开执行面；用量由网关记。
 做完这一阶段，`security.md` 的“沙箱只管写、不管读”与信息流那条“可绕过 `open_note` 直接读磁盘”才能删掉，#59 关闭。
