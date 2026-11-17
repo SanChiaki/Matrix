@@ -1,4 +1,4 @@
-# Matrix 部署：matrix（应用，只在内部网络里监听）+ caddy（唯一对外入口：HTTPS + basic auth）。
+# Matrix 部署：matrix（应用，只在内部网络里监听）+ caddy（唯一对外入口：HTTPS，可选 basic auth）。
 # 用法见 deploy/README.md。机密（basic auth 哈希、模型凭据）都在 deploy/.env 或卷里，不进仓库。
 name: matrix
 
@@ -21,6 +21,11 @@ services:
     env_file:
       - path: .env
         required: false
+    environment:
+      # 对外是 Caddy 的 HTTPS：cookie 加 Secure、跨站检查认这个来源（docs/reference/security.md）；.env 里写了 MATRIX_PUBLIC_URL 就用它
+      MATRIX_PUBLIC_URL: ${MATRIX_PUBLIC_URL:-https://${MATRIX_SITE:-localhost}}
+      # 认 Caddy 转来的 X-Forwarded-For / -Proto（uvicorn 的设置）：Matrix 的端口只有内部网络里的 Caddy 连得到
+      FORWARDED_ALLOW_IPS: "*"
     expose:
       - "8765"                       # 不发布到宿主机：只有 caddy 能访问
     # dsh 在 Linux 上用 bwrap 沙箱（bwrap 起不来时 dsh 退到更弱的方式、照样执行，所以这两项不能去掉）。bwrap 在容器里要建 user/pid 命名空间、
@@ -41,7 +46,7 @@ services:
     environment:
       MATRIX_SITE: ${MATRIX_SITE:?在 deploy/.env 里设置 MATRIX_SITE（服务器 IP 或域名）}
       MATRIX_TLS_ISSUER: ${MATRIX_TLS_ISSUER:-internal}   # acme = Let's Encrypt（MATRIX_SITE 须是域名）
-      MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-on}   # off = 关掉 basic auth（不安全）
+      MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-off}   # on = 在 Matrix 的登录前面再加一层 basic auth（可选）
       MATRIX_BASIC_USER: ${MATRIX_BASIC_USER:-matrix}
       MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:-}   # caddy hash-password 生成；basic auth 开着时必填，关掉时不用
     volumes:

@@ -3,8 +3,25 @@
 > 入口见 [AGENTS.md](../../AGENTS.md)，那里只列红线。
 
 - `/api/*` 要求登录（邮箱 + 密码，`auth.py`，HttpOnly + SameSite=Lax cookie），按用户做归属与可见性检查。
-  这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。补齐的设计见 [control-plane.md](../control-plane.md) 第 8 节（未实现）。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
-- 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
+  登录加固（[control-plane.md](../control-plane.md) 第 8 节，C0）：
+  - **令牌只存 sha256**（`state.json` 的 `sessions` 以哈希作键），库泄露不等于会话泄露；旧版的明文会话加载时就地换成哈希，原令牌照样能用。
+  - **会话过期与轮换**：闲置 7 天过期、最长 30 天（`MATRIX_SESSION_IDLE_DAYS` / `MATRIX_SESSION_MAX_DAYS`）；登录、改密码、重置都换新令牌，
+    改密码与重置后这个人其余的会话全部作废。“登录与密码”里能看到自己在哪些地方登录着（不显示令牌），逐个下线或一键下线其他所有。
+  - **跨站防护**（`web_guard.py`）：`/api/*` 上改状态的请求（POST / PUT / PATCH / DELETE）要 `Origin`（没有时 `Referer`）是自己的站点
+    （请求的 `Host` 或 `MATRIX_PUBLIC_URL`），并且带双提交的 CSRF 令牌（`matrix_csrf` cookie = `X-Matrix-CSRF` 头）；登录、注册、退出也在内。
+    例外只有连接器配对的两个端点（不靠 cookie）。`/internal/*`、`/hooks/*`、端侧与沙箱的 WebSocket 凭令牌、不经 cookie，不在范围里。
+    不要给新的改状态的 `/api/*` 端点开例外；前端经 `app.js` / `admin.js` 的 `api()` 发请求（插件页面经父页面转发）自动带令牌。
+  - **Secure cookie**：请求本身是 https，或部署方声明了 `MATRIX_PUBLIC_URL=https://…` / `MATRIX_SECURE_COOKIE=on`。
+    不无条件信任 `X-Forwarded-Proto`：只有来源在 uvicorn 的 `FORWARDED_ALLOW_IPS` 里时才认（compose 里只有 Caddy 连得到 Matrix，设成 `*`）。
+  - **限流**（`auth.Guards`）：登录按账号（连续输错 5 次）与按来源地址（20 次）分别指数退避（2、4、8 … 秒，最多 15 分钟），
+    等待期间正确的密码也不放行，回 429 与 `Retry-After`，说明对存在与不存在的账号一样；注册按地址一小时 5 次；重置链接按地址；改密码按用户。
+    只在内存里，重启清零。**已知风险（接受）**：知道邮箱的人能故意输错、让这个账号最多等 15 分钟（账号锁定式的拒绝服务）；
+    接受理由：退避有上限、不永久锁定，成功登录清零；复查时机：出现成批锁账号，或上了 OIDC（C4）、本地密码只留给管理员时。
+  - **审计**（`audit.py`）：后台的改动（模型目录与供应商、插件策略与目录、插件审核、模板、部署方的 IM 机器人、发重置链接）
+    在 `<数据目录>/audit.jsonl` 记一行、只追加，不记密钥与内容；管理后台“审计”页能看。
+  - 没有邮箱验证与自助找回密码（没有发信服务），忘了密码由管理员重置（下面）；单点登录（OIDC）是 C4，没做。
+  对外只经带 TLS 的反向代理（`deploy/` 的 Caddy）；本机直接跑时服务默认只监听 `127.0.0.1`。Caddy 前面那层 basic auth 改为可选（`MATRIX_BASIC_AUTH`，默认 off）。
+- 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌（明文或哈希）。`/api/users` 只返回 id 与邮箱。
 - **重置密码**（[admin.md](admin.md#reset)）：没有邮件，忘了密码由管理员签发一次性链接（`/#reset=<令牌>`，令牌在 `#` 后面，
   不进服务器日志与 Referer），本人打开后自己设新密码。令牌明文只在签发的那次返回给管理员，`state.json` 只存 sha256；
   每人同时只有一条、24 小时内有效、用过即作废；重置后这个人原有的登录全部失效（端侧连接器令牌不受影响）。
