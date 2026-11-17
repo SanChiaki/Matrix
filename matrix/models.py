@@ -551,6 +551,7 @@ class SandboxRecord:
     generation: int = 0                  # 每新建一次沙箱加一；对账时代数对不上的沙箱结束掉
     last_used: float = 0.0
     imported: bool = False               # 旧方式的工作目录与 dsh 会话已导入检查点（第 10 节）
+    exported: bool = False               # matrix migrate export 写回过原目录（回退）：再打开沙箱方式时从原目录重新导入
     ended_at: float | None = None        # 执行单元结束（委托验收 / 被拒、对话或 Agent 删除）的时间：过保留期销毁
     created_at: float = field(default_factory=time.time)
 

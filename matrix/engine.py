@@ -5466,7 +5466,7 @@ class Network:
             delivered = [t for t in self.store.tasks.values() if t.result and t.result.get("files")
                          and "files_ckpt" not in t.result and self._delivered_to(t) == unit]
             sid = holder.dsh_session_id
-        if old.is_dir() and self.checkpoints.load(unit) is None:
+        if old.is_dir() and (self.checkpoints.load(unit) is None or rec.exported):  # 导出回退过：原目录是新的
             ck = self.checkpoints.import_dir(unit, old)
             if ck.skipped:
                 print(f"[matrix] {unit} 的旧工作目录有 {len(ck.skipped)} 个文件超过检查点上限，只记了清单（原处还在）",
@@ -5495,7 +5495,7 @@ class Network:
                     self._new_session(holder)
                 print(f"[matrix] {unit} 的 dsh 会话 {sid} 找不到，换新会话", file=sys.stderr)
         with self._lock:
-            rec.imported = True
+            rec.imported, rec.exported = True, False
             self.store.save()
 
     def _delivered_to(self, task: Task) -> str:
