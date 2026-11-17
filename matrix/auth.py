@@ -181,6 +181,111 @@ def change_password(store: Store, user_id: str, old: str, new: str, meta: dict[s
     return token
 
 
+# ---- 限流：按账号与按来源地址分别记连续失败，超过免费次数后指数退避（control-plane.md 第 8 节） ----
+class Throttle:
+    """每个键（账号、来源地址）记连续失败。前 free 次不限；之后每多一次，要等 base × 2^(多出的次数) 秒，最多 cap 秒。
+    等待期间一律不受理（正确的密码也不放行，防爆破）；成功（ok）清零；forget 秒内没有新的失败也清零。只在内存里：
+    重启清零（单进程控制面，第 2 节）。"""
+
+    def __init__(self, free: int, base: float = 2.0, cap: float = 900.0, forget: float = 3600.0):
+        self.free, self.base, self.cap, self.forget = free, base, cap, forget
+        self._lock = threading.Lock()
+        self._fails: dict[str, tuple[int, float, float]] = {}   # 键 → (连续失败次数, 最近一次失败, 到什么时候之前不受理)
+
+    def wait(self, key: str) -> float:
+        """还要等几秒；0 = 现在可以试。"""
+        now = time.time()
+        with self._lock:
+            n, last, until = self._fails.get(key, (0, 0.0, 0.0))
+            if n and now - last > max(self.forget, until - last):
+                self._fails.pop(key, None)
+                return 0.0
+            return max(0.0, until - now)
+
+    def fail(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            n, last, _ = self._fails.get(key, (0, 0.0, 0.0))
+            if n and now - last > self.forget:
+                n = 0
+            n += 1
+            until = now + min(self.cap, self.base * 2 ** (n - self.free - 1)) if n > self.free else 0.0
+            self._fails[key] = (n, now, until)
+            if len(self._fails) > 100_000:   # 防止被大量不同的键撑大：丢掉最旧的一半
+                for k, _ in sorted(self._fails.items(), key=lambda kv: kv[1][1])[:50_000]:
+                    self._fails.pop(k, None)
+
+    def ok(self, key: str) -> None:
+        with self._lock:
+            self._fails.pop(key, None)
+
+
+class Throttled(AuthError):
+    def __init__(self, seconds: float):
+        self.seconds = max(1, int(seconds + 0.999))
+        super().__init__(f"尝试太频繁，请 {self.seconds} 秒后再试")
+
+
+class Guards:
+    """登录、注册、重置、改密码的限流。账号与来源地址分开记：换地址试同一个账号、或同一个地址试很多账号都挡得住。
+    限流的说明对存在与不存在的账号一样（键是输入的邮箱，不看它注册过没有）。"""
+
+    def __init__(self) -> None:
+        self.account = Throttle(free=5)               # 同一个账号连续输错 5 次后：2、4、8 … 秒，最多 15 分钟
+        self.address = Throttle(free=20)              # 同一个来源地址（NAT 后面的人多，放宽）
+        self.register = Throttle(free=5, base=60, forget=3600)   # 同一个地址一小时内注册 5 个以上：退避
+        self.reset = Throttle(free=10)                # 重置链接的令牌：按地址
+
+    def check(self, *pairs: tuple[Throttle, str]) -> None:
+        wait = max((t.wait(k) for t, k in pairs), default=0.0)
+        if wait > 0:
+            raise Throttled(wait)
+
+    def login(self, store: Store, email: str, password: str, ip: str, meta: dict[str, str] | None = None,
+              old_token: str | None = None) -> tuple[User, str]:
+        acct, addr = f"acct:{normalize_email(email)}", f"ip:{ip}"
+        self.check((self.account, acct), (self.address, addr))
+        try:
+            got = login(store, email, password, meta, old_token)
+        except AuthError:
+            self.account.fail(acct)
+            self.address.fail(addr)
+            raise
+        self.account.ok(acct)
+        return got
+
+    def register_user(self, store: Store, email: str, password: str, ip: str,
+                      meta: dict[str, str] | None = None) -> tuple[User, str, bool]:
+        addr = f"ip:{ip}"
+        self.check((self.register, addr))
+        self.register.fail(addr)   # 每次注册（成没成）都算一次：一小时内第 6 次起要等
+        self.check((self.register, addr))
+        return register(store, email, password, meta)
+
+    def reset_with(self, ip: str, fn: Any, *args: Any) -> Any:
+        addr = f"ip:{ip}"
+        self.check((self.reset, addr))
+        try:
+            return fn(*args)
+        except Throttled:
+            raise
+        except AuthError:
+            self.reset.fail(addr)
+            raise
+
+    def change_password(self, store: Store, user_id: str, old: str, new: str, meta: dict[str, str] | None = None) -> str:
+        acct = f"user:{user_id}"
+        self.check((self.account, acct))
+        try:
+            token = change_password(store, user_id, old, new, meta)
+        except AuthError as e:
+            if str(e) == "原密码不对":
+                self.account.fail(acct)
+            raise
+        self.account.ok(acct)
+        return token
+
+
 # ---- 管理员重置密码：一次性链接，用户自己设新密码 ----
 # 链接里的令牌只在签发时返回一次，state.json 里只存 sha256；每人同时只有一条（再发一条，旧的作废），
 # RESET_TTL_S 内有效，用过即作废。重置后这个人所有的登录都失效（端侧连接器令牌不受影响，在“设备”里另行吊销）。

@@ -659,10 +659,16 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.exception_handler(auth.AuthError)
     async def _auth_err(_: Request, e: auth.AuthError) -> JSONResponse:
+        if isinstance(e, auth.Throttled):   # 限流：429，说明多久后再试（对存在与不存在的账号一样）
+            return JSONResponse({"detail": str(e)}, status_code=429, headers={"Retry-After": str(e.seconds)})
         return JSONResponse({"detail": str(e)}, status_code=400)
 
     app.state.network = network
     app.state.im = im
+    guards = app.state.guards = auth.Guards()   # 登录、注册、重置、改密码的限流（只在内存里）
+
+    def ip_of(request: Request) -> str:
+        return request.client.host if request.client else ""
 
     def set_cookie(resp: Response, token: str, request: Request) -> None:
         resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=int(auth.session_limits()[1]), path="/",
@@ -692,7 +698,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
     def register(body: CredentialsIn, request: Request, response: Response) -> dict:
-        user, token, first = auth.register(store, body.email, body.password, session_meta(request))
+        user, token, first = guards.register_user(store, body.email, body.password, ip_of(request), session_meta(request))
         set_cookie(response, token, request)
         claimed = first and bool(store.agents)
         network.ensure_assistant(user.id)  # 注册即有助理（认领了旧数据、已有 Agent 的不补建）
@@ -700,18 +706,20 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.post("/api/auth/login")
     def login(body: CredentialsIn, request: Request, response: Response) -> dict:
-        user, token = auth.login(store, body.email, body.password, session_meta(request), request.cookies.get(auth.COOKIE))
+        user, token = guards.login(store, body.email, body.password, ip_of(request), session_meta(request),
+                                   request.cookies.get(auth.COOKIE))
         set_cookie(response, token, request)
         return user.public()
 
     # 重置密码：令牌在链接的 # 后面（不进服务器日志与 Referer），页面用 POST 交上来
     @app.post("/api/auth/reset/check")
-    def reset_check(body: ResetCheckIn) -> dict:
-        return {"email": auth.reset_info(store, body.token)}
+    def reset_check(body: ResetCheckIn, request: Request) -> dict:
+        return {"email": guards.reset_with(ip_of(request), auth.reset_info, store, body.token)}
 
     @app.post("/api/auth/reset")
     def reset(body: ResetIn, request: Request, response: Response) -> dict:
-        user, token = auth.reset_password(store, body.token, body.password, session_meta(request))
+        user, token = guards.reset_with(ip_of(request), auth.reset_password, store, body.token, body.password,
+                                        session_meta(request))
         set_cookie(response, token, request)
         return user.public()
 
@@ -725,7 +733,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     # 改密码：换新令牌，其余会话全部作废（control-plane.md 第 8 节）
     @app.post("/api/auth/password")
     def change_password(body: PasswordIn, request: Request, response: Response, user: Me) -> dict:
-        set_cookie(response, auth.change_password(store, user.id, body.old, body.new, session_meta(request)), request)
+        set_cookie(response, guards.change_password(store, user.id, body.old, body.new, session_meta(request)), request)
         return {"ok": True}
 
     # 我的会话：列出自己的登录（不显示令牌），逐个下线或一键下线其他所有
