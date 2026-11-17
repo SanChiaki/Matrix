@@ -71,6 +71,11 @@ class DockerConfig:
     max_memory_mb: int = 8192
     max_pids: int = 2048
     tmp_mb: int = 512                            # /tmp 的 tmpfs 上限
+    # 出口网关（阶段 2a）：写了 gateway_container 时，每个执行单元一张自己的 internal 网络（没有对外路由、宿主不在上面、
+    # 只有这个沙箱和网关所在的容器），沙箱只连得到网关；connect_url 里的 {gateway} 换成网关在这张网络上的地址。
+    # 不写 = 1b 的形态（所有沙箱共用 network 那一张网络，能直接出网）
+    gateway_container: str = ""
+    subnet_pool: str = "10.213.0.0/16"           # 每张执行单元网络从这里切一个 /28
     env: dict[str, str] = field(default_factory=dict)   # 沙箱里固定的环境（出网代理、CA）：不能放密钥
     dsh_bin: str = "dsh"
 
@@ -79,6 +84,14 @@ class DockerConfig:
             raise ValueError("namespace 只能是小写字母、数字、连字符，至多 31 个字符")
         if self.runtime not in RUNTIMES:
             raise ValueError(f"runtime 只能是 {'、'.join(RUNTIMES)}（写的是 {self.runtime!r}）")
+        if self.gateway_container and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", self.gateway_container):
+            raise ValueError("gateway_container 要是容器名")
+        if self.gateway_container and "{gateway}" not in self.connect_url:
+            raise ValueError("有 gateway_container 时 connect_url 要写成 ws://{gateway}:<端口>/api/sandbox/connect")
+        import ipaddress
+        net = ipaddress.ip_network(self.subnet_pool)
+        if net.prefixlen > 28 or not net.is_private:
+            raise ValueError("subnet_pool 要是私有网段，至少 /28")
         if self.network in ("host", "none", "") or ":" in self.network:
             raise ValueError("network 不能是 host / none / container:…：沙箱要有自己的网络")
         for p in self.workdir_prefixes:
@@ -184,7 +197,24 @@ def security_args(conf: DockerConfig) -> list[str]:
     return out
 
 
-def run_argv(req: dict[str, Any], conf: DockerConfig, now: float) -> list[str]:
+def subnet_for(conf: DockerConfig, unit: str, attempt: int = 0) -> str:
+    """执行单元网络的 /28：按 id 的哈希在 subnet_pool 里挑，撞了换下一个。"""
+    import ipaddress
+    pool = ipaddress.ip_network(conf.subnet_pool)
+    count = 2 ** (28 - pool.prefixlen)
+    i = (int(hashlib.sha256(f"{conf.namespace}\0{unit}".encode()).hexdigest(), 16) + attempt) % count
+    return str(ipaddress.ip_network((int(pool.network_address) + i * 16, 28)))
+
+
+def network_argv(conf: DockerConfig, unit: str, net: str, subnet: str) -> list[str]:
+    """执行单元自己的网络：internal（没有对外路由）、宿主不在上面（inhibit_ipv4：网桥上没有地址，沙箱连不到宿主的任何端口）。"""
+    return ["docker", "network", "create", "--driver", "bridge", "--internal",
+            "-o", "com.docker.network.bridge.inhibit_ipv4=true", "--subnet", subnet,
+            "--label", f"{LABEL}.ns={conf.namespace}", "--label", f"{LABEL}.unit={unit}", net]
+
+
+def run_argv(req: dict[str, Any], conf: DockerConfig, now: float, network: str | None = None,
+             gateway: str | None = None) -> list[str]:
     """起一个沙箱的 `docker run` 参数（纯函数）。挂载只有这个执行单元的两个卷：工作目录挂在逻辑路径（原来的绝对路径）上，
     dsh 状态挂在 /state；不挂宿主目录、docker.sock、数据目录。启动令牌经环境变量给客户端（用过即废）。"""
     unit, q = req["unit_id"], req["quota"]
@@ -193,7 +223,7 @@ def run_argv(req: dict[str, Any], conf: DockerConfig, now: float) -> list[str]:
               "agent": req["agent_id"], "owner": req.get("owner_id") or ""}
     argv = ["docker", "run", "-d", "--name", name, "--hostname", "sandbox", "--init",
             *security_args(conf),
-            "--network", conf.network,
+            "--network", network or conf.network,
             "--cpus", f"{q['cpus']:g}", "--memory", f"{q['memory_mb']}m", "--memory-swap", f"{q['memory_mb']}m",
             "--pids-limit", str(q["pids"]),
             "--log-driver", "json-file", "--log-opt", "max-size=10m", "--log-opt", "max-file=2",
@@ -208,7 +238,8 @@ def run_argv(req: dict[str, Any], conf: DockerConfig, now: float) -> list[str]:
            "MATRIX_BOOT_TOKEN": req["boot_token"]}
     for k, v in env.items():
         argv += ["--env", f"{k}={v}"]
-    argv += [conf.image, "python", "-m", "matrix.connector.sandbox", "--url", conf.connect_url,
+    url = conf.connect_url.replace("{gateway}", gateway) if gateway else conf.connect_url
+    argv += [conf.image, "python", "-m", "matrix.connector.sandbox", "--url", url,
              "--workdir", req["workdir"], "--state", STATE_DIR, "--dsh-bin", conf.dsh_bin]
     return argv
 
@@ -296,9 +327,11 @@ class Manager:
             return {"unit_id": unit, "state": "stopped" if rc == 0 else "absent", "generation": 0, "started_at": 0.0}
         labels = (c.get("Config") or {}).get("Labels") or {}
         running = bool((c.get("State") or {}).get("Running"))
+        nets = (c.get("NetworkSettings") or {}).get("Networks") or {}
+        addr = (nets.get(name) or {}).get("IPAddress", "") if self.conf.gateway_container else ""
         return {"unit_id": unit, "state": "running" if running else "stopped",
                 "generation": int(labels.get(f"{LABEL}.generation") or 0),
-                "started_at": float(labels.get(f"{LABEL}.started") or 0)}
+                "started_at": float(labels.get(f"{LABEL}.started") or 0), "address": addr or ""}
 
     def ensure(self, body: Any) -> dict[str, Any]:
         req = validate_ensure(body, self.conf)
@@ -320,18 +353,55 @@ class Manager:
                     raise Unavailable(f"TRANSPORT 工作目录卷准备不了：{(err or out).strip()[-300:]}")
             if self.run(["docker", "volume", "inspect", state])[0] != 0:
                 self._docker("volume", "create", *labels, state)   # 镜像里 /state 归沙箱用户：空卷挂上去照搬属主
+            net = gw = None
+            if self.conf.gateway_container:
+                net, gw = name, self._unit_network(unit, name)
             now = self.now()
-            rc, out, err = self.run(run_argv(req, self.conf, now))
+            rc, out, err = self.run(run_argv(req, self.conf, now, net, gw))
             if rc != 0:
                 raise Unavailable(f"TRANSPORT 沙箱容器起不来：{(err or out).strip()[-300:]}")
-        return {"unit_id": unit, "state": "running", "generation": req["generation"], "started_at": now}
+            addr = self._ip(name, net) if net else ""
+        return {"unit_id": unit, "state": "running", "generation": req["generation"], "started_at": now, "address": addr}
+
+    def _ip(self, container: str, net: str) -> str:
+        fmt = '{{(index .NetworkSettings.Networks "' + net + '").IPAddress}}'
+        rc, out, _ = self.run(["docker", "inspect", "-f", fmt, container])
+        return out.strip() if rc == 0 else ""
+
+    def _unit_network(self, unit: str, net: str) -> str:
+        """建（或沿用）执行单元的网络，把网关所在的容器接上去；返回网关在这张网络上的地址。"""
+        if self.run(["docker", "network", "inspect", net])[0] != 0:
+            for attempt in range(32):
+                rc, out, err = self.run(network_argv(self.conf, unit, net, subnet_for(self.conf, unit, attempt)))
+                if rc == 0:
+                    break
+                if "overlap" not in (err + out).lower():
+                    raise Unavailable(f"TRANSPORT 建不了执行单元的网络：{(err or out).strip()[-300:]}")
+            else:
+                raise Unavailable("TRANSPORT subnet_pool 里没有空的网段了")
+        rc, out, err = self.run(["docker", "network", "connect", net, self.conf.gateway_container])
+        if rc != 0 and "already exists" not in (err + out):
+            raise Unavailable(f"TRANSPORT 网关接不上执行单元的网络：{(err or out).strip()[-300:]}")
+        ip = self._ip(self.conf.gateway_container, net)
+        if not ip:
+            raise Unavailable("TRANSPORT 查不到网关在执行单元网络上的地址")
+        return ip
+
+    def _drop_network(self, net: str) -> None:
+        if not self.conf.gateway_container:
+            return
+        self.run(["docker", "network", "disconnect", "-f", net, self.conf.gateway_container])
+        self.run(["docker", "network", "rm", net])
 
     def stop(self, unit: str) -> None:
-        self._docker("rm", "-f", names(unit, self.conf.namespace)[0], ok=(0, 1))
+        name = names(unit, self.conf.namespace)[0]
+        self._docker("rm", "-f", name, ok=(0, 1))
+        self._drop_network(name)
 
     def destroy(self, unit: str) -> None:
         name, work, state = names(unit, self.conf.namespace)
         self._docker("rm", "-f", name, ok=(0, 1))
+        self._drop_network(name)
         self._docker("volume", "rm", "-f", work, state, ok=(0, 1))
 
     def list(self) -> list[dict[str, Any]]:

@@ -109,6 +109,7 @@ class FakeDocker:
         self.runtimes = runtimes
         self.containers: dict[str, dict] = {}
         self.volumes: set[str] = set()
+        self.networks: dict[str, set[str]] = {}
 
     def __call__(self, argv):
         self.calls.append(argv)
@@ -135,6 +136,23 @@ class FakeDocker:
             labels = dict(x.split("=", 1) for x, prev in zip(cmd[1:], cmd) if prev == "--label")
             self.containers[name] = {"Config": {"Labels": labels}, "State": {"Running": True}}
             return 0, "id", ""
+        if cmd[:2] == ["network", "inspect"]:
+            return (0, "[]", "") if cmd[2] in self.networks else (1, "", "no such network")
+        if cmd[:2] == ["network", "create"]:
+            self.networks[cmd[-1]] = set()
+            return 0, "id", ""
+        if cmd[:2] == ["network", "connect"]:
+            self.networks[cmd[2]].add(cmd[3])
+            return 0, "", ""
+        if cmd[:2] == ["network", "disconnect"]:
+            self.networks.get(cmd[3], set()).discard(cmd[4])
+            return 0, "", ""
+        if cmd[:2] == ["network", "rm"]:
+            self.networks.pop(cmd[2], None)
+            return 0, "", ""
+        if cmd[:2] == ["inspect", "-f"]:
+            net = cmd[2].split('"')[1]
+            return 0, ("10.213.0.2" if cmd[3] == "core" else "10.213.0.3") + "\n", ""
         if cmd[:2] == ["volume", "ls"]:
             return 0, "", ""
         if cmd[:2] == ["ps", "-a"]:
@@ -175,6 +193,30 @@ def test_namespaces_keep_deployments_apart():
     assert b.status("seat:conv-1/agent-1")["state"] == "absent"
     with pytest.raises(ValueError):
         DockerConfig(namespace="Bad Name")
+
+
+def test_gateway_mode_gives_each_unit_its_own_internal_network():
+    """出口网关（2a）：每个执行单元一张 internal 网络（没有对外路由、宿主不在上面），只接这个沙箱与网关所在的容器；
+    沙箱连回的是网关在这张网络上的地址；停沙箱时网络一起拆。"""
+    conf = DockerConfig(gateway_container="core", connect_url="ws://{gateway}:8766/api/sandbox/connect")
+    d = FakeDocker()
+    m = Manager(conf, run=d, now=lambda: 1.0)
+    st = m.ensure(body())
+    name = names("seat:conv-1/agent-1", conf.namespace)[0]
+    create = next(c for c in d.calls if c[1:3] == ["network", "create"])
+    assert "--internal" in create and "com.docker.network.bridge.inhibit_ipv4=true" in create
+    assert create[create.index("--subnet") + 1].endswith("/28") and create[-1] == name
+    assert d.networks[name] == {"core"}
+    run = next(c for c in d.calls if c[1:3] == ["run", "-d"])
+    assert run[run.index("--network") + 1] == name
+    assert run[run.index("--url") + 1] == "ws://10.213.0.2:8766/api/sandbox/connect"
+    assert st["address"] == "10.213.0.3"
+    m.stop("seat:conv-1/agent-1")
+    assert name not in d.networks
+    for bad in ({"gateway_container": "core"}, {"gateway_container": "a b", "connect_url": "ws://{gateway}:1/x"},
+                {"subnet_pool": "8.8.0.0/16"}):
+        with pytest.raises(ValueError):
+            DockerConfig(**bad)
 
 
 def test_missing_runtime_fails_closed():

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -16,6 +17,7 @@ from pathlib import Path
 from ...models import CONNECTOR_SERVER, MCP_SERVER
 from ...runtime import (ApprovalBridge, ConnectorBridge, DshRuntime, QuestionBridge, RunRequest, RuntimeCapabilities, ToolBridge, argv,
                         no_window)
+from ...gateway import PLACEHOLDER as GATEWAY_PLACEHOLDER
 from ...web_fetch import parse_policy
 from .base import RunOutcome, RunSpec
 
@@ -104,11 +106,22 @@ class DshDriver:
             except ValueError:
                 fetch = None
         env = {str(k): str(v) for k, v in (cloud.get("env") or {}).items()} if isinstance(cloud.get("env"), dict) else {}
+        llm = cloud.get("llm_provider") if isinstance(cloud.get("llm_provider"), dict) else None
+        gw, token = str(cloud.get("gateway") or ""), str(cloud.get("gateway_token") or "")
+        if gw and token:
+            # 出口网关（阶段 2a）：供应商地址换成网关；Agent 的命令与 dsh 自己出网都经网关的代理（令牌认定这一轮）
+            if llm is not None:
+                llm = json.loads(json.dumps(llm).replace(GATEWAY_PLACEHOLDER, gw))
+            proxy = f"http://sbx:{token}@{gw}"
+            host = gw.rsplit(":", 1)[0]
+            env.update(HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
+                       NO_PROXY=f"{host},127.0.0.1,localhost", no_proxy=f"{host},127.0.0.1,localhost",
+                       NODE_USE_ENV_PROXY="1")  # 本机小桥（网络工具、提问）在沙箱里的 127.0.0.1，不经代理
         req = RunRequest(agent_id=spec.agent_id, context_id=spec.context_id, prompt=spec.prompt,
                          cwd=Path(spec.workdir), authority=list(spec.authority), session_id=spec.session_id,
                          tools=tools, on_event=ctx.emit, timeout_s=spec.timeout_s, model=spec.model, cancel=cancel,
                          questions=questions, connectors=connectors, fetch=fetch,
-                         llm_provider=cloud.get("llm_provider") if isinstance(cloud.get("llm_provider"), dict) else None,
+                         llm_provider=llm,
                          env=env, state_dir=self.state_dir, events_file=False)
         res = self._runtime.run(req)
         return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,

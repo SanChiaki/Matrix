@@ -55,6 +55,8 @@ from .auth import Pairings
 from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .checkpoints import (BLOB_MAX, SHA_RE, CheckpointStore, ContentStore, Uploads, pack_session, unit_rel)
+from .gateway import PLACEHOLDER as GATEWAY_PLACEHOLDER, Gateway
+from urllib.parse import urlsplit
 from .sandboxes import (CONNECT_TIMEOUT_S, SandboxError, SandboxHost, SandboxHub, SandboxProvider, SandboxRuntime,
                         SandboxSpec, sandbox_config)
 from .homedir import HomeMount
@@ -123,6 +125,7 @@ class ExecContext:
     sent: list[dict[str, Any]] = field(default_factory=list)  # 这一轮 send_file 发出的文件（对话附件），附在这一轮的回复上
     # 云侧沙箱方式：私有目录在控制面这边的暂存副本（材料从这里出，客户端报的改动先落在这里，轮次结束三方合并写回）
     home_stage: Path | None = None
+    gateway_token: str = ""        # 沙箱方式（有出口网关时）：这一轮的网关令牌，轮次结束作废
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -5298,10 +5301,21 @@ class Network:
         self.content = ContentStore(self.store.root / "content")
         self.checkpoints = CheckpointStore(self.store.root / "checkpoints", self.content, limit=int(conf["checkpoint_limit"]))
         self.sandbox_hub = SandboxHub(Uploads(self.content))
+        self.gateway: Gateway | None = None
+        self.gateway_address: tuple[str, int] | None = None
         self._run_log_lock = threading.Lock()
         if provider is None:
             return
         root = Path(conf["root"]).resolve() if conf.get("root") else self.store.root / "exec"
+        if getattr(provider, "uses_gateway", False):   # 阶段 2a：沙箱到控制面与外面的全部流量都只到出口网关
+            host, _, port = str(conf.get("gateway_listen") or "127.0.0.1:0").rpartition(":")
+            core = urlsplit(self.tool_url)
+            self.gateway = Gateway((core.hostname or "127.0.0.1", core.port or 80), self.fetch.policy,
+                                   [m for m in str(conf.get("gateway_mirrors") or "").split(",") if m.strip()],
+                                   log_dir=self.store.root / "gateway")
+            self.gateway_address = self.gateway.start(host or "127.0.0.1", int(port))
+        if self.gateway_address is not None:  # 沙箱客户端连网关（网关只把这一个端点转给核心）
+            url = f"ws://{self.gateway_address[0]}:{self.gateway_address[1]}/api/sandbox/connect"
         provider.bind(SandboxHost(hub=self.sandbox_hub, root=root, runtime=self.runtime,
                                   connect_url=url or self.tool_url.rsplit("/internal/", 1)[0].replace("http", "ws", 1)
                                   + "/api/sandbox/connect",
@@ -5430,7 +5444,9 @@ class Network:
         token = self.sandbox_hub.issue(unit, gen)
         spec = SandboxSpec(unit_id=unit, owner_id=rec.owner_id, agent_id=rec.agent_id, generation=gen, boot_token=token)
         try:
-            self.sandbox.ensure(spec)
+            st = self.sandbox.ensure(spec)
+            if self.gateway is not None:   # docker 后端报得出沙箱的地址：网关据此核对请求来源
+                self.gateway.bind(unit, getattr(st, "address", "") or None)
         except SandboxError:
             raise
         except Exception as e:  # noqa: BLE001
@@ -5566,18 +5582,36 @@ class Network:
                                                 "files": [{"path": f["path"], "sha": f["sha"], "size": f["size"]} for f in stored],
                                                 "session": {k: sess[k] for k in ("sha", "size", "session_id")} if sess else None,
                                                 "limit": self.checkpoints.limit}}
-        # 模型密钥：平台配的供应商只经这里；服务进程环境里的 *_API_KEY（dsh 自带供应商用）照阶段 0 的口径带上。
-        # 1a / 1b 里密钥仍进执行面（沙箱客户端的内存与 dsh 进程环境），阶段 2 的出口网关去掉
-        keys = {k: v for k, v in os.environ.items() if k.endswith("_API_KEY") and not k.startswith(("MATRIX_", "AGENTNET_"))}
-        if keys or llm_env:
-            extra["env"] = {**keys, **llm_env}
-        if llm_provider is not None:
-            extra["llm_provider"] = llm_provider
+        if self.gateway is not None:   # 阶段 2a：模型经出口网关，沙箱里没有任何模型密钥
+            extra.update(self._gateway_grant(unit, ctx, llm_provider))
+        else:
+            # 没有网关的后端（测试用的内存后端）：平台供应商的密钥与服务进程环境里的 *_API_KEY 照阶段 0 的口径带上
+            keys = {k: v for k, v in os.environ.items() if k.endswith("_API_KEY") and not k.startswith(("MATRIX_", "AGENTNET_"))}
+            if keys or llm_env:
+                extra["env"] = {**keys, **llm_env}
+            if llm_provider is not None:
+                extra["llm_provider"] = llm_provider
         policy = self.fetch.policy()
         if policy is not None:
             extra["fetch"] = {"allow": policy.allow_entries(), "public": policy.public,
                               "replace_builtin": policy.replace_builtin}
         return extra, blobs
+
+    def _gateway_grant(self, unit: str, ctx: ExecContext, llm_provider: dict[str, Any] | None) -> dict[str, Any]:
+        """给这一轮签网关令牌：dsh 的供应商地址换成网关的 /llm/<供应商>，“密钥”填令牌；真密钥留在核心进程里。
+        dsh 自带的供应商（靠服务进程环境里的密钥）在沙箱方式下不支持：不把密钥放回沙箱，这一轮明确报错。"""
+        agent = self.store.agents.get(ctx.agent_id)
+        prov = self.models.provider(llm_provider["id"]) if llm_provider else None
+        model = (self.run_model(agent) or {}).get("model") if agent is not None else None
+        if prov is None or not model:
+            raise SandboxError("PROVIDER: 沙箱方式下只支持平台配置的模型供应商（管理后台“模型”页，密钥由网络保管、经出口网关使用）；"
+                               "这个 Agent 用的是 dsh 自带的供应商，请部署方在后台把它配成平台供应商并让 Agent 选它")
+        key = self.vault.get(_provider_vault(prov.id)).get("api_key") or ""
+        token = self.gateway.issue(unit, list(ctx.authority), prov.id, model, prov.base_url, prov.api, key)
+        ctx.gateway_token = token
+        cfg = json.loads(json.dumps(llm_provider["config"]))
+        cfg["baseURL"] = f"http://{GATEWAY_PLACEHOLDER}/llm/{prov.id}"
+        return {"llm_provider": {"id": prov.id, "config": cfg}, "env": {prov.key_env: token}, "gateway_token": token}
 
     def _sandbox_collect(self, unit: str, ctx: ExecContext, extra: dict[str, Any]) -> None:
         """轮次结束客户端报来的：校验后进检查点；私有目录的改动先落进暂存副本（_run 结束时三方合并写回）。
@@ -6240,15 +6274,18 @@ class Network:
                 agent.active = max(0, agent.active - 1)
             self._cancel_questions(ctx, "提问的那一轮已经结束")
             self.bus.emit("agent.updated", agent=agent.to_dict())
+            measured = self.gateway.close(ctx.gateway_token) if self.gateway is not None and ctx.gateway_token else None
+            ctx.gateway_token = ""
         if cancel is not None and cancel.is_set() and res.error_class != "stopped":
             # 人终止了这一轮：不管运行时最后报的是什么，都按终止处理（不自动续接，不当成交付）
             res = RunResult(res.session_id, res.final_text, res.tool_calls, res.usage, ok=False, error=STOPPED_ERROR)
-        self._record_usage(ctx, agent, res, started)
+        self._record_usage(ctx, agent, res, started, measured=measured)
         return res
 
     def _record_usage(self, ctx: ExecContext, agent: AgentNode, res: RunResult, started: float,
-                      offline: bool = False) -> None:
-        """用量台账记一行（管理后台只看用量：不记提示词、回复、工具参数）。记账失败不影响这一轮。"""
+                      offline: bool = False, measured: dict[str, int] | None = None) -> None:
+        """用量台账记一行（管理后台只看用量：不记提示词、回复、工具参数）。记账失败不影响这一轮。
+        measured：出口网关按实际响应记到的用量（含 dsh 每轮另发的生成标题的请求）；有它就用它，不用 dsh 自报的。"""
         with self._lock:
             conv = self.store.conversations.get(ctx.conversation_id)
             venue = ("task" if ctx.kind == "task" else "home" if ctx.home else "session" if ctx.session
@@ -6261,7 +6298,8 @@ class Network:
                 "runtime": (agent.harness or "") if agent.device_runtime else self.runtime.name,
                 "model": " / ".join(x for x in (model.get("provider"), model.get("model")) if x) if model else None,
                 "ok": res.ok, "error": "device_offline" if offline else res.error_class,
-                "tools": len(res.tool_calls), "usage": dict(res.usage)})
+                "tools": len(res.tool_calls), "usage": dict(measured if measured is not None else res.usage),
+                **({"usage_source": "gateway"} if measured is not None else {})})
         except OSError as e:  # 只给部署方看日志：事件会推给所有人，错误里有服务器路径
             print(f"[matrix] 用量台账写不进去：{e}", file=sys.stderr)
 

@@ -68,6 +68,7 @@ class SandboxStatus:
     state: str                   # running | stopped | absent
     generation: int = 0
     started_at: float = 0.0
+    address: str = ""            # 沙箱在它网络里的地址（docker 后端）：出口网关据此核对请求来源
 
 
 class SandboxProvider(Protocol):
@@ -387,6 +388,8 @@ class LocalSandboxes:
     """local 后端：沙箱客户端作为本机子进程，套外层 bwrap（Linux）。没有 bwrap 时起不来（不悄悄退回不隔离的子进程）。
     做不到 cgroup 配额（进程数、内存、磁盘总量），也不隔离网络与内核：能力报告里照实写。"""
 
+    uses_gateway = True   # 模型经出口网关；但共用宿主网络，做不到强制断网（能力报告里写明）
+
     name = "local"
 
     def __init__(self) -> None:
@@ -532,6 +535,8 @@ class DockerSandboxes:
     向沙箱管理器提请求；请求里只有执行单元 id、所有者、Agent、代数、配额、启动令牌、逻辑工作目录（管理器校验前缀）。
     镜像、运行时、安全选项、网络、挂载模板都在管理器的配置里。"""
 
+    uses_gateway = True
+
     name = "docker"
 
     def __init__(self, socket_path: str):
@@ -658,7 +663,9 @@ def sandbox_config(env: dict[str, str] | None = None) -> dict[str, Any]:
     return {"backend": (get("CLOUD_SANDBOX") or "off").strip().lower(),
             "max": int(num("SANDBOX_MAX", default_max())), "per_user": int(num("SANDBOX_PER_USER", 4)),
             "idle_s": num("SANDBOX_IDLE", 600), "retain_s": num("SANDBOX_RETAIN", 7 * 86400),
-            "checkpoint_limit": int(num("CHECKPOINT_LIMIT", 1_000_000_000)), "root": get("SANDBOX_ROOT") or ""}
+            "checkpoint_limit": int(num("CHECKPOINT_LIMIT", 1_000_000_000)), "root": get("SANDBOX_ROOT") or "",
+            # 出口网关（阶段 2a）：监听在哪（docker 后端要是沙箱网络能到的地址）、包镜像源（逗号分隔的主机，有 shell.exec 时放行）
+            "gateway_listen": get("GATEWAY_LISTEN") or "", "gateway_mirrors": get("GATEWAY_MIRRORS") or ""}
 
 
 def default_max() -> int:

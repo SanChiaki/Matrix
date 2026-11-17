@@ -495,3 +495,45 @@ def test_capabilities_report_the_sandbox_backend(tmp_path: Path):
     iso = net.cloud_isolation()
     assert iso["mode"] == "sandbox:memory" and not iso["active"]
     assert net.sandbox_report()["backend"] == "memory"
+
+
+# ================= 出口网关（阶段 2a） =================
+class GatewayMemory(MemorySandboxes):
+    uses_gateway = True
+
+
+def test_gateway_keeps_model_keys_out_of_the_sandbox(tmp_path: Path):
+    """有出口网关的后端：run.request 里没有任何模型密钥，供应商地址换成网关，“密钥”位置是这一轮的网关令牌；
+    用 dsh 自带供应商的 Agent 在沙箱方式下明确报错（不把密钥放回沙箱）；用量台账按网关记的。"""
+    import json as _json
+    sb = GatewayMemory()
+    net = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False, sandbox=sb)
+    alice, = users(net, "alice@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)
+    conv = net.direct_chat(a.id, actor=alice)
+    net.send_message(conv.id, "hi", actor=alice, background=False)
+    fail = [m.text for m in conv.messages if m.role == "system"][-1]
+    assert "只支持平台配置的模型供应商" in fail
+
+    (tmp_path / "models.json").write_text(_json.dumps({
+        "default": "m", "models": [{"id": "m", "label": "M", "provider": "p1", "model": "m-1"}],
+        "providers": [{"id": "p1", "name": "P1", "api": "openai-completions", "base_url": "https://llm.example/v1"}]}),
+        encoding="utf-8")
+    from matrix.engine import _provider_vault
+    net.vault.put(_provider_vault("p1"), {"api_key": "sk-REAL-SECRET"})
+    b = net.create_agent("B", "b", [], [], actor=alice)
+    conv2 = net.direct_chat(b.id, actor=alice)
+    net.send_message(conv2.id, "hi", actor=alice, background=False)
+    assert [m.role for m in conv2.messages][-1] == "agent"
+    rt = net.sandbox_hub.live(f"seat:{conv2.id}/{b.id}")
+    req = next(m for m in rt.link.sent if m["type"] == "run.request")
+    assert "sk-REAL-SECRET" not in _json.dumps(req)
+    assert req["llm_provider"]["config"]["baseURL"] == "http://__GATEWAY__/llm/p1"
+    tok = req["gateway_token"]
+    assert tok.startswith("mgw-") and set(req["env"].values()) == {tok}
+    rows = [_json.loads(x) for x in (tmp_path / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[-1].get("usage_source") == "gateway"
+    out = __import__("socket").create_connection(net.gateway_address, timeout=5)   # 这一轮结束：令牌作废
+    out.sendall(f"POST /llm/p1/chat/completions HTTP/1.1\r\nAuthorization: Bearer {tok}\r\nContent-Length: 2\r\n\r\n{{}}".encode())
+    assert b" 403 " in out.recv(4096).split(b"\r\n")[0]
+    net.gateway.stop()

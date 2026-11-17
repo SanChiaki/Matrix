@@ -56,8 +56,11 @@ class SandboxConnector(Connector):
     HOME_MODES = ("rw", "ro", *NET_HOME)
     CLEARED = (*Connector.CLEARED, AGENT_HOME, wd.DELIVERIES, "shared", "DELEGATION.json")
 
-    def __init__(self, drivers: Driver | list[Driver], workdir: Path, state: Path, bridge: LocalBridge | None = None):
+    def __init__(self, drivers: Driver | list[Driver], workdir: Path, state: Path, bridge: LocalBridge | None = None,
+                 gateway: str = ""):
+        """gateway：出口网关的 主机:端口（阶段 2a，从连回来的地址里取）；空 = 没有网关（测试用的内存后端）。"""
         super().__init__(drivers, state, bridge=bridge)
+        self.gateway = gateway
         self.unit_workdir = Path(workdir)
         self.state = Path(state)
         self._shas: dict[tuple[str, int, int], str] = {}
@@ -109,7 +112,10 @@ class SandboxConnector(Connector):
         self.send(reply)
 
     def _spec_extra(self, msg: dict[str, Any]) -> dict[str, Any]:
-        return {"cloud": {k: msg[k] for k in ("llm_provider", "env", "fetch", "cloud_connectors") if k in msg}}
+        cloud = {k: msg[k] for k in ("llm_provider", "env", "fetch", "cloud_connectors", "gateway_token") if k in msg}
+        if self.gateway:
+            cloud["gateway"] = self.gateway
+        return {"cloud": cloud}
 
     def _bridge_extra(self, run: _Run) -> tuple:
         return ((run.list_connectors, run.call_connector),) if run.msg.get("cloud_connectors") else ()
@@ -254,6 +260,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--state", required=True)
     p.add_argument("--dsh-bin", default="dsh")
     args = p.parse_args(argv)
+    from urllib.parse import urlsplit
+    u = urlsplit(args.url)   # 连回来的地址就是出口网关（阶段 2a）；模型请求与出网都经它
+    gateway = f"{u.hostname}:{u.port or 80}" if u.hostname else ""
     # 一次性启动令牌：local 后端经 stdin 给；docker 后端经环境变量 MATRIX_BOOT_TOKEN 给（读完就从环境里拿掉，用过即废）
     token = os.environ.pop("MATRIX_BOOT_TOKEN", "") or sys.stdin.readline().strip()
     os.environ["HOME"] = args.state
@@ -262,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
     credential, attempt = "", 0
     try:
         while True:
-            conn = SandboxConnector([driver], Path(args.workdir), Path(args.state), bridge=bridge)
+            conn = SandboxConnector([driver], Path(args.workdir), Path(args.state), bridge=bridge, gateway=gateway)
             try:
                 if credential:
                     conn.connect(f"{args.url}?credential={credential}", "")
