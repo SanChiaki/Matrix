@@ -991,9 +991,11 @@ const TEXT_EXT = ["MD", "TXT", "CSV", "TSV", "JSON", "YAML", "YML", "LOG", "XML"
 const IMAGE_EXT = ["PNG", "JPG", "JPEG", "GIF", "WEBP"];
 const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const fileExt = (name) => (name.includes(".") ? name.split(".").pop().toUpperCase() : "文件");
+// 复用一个格式化器：toLocaleTimeString 每次都新建一个，几百条消息时刷新一次就要上百毫秒
+const HM = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
 const dateTime = (ts) => {
   const d = new Date(ts * 1000), now = new Date(), day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()) / 864e5;
-  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const hm = HM.format(d);
   return day(now) - day(d) === 0 ? `今天 ${hm}` : day(now) - day(d) === 1 ? `昨天 ${hm}` : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
 };
 const FILE_KIND = { MD: "doc", TXT: "doc", LOG: "doc", CSV: "sheet", TSV: "sheet", JSON: "code", YAML: "code", YML: "code", XML: "code",
@@ -2795,7 +2797,7 @@ const TOOL_CN = { [`mcp__matrix_net__delegate`]: "委托", [`mcp__matrix_net__li
   [`mcp__matrix_net__retry_task`]: "续接委托", [`mcp__matrix_net__propose_agent`]: "提议新 Agent", web_search: "搜索", web_fetch: "抓取网页", read: "读取",
   write: "写入", edit: "编辑", bash: "执行命令", glob: "查找文件", grep: "搜索文件", todo_write: "更新计划" };
 const toolName = (t) => TOOL_CN[t] || t.replace(/^mcp__matrix_net__/, "");
-const time = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+const time = (ts) => HM.format(new Date(ts * 1000));
 
 // 过程：中间文本与工具调用。运行中实时展开；结束后折叠在回复上方。
 function stepsHtml(steps, live) {
@@ -2925,15 +2927,22 @@ function bindWorkdirs(box, c) {
   box.querySelectorAll("[data-wd]").forEach((d) => { d.addEventListener("toggle", () => load(d)); });
 }
 
+// 内容没变就不碰 DOM：事件驱动的刷新很频繁，整段重画会打断滚动、悬停与焦点（成员多时滚动卡顿）
+function setHtml(box, html) {
+  if (box._html === html) return false;
+  box.innerHTML = html; box._html = html;
+  return true;
+}
+
 function renderMembers() {
   const box = $("#members-panel"), c = S.conv;
-  if (!c || c.missing || c.loading || c.failed) { box.innerHTML = ""; return; }
+  if (!c || c.missing || c.loading || c.failed) { setHtml(box, ""); return; }
   const row = (a, extra = "", whose = "") => `<li>${avatar(a.name, "sm")}<span class="m-body"><span class="n">${esc(a.name)}
       ${c.live?.[a.id] ? '<span class="dot-live" title="运行中"></span>' : ""}</span>
       <span class="s">${whose ? `${esc(whose)} · ` : ""}${esc(a.capabilities.join(" · ") || a.description)}</span></span>${extra}</li>`;
   if (c.kind === "dm" && c.is_home) {
     const a = agent(c.agent_id);
-    box.innerHTML = `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : ""}
+    if (!setHtml(box, `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : ""}
       <h3>定时</h3><ul class="member-list sched-list">${schedulesHtml()}</ul><p class="error sched-error" role="alert"></p>
       <p class="hint">定时只唤醒你自己的助理，到点后它在这里回复你；没有新情况就不打扰。在这里说一句就能建，比如“每个工作日早上 8 点给我早报”。</p>
       <h3 class="im-head">在 IM 里找助理</h3><div class="im-box">${imHtml()}</div><p class="error im-error" role="alert"></p>
@@ -2942,7 +2951,7 @@ function renderMembers() {
       <p class="hint">助理看得到你参与的各个项目（只是你能看到的部分），往项目里说话要先起草、你确认后才以你的名义发出。
         共享项目里合作方写的内容送到的那一轮，它不用你授权的服务。</p>
       ${a ? `<dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${modelDd(a)}</dd></dl>` : ""}
-      ${workdirsHtml(c)}`;
+      ${workdirsHtml(c)}`)) return;
     bindSchedules(box);
     bindIm(box);
     bindWorkdirs(box, c);
@@ -2950,25 +2959,25 @@ function renderMembers() {
   }
   if (c.kind === "dm") {
     const a = agent(c.agent_id);
-    box.innerHTML = a ? `${workdirsHtml(c)}<ul class="member-list">${row(a)}</ul>
+    if (!setHtml(box, a ? `${workdirsHtml(c)}<ul class="member-list">${row(a)}</ul>
       <dl><dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd><dt>模型</dt><dd>${modelDd(a)}</dd></dl>
-      <p class="hint">私聊里它只能自己完成，不能委托。要让它和别的成员协作，在群聊里 @ 它。</p>` : placeholder("这个 Agent 已删除。");
+      <p class="hint">私聊里它只能自己完成，不能委托。要让它和别的成员协作，在群聊里 @ 它。</p>` : placeholder("这个 Agent 已删除。"))) return;
     bindWorkdirs(box, c);
     return;
   }
   const g = proj(c.project_id);
-  if (!g) { box.innerHTML = placeholder(c.kind === "session" ? "你已不在这个项目里，会话只读。" : "项目已删除。"); return; }
+  if (!g) { setHtml(box, placeholder(c.kind === "session" ? "你已不在这个项目里，会话只读。" : "项目已删除。")); return; }
   if (c.kind === "session") {
     const a = agent(c.agent_id);
     const chat = S.snap.conversations.find((x) => x.kind === "project" && x.project_id === g.id && !x.archived);
     const more = (c.members || []).filter((id) => id !== c.agent_id).map(agent).filter(Boolean);
-    box.innerHTML = `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : placeholder("助理已删除。")}
+    if (!setHtml(box, `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : placeholder("助理已删除。")}
       ${more.length ? `<h3>也能 @ · ${more.length}</h3><ul class="member-list">${more.map((x) => row(x)).join("")}</ul>
         <p class="hint">你在这个项目里的其他 Agent：@ 它就直接交给它，没 @ 时交给助理。别人的 Agent 看不到这里，要找它们去群聊。</p>` : ""}
       <p class="hint">项目会话只有你看得到。助理每一轮都会拿到「${esc(g.name)}」的纲要、决定、成员、没结束的任务和群聊里最近的消息，
         也能委托项目成员、登记任务；它写纲要、决定、文件时会在群聊里留一条事件。</p>
       <p><a href="#${esc(chat ? chat.id : `p-${g.id}`)}">回到项目群聊</a> · ${g.member_ids.length} 名成员</p>
-      ${workdirsHtml(c)}`;
+      ${workdirsHtml(c)}`)) return;
     bindWorkdirs(box, c);
     return;
   }
@@ -2978,7 +2987,7 @@ function renderMembers() {
   const rm = (a) => (a.mine || host) ? `<button type="button" class="ghost icon sm rm" data-id="${esc(a.id)}"
       aria-label="把 ${esc(a.name)} 移出项目" title="移出项目"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 8h8"/></svg></button>` : "";
   // 共享项目：标出属于谁（我的连接器在这个项目里怎么用，在项目页的连接器面板里设）
-  box.innerHTML = `<h3>成员 · ${members.length}</h3>
+  if (!setHtml(box, `<h3>成员 · ${members.length}</h3>
     <ul class="member-list">${members.map((a) => row(a, rm(a), joint ? (a.mine ? "你的" : `${a.owner_email || ""} 的`) : "")).join("")
       || '<li class="empty">还没有成员</li>'}</ul>
     ${others.length ? `<form class="add-member" aria-label="添加成员">
@@ -2989,7 +2998,7 @@ function renderMembers() {
     ${joint ? `<p class="hint">共享项目：主持人 ${esc(g.host_email || "")}。每个 Agent 只代表它的所有者，委托只给两端的所有者看，运行过程只给 Agent 的所有者看。</p>
       ${host ? "" : '<p><button type="button" class="ghost sm" id="leave-project">退出项目</button></p>'}` : ""}
     <p class="hint">移出项目不会打断它手上已经接下的任务，只是之后不能再被 @、被委托。</p>
-    ${workdirsHtml(c)}`;
+    ${workdirsHtml(c)}`)) return;
   bindWorkdirs(box, c);
   const err = (e) => { $(".error", box).textContent = e.message; };
   $("#leave-project", box)?.addEventListener("click", async () => {
@@ -3105,8 +3114,10 @@ function renderThread() {
   const lastSys = {};
   c.messages.forEach((m, i) => { if (m.role === "system" && m.agent_id) lastSys[m.agent_id] = i; });
   // 人发的消息也按 Markdown 渲染（和 Agent 的回复一样）；@成员 只在正文里标出，代码和链接里的不动
-  const mentionHtml = (text) => mapText(renderMarkdown(text), (part) => part.replace(/@([^\s@，。,:：]+(?: [A-Z][\w-]*)*)/g, (s) =>
-    members().some((a) => s.slice(1).toLowerCase().startsWith(a.name.toLowerCase())) ? `<span class="mention">${s}</span>` : s));
+  const names = members().map((a) => a.name.toLowerCase());
+  const mentionHtml = (text) => memo(`m:${names.join("\n")}:${text}`, () => mapText(renderMarkdown(text), (part) => part.replace(/@([^\s@，。,:：]+(?: [A-Z][\w-]*)*)/g, (s) =>
+    names.some((n) => s.slice(1).toLowerCase().startsWith(n)) ? `<span class="mention">${s}</span>` : s)));
+  const md = (text) => memo(`d:${text}`, () => renderMarkdown(text));
   const items = c.messages.map((m, i) => {
     const delegs = m.task_ids.length ? `<div class="delegs" aria-label="本轮委托">${treeOf(m.task_ids)}</div>` : "";
     const who = agent(m.agent_id);
@@ -3130,7 +3141,7 @@ function renderThread() {
       return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? viaPill(m.via) : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
     return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
-      <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${renderMarkdown(m.text)}</div>${attachmentsHtml(c.id, m.attachments)}</div></li>`;
+      <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${md(m.text)}</div>${attachmentsHtml(c.id, m.attachments)}</div></li>`;
   });
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
@@ -3155,13 +3166,55 @@ function renderThread() {
   // 正在填审核表单时不重绘线程，否则输入会被事件驱动的刷新清掉
   const typing = document.activeElement?.matches?.(".proposal-card input, .proposal-card textarea");
   if (typing && th.contains(document.activeElement)) { renderTask(); return; }
-  // 保留用户手动展开的“过程”，重绘不把它们收起来
-  const open = new Set([...th.querySelectorAll("details[open]")].map((d) => d.closest(".msg")?.dataset.i));
-  th.innerHTML = items.join("") || `<li>${placeholder(c.is_home ? "问问助理“今天有什么要我处理的”，或者让它“每天早上 9 点给我一份早报”。"
+  if (!items.length) items.push(`<li>${placeholder(c.is_home ? "问问助理“今天有什么要我处理的”，或者让它“每天早上 9 点给我一份早报”。"
     : dm ? "发一条消息开始私聊。"
-    : "@ 一个成员把任务交给它。它可以自己做，也可以在项目里找合适的成员委托。")}</li>`;
-  [...th.children].forEach((li, i) => { li.dataset.i = i; if (open.has(String(i))) li.querySelector("details")?.setAttribute("open", ""); });
+    : "@ 一个成员把任务交给它。它可以自己做，也可以在项目里找合适的成员委托。")}</li>`);
+  // 按条比对，只换变了的那几条（长对话整段重画会让滚动卡顿）；新换上的节点才需要绑事件
+  const fresh = patchList(th, items);
   if (atBottom) th.scrollTop = th.scrollHeight;
+  fresh.forEach((li) => bindThreadItem(li, th, c));
+  // Agent 运行中也可以发消息：进被 @ 成员的收件箱排队，这一轮结束后送达
+  $("#msg-form button[type=submit]").disabled = !dm && !g;
+  $("#msg").disabled = !dm && !g;
+  renderComposer();
+  renderTask();
+}
+
+// 列表按条打补丁：每一项是一个 <li> 的 HTML，和上次一样的节点原样保留（展开的“过程”、选中状态都还在）。返回新放进去的节点
+function patchList(ul, items) {
+  const kids = [...ul.children], fresh = [];
+  items.forEach((html, i) => {
+    const old = kids[i];
+    if (old && old._html === html) return;
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const li = tpl.content.firstElementChild || document.createElement("li");
+    li._html = html;
+    if (old) {  // 保留用户手动展开的“过程”
+      if (old.querySelector("details[open]")) li.querySelector("details")?.setAttribute("open", "");
+      old.replaceWith(li);
+    } else ul.append(li);
+    fresh.push(li);
+  });
+  kids.slice(items.length).forEach((x) => x.remove());
+  [...ul.children].forEach((li, i) => { li.dataset.i = i; });
+  return fresh;
+}
+
+// 渲染结果缓存：同一段文字每次刷新都重新解析 Markdown 很贵（几百条消息时每次事件都要上百毫秒）
+const MEMO = new Map();
+function memo(key, make) {
+  let v = MEMO.get(key);
+  if (v === undefined) {
+    v = make();
+    if (MEMO.size > 3000) MEMO.delete(MEMO.keys().next().value);
+    MEMO.set(key, v);
+  }
+  return v;
+}
+
+// 一条消息节点上的交互（只给新放进去的节点绑；th 是这一条，list 是整个消息列表）
+function bindThreadItem(th, list, c) {
   th.querySelectorAll(".stop-run").forEach((b) => b.addEventListener("click", async () => {
     b.disabled = true; b.textContent = "正在停止…";
     try { await api(`/api/conversations/${c.id}/seats/${b.dataset.agent}/stop`, { method: "POST" }); }
@@ -3169,7 +3222,7 @@ function renderThread() {
   }));
   th.querySelectorAll(".deleg").forEach((b) => b.addEventListener("click", () => {
     S.taskSel = b.dataset.id;
-    th.querySelectorAll(".deleg").forEach((x) => x.classList.toggle("selected", x === b));
+    list.querySelectorAll(".deleg").forEach((x) => x.classList.toggle("selected", x === b));
     sideTab("task");
   }));
   bindProposals(th);
@@ -3183,11 +3236,6 @@ function renderThread() {
     try { await api(`/api/conversations/${c.id}/resume`, { method: "POST", body: { agent_id: b.dataset.agent } }); await reload(); }
     catch (err) { alert(err.message); b.disabled = false; }
   }));
-  // Agent 运行中也可以发消息：进被 @ 成员的收件箱排队，这一轮结束后送达
-  $("#msg-form button[type=submit]").disabled = !dm && !g;
-  $("#msg").disabled = !dm && !g;
-  renderComposer();
-  renderTask();
 }
 
 // 助理起草、要以你的名义发进项目群聊的消息：你确认（可以改）才发出

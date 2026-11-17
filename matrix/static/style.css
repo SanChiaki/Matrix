@@ -120,7 +120,8 @@ main { min-width: 0; min-height: 0; display: flex; flex-direction: column; overf
   background: var(--surface); border-top: 1px solid var(--border); }
 .view[hidden] .side.open { display: none; }
 @keyframes modal-in { from { opacity: 0; transform: translate(-50%, -48%) scale(.98); } }
-.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: var(--scrim); backdrop-filter: blur(3px); }
+/* 不用 backdrop-filter：弹窗里滚动时每一帧都要重新模糊整页，成员多、消息多时明显卡顿 */
+.modal-backdrop { position: fixed; inset: 0; z-index: 50; background: var(--scrim); }
 .modal-backdrop[hidden] { display: none; }
 .modal-x { position: sticky; top: -14px; float: right; margin: -16px -16px 0 8px; width: 32px; height: 32px; font-size: var(--fs-xl); line-height: 1; z-index: 1; }
 .side > h2, .panel-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--fs-lg); margin-bottom: 6px; }
@@ -289,13 +290,13 @@ button.icon svg { width: 14px; height: 14px; }
 .status-line.offline::before { background: var(--rejected); box-shadow: 0 0 0 3px color-mix(in srgb, var(--rejected) 15%, transparent); animation: none; }
 
 .view.chats { grid-template-columns: minmax(0, 1fr); }
-.chat-side { padding: 0; height: min(82vh, 860px); }
+.chat-side { padding: 0; height: min(82vh, 860px); overflow: hidden; }  /* 只让里面的面板滚，外层不再出第二个滚动条 */
 .chat-side.open { display: flex; flex-direction: column; }
 .chat-side > .modal-x { position: absolute; top: 10px; right: 12px; margin: 0; }
 .side-tabs { display: flex; gap: 4px; padding: 16px 20px 0; border-bottom: 1px solid var(--border); }
 .side-tabs button { background: none; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 12px; color: var(--muted); font-size: var(--fs-md); }
 .side-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
-#members-panel, #task-detail { padding: 20px 24px; overflow: auto; flex: 1; min-height: 0; }
+#members-panel, #task-detail { padding: 20px 24px; overflow: auto; overscroll-behavior: contain; flex: 1; min-height: 0; }
 #members-panel[hidden], #task-detail[hidden] { display: none; }
 #members-panel > h3:first-child { margin-top: 0; }
 .member-list { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -672,6 +673,7 @@ kbd { font: var(--fs-xs) var(--font-mono); padding: 1px 6px; border-radius: var(
   .deleg.child { margin-left: 12px; }
   .pane { padding: 16px; }
   .side { padding: 20px 16px; }
+  .chat-side { padding: 0; }  /* 成员弹窗靠里面的面板留白和滚动，外层加内边距会多出一截、冒出第二个滚动条 */
   .side form > .actions:last-child { bottom: -20px; margin: 8px -16px -20px; padding: 12px 16px; }
   .view-head { flex-direction: column; align-items: stretch; gap: 12px; }
   .view-head button { width: 100%; }
