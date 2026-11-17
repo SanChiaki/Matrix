@@ -5310,7 +5310,8 @@ class Network:
         if getattr(provider, "uses_gateway", False):   # 阶段 2a：沙箱到控制面与外面的全部流量都只到出口网关
             host, _, port = str(conf.get("gateway_listen") or "127.0.0.1:0").rpartition(":")
             core = urlsplit(self.tool_url)
-            self.gateway = Gateway((core.hostname or "127.0.0.1", core.port or 80), self.fetch.policy,
+            ch, _, cp = str(conf.get("gateway_core") or f"{core.hostname or '127.0.0.1'}:{core.port or 80}").rpartition(":")
+            self.gateway = Gateway((ch, int(cp)), self.fetch.policy,
                                    [m for m in str(conf.get("gateway_mirrors") or "").split(",") if m.strip()],
                                    log_dir=self.store.root / "gateway")
             self.gateway_address = self.gateway.start(host or "127.0.0.1", int(port))

@@ -8,15 +8,18 @@ services:
     environment:
       MATRIX_CLOUD_SANDBOX: docker
       MATRIX_SANDBOXD_SOCKET: /run/matrix-sandboxd/sandboxd.sock
+      # 核心只监听内部网络上的地址（服务名 matrix 解析出来的那个）：沙箱的网络接到这个容器上以后也连不到核心
+      MATRIX_HOST: matrix
+      # 出口网关（阶段 2a）：沙箱唯一连得到的地方。管理器把这个容器接到每个执行单元自己的 internal 网络上
+      MATRIX_GATEWAY_LISTEN: 0.0.0.0:8766
+      MATRIX_GATEWAY_MIRRORS: ${MATRIX_GATEWAY_MIRRORS:-}
     volumes:
       - sandboxd-run:/run/matrix-sandboxd      # 只有这个目录通向管理器；docker.sock 不挂进来
     # Matrix 不再跑 dsh：不用再放开 seccomp 与 /proc 遮挡（compose.yml 里那两项是给容器里的 bwrap 的）
     security_opt: !override
       - no-new-privileges
-    # 沙箱客户端连回来：只在沙箱网络的网关上开放 8765（沙箱之间不互通，到网关的流量放行）。
-    # 这一阶段沙箱还能访问 Matrix 的其他接口（都要登录或执行上下文令牌）；阶段 2 改成只经出口网关
-    ports:
-      - "${MATRIX_SANDBOX_GATEWAY:-172.31.255.1}:8765:8765"
+    # 容器名固定：管理器按它把网关接到执行单元的网络上（sandboxd.json 的 gateway_container）
+    container_name: matrix-core
     depends_on: [sandboxd]
 
   # 沙箱管理器：唯一挂 docker.sock 的服务（docker.sock 等于宿主 root）。不对外监听，只在共享卷里开一个 Unix socket
@@ -46,7 +49,7 @@ services:
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges]
-    networks: [sandbox]                        # 只为让 compose 建出沙箱网络；它自己不监听任何端口
+    network_mode: none                         # 它自己不联网：只经 docker.sock 与共享卷里的 socket
 
   # 只用来构建沙箱镜像（不运行）：管理器按 sandboxd.json 的 image 起沙箱容器
   sandbox-image:
@@ -60,15 +63,3 @@ services:
 
 volumes:
   sandboxd-run:
-
-networks:
-  # 沙箱专用网络：容器之间不互通（enable_icc=false），能到的只有网关上开放的 Matrix 与外网（阶段 2 改成只到出口网关）
-  sandbox:
-    name: matrix-sandbox
-    driver: bridge
-    driver_opts:
-      com.docker.network.bridge.enable_icc: "false"
-    ipam:
-      config:
-        - subnet: ${MATRIX_SANDBOX_SUBNET:-172.31.255.0/24}
-          gateway: ${MATRIX_SANDBOX_GATEWAY:-172.31.255.1}

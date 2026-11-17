@@ -62,7 +62,9 @@ def test_decide_with_upstream_proxy():
 def test_usage_of_openai_and_anthropic():
     assert usage_of({"usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13,
                                "prompt_tokens_details": {"cached_tokens": 4}}}) == \
-        {"inputTokens": 10, "outputTokens": 3, "totalTokens": 13, "cacheReadTokens": 4}
+        {"inputTokens": 6, "outputTokens": 3, "totalTokens": 13, "cacheReadTokens": 4}   # 和 dsh 一样：输入不含命中缓存的
+    assert usage_of({"usage": {"prompt_tokens": 10, "completion_tokens": 1, "prompt_cache_hit_tokens": 8}}) == \
+        {"inputTokens": 2, "outputTokens": 1, "cacheReadTokens": 8}
     assert usage_of({"type": "message_start", "message": {"usage": {"input_tokens": 7}}}) == {"inputTokens": 7}
     assert usage_of({"choices": []}) == {}
 

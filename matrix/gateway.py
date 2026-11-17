@@ -118,8 +118,12 @@ def usage_of(event: dict[str, Any]) -> dict[str, int]:
         if k in pairs and isinstance(v, int) and not isinstance(v, bool):
             out[pairs[k]] = out.get(pairs[k], 0) + v
     cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") if isinstance(u.get("prompt_tokens_details"), dict) else None
-    if isinstance(cached, int):
+    if not isinstance(cached, int):
+        cached = u.get("prompt_cache_hit_tokens") if isinstance(u.get("prompt_cache_hit_tokens"), int) else None  # DeepSeek
+    if isinstance(cached, int) and "prompt_tokens" in u:
+        # OpenAI 口径的 prompt_tokens 含命中缓存的部分；dsh 的 inputTokens 不含：换成同一口径
         out["cacheReadTokens"] = out.get("cacheReadTokens", 0) + cached
+        out["inputTokens"] = max(0, out.get("inputTokens", 0) - cached)
     return out
 
 
@@ -399,6 +403,8 @@ class Gateway:
                 pass
         with self._lock:
             _add(g.usage, acc)
+        self._log({"unit": g.unit, "method": "LLM", "host": g.provider, "model": g.model, "status": status,
+                   "usage": acc, "result": "ok"})
 
 
 def _read_head(conn: socket.socket) -> tuple[bytes, bytes]:

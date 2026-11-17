@@ -1683,7 +1683,8 @@ class MatrixServer(uvicorn.Server):
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
-                  admins: str | None = None, fetch: str | None = None, sandbox: str | None = None) -> Network:
+                  admins: str | None = None, fetch: str | None = None, sandbox: str | None = None,
+                  host: str = "127.0.0.1") -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
     admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
@@ -1697,7 +1698,9 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
                    admins=(admins or "").split(","),
                    fetch=FetchConfig(Path(fetch).resolve()) if fetch else None,
                    sandbox=provider_named(sandbox if sandbox is not None else sandbox_config()["backend"]),
-                   sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect")
+                   sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect",
+                   # 出口网关把沙箱连接转给核心：核心监听在哪就连哪（容器里核心只监听内部网络的地址，沙箱网络上没有它）
+                   sandbox_limits={"gateway_core": f"{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"})
 
 
 def main() -> None:
@@ -1732,7 +1735,7 @@ def main() -> None:
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,
-                            sandbox=args.sandbox)
+                            sandbox=args.sandbox, host=args.host)
     if network.sandbox is not None:
         rep = network.sandbox_report()
         print(f"[matrix] 云侧执行面：{rep['backend']} 后端（{rep['note']}）")
