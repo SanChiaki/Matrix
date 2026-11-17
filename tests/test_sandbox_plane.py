@@ -541,3 +541,38 @@ def test_gateway_keeps_model_keys_out_of_the_sandbox(tmp_path: Path):
     out.sendall(f"POST /llm/p1/chat/completions HTTP/1.1\r\nAuthorization: Bearer {tok}\r\nContent-Length: 2\r\n\r\n{{}}".encode())
     assert b" 403 " in out.recv(4096).split(b"\r\n")[0]
     net.gateway.stop()
+
+
+# ================= 资料的可见范围 =================
+def test_sandbox_materials_follow_archive_access(tmp_path: Path):
+    """不变量 26 在沙箱方式下不被绕过：材料清单（project/、skills/）与档案推送走同一套可见范围，范围外的 Agent
+    的沙箱里没有收窄了的资料与技能；放开后下一轮就有。"""
+    seen: dict = {}
+
+    def handler(call: ScriptCall) -> str:
+        def listing(top: str) -> list[str]:
+            root = call.cwd / top
+            return sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()) if root.is_dir() else []
+        seen[call.agent_id] = {"files": listing("project"), "skills": listing("skills"), "prompt": call.prompt}
+        seen.setdefault("cwds", []).append(str(call.cwd))
+        return "ok"
+    net, sb, alice = build(tmp_path, handler)
+    a = net.create_agent("Lead", "负责人", [], ["file.write"], actor=alice)
+    b = net.create_agent("Helper", "帮手", [], ["file.write"], actor=alice)
+    g = net.create_project("P", "", [a.id, b.id], actor=alice)
+    net.publish_file(g.id, "公开.md", "大家都看".encode(), actor=alice)
+    net.publish_file(g.id, "内部/薪资.md", "薪资".encode(), actor=alice)
+    net.save_project_skill(g.id, "pay-review", "薪资评审", "保密流程", actor=alice)
+    net.set_project_roles(g.id, {"lead": {"name": "负责人", "members": [a.id]}}, actor=alice)
+    net.set_file_access(g.id, "内部", {"roles": ["lead"]}, actor=alice)
+    net.set_skill_access(g.id, "pay-review", {"agents": [a.id]}, actor=alice)
+    chat = net.project_chat(g.id, actor=alice)
+    for who in ("Lead", "Helper"):
+        net.send_message(chat.id, f"@{who} 看看资料", actor=alice, background=False)
+    assert all((tmp_path / "exec") in Path(c).parents for c in seen["cwds"])     # 真的是在沙箱里跑的
+    assert seen[a.id]["files"] == ["公开.md", "内部/薪资.md"] and any(s.startswith("pay-review/") for s in seen[a.id]["skills"])
+    assert seen[b.id]["files"] == ["公开.md"] and not any(s.startswith("pay-review/") for s in seen[b.id]["skills"])
+    assert "薪资" not in seen[b.id]["prompt"] and "pay-review" not in seen[b.id]["prompt"]
+    net.set_file_access(g.id, "内部", {}, actor=alice)
+    net.send_message(chat.id, "@Helper 再看看", actor=alice, background=False)
+    assert seen[b.id]["files"] == ["公开.md", "内部/薪资.md"]
