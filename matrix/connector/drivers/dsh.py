@@ -106,6 +106,11 @@ class DshDriver:
             except ValueError:
                 fetch = None
         env = {str(k): str(v) for k, v in (cloud.get("env") or {}).items()} if isinstance(cloud.get("env"), dict) else {}
+        # Agent 的命令里 HOME（dsh 状态目录）只读，只有工作目录与 /tmp 可写：各家工具的缓存放到 /tmp（uv 写不了缓存就装不了包）
+        env.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+        env.setdefault("UV_CACHE_DIR", "/tmp/.cache/uv")
+        env.setdefault("npm_config_cache", "/tmp/.npm")
+        env.setdefault("PIP_CACHE_DIR", "/tmp/.cache/pip")
         llm = cloud.get("llm_provider") if isinstance(cloud.get("llm_provider"), dict) else None
         gw, token = str(cloud.get("gateway") or ""), str(cloud.get("gateway_token") or "")
         if gw and token:
