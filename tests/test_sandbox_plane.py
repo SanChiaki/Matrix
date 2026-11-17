@@ -221,6 +221,18 @@ def test_send_and_publish_read_through_the_client(tmp_path: Path):
 
 
 # ================= 容量 =================
+def test_wake_after_capacity_frees_is_not_seen_as_quiet(tmp_path: Path, monkeypatch):
+    """一轮结束、放出位置到排队的委托被重新调度之间，网络不算静止：wait_quiet（IM 桥、同步发消息都用它）要等到委托跑完。
+    在“出队”与“唤醒”之间人为插一段延迟（Windows 上线程切换慢时就是这样），等待也不能提前返回。"""
+    wake = Network._sandbox_wake
+
+    def slow_wake(self):
+        time.sleep(0.3)
+        wake(self)
+    monkeypatch.setattr(Network, "_sandbox_wake", slow_wake)
+    test_full_capacity_means_waiting_not_failure(tmp_path)
+
+
 def test_full_capacity_means_waiting_not_failure(tmp_path: Path):
     """容量不够时是等待：委托进 WAITING、不判失败；位置腾出来后（委托方这一轮结束、它的空闲沙箱被停掉）接着跑。"""
     states: list = []

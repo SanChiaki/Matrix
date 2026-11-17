@@ -240,6 +240,7 @@ class Network:
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
+        self._waking = 0                   # 一轮结束后正在唤醒排队的沙箱运行（还没登记进 _running）：wait_quiet 也要等
         self._stops: dict[str, threading.Event] = {}  # 正在跑的一轮 -> 人终止它的信号（stop_run）
         self._approval_waits: dict[str, threading.Event] = {}
         self._question_waits: dict[str, threading.Event] = {}
@@ -4729,7 +4730,7 @@ class Network:
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
-                if not self._running:
+                if not self._running and not self._waking:
                     return
             time.sleep(0.02)
         raise TimeoutError(f"网络未在 {timeout}s 内静止：{sorted(self._running)}")
@@ -4828,13 +4829,21 @@ class Network:
         finally:
             with self._lock:  # 判断与出队放在同一把锁里，wait_quiet 不会在两轮之间误判为静止
                 again = self._eligible(kind, cid)
+                wake = self.sandbox is not None and not again
                 if not again:
                     self._running.discard(cid)
+                if wake:  # 出队与唤醒排队的运行之间同样不算静止：先记上，唤醒把它们登记进 _running 后再减
+                    self._waking += 1
             if again:
                 self._pool.submit(self._round_safe, kind, cid)
-            self._refresh_conv(self._conv_id_of(kind, cid))
-            if self.sandbox is not None and not again:
-                self._sandbox_wake()
+            try:
+                self._refresh_conv(self._conv_id_of(kind, cid))
+                if wake:
+                    self._sandbox_wake()
+            finally:
+                if wake:
+                    with self._lock:
+                        self._waking -= 1
 
     def _internal_error(self, kind: str, cid: str, e: Exception) -> None:
         if kind == "seat":
