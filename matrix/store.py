@@ -218,6 +218,8 @@ class Store:
         self.im_channels: dict[str, ImChannel] = {}  # IM 机器人（个人的与部署方的）
         self.im_bindings: dict[str, ImBinding] = {}  # 人在 IM 机器人上的身份
         self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
+        # 对账时发现、控制面没有记录的沙箱（只剩卷）：执行单元 → 第一次发现的时间。过保留期才删，计时不随重启重来
+        self.sandbox_orphans: dict[str, float] = {}
         if self.path.exists():
             self._load()
         else:
@@ -334,6 +336,7 @@ class Store:
                 "im_channels": [x.to_dict() for x in self.im_channels.values()],
                 "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
                 **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
+                **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -441,6 +444,8 @@ class Store:
             self.im_bindings[x["id"]] = ImBinding(**_known(ImBinding, x))
         for x in raw.get("sandboxes", []):  # 旧数据没有：缺省为空
             self.sandboxes[x["unit"]] = SandboxRecord(**_known(SandboxRecord, x))
+        self.sandbox_orphans = {str(k): float(v) for k, v in (raw.get("sandbox_orphans") or {}).items()
+                                if isinstance(v, (int, float))}
         self._one_trust_domain()
         self.default_assistants()
         if migrated:

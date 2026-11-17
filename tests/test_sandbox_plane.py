@@ -305,9 +305,7 @@ def test_reconcile_three_cases(tmp_path: Path):
     assert acts["stopped"] == []                              # 刚起的：宽限期内不动
     acts = net.reconcile_sandboxes(now=time.time() + 120)
     assert "seat:orphan/x" in acts["stopped"]                 # 1. 没有记录
-    sb.adopt("seat:orphan/y", generation=1)
-    sb.crash("seat:orphan/y")                                 # 没有记录、已停的（只剩卷）：删掉
-    assert "seat:orphan/y" in net.reconcile_sandboxes()["destroyed"] and sb.status("seat:orphan/y").state == "absent"
+    assert sb.status("seat:orphan/x").state == "stopped"      # 只停，卷保留
 
     net.send_message(chat.id, "@Lead 委托", actor=alice)
     assert started.wait(5)
@@ -320,6 +318,23 @@ def test_reconcile_three_cases(tmp_path: Path):
     net.wait_quiet()
     assert t.status == TaskStatus.FAILED and "TRANSPORT" in (t.error or "")
     assert net.store.sandboxes[unit].desired == "stopped"
+
+
+def test_unknown_volumes_kept_until_retention(tmp_path: Path):
+    """控制面不认识的卷（比如 state.json 从备份恢复、备份之后建的执行单元）：保留期内不删，过期才删；
+    计时从第一次发现算起，记进 state.json，控制面重启后不重新计时。"""
+    net, sb, alice = build(tmp_path, lambda c: "ok", retain_s=100)
+    sb.adopt("seat:lost/x", generation=1, started_at=0)
+    sb.crash("seat:lost/x")                                    # 已停，只剩卷；后端报不出时间
+    t0 = time.time() + 1000
+    assert net.reconcile_sandboxes(now=t0)["destroyed"] == []
+    assert net.store.sandbox_orphans["seat:lost/x"] == t0
+    again = Network(ScriptedRuntime(lambda c: "ok"), tmp_path, seed=False, sandbox=sb, sandbox_limits={"retain_s": 100})
+    assert again.store.sandbox_orphans["seat:lost/x"] == t0      # 重启后计时不丢（启动时的对账也没删）
+    assert sb.status("seat:lost/x").state == "stopped"
+    assert again.reconcile_sandboxes(now=t0 + 50)["destroyed"] == []
+    assert again.reconcile_sandboxes(now=t0 + 150)["destroyed"] == ["seat:lost/x"]
+    assert sb.status("seat:lost/x").state == "absent" and "seat:lost/x" not in again.store.sandbox_orphans
 
 
 def test_idle_stop_and_retention_destroy(tmp_path: Path):

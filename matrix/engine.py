@@ -5645,16 +5645,37 @@ class Network:
         with self._lock:
             recs = dict(self.store.sandboxes)
             running = set(self._running)
+        changed = False
+        retain = float(self.sandbox_limits["retain_s"])
         for unit, st in actual.items():
             rec = recs.get(unit)
-            if st.state == "running" and (rec is None or rec.generation != st.generation or rec.desired != "running") \
+            is_up = st.state == "running"
+            if is_up and (rec is None or rec.generation != st.generation or rec.desired != "running") \
                     and now - st.started_at >= grace_s:
-                self.sandbox.stop(unit) if rec is not None else self.sandbox.destroy(unit)
+                self.sandbox.stop(unit)   # 停掉，卷保留：控制面不认识的也只停不删（state.json 可能是从备份恢复的）
                 acts["stopped"].append(unit)
-            elif st.state != "running" and rec is None:   # 没有执行单元的卷：控制面不认识，删掉（检查点才是准）
-                self.sandbox.destroy(unit)
-                acts["destroyed"].append(unit)
-        changed = False
+                is_up = False
+            if rec is None:
+                # 控制面不认识的卷：过保留期才删。从第一次发现算起（记进 state.json，重启不重新计时），
+                # 后端报得出最近一次起动时间的，从更晚的那个算
+                with self._lock:
+                    first = self.store.sandbox_orphans.setdefault(unit, now)
+                changed = changed or first == now
+                basis = max(first, st.started_at)
+                if not is_up and now - basis > retain:
+                    print(f"[matrix] 删掉 {unit} 的沙箱卷：控制面没有这个执行单元的记录，自 "
+                          f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(basis))} 起"
+                          f"（{'最近一次起动' if basis == st.started_at else '第一次发现'}）已过保留期 {retain / 86400:g} 天",
+                          file=sys.stderr, flush=True)
+                    self.sandbox.destroy(unit)
+                    acts["destroyed"].append(unit)
+                    with self._lock:
+                        self.store.sandbox_orphans.pop(unit, None)
+                    changed = True
+        with self._lock:
+            for unit in [u for u in self.store.sandbox_orphans if u in recs or u not in actual]:
+                self.store.sandbox_orphans.pop(unit)
+                changed = True
         for unit, rec in recs.items():
             st = actual.get(unit)
             up = st is not None and st.state == "running" and st.generation == rec.generation
