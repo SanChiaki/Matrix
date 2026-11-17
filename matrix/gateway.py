@@ -22,6 +22,7 @@ import os
 import secrets
 import socket
 import socketserver
+import ssl
 import threading
 import time
 import urllib.error
@@ -34,6 +35,9 @@ from urllib.parse import urlsplit
 from .web_fetch import FetchError, FetchPolicy, _literal, _resolve, is_public
 
 HEAD_MAX = 64 * 1024
+URL_MAX = 2048                    # 公网读：URL 不超过 2 KB（6.4）
+BUDGET = 64 * 1024                # 每一轮发往非白名单主机的 URL 与请求头累计字节数（6.4）
+READ_METHODS = ("GET", "HEAD")
 BODY_MAX = 32 * 1024 * 1024      # 一次模型请求体的上限
 PUBLIC_PORTS = (80, 443)
 PLACEHOLDER = "__GATEWAY__"       # 下发给沙箱的供应商地址里的占位：沙箱客户端换成它连得到的网关地址
@@ -57,6 +61,9 @@ class Grant:
     key: str = field(default="", repr=False)
     usage: dict[str, int] = field(default_factory=dict)
     requests: int = 0
+    budget: int = BUDGET          # 出网预算还剩多少字节（2b）
+    full_url: bool = False        # 场合里有别人、或会话记过别处来源：公网请求记完整 URL（2b）
+    budget_hit: bool = False
 
 
 # ================= 放行决策（纯函数） =================
@@ -103,6 +110,33 @@ def decide(authority: list[str], host: str, port: int, policy: FetchPolicy | Non
     return "direct", ips
 
 
+def host_kind(host: str, policy: FetchPolicy | None, mirrors: list[str]) -> str:
+    """mirror（部署方配的包镜像源）| allow（fetch.json 的 allow）| public。"""
+    host = host.rstrip(".").lower()
+    if any(host == m or host.endswith("." + m) for m in mirrors):
+        return "mirror"
+    literal = _literal(host)
+    if policy is not None and (policy.named(host) or (literal is not None and policy.listed(literal))):
+        return "allow"
+    return "public"
+
+
+def check_request(kind: str, host: str, method: str, target: str, has_body: bool,
+                  write_hosts: list[str]) -> tuple[bool, str, bool]:
+    """解开 HTTPS 之后，一个请求放不放（6.4 的四级，纯函数）：（放不放, 原因, 算不算出网预算）。
+    主机这一层（权限、地址）已经由 decide 过了；这里按方法分：镜像源与白名单只读；公网读只 GET / HEAD、不带请求体、URL 不超过 2 KB，
+    算预算；公网写（带请求体或别的方法）默认不允许，只到部署方的写白名单。"""
+    host = host.rstrip(".").lower()
+    writable = any(host == w or host.endswith("." + w) for w in write_hosts)
+    write = method.upper() not in READ_METHODS or has_body
+    if write and not writable:
+        return False, (f"{method} {host}：网关只放行只读请求（GET / HEAD、不带请求体）；要调外部系统的接口请走连接器"
+                       if kind == "public" else f"{method} {host}：{'包镜像源' if kind == 'mirror' else '白名单里的地址'}只读"), False
+    if kind == "public" and not writable and len(target) > URL_MAX:
+        return False, f"URL 超过 {URL_MAX} 字节", False
+    return True, "", kind == "public" and not writable
+
+
 def usage_of(event: dict[str, Any]) -> dict[str, int]:
     """一段响应里的用量（OpenAI 的 usage；Anthropic 的 message_start / message_delta），换成 dsh 的口径。"""
     out: dict[str, int] = {}
@@ -135,7 +169,10 @@ def _add(acc: dict[str, int], part: dict[str, int]) -> None:
 # ================= 网关 =================
 class Gateway:
     def __init__(self, core: tuple[str, int], policy: Callable[[], FetchPolicy | None], mirrors: list[str] | None = None,
-                 log_dir: Path | None = None, upstream_proxy: str | None = None):
+                 log_dir: Path | None = None, upstream_proxy: str | None = None, ca: Any = None,
+                 write_hosts: list[str] | None = None, budget: int = BUDGET,
+                 on_budget: Callable[[str], None] | None = None):
+        """ca：出网 CA（egress_ca.EgressCA，2b）；有它时 CONNECT 解开 TLS、按方法与预算逐个请求放行，没有时只按主机放行隧道（2a）。"""
         self.core = core                      # 核心的监听地址：/api/sandbox/connect 转到这里
         self.policy = policy
         self.mirrors = [m.strip().lower().lstrip(".") for m in (mirrors or []) if m.strip()]
@@ -146,6 +183,10 @@ class Gateway:
         self._ips: dict[str, str] = {}        # 执行单元 → 管理器登记的沙箱地址（docker 后端）
         self._lock = threading.Lock()
         self.server: socketserver.ThreadingTCPServer | None = None
+        self.ca = ca
+        self.write_hosts = [w.strip().lower().lstrip(".") for w in (write_hosts or []) if w.strip()]
+        self.budget = budget
+        self.on_budget = on_budget
 
     # ---- 令牌 ----
     @staticmethod
@@ -153,10 +194,11 @@ class Gateway:
         return hashlib.sha256(token.encode()).hexdigest()
 
     def issue(self, unit: str, authority: list[str], provider: str = "", model: str = "", upstream: str = "",
-              api: str = "openai-completions", key: str = "") -> str:
+              api: str = "openai-completions", key: str = "", full_url: bool = False) -> str:
         token = "mgw-" + secrets.token_urlsafe(24)
         with self._lock:
-            self._grants[self._h(token)] = Grant(unit, list(authority), provider, model, upstream.rstrip("/"), api, key)
+            self._grants[self._h(token)] = Grant(unit, list(authority), provider, model, upstream.rstrip("/"), api, key,
+                                                 budget=self.budget, full_url=full_url)
         return token
 
     def close(self, token: str) -> dict[str, int]:
@@ -297,9 +339,91 @@ class Gateway:
             self._log({"unit": g.unit, "method": "CONNECT", "host": host, "port": port, "result": f"error: {e}"})
             return _reply(conn, 502, str(e))
         conn.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        if self.ca is not None:   # 2b：解开 TLS，逐个请求按方法、URL 与预算放行
+            return self._intercept(conn, up, g, host, port)
         sent, got = _splice(conn, up)
         self._log({"unit": g.unit, "method": "CONNECT", "host": host, "port": port, "up": sent, "down": got,
                    "result": "ok"})
+
+    def _allow(self, g: Grant, host: str, method: str, target: str, has_body: bool, head_bytes: int) -> str:
+        """一个请求放不放：返回拒绝的原因，空串表示放行（并扣掉出网预算）。"""
+        kind = host_kind(host, self.policy(), self.mirrors)
+        ok, why, budgeted = check_request(kind, host, method, target, has_body, self.write_hosts)
+        if not ok:
+            return why
+        if budgeted:
+            with self._lock:
+                if g.budget_hit or g.budget - head_bytes < 0:   # 超过一次，这一轮的公网读就停了
+                    first, g.budget_hit = not g.budget_hit, True
+                else:
+                    g.budget -= head_bytes
+                    first = None
+            if first is not None:
+                if first and self.on_budget is not None:
+                    self.on_budget(g.unit)
+                return f"这一轮发往外部主机的请求超过出网预算（{self.budget // 1024} KB），公网读已停"
+        return ""
+
+    def _row(self, g: Grant, host: str, port: int, method: str, target: str, **kw: Any) -> dict[str, Any]:
+        row: dict[str, Any] = {"unit": g.unit, "method": method, "host": host, "port": port, **kw}
+        if g.full_url:   # 场合里有别人、或会话记过别处来源：记完整 URL（6.4 留痕加细）
+            row["url"] = f"https://{host}{target}" if port == 443 else f"https://{host}:{port}{target}"
+        return row
+
+    def _intercept(self, conn: socket.socket, up_raw: socket.socket, g: Grant, host: str, port: int) -> None:
+        """在隧道里终止沙箱的 TLS（出网 CA 现签的证书），一个一个请求核对后再用真的 TLS 转给目标。
+        解不开的（证书固定的客户端、不是 TLS 的协议）这一条连接就断掉。"""
+        try:
+            tls = self.ca.context(host).wrap_socket(conn, server_side=True)
+        except (ssl.SSLError, OSError) as e:
+            self._log({"unit": g.unit, "method": "CONNECT", "host": host, "port": port,
+                       "result": f"denied: 解不开的流量（{type(e).__name__}）"})
+            conn.close()
+            up_raw.close()
+            return
+        up: ssl.SSLSocket | None = None
+        rf = tls.makefile("rb")
+        upf = None
+        try:
+            while True:
+                try:
+                    head = _read_lines(rf)
+                except (OSError, ValueError):
+                    break
+                if head is None:
+                    break
+                line, hdrs = head
+                method, target = (line.split(" ") + ["", ""])[:2]
+                body = _read_body(rf, hdrs)
+                has_body = bool(body) or _hget(hdrs, "transfer-encoding").lower() == "chunked"
+                head_bytes = len(line) + sum(len(k) + len(v) + 4 for k, v in hdrs)
+                why = self._allow(g, host, method, target, has_body, head_bytes)
+                if why:
+                    self._log(self._row(g, host, port, method, target, result=f"denied: {why}"))
+                    _respond(tls, 403, why)
+                    break
+                if up is None:
+                    ctx = ssl.create_default_context()
+                    ctx.set_alpn_protocols(["http/1.1"])
+                    up = ctx.wrap_socket(up_raw, server_hostname=host)
+                    upf = up.makefile("rb")
+                up.sendall((line + "\r\n" + "".join(f"{k}: {v}\r\n" for k, v in hdrs) + "\r\n").encode("latin-1") + body)
+                status_line, rh = _read_lines(upf) or ("", [])
+                tls.sendall((status_line + "\r\n" + "".join(f"{k}: {v}\r\n" for k, v in rh) + "\r\n").encode("latin-1"))
+                code = int(status_line.split(" ")[1]) if len(status_line.split(" ")) > 1 else 0
+                down, closing = _relay_body(upf, tls, rh, method, code)
+                self._log(self._row(g, host, port, method, target, status=code, up=len(body), down=down, result="ok"))
+                if closing or _hget(hdrs, "connection").lower() == "close":
+                    break
+        except (OSError, ValueError, ssl.SSLError):
+            pass
+        finally:
+            for x in (tls, up, up_raw):
+                try:
+                    if x is not None:
+                        x.close()
+                except OSError:
+                    pass
 
     def _plain(self, conn: socket.socket, peer: str, method: str, target: str, headers: dict[str, str],
                lines: list[str], rest: bytes) -> None:
@@ -311,6 +435,13 @@ class Gateway:
         except Denied as e:
             self._log({"unit": g.unit, "method": method, "host": host, "port": port, "result": f"denied: {e}"})
             raise
+        if self.ca is not None:   # 2b：明文 HTTP 同样按方法、URL 与预算放行
+            hdr_bytes = sum(len(x) + 2 for x in lines)
+            why = self._allow(g, host, method, target, bool(rest) or "content-length" in headers
+                              or headers.get("transfer-encoding", "").lower() == "chunked", hdr_bytes)
+            if why:
+                self._log({"unit": g.unit, "method": method, "host": host, "port": port, "result": f"denied: {why}"})
+                raise Denied(why)
         try:
             up = self._open(route, host, port, tunnel=False)
         except OSError as e:
@@ -405,6 +536,101 @@ class Gateway:
             _add(g.usage, acc)
         self._log({"unit": g.unit, "method": "LLM", "host": g.provider, "model": g.model, "status": status,
                    "usage": acc, "result": "ok"})
+
+
+def _hget(hdrs: list[tuple[str, str]], name: str) -> str:
+    return next((v for k, v in hdrs if k.lower() == name), "")
+
+
+def _read_lines(f: Any) -> tuple[str, list[tuple[str, str]]] | None:
+    """读一个 HTTP 头：（起始行, [(名, 值)]）；连接关了返回 None。"""
+    first = f.readline(HEAD_MAX)
+    if not first:
+        return None
+    line = first.decode("latin-1").rstrip("\r\n")
+    hdrs: list[tuple[str, str]] = []
+    total = len(first)
+    while True:
+        raw = f.readline(HEAD_MAX)
+        total += len(raw)
+        if total > HEAD_MAX:
+            raise ValueError("请求头太大")
+        if raw in (b"\r\n", b"\n", b""):
+            break
+        k, _, v = raw.decode("latin-1").partition(":")
+        hdrs.append((k.strip(), v.strip()))
+    return line, hdrs
+
+
+def _read_body(f: Any, hdrs: list[tuple[str, str]]) -> bytes:
+    """请求体：按 Content-Length，或原样读完 chunked（含结尾），有上限。"""
+    if _hget(hdrs, "transfer-encoding").lower() == "chunked":
+        out = b""
+        while True:
+            size_line = f.readline(1024)
+            out += size_line
+            n = int(size_line.split(b";")[0].strip() or b"0", 16)
+            if n == 0:
+                while True:
+                    t = f.readline(HEAD_MAX)
+                    out += t
+                    if t in (b"\r\n", b"\n", b""):
+                        return out
+            out += f.read(n + 2)
+            if len(out) > BODY_MAX:
+                raise ValueError("请求体太大")
+    n = int(_hget(hdrs, "content-length") or 0)
+    if n > BODY_MAX:
+        raise ValueError("请求体太大")
+    return f.read(n) if n > 0 else b""
+
+
+def _relay_body(f: Any, out: Any, hdrs: list[tuple[str, str]], method: str, code: int) -> tuple[int, bool]:
+    """把响应体原样转回去：（字节数, 之后要不要断开）。"""
+    if method == "HEAD" or code in (204, 304) or 100 <= code < 200:
+        return 0, False
+    total = 0
+    if _hget(hdrs, "transfer-encoding").lower() == "chunked":
+        while True:
+            size_line = f.readline(1024)
+            if not size_line:
+                return total, True
+            out.sendall(size_line)
+            n = int(size_line.split(b";")[0].strip() or b"0", 16)
+            if n == 0:
+                while True:
+                    t = f.readline(HEAD_MAX)
+                    out.sendall(t)
+                    if t in (b"\r\n", b"\n", b""):
+                        return total, False
+            data = f.read(n + 2)
+            out.sendall(data)
+            total += n
+    if _hget(hdrs, "content-length"):
+        left = int(_hget(hdrs, "content-length"))
+        while left > 0:
+            data = f.read(min(65536, left))
+            if not data:
+                return total, True
+            out.sendall(data)
+            total += len(data)
+            left -= len(data)
+        return total, _hget(hdrs, "connection").lower() == "close"
+    while True:                                   # 读到关闭为止
+        data = f.read1(65536) if hasattr(f, "read1") else f.read(65536)
+        if not data:
+            return total, True
+        out.sendall(data)
+        total += len(data)
+
+
+def _respond(out: Any, code: int, text: str) -> None:
+    body = text.encode()
+    try:
+        out.sendall(f"HTTP/1.1 {code} Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\n"
+                    f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+    except OSError:
+        pass
 
 
 def _read_head(conn: socket.socket) -> tuple[bytes, bytes]:

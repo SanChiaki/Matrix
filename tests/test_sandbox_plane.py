@@ -531,8 +531,12 @@ def test_gateway_keeps_model_keys_out_of_the_sandbox(tmp_path: Path):
     assert req["llm_provider"]["config"]["baseURL"] == "http://__GATEWAY__/llm/p1"
     tok = req["gateway_token"]
     assert tok.startswith("mgw-") and set(req["env"].values()) == {tok}
+    assert "BEGIN CERTIFICATE" in req["gateway_ca"] and "PRIVATE KEY" not in _json.dumps(req)   # 2b：只给 CA 证书
     rows = [_json.loads(x) for x in (tmp_path / "usage.jsonl").read_text(encoding="utf-8").splitlines()]
     assert rows[-1].get("usage_source") == "gateway"
+    net._gateway_budget(f"seat:{conv2.id}/{b.id}")       # 出网预算用完：告诉所有者
+    note = [m for m in conv2.messages if m.role == "system"][-1]
+    assert "出网预算" in note.text and note.audience == [alice]
     out = __import__("socket").create_connection(net.gateway_address, timeout=5)   # 这一轮结束：令牌作废
     out.sendall(f"POST /llm/p1/chat/completions HTTP/1.1\r\nAuthorization: Bearer {tok}\r\nContent-Length: 2\r\n\r\n{{}}".encode())
     assert b" 403 " in out.recv(4096).split(b"\r\n")[0]

@@ -112,7 +112,8 @@ class SandboxConnector(Connector):
         self.send(reply)
 
     def _spec_extra(self, msg: dict[str, Any]) -> dict[str, Any]:
-        cloud = {k: msg[k] for k in ("llm_provider", "env", "fetch", "cloud_connectors", "gateway_token") if k in msg}
+        cloud = {k: msg[k] for k in ("llm_provider", "env", "fetch", "cloud_connectors", "gateway_token", "gateway_ca")
+                 if k in msg}
         if self.gateway:
             cloud["gateway"] = self.gateway
         return {"cloud": cloud}

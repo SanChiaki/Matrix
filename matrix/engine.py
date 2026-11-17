@@ -55,7 +55,8 @@ from .auth import Pairings
 from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .checkpoints import (BLOB_MAX, SHA_RE, CheckpointStore, ContentStore, Uploads, pack_session, unit_rel)
-from .gateway import PLACEHOLDER as GATEWAY_PLACEHOLDER, Gateway
+from .egress_ca import EgressCA
+from .gateway import BUDGET, PLACEHOLDER as GATEWAY_PLACEHOLDER, Gateway
 from urllib.parse import urlsplit
 from .sandboxes import (CONNECT_TIMEOUT_S, SandboxError, SandboxHost, SandboxHub, SandboxProvider, SandboxRuntime,
                         SandboxSpec, sandbox_config)
@@ -5311,9 +5312,14 @@ class Network:
             host, _, port = str(conf.get("gateway_listen") or "127.0.0.1:0").rpartition(":")
             core = urlsplit(self.tool_url)
             ch, _, cp = str(conf.get("gateway_core") or f"{core.hostname or '127.0.0.1'}:{core.port or 80}").rpartition(":")
+            tls = str(conf.get("gateway_tls") or "on").lower() not in ("off", "0", "false", "no")
             self.gateway = Gateway((ch, int(cp)), self.fetch.policy,
                                    [m for m in str(conf.get("gateway_mirrors") or "").split(",") if m.strip()],
-                                   log_dir=self.store.root / "gateway")
+                                   log_dir=self.store.root / "gateway",
+                                   # 2b：解开沙箱的 HTTPS，按方法、URL 与出网预算逐个请求放行（MATRIX_GATEWAY_TLS=off 退回 2a 的按主机隧道）
+                                   ca=EgressCA(self.store.root / "gateway" / "ca") if tls else None,
+                                   write_hosts=[w for w in str(conf.get("gateway_write_hosts") or "").split(",") if w.strip()],
+                                   budget=int(conf.get("gateway_budget") or BUDGET), on_budget=self._gateway_budget)
             self.gateway_address = self.gateway.start(host or "127.0.0.1", int(port))
         if self.gateway_address is not None:  # 沙箱客户端连网关（网关只把这一个端点转给核心）
             url = f"ws://{self.gateway_address[0]}:{self.gateway_address[1]}/api/sandbox/connect"
@@ -5608,11 +5614,32 @@ class Network:
             raise SandboxError("PROVIDER: 沙箱方式下只支持平台配置的模型供应商（管理后台“模型”页，密钥由网络保管、经出口网关使用）；"
                                "这个 Agent 用的是 dsh 自带的供应商，请部署方在后台把它配成平台供应商并让 Agent 选它")
         key = self.vault.get(_provider_vault(prov.id)).get("api_key") or ""
-        token = self.gateway.issue(unit, list(ctx.authority), prov.id, model, prov.base_url, prov.api, key)
+        with self._lock:   # 场合里有别人、或会话记过别处来源：公网请求记完整 URL（6.4 留痕加细）
+            full_url = bool(ctx.sources) or (agent is not None and self._others(ctx, agent))
+        token = self.gateway.issue(unit, list(ctx.authority), prov.id, model, prov.base_url, prov.api, key, full_url)
         ctx.gateway_token = token
         cfg = json.loads(json.dumps(llm_provider["config"]))
         cfg["baseURL"] = f"http://{GATEWAY_PLACEHOLDER}/llm/{prov.id}"
-        return {"llm_provider": {"id": prov.id, "config": cfg}, "env": {prov.key_env: token}, "gateway_token": token}
+        out = {"llm_provider": {"id": prov.id, "config": cfg}, "env": {prov.key_env: token}, "gateway_token": token}
+        if self.gateway.ca is not None:   # 沙箱信任出网 CA（只有证书；私钥只在控制面）
+            out["gateway_ca"] = self.gateway.ca.pem
+        return out
+
+    def _gateway_budget(self, unit: str) -> None:
+        """这一轮的出网预算用完了：公网读已停，告诉 Agent 的所有者（6.4）。"""
+        kind, _, cid = unit.partition(":")
+        with self._lock:
+            holder = self._holder(kind, cid)
+            agent_id = holder.agent_id if isinstance(holder, Seat) else (holder.delegatee_id if holder else None)
+            agent = self.store.agents.get(agent_id or "")
+            conv_id = cid.partition("/")[0] if kind == "seat" else (holder.conversation_id if holder else "")
+            conv = self.store.conversations.get(conv_id)
+        if agent is None or conv is None:
+            return
+        self.bus.emit("gateway.budget", agent_id=agent.id, context_id=cid)
+        self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, audience=[agent.owner_id] if agent.owner_id else [],
+                                   text=f"{agent.name} 这一轮发往外部网站的请求超过了出网预算，这一轮的公网读已停（防止把内容成批带出去）。"
+                                        "下一轮重新计算；常用的站点可以请部署方加进白名单。"))
 
     def _sandbox_collect(self, unit: str, ctx: ExecContext, extra: dict[str, Any]) -> None:
         """轮次结束客户端报来的：校验后进检查点；私有目录的改动先落进暂存副本（_run 结束时三方合并写回）。

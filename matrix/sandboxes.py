@@ -666,7 +666,10 @@ def sandbox_config(env: dict[str, str] | None = None) -> dict[str, Any]:
             "idle_s": num("SANDBOX_IDLE", 600), "retain_s": num("SANDBOX_RETAIN", 7 * 86400),
             "checkpoint_limit": int(num("CHECKPOINT_LIMIT", 1_000_000_000)), "root": get("SANDBOX_ROOT") or "",
             # 出口网关（阶段 2a）：监听在哪（docker 后端要是沙箱网络能到的地址）、包镜像源（逗号分隔的主机，有 shell.exec 时放行）
-            "gateway_listen": get("GATEWAY_LISTEN") or "", "gateway_mirrors": get("GATEWAY_MIRRORS") or ""}
+            "gateway_listen": get("GATEWAY_LISTEN") or "", "gateway_mirrors": get("GATEWAY_MIRRORS") or "",
+            # 2b：解开 HTTPS（默认开）、公网写白名单（逗号分隔的主机）、每轮出网预算（字节）
+            "gateway_tls": get("GATEWAY_TLS") or "on", "gateway_write_hosts": get("GATEWAY_WRITE_HOSTS") or "",
+            "gateway_budget": int(num("GATEWAY_BUDGET", 64 * 1024))}
 
 
 def default_max() -> int:

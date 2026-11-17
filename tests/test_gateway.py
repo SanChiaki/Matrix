@@ -178,3 +178,101 @@ def test_sandbox_connect_is_spliced_to_core(tmp_path):
     assert out.startswith(b"HTTP/1.1 101") and out.endswith(b"hello")
     g.stop()
     core.close()
+
+
+# ================= 2b：解开 HTTPS，按方法、URL 与预算放行 =================
+from matrix.gateway import check_request, host_kind  # noqa: E402
+
+
+def test_check_request_tiers():
+    """6.4 的四级：镜像源与白名单只读；公网读只 GET / HEAD、不带请求体、URL ≤ 2 KB，算预算；公网写只到写白名单。"""
+    W = ["api.partner.example"]
+    assert check_request("public", "example.com", "GET", "/a", False, W) == (True, "", True)
+    assert check_request("public", "example.com", "HEAD", "/a", False, W)[0]
+    assert not check_request("public", "example.com", "POST", "/a", True, W)[0]
+    assert not check_request("public", "example.com", "GET", "/a", True, W)[0]        # GET 带请求体也算写
+    assert not check_request("public", "example.com", "PUT", "/a", False, W)[0]
+    assert "2048" in check_request("public", "example.com", "GET", "/" + "x" * 2100, False, W)[1]
+    assert check_request("public", "api.partner.example", "POST", "/a", True, W) == (True, "", False)  # 写白名单不算预算
+    assert check_request("mirror", "pypi.org", "GET", "/simple/x/", False, W) == (True, "", False)
+    assert "只读" in check_request("mirror", "pypi.org", "POST", "/", True, W)[1]
+    assert "只读" in check_request("allow", "wiki.corp", "DELETE", "/", False, W)[1]
+    pol = parse_policy({"allow": ["wiki.corp"]})
+    assert [host_kind(h, pol, ["pypi.org"]) for h in ("files.pypi.org", "wiki.corp", "example.com")] == \
+        ["mirror", "allow", "public"]
+
+
+def test_budget_stops_public_reads_and_notifies_once(tmp_path):
+    hit: list[str] = []
+    g = Gateway(("127.0.0.1", 9), lambda: None, [], upstream_proxy="", budget=100, on_budget=hit.append)
+    tok = g.issue("seat:c/a", ["web.research"])
+    grant = g._grants[g._h(tok)]
+    assert g._allow(grant, "example.com", "GET", "/a", False, 60) == ""
+    assert "出网预算" in g._allow(grant, "example.com", "GET", "/b", False, 60)
+    assert "出网预算" in g._allow(grant, "example.com", "GET", "/c", False, 10)
+    assert hit == ["seat:c/a"]                                                       # 只通知一次
+    g2 = Gateway(("127.0.0.1", 9), lambda: None, ["pypi.org"], upstream_proxy="", budget=10)
+    t2 = g2.issue("seat:c/b", ["shell.exec"])
+    assert g2._allow(g2._grants[g2._h(t2)], "pypi.org", "GET", "/x", False, 1000) == ""  # 镜像源不算预算
+
+
+def test_tls_is_terminated_with_per_host_certs(tmp_path, monkeypatch):
+    """CONNECT 之后网关用出网 CA 现签的证书终止沙箱的 TLS，逐个请求核对：白名单里的地址 GET 放行、POST 拒绝；
+    转给目标时用真的 TLS 并校验目标证书。"""
+    import ssl as _ssl
+    from http.server import HTTPServer
+    from matrix.egress_ca import EgressCA
+    for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    upstream_ca = EgressCA(tmp_path / "up-ca")
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):  # noqa: N802
+            body = f"hello {self.path}".encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    srv.socket = upstream_ca.context("127.0.0.1").wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    trust = _ssl.create_default_context(cafile=str(tmp_path / "up-ca" / "ca.crt"))
+    monkeypatch.setattr("matrix.gateway.ssl.create_default_context", lambda *a, **k: trust)
+
+    ca = EgressCA(tmp_path / "egress-ca")
+    assert oct((tmp_path / "egress-ca" / "ca.key").stat().st_mode & 0o777) == "0o600"
+    g = Gateway(("127.0.0.1", 9), lambda: parse_policy({"allow": ["127.0.0.1/32"]}), [], upstream_proxy="", ca=ca,
+                log_dir=tmp_path / "gw")
+    addr = g.start("127.0.0.1", 0)
+    tok = g.issue("seat:c/a", ["web.research"])
+    auth = base64.b64encode(f"sbx:{tok}".encode()).decode()
+
+    def through(method: str) -> bytes:
+        s = socket.create_connection(addr, timeout=10)
+        s.sendall(f"CONNECT 127.0.0.1:{port} HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode())
+        assert b" 200 " in s.recv(4096)
+        client = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        client.load_verify_locations(str(tmp_path / "egress-ca" / "ca.crt"))
+        t = client.wrap_socket(s, server_hostname="127.0.0.1")
+        body = b"x=1" if method == "POST" else b""
+        t.sendall(f"{method} /p HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                  + body)
+        out = b""
+        while chunk := t.recv(65536):
+            out += chunk
+        t.close()
+        return out
+    got = through("GET")
+    assert got.startswith(b"HTTP/1.1 200") and got.endswith(b"hello /p")
+    denied = through("POST")
+    assert denied.startswith(b"HTTP/1.1 403") and "只读" in denied.decode()
+    rows = [json.loads(x) for x in (tmp_path / "gw" / "egress.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [(r["method"], r["result"][:6]) for r in rows] == [("GET", "ok"), ("POST", "denied")]
+    g.stop()
+    srv.shutdown()

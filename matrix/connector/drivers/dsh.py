@@ -117,6 +117,9 @@ class DshDriver:
             env.update(HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
                        NO_PROXY=f"{host},127.0.0.1,localhost", no_proxy=f"{host},127.0.0.1,localhost",
                        NODE_USE_ENV_PROXY="1")  # 本机小桥（网络工具、提问）在沙箱里的 127.0.0.1，不经代理
+            ca = cloud.get("gateway_ca")
+            if isinstance(ca, str) and "BEGIN CERTIFICATE" in ca and self.state_dir is not None:
+                env.update(trust_env(self.state_dir, ca))
         req = RunRequest(agent_id=spec.agent_id, context_id=spec.context_id, prompt=spec.prompt,
                          cwd=Path(spec.workdir), authority=list(spec.authority), session_id=spec.session_id,
                          tools=tools, on_event=ctx.emit, timeout_s=spec.timeout_s, model=spec.model, cancel=cancel,
@@ -126,3 +129,21 @@ class DshDriver:
         res = self._runtime.run(req)
         return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,
                           usage=res.usage, ok=res.ok, error=res.error)
+
+
+SYSTEM_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem")
+
+
+def trust_env(state: Path, ca_pem: str) -> dict[str, str]:
+    """沙箱信任出网 CA（2b，网关解开 HTTPS）：系统证书库 + 出网 CA 合成一个包，交给各家工具认的环境变量
+    （Python / requests / pip / uv、curl、git 认 SSL_CERT_FILE 一类；Node 与 npm 认 NODE_EXTRA_CA_CERTS）。"""
+    d = state / ".matrix"
+    d.mkdir(parents=True, exist_ok=True)
+    ca = d / "egress-ca.pem"
+    ca.write_text(ca_pem, encoding="utf-8")
+    system = next((Path(p).read_text(encoding="utf-8", errors="replace") for p in SYSTEM_BUNDLES if Path(p).is_file()), "")
+    bundle = d / "ca-bundle.pem"
+    bundle.write_text(system.rstrip() + "\n" + ca_pem, encoding="utf-8")
+    b = str(bundle)
+    return {"SSL_CERT_FILE": b, "REQUESTS_CA_BUNDLE": b, "CURL_CA_BUNDLE": b, "GIT_SSL_CAINFO": b, "PIP_CERT": b,
+            "NODE_EXTRA_CA_CERTS": str(ca)}
