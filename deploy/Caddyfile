@@ -7,8 +7,9 @@
 	default_sni {$MATRIX_SITE}
 }
 
-# 可选：在 Matrix 自己的登录（会话过期、CSRF 防护、限流，docs/reference/security.md）前面再加一层 basic auth。
-# 片段只在被 import 时才解析：MATRIX_BASIC_AUTH=off（默认）时不需要 MATRIX_BASIC_HASH。
+# 在 Matrix 自己的登录前面再加一层 basic auth（默认开）。Matrix 自己的登录已经有会话过期、限流、CSRF 防护
+# （docs/reference/security.md），部署方确认之后可以显式写 MATRIX_BASIC_AUTH=off。
+# 片段只在被 import 时才解析：off 时不需要 MATRIX_BASIC_HASH。
 (basic-auth-on) {
 	basic_auth {
 		{$MATRIX_BASIC_USER:matrix} {$MATRIX_BASIC_HASH}
@@ -24,7 +25,7 @@
 	}
 
 	# 按 MATRIX_BASIC_AUTH 选上面的片段；写错（不是 on / off）时 Caddy 起不来，不会悄悄放开
-	import basic-auth-{$MATRIX_BASIC_AUTH:off}
+	import basic-auth-{$MATRIX_BASIC_AUTH:on}
 
 	# /internal/* 只给容器里的 dsh / MCP 回调用（走 127.0.0.1），不对外
 	@internal path /internal/*

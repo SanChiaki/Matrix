@@ -1,4 +1,4 @@
-# Matrix 部署：matrix（应用，只在内部网络里监听）+ caddy（唯一对外入口：HTTPS，可选 basic auth）。
+# Matrix 部署：matrix（应用，只在内部网络里监听）+ caddy（唯一对外入口：HTTPS + basic auth，basic auth 可显式关掉）。
 # 用法见 deploy/README.md。机密（basic auth 哈希、模型凭据）都在 deploy/.env 或卷里，不进仓库。
 name: matrix
 
@@ -24,8 +24,9 @@ services:
     environment:
       # 对外是 Caddy 的 HTTPS：cookie 加 Secure、跨站检查认这个来源（docs/reference/security.md）；.env 里写了 MATRIX_PUBLIC_URL 就用它
       MATRIX_PUBLIC_URL: ${MATRIX_PUBLIC_URL:-https://${MATRIX_SITE:-localhost}}
-      # 认 Caddy 转来的 X-Forwarded-For / -Proto（uvicorn 的设置）：Matrix 的端口只有内部网络里的 Caddy 连得到
-      FORWARDED_ALLOW_IPS: "*"
+      # 只认 Caddy 转来的 X-Forwarded-For / -Proto（uvicorn 的设置）：Caddy 在内部网络上的地址是固定的（下面 caddy 的 ipv4_address），
+      # 别的来源（含沙箱方式下核心里的出口网关转来的连接）带这两个头也不认。改了 MATRIX_CADDY_IP 这里跟着变
+      FORWARDED_ALLOW_IPS: ${MATRIX_FORWARDED_ALLOW_IPS:-${MATRIX_CADDY_IP:-172.30.77.10}}
     expose:
       - "8765"                       # 不发布到宿主机：只有 caddy 能访问
     # dsh 在 Linux 上用 bwrap 沙箱（bwrap 起不来时 dsh 退到更弱的方式、照样执行，所以这两项不能去掉）。bwrap 在容器里要建 user/pid 命名空间、
@@ -46,14 +47,16 @@ services:
     environment:
       MATRIX_SITE: ${MATRIX_SITE:?在 deploy/.env 里设置 MATRIX_SITE（服务器 IP 或域名）}
       MATRIX_TLS_ISSUER: ${MATRIX_TLS_ISSUER:-internal}   # acme = Let's Encrypt（MATRIX_SITE 须是域名）
-      MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-off}   # on = 在 Matrix 的登录前面再加一层 basic auth（可选）
+      MATRIX_BASIC_AUTH: ${MATRIX_BASIC_AUTH:-on}   # 默认开；确认 Matrix 自己的登录够用后可以显式写 off（见 README）
       MATRIX_BASIC_USER: ${MATRIX_BASIC_USER:-matrix}
       MATRIX_BASIC_HASH: ${MATRIX_BASIC_HASH:-}   # caddy hash-password 生成；basic auth 开着时必填，关掉时不用
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
-    networks: [internal]
+    networks:
+      internal:
+        ipv4_address: ${MATRIX_CADDY_IP:-172.30.77.10}   # 固定：Matrix 只认这个地址转来的来源地址与协议
 
 volumes:
   matrix-data:
@@ -63,3 +66,8 @@ volumes:
 
 networks:
   internal:
+    # 固定子网：Caddy 用一个固定地址，别的容器从 ip_range 里分（不会抢到 Caddy 的地址）。和宿主已有的网段冲突时在 .env 里改这三项
+    ipam:
+      config:
+        - subnet: ${MATRIX_INTERNAL_SUBNET:-172.30.77.0/24}
+          ip_range: ${MATRIX_INTERNAL_RANGE:-172.30.77.128/25}

@@ -466,12 +466,14 @@ class Gateway:
         self._log({"unit": g.unit, "method": method, "host": host, "port": port, "up": sent, "down": got, "result": "ok"})
 
     def _to_core(self, conn: socket.socket, head: bytes, rest: bytes) -> None:
-        """沙箱客户端的长连接：原样转给核心的 /api/sandbox/connect（身份由启动令牌 / 执行单元凭证认定）。"""
+        """沙箱客户端的长连接：转给核心的 /api/sandbox/connect（身份由启动令牌 / 执行单元凭证认定）。
+        去掉沙箱带来的转发头（X-Forwarded-*、Forwarded、X-Real-IP）：核心本来就不认这个来源转来的（FORWARDED_ALLOW_IPS 只有反向代理），
+        这里再挡一层，免得部署方把 FORWARDED_ALLOW_IPS 设宽了以后沙箱能冒充来源地址或 https。"""
         try:
             up = socket.create_connection(self.core, timeout=30)
         except OSError as e:
             return _reply(conn, 502, f"连不上核心：{e}")
-        up.sendall(head + rest)
+        up.sendall(strip_forwarding(head) + rest)
         conn.settimeout(None)
         up.settimeout(None)
         _splice(conn, up)
@@ -679,6 +681,17 @@ def _reply(conn: socket.socket, code: int, text: str, extra: dict[str, str] | No
         pass
     finally:
         conn.close()
+
+
+FORWARDING = ("x-forwarded-", "forwarded", "x-real-ip")
+
+
+def strip_forwarding(head: bytes) -> bytes:
+    """请求头里去掉转发类的头（大小写不敏感），其余原样。head 是到空行为止的请求头（含结尾的空行）。"""
+    lines = head.split(b"\r\n")
+    keep = [ln for i, ln in enumerate(lines)
+            if i == 0 or not ln.split(b":", 1)[0].strip().lower().decode("latin-1").startswith(FORWARDING)]
+    return b"\r\n".join(keep)
 
 
 def _splice(a: socket.socket, b: socket.socket) -> tuple[int, int]:
