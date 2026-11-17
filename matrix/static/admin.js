@@ -41,9 +41,14 @@ const shortDay = (day) => day.slice(5).replace("-", "/");
 const runtimeName = (r) => r.where === "device"
   ? `端侧 · ${S.info?.harnesses?.[r.runtime] || r.runtime || "未知"}` : `云侧 · ${r.runtime || "默认"}`;
 
+// 跨站防护（matrix/web_guard.py）：改状态的请求带上 CSRF cookie 里的令牌（双提交）
+const csrfToken = () => decodeURIComponent((document.cookie.match(/(?:^|;\s*)matrix_csrf=([^;]*)/) || [])[1] || "");
+const withCsrf = (opts) => (["GET", "HEAD"].includes((opts.method || "GET").toUpperCase()) ? opts
+  : { ...opts, headers: { ...(opts.headers || {}), "X-Matrix-CSRF": csrfToken() } });
+
 async function api(path, opts = {}) {
   if (opts.body) opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
-  const r = await fetch(path, { ...opts, signal: AbortSignal.timeout(30000) });
+  const r = await fetch(path, withCsrf({ ...opts, signal: AbortSignal.timeout(30000) }));
   const data = await r.json().catch(() => ({}));
   const detail = Array.isArray(data.detail) ? data.detail.map((x) => x.msg).join("；") : data.detail;
   if (!r.ok) throw Object.assign(new Error(detail || `HTTP ${r.status}`), { status: r.status });
@@ -589,7 +594,7 @@ function bindPlugins() {
     const file = await pickZip();
     if (!file) return;
     try {
-      const r = await fetch("/api/admin/blueprints", { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      const r = await fetch("/api/admin/blueprints", withCsrf({ method: "POST", body: file, headers: { "Content-Type": "application/zip" } }));
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
       loadBlueprints();
@@ -605,7 +610,7 @@ function bindPlugins() {
     const file = await pickZip();
     if (!file) return;
     try {
-      const r = await fetch("/api/admin/plugins/catalog/upload", { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      const r = await fetch("/api/admin/plugins/catalog/upload", withCsrf({ method: "POST", body: file, headers: { "Content-Type": "application/zip" } }));
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
       P.data = data;

@@ -28,6 +28,7 @@ import uvicorn
 from pydantic import BaseModel, Field, model_validator
 
 from . import auth, compat
+from .web_guard import CsrfGuard, secure_cookies
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .sandboxes import hello_message as sandbox_hello, provider_named, sandbox_config
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
@@ -645,6 +646,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         network.services.stop_all()  # 插件服务进程随服务一起退出（不变量 24）
 
     app = FastAPI(title="Matrix", lifespan=lifespan)
+    app.add_middleware(CsrfGuard)  # 改状态的请求：同站来源 + 双提交的 CSRF 令牌（web_guard.py，C0）
     app.mount("/static", NoCacheStaticFiles(directory=STATIC), name="static")
     store = network.store
 
@@ -662,8 +664,9 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     app.state.network = network
     app.state.im = im
 
-    def set_cookie(resp: Response, token: str) -> None:
-        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=int(auth.session_limits()[1]), path="/")
+    def set_cookie(resp: Response, token: str, request: Request) -> None:
+        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=int(auth.session_limits()[1]), path="/",
+                        secure=secure_cookies(request.url.scheme))
 
     @app.get("/")
     def index() -> FileResponse:
@@ -690,7 +693,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.post("/api/auth/register")
     def register(body: CredentialsIn, request: Request, response: Response) -> dict:
         user, token, first = auth.register(store, body.email, body.password, session_meta(request))
-        set_cookie(response, token)
+        set_cookie(response, token, request)
         claimed = first and bool(store.agents)
         network.ensure_assistant(user.id)  # 注册即有助理（认领了旧数据、已有 Agent 的不补建）
         return {**store.users[user.id].public(), "claimed_existing": claimed}
@@ -698,7 +701,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.post("/api/auth/login")
     def login(body: CredentialsIn, request: Request, response: Response) -> dict:
         user, token = auth.login(store, body.email, body.password, session_meta(request), request.cookies.get(auth.COOKIE))
-        set_cookie(response, token)
+        set_cookie(response, token, request)
         return user.public()
 
     # 重置密码：令牌在链接的 # 后面（不进服务器日志与 Referer），页面用 POST 交上来
@@ -709,19 +712,20 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.post("/api/auth/reset")
     def reset(body: ResetIn, request: Request, response: Response) -> dict:
         user, token = auth.reset_password(store, body.token, body.password, session_meta(request))
-        set_cookie(response, token)
+        set_cookie(response, token, request)
         return user.public()
 
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response) -> dict:
         auth.logout(store, request.cookies.get(auth.COOKIE))
-        response.delete_cookie(auth.COOKIE, path="/")
+        response.delete_cookie(auth.COOKIE, path="/", secure=secure_cookies(request.url.scheme), httponly=True,
+                               samesite="lax")
         return {"ok": True}
 
     # 改密码：换新令牌，其余会话全部作废（control-plane.md 第 8 节）
     @app.post("/api/auth/password")
     def change_password(body: PasswordIn, request: Request, response: Response, user: Me) -> dict:
-        set_cookie(response, auth.change_password(store, user.id, body.old, body.new, session_meta(request)))
+        set_cookie(response, auth.change_password(store, user.id, body.old, body.new, session_meta(request)), request)
         return {"ok": True}
 
     # 我的会话：列出自己的登录（不显示令牌），逐个下线或一键下线其他所有

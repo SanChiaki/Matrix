@@ -36,10 +36,16 @@ const MOD_KEY = IS_MAC ? "⌘" : "Ctrl";
 const SEND_HINT = `<kbd>${MOD_KEY}</kbd> <kbd>Enter</kbd> 发送`;
 const httpError = (message, status) => Object.assign(new Error(message), { status });
 
+// 跨站防护（matrix/web_guard.py）：改状态的请求带上 CSRF cookie 里的令牌（双提交）。插件页面经 postMessage 让这里转发，同样带上
+const csrfToken = () => decodeURIComponent((document.cookie.match(/(?:^|;\s*)matrix_csrf=([^;]*)/) || [])[1] || "");
+const withCsrf = (opts) => (["GET", "HEAD"].includes((opts.method || "GET").toUpperCase()) ? opts
+  : { ...opts, headers: { ...(opts.headers || {}), "X-Matrix-CSRF": csrfToken() } });
+
 async function api(path, opts = {}) {
   if (opts.body && typeof opts.body !== "string" && !(opts.body instanceof Blob)) {  // 文件（附件上传）原样发送
     opts = { ...opts, body: JSON.stringify(opts.body), headers: { "Content-Type": "application/json" } };
   }
+  opts = withCsrf(opts);
   let r;
   try {
     r = await fetch(path, { ...opts, signal: AbortSignal.timeout(opts.timeoutMs || API_TIMEOUT_MS) });
