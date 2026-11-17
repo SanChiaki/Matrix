@@ -263,6 +263,8 @@ Matrix 用的是别人的 harness，读不懂它的会话，所以整份当块�
   超了这一轮的公网读即停，并通知所有者。
 - **留痕加细**：场合里有别人、或会话记过别处来源的执行单元，公网请求记完整 URL（平时只记主机）。事后查得到带出去了什么。
 
+**已定（2026-11-17）**：预算默认 64 KB、超了停这一轮的全部公网读，部署方用 `MATRIX_GATEWAY_BUDGET` 调；包镜像源维持现状——没有内置清单，部署方用 `MATRIX_GATEWAY_MIRRORS` 增减（逗号分隔的主机）。
+
 接受的风险：有 `web.research` 的 Agent 仍能经 URL 带出少量内容。范围：预算以内；复查时机：出现第一起经此途径的外泄，或要服务对外泄零容忍的客户时
 （那时把有别人的场合的公网读改成只到白名单）。
 
@@ -428,6 +430,7 @@ class SandboxProvider(Protocol):
 执行单元照常）与 `isolation` 里的内层 bwrap 核对（这两项 2026-11-17 起由假模型驱动：真模型常把探针当攻击拒绝执行，结果时好时坏）；工具包 `t8` 在本机按同样的方式跑过（早先几遍偶有一项报 `TRANSPORT device disconnected`，查明是同一个 Docker 上另一套控制面的对账删了沙箱，加了部署名后不再出现）；
 compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API 跑通两轮真实对话（续接记得编号、产物进检查点），Matrix 容器里没有 docker.sock、
 经 socket 发带镜像 / 挂载 / 特权的请求都被拒。**`runsc` 档没在本机验证**，要在装了 gVisor 的机器上跑工具包的 `t8`。
+**2026-11-17 补：** 在一台装了 gVisor 的 2 核 1.8 GB 机器上跑了工具包的轻量模式 `t8lite`，`runsc` 档 21 项全过（第 11 节）；gVisor 下的配额（`resource-limit`）还没验证，要在 4 GB 以上的机器上跑完整的 `t8`。
 
 和设计不一样的地方：
 
@@ -455,7 +458,7 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
   用量台账用网关记的（`usage_source: gateway`），和 dsh 自报的口径对齐（输入不含缓存命中）。实测 dsh 0.2.1-rc.5 headless 在平台供应商下
   每轮没有另发“生成标题”的请求：网关记到的请求数等于 dsh 的步数，用量与 dsh 自报一致（设计里说的“少记的标题请求”这一版没看到）。
 - **只支持平台供应商**：沙箱方式下用 dsh 自带供应商（靠服务进程环境里的 `DEEPSEEK_API_KEY` 之类）的 Agent 这一轮报错，提示在后台配成平台供应商；
-  不再把服务进程环境里的密钥放进沙箱。按主机注入凭证（2b）做完后再评估。
+  不再把服务进程环境里的密钥放进沙箱。**已定（2026-11-17）**：沙箱方式下只支持平台配置的供应商，理由是沙箱里不放密钥（9.1）；按主机注入凭证不在阶段 2 做，归需求 #60（连接器，6.3）。
 - **出网**（`gateway.decide`，纯函数）：公网要 `web.research`、只到 80 / 443、解析出来的地址都得是公网（私有、回环、链路本地、元数据地址都拒），
   连接固定在校验过的地址上；包镜像源（`MATRIX_GATEWAY_MIRRORS`）要 `shell.exec`；内网目标只认 `fetch.json` 的 `allow`。网关自己要经上游代理出网时公网交给上游代理。
   每个请求在 `<data>/gateway/egress.jsonl` 记一行（执行单元、主机、端口、字节数、结果），不记内容。
@@ -469,6 +472,7 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
 经网关去元数据地址与内网）与 `key-absent`（在环境变量、各进程环境、主目录 / 工作目录 / `/tmp` 里找真密钥；拿沙箱的令牌请求没分配的模型）。
 沙箱方式下 `key-hidden` 照旧只查服务器上直接起的 dsh（阶段 0 的口径），沙箱里有没有密钥看 `key-absent`。验证（本机，`insecure-runc`，核心在容器里、经网关与本机代理出网）：
 `--live --sandbox docker` 27 项全过；`--sandbox local` 除 `resource-limit`、`net-isolation` 两项提醒（这个后端做不到）外全过；compose 形态两轮真实对话通过。
+gVisor：2026-11-17 轻量模式 `t8lite` 在 `runsc` 下 `net-isolation`、`key-absent` 都通过（第 11 节）；compose 形态还只在 runc 下跑过。
 
 和设计不一样的地方：网关不是独立进程（这一步的要求就是核心里的模块，以后能拆）；网络形状是“每个执行单元一张 internal 网络 + 网关所在容器接上去”，
 不是设计里的“一张 internal 网络 + 双网卡网关”（同一张网络上容器之间要么全通、要么连网关也不通，做不到只连网关）；只 GET / 预算 / 解 TLS 见下面的 2b。
@@ -489,13 +493,14 @@ compose 形态（`matrix` + `sandboxd` + 沙箱网络）起来后经 HTTP API �
 检查：`net-isolation` 另查公网 GET 经网关放行、POST 被拒、超过预算后公网读被拒；新增 `egress-tools`（只有 `shell.exec`，经网关访问包镜像源：
 curl、git clone、pip、uv、npm、Node 的 fetch 都要通，公网要被拒）。验证（本机）：`--live --sandbox docker`（insecure-runc，工具包 t8 的方式）28 项全过；
 `--sandbox local` 除 `resource-limit`、`net-isolation`（这个后端做不到）两项提醒外全过；compose 形态两轮真实对话通过。
-**没做的**：按主机注入凭证的最小形态（让 dsh 自带的供应商在沙箱方式下可用）这一版没做，沙箱方式下照旧只支持平台供应商；HTTP/2 只按 HTTP/1.1 说；
+gVisor：2026-11-17 轻量模式 `t8lite` 在 `runsc` 下 `net-isolation`（含公网 GET 放行、POST 被拒、超预算被拒）与 `egress-tools`（curl、git、pip、uv、npm、Node、不经网关被拒）都通过（第 11 节）。
+**没做的**：按主机注入凭证（让 dsh 自带的供应商在沙箱方式下可用）不在阶段 2 做，归需求 #60（2026-11-17 定），沙箱方式下照旧只支持平台供应商；HTTP/2 只按 HTTP/1.1 说；
 公网读预算只算请求行与请求头，不限响应大小。
 
 **阶段 2：出口网关。** 沙箱网络默认全拒，客户端连接、模型调用、网页出网全部改经网关；模型密钥离开执行面；用量由网关记。
 做完这一阶段，`security.md` 的“沙箱只管写、不管读”与信息流那条“可绕过 `open_note` 直接读磁盘”才能删掉，#59 关闭。
 
-**阶段 3：收尾与 #68、#60。** 卷的用量：管理器定期统计每个执行单元卷的大小，超了上限停沙箱并通知所有者（docker 后端的 local 卷没有大小上限，1b 先接受）；插件服务迁入；节点级只读内容存储；预热池；管理后台的沙箱页（数量、配额、排队、出网记录）；
+**阶段 3：收尾与 #68、#60。** 卷的用量：管理器定期统计每个执行单元卷的大小，超了上限停沙箱并通知所有者（docker 后端的 local 卷没有大小上限，1b 先接受）；管理器的总内存上限：所有沙箱的内存配额之和超过“宿主内存 − 预留”时拒绝新建（现在只核对单个沙箱，4.3）；插件服务迁入；节点级只读内容存储；预热池；管理后台的沙箱页（数量、配额、排队、出网记录）；
 连接器凭证注入（#60）。
 
 **阶段 4：集群。** `kubernetes` 后端、多节点调度。调度、预热池、休眠先评估 Kubernetes 的 agent-sandbox，不自己写
@@ -527,7 +532,7 @@ curl、git clone、pip、uv、npm、Node 的 fetch 都要通，公网要被拒�
 | 变化 | 谁会碰壁 | 怎么办 |
 | --- | --- | --- |
 | 云侧运行要求宿主是 Linux 且装了 gVisor；compose 多两个服务 | 升级后没装 gVisor 的部署：`--isolation required` 下云侧 Agent 全部拒绝运行 | 先发一个版本默认 `--isolation preferred`（没有后端时照旧跑，后台标红），下一个版本才把默认改成 `required` |
-| 共用的 `~/.dsh` 退役，云侧只认平台配置的供应商 | 用 `.env` 里的 `DEEPSEEK_API_KEY`、或进容器 `dsh` 登录的部署；没有 `models.json`、Agent 自由填 provider 的部署 | 升级前在后台“模型”页把供应商重配一遍。只能用账号登录、给不出地址加密钥的供应商，云侧不能再用 |
+| 共用的 `~/.dsh` 退役，云侧只认平台配置的供应商（2026-11-17 定：沙箱方式下用 dsh 自带供应商的 Agent 这一轮报错，因为沙箱里不放密钥，密钥只在网关换上） | 用 `.env` 里的 `DEEPSEEK_API_KEY`、或进容器 `dsh` 登录的部署；没有 `models.json`、Agent 自由填 provider 的部署 | 升级前在后台“模型”页把供应商重配一遍。只能用账号登录、给不出地址加密钥的供应商，云侧不能再用。按主机注入凭证归 #60，不在阶段 2 |
 | Agent 不能再直接访问内网，出网只有 HTTP(S) 经网关 | Agent 用 `curl`、脚本直接调内网系统的用法（现在不受限）；走 SSH 的 `git clone`、直连数据库等非 HTTP 协议；不认 `HTTPS_PROXY` 的工具 | 内网目标写进 `fetch.json` 的 `allow`；包仓库在网关配镜像源；非 HTTP 协议不支持，要用就包成连接器 |
 | 沙箱里只有镜像里的东西 | 往 Matrix 容器里另装过工具、挂过共享数据目录给 Agent 用的部署 | 工具装进沙箱镜像；数据改成项目档案文件或连接器 |
 | 备份范围变了 | 只备份 `matrix-data` 卷的部署 | 还要备份内容存储（产物检查点）；执行单元的卷可以不备份（能从检查点重建）；`dsh-home` 不用再备份 |
@@ -722,13 +727,28 @@ gVisor 每轮多约 90 MB，空闲沙箱约 10–17 MB 一个，冷启动 1–2 
 **`uv sync` 拆开计时（runc）**：1500 个文件的虚拟环境，缓存已有时放文件只要 0.05–0.2 秒（硬链接最快），项目与缓存不在同一个文件系统时
 退成拷贝、0.3–0.4 秒；冷缓存（含下载）0.6–1.2 秒。gVisor 下那 12.7 秒里下载与放文件各占多少，要在 gVisor 上跑 `t6` 才知道。
 
+### docker 后端 + gVisor 实测（2026-11-17，轻量模式）
+
+在一台装了 gVisor 的机器上跑 [deploy/isolation-check](../deploy/isolation-check/README.md) 的 `./run.sh info build t8lite pack`：
+2 核、1871 MB 内存、没有 KVM。管理器按宿主内存定配额：预留 1024 MB，单个沙箱的内存默认与上限都是 768 MB。
+
+**`runsc` 档 21 项全过**：`sandbox`、`isolation`（含 Agent 的命令在 dsh 的内层 bwrap 里）、`read-isolation`、`proc-isolation`、`reply`、`resume`、
+`delegate`、`deliver`、`restore`、`net-isolation`（含 2b 的公网 GET 放行、POST 被拒、超过出网预算后公网读被拒）、`key-absent`、
+`egress-tools`（curl、git、pip、uv、npm、Node 经网关通，不经网关被拒）。结果里没有出现密钥。
+所以 1b 的 docker 后端与 2a、2b 的出口网关在 gVisor 下能跑，网络形状（每个执行单元一张 internal 网络、只连得到网关）在 gVisor 下同样成立。
+
+**轻量模式没有验证的**：配额（`resource-limit`：超额内存被结束、进程数被挡住）和 runc 对照。这两项只在 runc 下验证过（第 8 节），
+gVisor 下的配额要在 4 GB 以上的机器上跑完整的 `t8` 才算验证。此前一台同规格、还跑着别的服务的测试机被完整的 `t8` 压垮过，
+起因是默认配额 2 GB 比宿主内存还大，这次加了管理器的核对（4.3）和工具包的开跑前检查与轻量模式。
+
 ### 还要验证
 
-只剩两项，都要在装了 gVisor 的机器上跑 [deploy/isolation-check](../deploy/isolation-check/README.md) 的 `t6`、`t7`：
+三项，都要在装了 gVisor 的机器上跑 [deploy/isolation-check](../deploy/isolation-check/README.md)：
 
 1. `uv sync` 在 gVisor 下慢的原因与调法（`t6`）。结果怎么用：慢在放文件，就把 uv 缓存放进执行单元的卷、镜像里设 `UV_LINK_MODE`
    为最快的那种；慢在下载，就查 gVisor 的网络栈（`runsc-hostnet` 变体做对照）；两种 overlay 设置的变体用来定根文件系统怎么挂。
 2. gVisor 下的并发与内存（`t7`），用来定内存上限与并发的默认值。在此之前沿用 4.3 的估算。
+3. gVisor 下的配额（完整的 `t8` 的 `resource-limit`），要 4 GB 以上、不跑别的服务的机器。
 
 ## 12. 横向扩容与重启恢复
 
