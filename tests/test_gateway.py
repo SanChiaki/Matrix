@@ -149,7 +149,10 @@ def test_only_the_sandbox_endpoint_is_forwarded_and_connect_is_checked(gw, tmp_p
     """别的 Matrix 接口不转；CONNECT 认令牌、按权限与地址放行，每个请求记一行（不记内容）。"""
     g, addr = gw
     assert b" 404 " in http(addr, b"GET /api/me HTTP/1.1\r\nHost: gw\r\n\r\n").split(b"\r\n")[0]
-    assert b" 403 " in http(addr, b"CONNECT example.com:443 HTTP/1.1\r\n\r\n").split(b"\r\n")[0]
+    first = http(addr, b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")   # 没带凭证：质询（git 等着它才带）
+    assert b" 407 " in first.split(b"\r\n")[0] and b"Proxy-Authenticate: Basic" in first
+    bad = base64.b64encode(b"sbx:mgw-nope").decode()
+    assert b" 403 " in http(addr, f"CONNECT example.com:443 HTTP/1.1\r\nProxy-Authorization: Basic {bad}\r\n\r\n".encode()).split(b"\r\n")[0]
     tok = g.issue("seat:c/a", ["web.research"])
     auth = base64.b64encode(f"sbx:{tok}".encode()).decode()
     out = http(addr, f"CONNECT 169.254.169.254:80 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n".encode())
@@ -196,6 +199,8 @@ def test_check_request_tiers():
     assert check_request("public", "api.partner.example", "POST", "/a", True, W) == (True, "", False)  # 写白名单不算预算
     assert check_request("mirror", "pypi.org", "GET", "/simple/x/", False, W) == (True, "", False)
     assert "只读" in check_request("mirror", "pypi.org", "POST", "/", True, W)[1]
+    assert check_request("mirror", "github.com", "POST", "/o/r.git/git-upload-pack", True, W)[0]   # git 取代码
+    assert not check_request("public", "evil.example", "POST", "/o/r.git/git-upload-pack", True, W)[0]
     assert "只读" in check_request("allow", "wiki.corp", "DELETE", "/", False, W)[1]
     pol = parse_policy({"allow": ["wiki.corp"]})
     assert [host_kind(h, pol, ["pypi.org"]) for h in ("files.pypi.org", "wiki.corp", "example.com")] == \

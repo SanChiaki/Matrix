@@ -49,6 +49,10 @@ class Denied(Exception):
     pass
 
 
+class NeedAuth(Exception):
+    """代理请求没带凭证：回 407 让客户端带上（git 之类先不带，等质询）。"""
+
+
 @dataclass
 class Grant:
     """一张网关令牌：这一轮、这个执行单元能用的模型与出网权限。真密钥只在这里（核心进程的内存里）。"""
@@ -105,7 +109,8 @@ def decide(authority: list[str], host: str, port: int, policy: FetchPolicy | Non
         bad = [ip for ip in ips if not is_public(ip) and not (policy is not None and policy.listed(ip))]
         if bad:
             raise Denied(f"{host} 指向内网或保留地址 {bad[0]}，不在部署方的白名单里")
-    if upstream_proxy and not (mirror or allow) and not (literal and policy is not None and policy.listed(literal)):
+    # 网关自己要经上游代理出网时：解析出来都是公网地址的（含公网上的镜像源），交给上游代理；内网地址直连
+    if upstream_proxy and all(is_public(ip) for ip in ips) and not urllib.request.proxy_bypass(host):
         return "proxy", upstream_proxy
     return "direct", ips
 
@@ -129,6 +134,8 @@ def check_request(kind: str, host: str, method: str, target: str, has_body: bool
     host = host.rstrip(".").lower()
     writable = any(host == w or host.endswith("." + w) for w in write_hosts)
     write = method.upper() not in READ_METHODS or has_body
+    if write and kind == "mirror" and method.upper() == "POST" and target.split("?")[0].endswith("/git-upload-pack"):
+        write = False   # git 的 smart HTTP 取代码用 POST（只读的取包请求）：只对部署方配的镜像源这样认，公网主机不认
     if write and not writable:
         return False, (f"{method} {host}：网关只放行只读请求（GET / HEAD、不带请求体）；要调外部系统的接口请走连接器"
                        if kind == "public" else f"{method} {host}：{'包镜像源' if kind == 'mirror' else '白名单里的地址'}只读"), False
@@ -285,9 +292,13 @@ class Gateway:
             return _reply(conn, 404, "网关只转发沙箱连接、模型请求与出网代理")
         except Denied as e:
             return _reply(conn, 403, str(e))
+        except NeedAuth:
+            return _reply(conn, 407, "要带沙箱的网关令牌", {"Proxy-Authenticate": 'Basic realm="matrix-gateway"'})
 
     def _proxy_grant(self, headers: dict[str, str], peer: str) -> Grant:
         auth = headers.get("proxy-authorization", "")
+        if not auth:
+            raise NeedAuth()
         token = ""
         if auth.lower().startswith("basic "):
             try:
@@ -656,11 +667,13 @@ def _read_exact(conn: socket.socket, n: int) -> bytes:
     return out
 
 
-def _reply(conn: socket.socket, code: int, text: str) -> None:
+def _reply(conn: socket.socket, code: int, text: str, extra: dict[str, str] | None = None) -> None:
     body = text.encode()
-    reason = {400: "Bad Request", 403: "Forbidden", 404: "Not Found", 502: "Bad Gateway"}.get(code, "Error")
+    reason = {400: "Bad Request", 403: "Forbidden", 404: "Not Found", 407: "Proxy Authentication Required",
+              502: "Bad Gateway"}.get(code, "Error")
+    more = "".join(f"{k}: {v}\r\n" for k, v in (extra or {}).items())
     try:
-        conn.sendall(f"HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\n"
+        conn.sendall(f"HTTP/1.1 {code} {reason}\r\nContent-Type: text/plain; charset=utf-8\r\n{more}"
                      f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
     except OSError:
         pass

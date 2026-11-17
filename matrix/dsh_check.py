@@ -406,6 +406,9 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
+MIRRORS = ("pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com", "codeload.github.com")
+
+
 class Live:
     """一个临时的网络：真实 dsh 运行时 + 只监听本机的回调服务 + 本机 echo 连接器。"""
 
@@ -450,7 +453,9 @@ class Live:
         self.net = Network(rt, root / "data", tool_url=f"http://{listen}:{port}/internal/tools", seed=False,
                            connectors=ConnectorCatalog(catalog), sandbox=provider_named(sandbox), models=models,
                            sandbox_url=f"ws://{listen}:{port}/api/sandbox/connect",
-                           sandbox_limits={"gateway_listen": gateway_listen} if gateway_listen else None)
+                           sandbox_limits={"gateway_listen": gateway_listen or "127.0.0.1:0",
+                                           # 检查用的包镜像源：egress-tools 经网关去这些主机（只读）
+                                           "gateway_mirrors": os.environ.get("MATRIX_CHECK_MIRRORS", ",".join(MIRRORS))})
         self.sandbox = sandbox
         self.server = uvicorn.Server(uvicorn.Config(create_app(self.net), host=listen, port=port, log_level="warning"))
         threading.Thread(target=self.server.run, daemon=True).start()
@@ -729,6 +734,27 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
             return FAIL, f"探针没跑起来：{text[:200]!r}"
         open_ = [f"{k}({v})" for k, v in seen.items() if v.startswith("OPEN")]
         enforced = bool(live.net.sandbox_report().get("net_enforced"))
+        if not open_ and gw.ca is not None:
+            # 2b：有 web.research 的探针经网关：公网 GET 放行（沙箱信任出网 CA）、POST 被拒、超过出网预算后公网读被拒
+            q = "q=" + "x" * 1900
+            text2 = live.probe("; ".join([
+                "echo GET=$(curl -s -m 15 -o /dev/null -w '%{http_code}' https://example.com/)",
+                "echo POST=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -d 'a=1' https://example.com/)",
+                f"n=0; for i in $(seq 1 60); do c=$(curl -s -m 10 -o /dev/null -w '%{{http_code}}' 'https://example.com/?{q}&i='$i); "
+                "[ \"$c\" = 403 ] && break; n=$((n+1)); done; echo BUDGET_OK=$n; echo AFTER=$c"]),
+                authority=("web.research", "shell.exec"))
+            got = dict(re.findall(r"(\w+)=(\d+)", text2))
+            bad = []
+            if got.get("GET") != "200":
+                bad.append(f"公网 GET 经网关不通（{got.get('GET')}）")
+            if got.get("POST") != "403":
+                bad.append(f"公网 POST 没被拒（{got.get('POST')}）")
+            if got.get("AFTER") != "403" or not 0 < int(got.get("BUDGET_OK", "0")) < 60:
+                bad.append(f"出网预算没生效（放行了 {got.get('BUDGET_OK')} 次，之后 {got.get('AFTER')}）")
+            if bad:
+                return FAIL, "；".join(bad)
+            return OK, ("控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网、DNS 都连不上；经网关去内网与元数据地址被拒；"
+                        f"公网 GET 放行、POST 被拒、超过出网预算（{got['BUDGET_OK']} 次长 URL 之后）公网读被拒")
         if not open_:
             return OK, "控制面的 /api、别的沙箱、内网、元数据地址、不经网关的公网、DNS 都连不上；经网关去内网与元数据地址被拒"
         if not enforced:
@@ -760,12 +786,34 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         return OK, (f"环境变量、进程、主目录与工作目录里都没有模型密钥；没分配的模型网关回 {seen['OTHER_MODEL']}"
                     + ("" if live.real_key else "（没设真模型的密钥，只查了假供应商的）"))
 
+    def egress_tools() -> tuple[str, str]:
+        # 2b：沙箱里常用工具经网关访问包镜像源（只读）都能用，Node 也信任出网 CA。只有 shell.exec，没有 web.research
+        cmds = {
+            "CURL": "curl -s -m 30 -o /dev/null -w '%{http_code}' https://pypi.org/simple/six/ | grep -q 200",
+            "GIT": "rm -rf /tmp/hw && git clone -q --depth 1 https://github.com/octocat/Hello-World.git /tmp/hw",
+            "PIP": "command -v pip3 >/dev/null || exit 9; pip3 download -q --no-deps -d /tmp/pp six",
+            "UV": "command -v uv >/dev/null || exit 9; rm -rf /tmp/uvt && uv pip install -q --target /tmp/uvt six",
+            "NPM": "command -v npm >/dev/null || exit 9; npm view left-pad version --cache /tmp/npmc",
+            "NODE": "node -e \"fetch('https://registry.npmjs.org/left-pad').then(r=>process.exit(r.status==200?0:1),()=>process.exit(1))\"",
+            "PUBLIC_DENIED": "c=$(curl -s -m 15 -o /dev/null -w '%{http_code}:%{http_connect}' https://example.com/); "
+                             "case $c in *403*) exit 0;; *) exit 1;; esac",
+        }
+        text = live.probe("; ".join(f"( {c} ) >/dev/null 2>&1; echo {n}=$?" for n, c in cmds.items()))
+        got = dict(re.findall(r"(\w+)=(\d+)", text))
+        if len(got) < len(cmds):
+            return FAIL, f"探针没跑起来：{text[:200]!r}"
+        fail = [n for n, v in got.items() if v not in ("0", "9")]
+        skip = [n for n, v in got.items() if v == "9"]
+        ok_ = [n for n, v in got.items() if v == "0"]
+        detail = f"通：{'、'.join(ok_) or '无'}" + (f"；这个环境里没有：{'、'.join(skip)}" if skip else "")
+        return (FAIL, f"不通：{'、'.join(fail)}；{detail}") if fail else (OK, detail)
+
     out = [("reply", reply), ("resume", resume), ("skill", skill), ("delegate", delegate),
            ("connector", connector), ("approval", approval), ("question", question)]
     if live.sandbox != "off":
         out += [("home", home), ("send-file", send_file), ("deliver", deliver), ("restore", restore),
                 ("isolation", isolation), ("resource-limit", resource_limit), ("net-isolation", net_isolation),
-                ("key-absent", key_absent)]
+                ("key-absent", key_absent), ("egress-tools", egress_tools)]
     return out
 
 
@@ -808,7 +856,7 @@ def main() -> None:
     p.add_argument("--profile", default="headless")
     p.add_argument("--live", action="store_true", help="实际跑几轮（要调模型）")
     p.add_argument("--only", default="", help="只跑这些实际检查，逗号分隔：reply,resume,skill,delegate,connector,approval,question；"
-                        "--sandbox 时另有 home,send-file,deliver,restore,isolation,resource-limit,net-isolation,key-absent")
+                        "--sandbox 时另有 home,send-file,deliver,restore,isolation,resource-limit,net-isolation,key-absent,egress-tools")
     p.add_argument("--model", default="", help="实际检查的 Agent 用这个模型，provider/model（默认用 dsh 的默认模型），"
                    "如本机用账号登录时 deepseek-account/deepseek-flash")
     p.add_argument("--timeout", type=float, default=300, help="每项实际检查最多等多少秒")
@@ -829,6 +877,10 @@ def main() -> None:
     if shutil.which(args.dsh_bin) is None and not Path(args.dsh_bin).is_file():
         raise SystemExit(f"找不到 dsh：{args.dsh_bin}")
     rt = DshRuntime(args.dsh_bin, args.profile, isolation=args.isolation or None)
+    if not args.root and args.sandbox != "off":
+        # 沙箱方式下执行单元的状态目录在数据目录里：不能放在 /tmp 下（dsh 的内层沙箱把 /tmp 换成空的 tmpfs，
+        # 放在那里的出网 CA 证书包在 Agent 的命令里就不存在了）
+        args.root = str(Path.home() / ".cache" / "matrix-dsh-check")
     if args.root:
         Path(args.root).mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix="matrix-dsh-check-", dir=args.root or None))
