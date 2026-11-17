@@ -89,7 +89,8 @@
 | `where` / `runtime` | `cloud` + 运行时名，或 `device` + harness |
 | `model` | `provider / model`；`null` = 运行时默认 |
 | `ok` / `error` | 成没成；失败的错误类别（`runtime.ERROR_CLASSES`），端侧不在线记 `device_offline` |
-| `tools` / `usage` | 工具调用次数；运行时报告的原始 token 字段 |
+| `tools` / `usage` | 工具调用次数；token 字段（dsh 的口径：`inputTokens` 不含命中缓存的、`cacheReadTokens`、`outputTokens`、`totalTokens`） |
+| `usage_source` | 只在云侧沙箱方式（有出口网关，阶段 2a）下有，值是 `gateway`：`usage` 是出口网关按实际的模型响应记的（这一轮经网关的全部模型请求），不是运行时自报的 |
 
 - 只追加，不写进 `state.json`；写失败只在服务日志里记一行（事件会推给所有人，错误里有服务器路径），不影响这一轮。坏行读的时候跳过。
 - 各运行时报告 token 的字段名不同，统计时由 `usage.tokens` 归一成输入 / 输出 / 缓存命中 / 合计；原始字段留在台账里。

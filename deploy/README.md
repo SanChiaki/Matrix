@@ -339,8 +339,8 @@ docker compose -f compose.yml -f compose.sandbox.yml --profile build build
 ```
 
 管理器的 socket 是 0660、属组 gid 1000（Matrix 服务的用户），管理器用 `group_add` 加进这个组，别的进程连不上。
-`sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`network`、`connect_url`（沙箱客户端连回来的地址，和
-`.env` 的 `MATRIX_SANDBOX_GATEWAY` 一致）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`、`tmp_mb`、`env`（不能放密钥，
+`sandboxd.json` 里能改的：`namespace`（部署名：容器、卷的名字与标签都带它，管理器只认自己名下的沙箱；同一个 Docker 上跑几套 Matrix 时各写各的）、`image`、`runtime`（`runsc` / `insecure-runc`）、`gateway_container`（出口网关所在的容器，compose 里是 `matrix-core`）、
+`connect_url`（沙箱客户端连回来的地址，`{gateway}` 换成网关在执行单元网络上的地址）、`subnet_pool`（每个执行单元一张网络，从这里切 /28）、`workdir_prefixes`、`cpus` / `memory_mb` / `pids` 与对应的 `max_*`、`tmp_mb`、`env`（不能放密钥，
 名字带 KEY / TOKEN / SECRET / PASSWORD 的会被拒）。镜像、命令、挂载、特权都只能在这里定，Matrix 服务发来的请求改不了。
 内网构建的参数与主镜像相同，另有 `DOCKER_CLI_TARBALL`（管理器镜像里 docker 命令行的静态包地址）。
 
@@ -351,15 +351,27 @@ docker compose -f compose.yml -f compose.sandbox.yml up -d
 docker compose -f compose.yml -f compose.sandbox.yml logs sandboxd | head    # 第二行写着隔离等级
 ```
 
-叠加文件会把 `matrix` 改成 `MATRIX_CLOUD_SANDBOX=docker`、挂上管理器的 socket 目录、在沙箱网络网关（默认 `172.31.255.1`）上开放 8765、
-安全选项改成只有 `no-new-privileges`。沙箱网络 `matrix-sandbox`（默认 `172.31.255.0/24`）和机器上已有的网络冲突时，在 `.env` 里改
-`MATRIX_SANDBOX_SUBNET` / `MATRIX_SANDBOX_GATEWAY`，同时改 `sandboxd.json` 的 `connect_url`。
+叠加文件会把 `matrix` 改成 `MATRIX_CLOUD_SANDBOX=docker`、挂上管理器的 socket 目录、安全选项改成只有 `no-new-privileges`，
+容器名固定为 `matrix-core`，核心只监听内部网络的地址（`MATRIX_HOST=matrix`），出口网关监听 8766（`MATRIX_GATEWAY_LISTEN`）。
+管理器给每个执行单元建一张 internal 网络（没有对外路由、宿主不在上面），只接这个沙箱和 `matrix-core`：沙箱只连得到出口网关。
+`subnet_pool`（默认 `10.213.0.0/16`）和机器上已有的网络冲突时在 `sandboxd.json` 里改。
+
+**模型**：沙箱方式下只支持平台配置的模型供应商（管理后台“模型”页填地址与密钥，Agent 选它）：密钥留在核心，模型请求经出口网关换上。
+用 dsh 自带供应商（`.env` 里的 `DEEPSEEK_API_KEY` 之类）的 Agent 这一轮会报错，提示去后台配。DeepSeek 写成：协议 `openai-completions`、
+地址 `https://api.deepseek.com`、模型 `deepseek-flash`。
+
+**出网**：沙箱里的命令只能经出口网关的代理出网（环境里已经设好 `HTTPS_PROXY`）。公网要 Agent 有 `web.research`（只到 80 / 443），
+包镜像源写进 `.env` 的 `MATRIX_GATEWAY_MIRRORS`（逗号分隔的主机，有 `shell.exec` 就放行，内网的镜像源也行），别的内网目标只认 `fetch.json` 的 `allow`。
+这一版网关不解 TLS，放行到主机为止；每个请求记在 `/data/gateway/egress.jsonl`（执行单元、主机、端口、字节数、结果）。服务器自己要经代理出网时，
+在 `.env` 里给 matrix 设 `HTTPS_PROXY`（网关转发模型请求与出网时用它）。
 
 - **`insecure-runc`**：没装 gVisor 时可以先用 runc 试（`sandboxd.json` 写 `"runtime": "insecure-runc"`）。这一档沙箱容器与宿主共用内核，
   而且为了让 dsh 的内层 bwrap 能建命名空间，沙箱容器放开了 seccomp 与 `/proc` 遮挡（不放开 dsh 会悄悄退到更弱的沙箱）。
   管理后台、Agent 页、启动日志会一直写“未达到生产隔离”。**不要用在多用户部署上**。
 - 配置的运行时不在（比如写了 `runsc` 但没装）：云侧运行一律拒绝并写明原因，不退回 runc。
-- 沙箱经沙箱网络直接出网；服务器只能经代理出网时，代理地址要是沙箱网络能到的（不能是宿主的 127.0.0.1），写进 `sandboxd.json` 的 `env`。
+- `sandboxd.json` 不写 `gateway_container` 时是 1b 的旧形态（共用一张网络、沙箱能直接出网），能力报告写“未达到生产隔离”。
+- 排错：沙箱连不回来（“沙箱的客户端没有连上”）先看 `docker network inspect <沙箱名>` 里有没有 `matrix-core`、`connect_url` 的端口和 `MATRIX_GATEWAY_LISTEN` 是否一致；
+  命令出不了网看 `/data/gateway/egress.jsonl` 里那一行的 `result`（被拒的写着原因）。
 - 配额：CPU、内存（不给 swap）、进程数由 cgroup 管；**卷没有大小上限**（Docker 的 local 卷做不到；按用量停沙箱放在阶段 3）。
 - 控制面不认识的沙箱（比如 `state.json` 从备份恢复后）：运行中的停掉、卷保留，卷过 `MATRIX_SANDBOX_RETAIN`（默认 7 天）才删，日志里写明删了哪个。
 - 数据：沙箱的卷（`matrix-sbx-*`）只是缓存，能从检查点重建，不用备份；`/data/checkpoints/` 与 `/data/content/` 要备份。

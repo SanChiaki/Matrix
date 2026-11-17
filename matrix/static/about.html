@@ -580,7 +580,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>连接器桥</h4><p>外部服务的工具也回调网络（<code>/internal/connectors</code>），网络查这一轮能用哪些，带上凭证代为调用并记录</p></div>
           <div class="part"><h4>白名单抓取</h4><p>部署方配了 <code>fetch.json</code> 时，替代 dsh 自带的 <code>web_fetch</code>：公网照抓，内网只抓白名单里的域名与网段，每一跳重定向都重新校验</p></div>
           <div class="part"><h4>外层沙箱</h4><p>dsh 外面再包一层 bubblewrap：只读的系统目录与代码，加上这个席位或委托的工作目录和它自己的 dsh 会话目录；数据目录的其余部分、别人的会话、保管密钥在里面不存在，也看不到别的进程（<code>MATRIX_CLOUD_ISOLATION</code>）。工作目录以外一律写不进，也不审批</p></div>
-          <div class="part"><h4>沙箱方式（试用）</h4><p>部署方打开 <code>MATRIX_CLOUD_SANDBOX</code> 后，每个席位或委托一个沙箱（本机子进程，或由沙箱管理器创建的容器，生产用 gVisor，有 CPU、内存、进程数上限），里面跑的是和你电脑上同一套 Matrix 客户端：凭一次性令牌连回网络领活，资料按清单下发、没变的不再传；每轮结束产物与对话记忆存成检查点，沙箱丢了也能接着做</p></div>
+          <div class="part"><h4>沙箱方式（试用）</h4><p>部署方打开 <code>MATRIX_CLOUD_SANDBOX</code> 后，每个席位或委托一个沙箱（本机子进程，或由沙箱管理器创建的容器，生产用 gVisor，有 CPU、内存、进程数上限），里面跑的是和你电脑上同一套 Matrix 客户端：凭一次性令牌连回网络领活，资料按清单下发、没变的不再传；每轮结束产物与对话记忆存成检查点，沙箱丢了也能接着做；模型请求与出网都经网络的出口网关，沙箱里没有模型密钥</p></div>
           <div class="part"><h4>后台任务守护</h4><p>每轮结束 dsh 进程就退出、连带结束后台任务：Agent 要收尾时还有任务在跑，就提醒它先收完或结束</p></div>
           <div class="part"><h4>提问应答</h4><p>覆盖层挂上 dsh 的 <code>ask_user_question</code>，问题转给网络，阻塞到有人（或委托方）回答；没回答时是错误，不当成同意</p></div>
           <div class="part"><h4>私有目录</h4><p>每轮挂载进工作目录，写回时按文件三方合并，冲突另存副本</p></div>

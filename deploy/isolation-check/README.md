@@ -119,10 +119,9 @@ export DEEPSEEK_API_KEY=sk-...
 ./run.sh info build t8 pack
 ```
 
-`t8` 会建一张沙箱网络 `isochk-sandbox`（默认 `172.31.254.0/24`，网关 `172.31.254.1`；和机器上已有的网络冲突时设
-`T8_SUBNET` / `T8_GATEWAY`），起一个 `isochk-sandboxd` 容器（唯一挂 docker.sock），控制面在部署镜像里、监听网关的 `18765` 端口
-（`T8_PORT`）。沙箱容器经这张网络直接出网；机器只能经代理出网时，代理要在沙箱网络能到的地址上，写进
-`T8_SANDBOX_ENV`（JSON，例如 `'{"HTTPS_PROXY": "http://172.31.254.1:3128", "NO_PROXY": "172.31.254.1"}'`）。
+`t8` 起一个 `isochk-sandboxd` 容器（唯一挂 docker.sock）和一个 `isochk-core` 容器（部署镜像里的 matrix-dsh-check：控制面与出口网关），
+管理器给每个执行单元建一张只接这个沙箱与 `isochk-core` 的 internal 网络（地址池默认 `10.214.0.0/16`，冲突时设 `T8_SUBNET_POOL`）。
+沙箱只能经出口网关出网；控制面自己要经代理出网时，设 `T8_CORE_PROXY`（容器里连得到的代理地址，不能是宿主的 127.0.0.1）。
 跑完会删掉它建的容器、卷与网络，镜像 `matrix-sandbox:isochk`、`matrix-sandboxd:isochk` 留着（第 9 节一起删）。
 
 ## 5. 发回什么
@@ -172,7 +171,8 @@ export DEEPSEEK_API_KEY=sk-...
 
 **T8（阶段 1b）**，看 `[t8-runsc]` 与 `[t8-insecure-runc]`：两档都应该全是 ✓。`runsc` 有 ✗ 而 `insecure-runc` 全过，就是 gVisor 下的兼容性问题
 （这正是要找的，把对应的 `t8-runsc.log` 一起发回来）。`isolation` 一项另核对 Agent 的命令在 dsh 的内层 bwrap 里；
-`resource-limit` 看超额内存（退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常。
+`resource-limit` 看超额内存（退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常；
+`net-isolation` 看沙箱是不是只连得到出口网关，`key-absent` 看沙箱里有没有模型密钥（这几项都由假模型驱动，结果确定）。
 `[t8-insecure-runc]` 那一行“未达到生产隔离”是预期的：runc 档只用于对比与过渡。
 
 ## 8. 参考：在另一台机器上的结果（runc，没有 gVisor）

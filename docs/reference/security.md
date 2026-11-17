@@ -33,9 +33,15 @@
   （唯一持有 docker.sock，Matrix 服务只经 Unix socket 提只含 id、配额、启动令牌、逻辑工作目录的请求，镜像与安全选项写死在管理器配置里），
   有 CPU、内存、进程数配额，Matrix 容器不再放开 seccomp 与 `/proc` 遮挡。仍没解决的：`runsc`（gVisor）档才有独立的内核边界，
   `insecure-runc` 档与宿主共用内核、并且沙箱容器放开了 seccomp 与 `/proc` 遮挡（内层 bwrap 要），能力报告与管理后台写“未达到生产隔离”；
-  卷没有大小上限；沙箱还能直接出网，也能访问控制面的其他接口（都要登录或执行上下文令牌）；模型密钥随 `run.request` 进沙箱。
+  卷没有大小上限。
+  **出口网关（阶段 2a，沙箱方式下 local / docker 后端都有）**：沙箱里不再有任何模型密钥：模型请求经网关（核心进程里的一个模块、单独的端口），
+  网关凭这一轮的令牌核对供应商与模型、换上 vault 里的真密钥；沙箱方式下只支持平台配置的供应商（dsh 自带的、靠服务进程环境变量里密钥的供应商明确报错）。
+  docker 后端配了 `gateway_container` 时每个沙箱一张自己的 internal 网络，只连得到网关：控制面的其他接口、别的沙箱、宿主、内网、元数据地址、
+  不经网关的公网与 DNS 都不通（`matrix-dsh-check` 的 `net-isolation`、`key-absent`）；出网只经网关的代理，按有效权限与主机放行，内网目标只认 `fetch.json` 的 `allow`，
+  每个请求记一行。2a 仍没解决的：网关不解 TLS，放行到主机为止（不分方法、没有出网预算，有 `web.research` 的 Agent 能对放行的主机发任意请求，6.4 的分级是 2b）；
+  local 后端共用宿主网络，做不到强制断网（`net_enforced: false`，检查里是提醒）；网关令牌在沙箱里看得到（它只代表这个执行单元的这一轮）。
   gVisor 档的完整检查（`deploy/isolation-check` 的 `t8`）在写这一版时还没在装了 gVisor 的机器上跑过。
-  接受理由：阶段 1（每个执行单元一个 gVisor 沙箱）还是开关后面的试用、阶段 2（出口网关）还没做；复查时机：多机部署、多用户部署接真实账号之前，至少要
+  接受理由：阶段 1–2 还是开关后面的试用，出网分级（2b）还没做；复查时机：多机部署、多用户部署接真实账号之前，至少要
   `MATRIX_CLOUD_ISOLATION=required` 并做完阶段 1–2。云侧和端侧在执行面上的全部差异与云侧待优化的地方，见 [device-runtimes.md](device-runtimes.md#cloud-vs-device)。
 - 端侧材料（`material.fetch`）只回**这一轮清单里**的 sha，轮次结束就取不到；连接器在本机再校验路径（不进 `agent-home/`、不越界）、
   大小与 sha256。缓存在 `<工作根目录>/.cache/materials/`，只有这台设备上跑过的轮次给过它的内容（[device-runtimes.md](device-runtimes.md)“材料”）。

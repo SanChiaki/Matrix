@@ -4,7 +4,8 @@
 #   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 t8 pack
 # 环境变量：DEEPSEEK_API_KEY（有就跑真模型的检查）、DOCKER_NETWORK（如 host）、BUILD_ARGS（额外的 docker build 参数）、
 #           IMAGE（镜像名）、OUT（结果目录）、CONC（t7 同时起几个执行单元，默认 "2 4 8 16"）、
-#           T8_SUBNET / T8_GATEWAY / T8_PORT（t8 的沙箱网络与回连端口）、T8_SANDBOX_ENV（t8 沙箱里固定的环境，JSON 对象，如出网代理）。
+#           T8_PORT（t8 控制面的端口）、T8_SUBNET_POOL（t8 每个执行单元网络的地址池）、
+#           T8_CORE_PROXY（t8 的控制面要经代理出网时，容器里连得到的代理地址）。
 set -uo pipefail
 KIT=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$KIT/../.." && pwd)
@@ -205,47 +206,50 @@ t7() {  # 并发：同时起 N 个执行单元，每个里一个 dsh 在跑命�
   done
 }
 
-t8() {  # docker 后端（阶段 1b）：沙箱管理器 + 每个执行单元一个容器，insecure-runc 与 runsc 各跑一遍 matrix-dsh-check --live --sandbox docker
+t8() {  # docker 后端（阶段 1b / 2a）：沙箱管理器 + 每个执行单元一个容器与一张只连得到出口网关的网络，
+        # insecure-runc 与 runsc 各跑一遍 matrix-dsh-check --live --sandbox docker（含 net-isolation、key-absent）
   if [ -z "$LIVE" ]; then say "[t8] SKIPPED（要 DEEPSEEK_API_KEY：这一步全是真模型的检查）"; return; fi
-  local sub=${T8_SUBNET:-172.31.254.0/24} gw=${T8_GATEWAY:-172.31.254.1} port=${T8_PORT:-18765} senv=${T8_SANDBOX_ENV:-}
-  [ -n "$senv" ] || senv='{}'
+  local port=${T8_PORT:-18765}
   # shellcheck disable=SC2086
   for target in sandbox sandboxd; do
     if ! docker build $BUILD_ARGS -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
         > "$OUT/t8-build-$target.log" 2>&1; then say "[t8] build-$target=FAIL（看 t8-build-$target.log）"; return; fi
   done
-  docker network rm isochk-sandbox > /dev/null 2>&1
-  docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false --subnet "$sub" --gateway "$gw" \
-    --label dev.matrix.isochk=1 isochk-sandbox > /dev/null || { say "[t8] 建不了沙箱网络"; return; }
   local rts=(insecure-runc); have_runsc && rts+=(runsc) || say "[t8-runsc] SKIPPED（Docker 没注册 runsc）"
   for rt in "${rts[@]}"; do
     local dir; dir=$(mktemp -d); chmod 755 "$dir"
     cat > "$dir/sandboxd.json" <<JSON
-{"namespace": "isochk", "image": "matrix-sandbox:isochk", "runtime": "$rt", "network": "isochk-sandbox",
- "connect_url": "ws://$gw:$port/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
- "env": $senv}
+{"namespace": "isochk", "image": "matrix-sandbox:isochk", "runtime": "$rt", "gateway_container": "isochk-core",
+ "connect_url": "ws://{gateway}:8766/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
+ "subnet_pool": "${T8_SUBNET_POOL:-10.214.0.0/16}", "env": {}}
 JSON
-    chmod 644 "$dir/sandboxd.json"
-    docker rm -f isochk-sandboxd > /dev/null 2>&1
+    printf '#!/bin/sh\nIP=$(python -c "import socket;print(socket.gethostbyname(socket.gethostname()))")\n'\
+'exec matrix-dsh-check --live --sandbox docker --listen "$IP" --port %s --gateway-listen 0.0.0.0:8766 --root /home/matrix/isochk --timeout 300\n' \
+      "$port" > "$dir/core.sh"
+    chmod 644 "$dir/sandboxd.json"; chmod 755 "$dir/core.sh"
+    docker rm -f isochk-sandboxd isochk-core > /dev/null 2>&1
     docker run -d --name isochk-sandboxd --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --group-add 1000 \
       -e DOCKER_CONFIG=/tmp/.docker -e MATRIX_SANDBOXD_CONFIG=/etc/matrix/sandboxd.json \
       -v /var/run/docker.sock:/var/run/docker.sock -v "$dir":/run/matrix-sandboxd \
       -v "$dir/sandboxd.json":/etc/matrix/sandboxd.json:ro matrix-sandboxd:isochk matrix-sandboxd --socket-mode 660 --socket-group 1000 > /dev/null
     sleep 3
     docker logs isochk-sandboxd > "$OUT/t8-$rt-sandboxd.log" 2>&1
-    # 控制面（matrix-dsh-check 里的临时服务）跑在部署镜像里，监听沙箱网络的网关；它自己不碰 docker.sock
-    mapfile -t args < <(common runc "$SEC_COMPOSE")
-    docker run --rm --network host "${args[@]}" -e MATRIX_SANDBOXD_SOCKET=/run/matrix-sandboxd/sandboxd.sock \
-      -v "$dir":/run/matrix-sandboxd "$IMAGE" matrix-dsh-check --live --sandbox docker --listen "$gw" --port "$port" \
-      --root /home/matrix/isochk --timeout 300 > "$OUT/t8-$rt.log" 2>&1
+    # 控制面（matrix-dsh-check 里的临时服务与出口网关）跑在部署镜像里、默认网络上（不能是 host 网络：管理器要把它接到
+    # 每个执行单元的网络上）；它自己不碰 docker.sock。它要经代理出网时设 T8_CORE_PROXY（容器里连得到的地址）
+    local -a env=(-e DEEPSEEK_API_KEY)
+    [ -n "${T8_CORE_PROXY:-}" ] && env+=(-e "HTTPS_PROXY=$T8_CORE_PROXY" -e "HTTP_PROXY=$T8_CORE_PROXY" -e "NO_PROXY=localhost,127.0.0.1")
+    # shellcheck disable=SC2086
+    docker run --rm --name isochk-core --user matrix --cap-drop ALL $SEC_COMPOSE "${env[@]}" \
+      -e MATRIX_SANDBOXD_SOCKET=/run/matrix-sandboxd/sandboxd.sock -v "$dir":/run/matrix-sandboxd \
+      --entrypoint /run/matrix-sandboxd/core.sh "$IMAGE" > "$OUT/t8-$rt.log" 2>&1
     collect "$OUT/t8-$rt.log" "[t8-$rt]"
     grep -h 'production\|未达到生产隔离\|gVisor' "$OUT/t8-$rt-sandboxd.log" | head -2 | sed "s/^/[t8-$rt] /" >> "$SUM"
     docker rm -f isochk-sandboxd > /dev/null 2>&1
     docker ps -aq --filter label=dev.matrix.ns=isochk | xargs -r docker rm -f > /dev/null
+    docker network ls -q --filter label=dev.matrix.ns=isochk | xargs -r docker network rm > /dev/null 2>&1
     docker volume ls -q --filter label=dev.matrix.ns=isochk | xargs -r docker volume rm > /dev/null
     rm -rf "$dir"
   done
-  docker network rm isochk-sandbox > /dev/null 2>&1
 }
 
 pack() {
