@@ -273,7 +273,7 @@ t8() {  # docker 后端（阶段 1b / 2a / 2b）：沙箱管理器 + 每个执�
   local target
   for target in sandbox sandboxd; do
     # shellcheck disable=SC2086
-    if ! docker build $BUILD_ARGS -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
+    if ! docker build ${BUILD_ARGS:-} -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
         > "$OUT/$tag-build-$target.log" 2>&1; then say "[$tag] build-$target=FAIL（看 $tag-build-$target.log）"; return 1; fi
   done
   for rt in "${rts[@]}"; do
