@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # 云侧执行面隔离验证（docs/cloud-runtime.md 第 11 节）。用法见同目录 README.md：
 #   ./run.sh all        依次跑 info build t1 … t8，最后打包结果
-#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 t8 pack
+#   ./run.sh <步骤>...  只跑某几步：info build t1 t2 t3 t4 t5 t6 t7 t8 t8lite pack
+#   ./run.sh build t8lite   小机器上的轻量入口：只跑 runsc 档、配额按宿主内存定、不跑 resource-limit（README 第 2 节）
 # 环境变量：DEEPSEEK_API_KEY（有就跑真模型的检查）、DOCKER_NETWORK（如 host）、BUILD_ARGS（额外的 docker build 参数）、
 #           IMAGE（镜像名）、OUT（结果目录）、CONC（t7 同时起几个执行单元，默认 "2 4 8 16"）、
 #           T8_PORT（t8 控制面的端口）、T8_SUBNET_POOL（t8 每个执行单元网络的地址池）、
-#           T8_CORE_PROXY（t8 的控制面要经代理出网时，容器里连得到的代理地址）。
+#           T8_CORE_PROXY（t8 的控制面要经代理出网时，容器里连得到的代理地址）、
+#           T8_RUNTIMES（t8 跑哪几档，默认 "insecure-runc runsc"，轻量模式默认 "runsc"）、
+#           T8_MEMORY_MB / T8_PIDS（写进管理器配置的 memory_mb 与 max_memory_mb / pids 与 max_pids）、
+#           T8_ONLY（透传给 matrix-dsh-check --only）、T8_LIGHT=1（等于 t8lite）。
 set -uo pipefail
 KIT=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$KIT/../.." && pwd)
@@ -206,26 +210,85 @@ t7() {  # 并发：同时起 N 个执行单元，每个里一个 dsh 在跑命�
   done
 }
 
-t8() {  # docker 后端（阶段 1b / 2a）：沙箱管理器 + 每个执行单元一个容器与一张只连得到出口网关的网络，
-        # insecure-runc 与 runsc 各跑一遍 matrix-dsh-check --live --sandbox docker（含 net-isolation、key-absent）
-  if [ -z "$LIVE" ]; then say "[t8] SKIPPED（要 DEEPSEEK_API_KEY：这一步全是真模型的检查）"; return; fi
-  local port=${T8_PORT:-18765}
-  # shellcheck disable=SC2086
-  for target in sandbox sandboxd; do
-    if ! docker build $BUILD_ARGS -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
-        > "$OUT/t8-build-$target.log" 2>&1; then say "[t8] build-$target=FAIL（看 t8-build-$target.log）"; return; fi
-  done
-  local rts=(insecure-runc); have_runsc && rts+=(runsc) || say "[t8-runsc] SKIPPED（Docker 没注册 runsc）"
+# 开跑 t8 前看宿主：低于下限就拒绝（不硬上：2026-11-17 一台 2 核 1.8 GB、还跑着别的服务的测试机被 t8 压垮过）。
+# 下限：完整模式 4 GB 内存（可用 3 GB）、2 核；轻量模式 1.7 GB（可用 1.2 GB）、2 核；磁盘空闲都要 15 GB（README 第 2 节）
+host_mem() { awk -v k="$1:" '$1 == k {print int($2 / 1024)}' /proc/meminfo; }
+top_procs() {  # 占内存最多的几个非 Docker 进程：只提醒，不阻止
+  local out
+  out=$(ps -eo pid=,rss=,comm= --sort=-rss 2>/dev/null | head -40 | while read -r pid rss comm; do
+      case $comm in dockerd|containerd*|runsc*|docker-proxy|ps|head) continue ;; esac
+      grep -qE 'docker|containerd|libpod' "/proc/$pid/cgroup" 2>/dev/null && continue
+      echo "$comm（pid $pid）$((rss / 1024))MiB"
+    done | head -5 | awk '{printf "%s%s", (NR > 1 ? "；" : ""), $0}')
+  [ -n "$out" ] && say "[$1] 提醒：占内存最多的非 Docker 进程：$out。t8 的沙箱会和它们抢内存，不要在跑着其他服务的机器上跑"
+}
+host_check() {  # host_check <名字> <最少内存MiB> <最少可用MiB> <最少核数> <最少磁盘GiB>
+  local total avail cpus disk root bad=()
+  total=$(host_mem MemTotal); avail=$(host_mem MemAvailable); cpus=$(nproc)
+  root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null); [ -d "$root" ] || root=/
+  disk=$(df -Pk "$root" | awk 'NR == 2 {print int($4 / 1048576)}')
+  say "[$1] 宿主：内存 ${total}MiB（可用 ${avail}MiB）、${cpus} 核、Docker 所在磁盘（$root）空闲 ${disk}GiB"
+  top_procs "$1"
+  [ "$total" -lt "$2" ] && bad+=("内存 ${total}MiB 不到 ${2}MiB")
+  [ "$avail" -lt "$3" ] && bad+=("可用内存 ${avail}MiB 不到 ${3}MiB（先停掉别的服务）")
+  [ "$cpus" -lt "$4" ] && bad+=("${cpus} 核不到 ${4} 核")
+  [ "$disk" -lt "$5" ] && bad+=("磁盘空闲 ${disk}GiB 不到 ${5}GiB")
+  if [ ${#bad[@]} -gt 0 ]; then
+    say "[$1] 拒绝开跑：${bad[*]}。见 README 第 2 节的机器要求$([ "$1" = t8 ] && echo '；小机器用轻量入口 ./run.sh t8lite')"
+    return 1
+  fi
+}
+
+t8lite() { T8_LIGHT=1 t8; }
+
+t8() {  # docker 后端（阶段 1b / 2a / 2b）：沙箱管理器 + 每个执行单元一个容器与一张只连得到出口网关的网络，
+        # insecure-runc 与 runsc 各跑一遍 matrix-dsh-check --live --sandbox docker（含 net-isolation、key-absent、egress-tools）。
+        # T8_LIGHT=1（t8lite）：只跑 runsc 档，配额按宿主内存定，跳过 resource-limit
+  local light=${T8_LIGHT:-} tag=t8 port=${T8_PORT:-18765} mem=${T8_MEMORY_MB:-} pids=${T8_PIDS:-} only=${T8_ONLY:-}
+  [ -n "$light" ] && [ "$light" != 0 ] && tag=t8lite || light=""
+  say "## $tag"
+  if [ -z "$LIVE" ]; then say "[$tag] SKIPPED（要 DEEPSEEK_API_KEY：这一步全是真模型的检查）"; return; fi
+  if [ -n "$light" ]; then host_check "$tag" 1700 1200 2 15 || return 1; else host_check "$tag" 4096 3072 2 15 || return 1; fi
+  docker image inspect "$IMAGE" > /dev/null 2>&1 || { say "[$tag] 没有部署镜像 $IMAGE：先跑 ./run.sh build"; return 1; }
+  local -a rts
+  read -r -a rts <<< "${T8_RUNTIMES:-$([ -n "$light" ] && echo runsc || echo insecure-runc runsc)}"
+  local rt
   for rt in "${rts[@]}"; do
-    local dir; dir=$(mktemp -d); chmod 755 "$dir"
+    case $rt in insecure-runc|runsc) ;; *) say "[$tag] T8_RUNTIMES 里的 $rt 认不出（insecure-runc / runsc）"; return 1 ;; esac
+  done
+  if [ -n "$light" ]; then
+    # 轻量：单个沙箱的内存按宿主定（宿主 ≤ 4 GB 时 768 MB，再大 1024 MB；还要放得进“宿主内存 − 管理器的预留 1024 MB”）
+    if [ -z "$mem" ]; then
+      local total; total=$(host_mem MemTotal)
+      mem=$([ "$total" -le 4096 ] && echo 768 || echo 1024)
+      [ $((total - 1024)) -lt "$mem" ] && mem=$((total - 1024))
+    fi
+    [ -n "$only" ] || only=reply,resume,delegate,deliver,restore,isolation,net-isolation,key-absent,egress-tools
+    if [[ " ${rts[*]} " == *" runsc "* ]] && ! have_runsc; then
+      say "[$tag] Docker 没注册 runsc：轻量模式只验证 gVisor，不退回 runc。先按 README 第 3 节装 gVisor"; return 1
+    fi
+  fi
+  say "[$tag] 运行时：${rts[*]}；单个沙箱内存：${mem:-管理器默认（2048）}MB；进程数：${pids:-管理器默认（512）}；检查：${only:-全部}"
+  # 一个一个构建，不并行（构建阶段的内存峰值见 README 第 2 节）
+  local target
+  for target in sandbox sandboxd; do
+    # shellcheck disable=SC2086
+    if ! docker build $BUILD_ARGS -f "$REPO/deploy/Dockerfile.sandbox" --target $target -t matrix-$target:isochk "$REPO" \
+        > "$OUT/$tag-build-$target.log" 2>&1; then say "[$tag] build-$target=FAIL（看 $tag-build-$target.log）"; return 1; fi
+  done
+  for rt in "${rts[@]}"; do
+    if [ "$rt" = runsc ] && ! have_runsc; then say "[$tag-runsc] SKIPPED（Docker 没注册 runsc）"; continue; fi
+    local dir quota=""; dir=$(mktemp -d); chmod 755 "$dir"
+    [ -n "$mem" ] && quota+=", \"memory_mb\": $mem, \"max_memory_mb\": $mem"
+    [ -n "$pids" ] && quota+=", \"pids\": $pids, \"max_pids\": $pids"
     cat > "$dir/sandboxd.json" <<JSON
 {"namespace": "isochk", "image": "matrix-sandbox:isochk", "runtime": "$rt", "gateway_container": "isochk-core",
  "connect_url": "ws://{gateway}:8766/api/sandbox/connect", "workdir_prefixes": ["/home/matrix/isochk/"],
- "subnet_pool": "${T8_SUBNET_POOL:-10.214.0.0/16}", "env": {}}
+ "subnet_pool": "${T8_SUBNET_POOL:-10.214.0.0/16}", "env": {}$quota}
 JSON
     printf '#!/bin/sh\nIP=$(python -c "import socket;print(socket.gethostbyname(socket.gethostname()))")\n'\
-'exec matrix-dsh-check --live --sandbox docker --listen "$IP" --port %s --gateway-listen 0.0.0.0:8766 --root /home/matrix/isochk --timeout 300\n' \
-      "$port" > "$dir/core.sh"
+'exec matrix-dsh-check --live --sandbox docker --listen "$IP" --port %s --gateway-listen 0.0.0.0:8766 --root /home/matrix/isochk --timeout 300 %s\n' \
+      "$port" "${only:+--only $only}" > "$dir/core.sh"
     chmod 644 "$dir/sandboxd.json"; chmod 755 "$dir/core.sh"
     docker rm -f isochk-sandboxd isochk-core > /dev/null 2>&1
     docker run -d --name isochk-sandboxd --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges --group-add 1000 \
@@ -233,7 +296,11 @@ JSON
       -v /var/run/docker.sock:/var/run/docker.sock -v "$dir":/run/matrix-sandboxd \
       -v "$dir/sandboxd.json":/etc/matrix/sandboxd.json:ro matrix-sandboxd:isochk matrix-sandboxd --socket-mode 660 --socket-group 1000 > /dev/null
     sleep 3
-    docker logs isochk-sandboxd > "$OUT/t8-$rt-sandboxd.log" 2>&1
+    docker logs isochk-sandboxd > "$OUT/$tag-$rt-sandboxd.log" 2>&1
+    if [ "$(docker inspect -f '{{.State.Running}}' isochk-sandboxd 2>/dev/null)" != true ]; then
+      say "[$tag-$rt] 管理器没起来：$(grep -m1 '拒绝启动\|Error\|rror:' "$OUT/$tag-$rt-sandboxd.log" || tail -1 "$OUT/$tag-$rt-sandboxd.log")"
+      docker rm -f isochk-sandboxd > /dev/null 2>&1; rm -rf "$dir"; continue
+    fi
     # 控制面（matrix-dsh-check 里的临时服务与出口网关）跑在部署镜像里、默认网络上（不能是 host 网络：管理器要把它接到
     # 每个执行单元的网络上）；它自己不碰 docker.sock。它要经代理出网时设 T8_CORE_PROXY（容器里连得到的地址）
     local -a env=(-e DEEPSEEK_API_KEY)
@@ -241,9 +308,9 @@ JSON
     # shellcheck disable=SC2086
     docker run --rm --name isochk-core --user matrix --cap-drop ALL $SEC_COMPOSE "${env[@]}" \
       -e MATRIX_SANDBOXD_SOCKET=/run/matrix-sandboxd/sandboxd.sock -v "$dir":/run/matrix-sandboxd \
-      --entrypoint /run/matrix-sandboxd/core.sh "$IMAGE" > "$OUT/t8-$rt.log" 2>&1
-    collect "$OUT/t8-$rt.log" "[t8-$rt]"
-    grep -h 'production\|未达到生产隔离\|gVisor' "$OUT/t8-$rt-sandboxd.log" | head -2 | sed "s/^/[t8-$rt] /" >> "$SUM"
+      --entrypoint /run/matrix-sandboxd/core.sh "$IMAGE" > "$OUT/$tag-$rt.log" 2>&1
+    collect "$OUT/$tag-$rt.log" "[$tag-$rt]"
+    grep -h 'production\|未达到生产隔离\|gVisor\|宿主内存' "$OUT/$tag-$rt-sandboxd.log" | head -3 | sed "s/^/[$tag-$rt] /" >> "$SUM"
     docker rm -f isochk-sandboxd > /dev/null 2>&1
     docker ps -aq --filter label=dev.matrix.ns=isochk | xargs -r docker rm -f > /dev/null
     docker network ls -q --filter label=dev.matrix.ns=isochk | xargs -r docker network rm > /dev/null 2>&1
@@ -260,9 +327,12 @@ pack() {
 
 steps=("$@"); [ ${#steps[@]} -eq 0 ] && steps=(all)
 [ "${steps[0]}" = all ] && steps=(info build t1 t2 t3 t4 t5 t6 t7 t8 pack)
+if [ -n "${T8_LIGHT:-}" ] && [ "${T8_LIGHT}" != 0 ]; then
+  for i in "${!steps[@]}"; do [ "${steps[$i]}" = t8 ] && steps[$i]=t8lite; done
+fi
 for s in "${steps[@]}"; do
   case $s in
-    info|build|t1|t2|t3|t4|t5|t6|t7|t8|pack) $s ;;
-    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 t5 t6 t7 t8 pack）"; exit 2 ;;
+    info|build|t1|t2|t3|t4|t5|t6|t7|t8|t8lite|pack) $s ;;
+    *) echo "不认识的步骤：$s（可用：all info build t1 t2 t3 t4 t5 t6 t7 t8 t8lite pack）"; exit 2 ;;
   esac
 done

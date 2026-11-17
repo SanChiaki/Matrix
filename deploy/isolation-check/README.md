@@ -3,7 +3,7 @@
 回答 [docs/cloud-runtime.md](../../docs/cloud-runtime.md) 第 11 节还没答上的问题。最关键的是第一个：
 **dsh 自己的沙箱（bubblewrap）能不能在 gVisor 里运行**，它决定阶段 1 用 gVisor 还是 Kata。
 
-一条命令跑完，结果打成一个压缩包，发回来即可。全程大约 40–60 分钟，下载 2–3 GB。
+一条命令跑完，结果打成一个压缩包，发回来即可。全程大约 40–60 分钟，下载 2–3 GB。小机器只跑轻量模式，见第 2 节。
 
 ## 1. 测什么
 
@@ -19,6 +19,7 @@
 | `t6` | `uv sync` 拆开计时：慢在下载还是慢在放文件；四种放法、项目与缓存放在根文件系统或卷上的各种组合；runc、gVisor 及其变体对比 | 对比用 | 否 |
 | `t7` | 并发：同时起 2、4、8、16 个执行单元（内存不够的档自动跳过），看成功数与每个占多少内存 | 对比用 | 否 |
 | `t8` | 阶段 1b 的 docker 后端：构建沙箱镜像与管理器镜像，起沙箱管理器，每个执行单元一个容器，在 `insecure-runc` 与 `runsc` 下各跑一遍完整的 `matrix-dsh-check --live --sandbox docker`（含 `restore`、`deliver`、`isolation`（内层 bwrap）、`resource-limit`） | 对比用 | **要** |
+| `t8lite` | `t8` 的轻量模式：只跑 `runsc` 一档，配额按宿主内存定，不跑 `resource-limit`（第 2 节） | **是** | **要** |
 | `pack` | 把结果打成 `isolation-results-<主机>-<时间>.tgz` | 否 | 否 |
 
 没有模型密钥时，不调真模型的部分照跑（Agent 的 bash 由一个本地假模型服务驱动），真模型那几项（回复、续接、委托、审批、提问等）跳过。
@@ -26,15 +27,39 @@
 
 ## 2. 机器要求
 
-- **不要用生产机**：要装 gVisor、改 Docker 配置、重启 Docker。
+- **不要用生产机，也不要在跑着其他服务的机器上跑**：要装 gVisor、改 Docker 配置、重启 Docker；`t8` 会构建镜像、起好几个容器，
+  完整模式还会故意在沙箱里把内存配额用满。2026-11-17 一台 2 核 1.8 GB、上面还跑着别的服务的测试机被 `t8` 压垮过。
 - Linux x86_64，发行版尽量和以后部署的一样。首选 **Ubuntu 22.04 / 24.04 或 Debian 12**，并保持默认的 seccomp 与 AppArmor 开着，
   这些正是要测的；不要在 Docker Desktop、WSL 或已经关掉 seccomp 的机器上测。
-- Docker Engine 24 或以上，最好是 cgroup v2。
-- 4 核、8 GB 内存以上，磁盘空闲 20 GB 以上。不需要 KVM（gVisor 默认不用它）。
+- Docker Engine 24 或以上，最好是 cgroup v2。不需要 KVM（gVisor 默认不用它）。
 - 能访问：Docker Hub、`deb.debian.org`、`deb.nodesource.com`、`registry.npmjs.org`、`pypi.org` 与 `files.pythonhosted.org`、`github.com`、
   装 gVisor 用的 `gvisor.dev` 与 `storage.googleapis.com`；有密钥时还要 `api.deepseek.com`。
   只有内网镜像的机器见第 6 节。
 - 跑脚本的用户能用 `docker`（在 docker 组里，或用 `sudo -E`）。
+
+分两档。`t8` / `t8lite` 开跑前会看内存总量、可用内存、CPU 数与 Docker 所在磁盘的空闲，低于下限就拒绝并说明；
+另外列出占内存最多的几个非 Docker 进程作为提醒（不阻止）。
+
+| | 完整模式（`./run.sh all`、`t8`） | 轻量模式（`./run.sh build t8lite`，或 `T8_LIGHT=1`） |
+| --- | --- | --- |
+| 建议 | 4 核、8 GB 内存、磁盘空闲 20 GB 以上 | 2 核、2 GB 内存、磁盘空闲 15 GB，机器上不跑别的 |
+| `t8` 拒绝开跑的下限 | 内存 4 GB（可用 3 GB）、2 核、磁盘空闲 15 GB | 内存 1.7 GB（可用 1.2 GB）、2 核、磁盘空闲 15 GB |
+| 跑哪几档 | `insecure-runc` 与 `runsc` 各一遍（`T8_RUNTIMES` 可改） | 只有 `runsc`；没有 runsc 直接说明并退出，不退回 runc |
+| 单个沙箱的内存配额 | 管理器默认 2048 MB（`T8_MEMORY_MB` 可改） | 按宿主定：宿主 ≤ 4 GB 时 768 MB，再大 1024 MB（`T8_MEMORY_MB` 可改） |
+| 验证什么 | 全部检查，含 `resource-limit`（配额 + 256 MB 的内存申请、pids + 100 个进程被挡住）与 runc / gVisor 对照 | gVisor 下的 `sandbox`、`isolation`、`read-isolation`、`proc-isolation`、`net-isolation`、`key-absent`、`egress-tools`、`reply`、`resume`、`delegate`、`deliver`、`restore` |
+| 不验证什么 | — | **不验证配额（`resource-limit`）与 runc 对照**；`t1`–`t7` 也别在小机器上跑 |
+
+内存峰值（本机实测，宿主“已用”内存比开跑前多出的部分，含 dockerd 与 buildkit）：
+
+- **构建阶段**：`t8` 一个一个地构建沙箱镜像与管理器镜像，不并行。峰值约 0.85 GB，出现在沙箱镜像里 `npm install -g @deepseek-ai/dsh`
+  （616 个包）；部署镜像（`build` 一步）约 0.75 GB，管理器镜像不到 0.1 GB。限制 Node 的堆只省约 90 MB，所以没改 Dockerfile。
+  2 GB 的机器构建时要有 1.2 GB 左右的可用内存；不够就在别的机器上构建好再 `docker save` / `docker load` 过来，
+  或者设 `BUILD_ARGS` 用内网镜像源（第 6 节）。磁盘：三个镜像约 4 GB，不带缓存的构建另有约 7 GB 的构建缓存（`docker builder prune` 可清）。
+- **运行阶段**：轻量模式（`runc`、配额 768 MB）峰值约 0.45 GB（控制面容器、管理器、同时最多两个沙箱）；gVisor 下每个 dsh 多约 90 MB，
+  估计 0.6–0.7 GB。完整模式因为 `resource-limit` 要把配额用满，峰值约 1.35 GB（配额 2048 MB 时；配额越大越高）。
+
+沙箱管理器自己也会核对：单个沙箱的 `memory_mb`、`max_memory_mb` 超过“宿主内存 − 1024 MB”时拒绝启动（`t8` 会打出它的错误）；
+`matrix-dsh-check` 的 `resource-limit` 在宿主可用内存不到“配额 + 768 MB”时提醒并跳过。
 
 ## 3. 准备
 
@@ -119,6 +144,16 @@ export DEEPSEEK_API_KEY=sk-...
 ./run.sh info build t8 pack
 ```
 
+小机器（2 核 2 GB）上只跑轻量模式（只有 gVisor 一档，不跑 `resource-limit`，见第 2 节）：
+
+```bash
+./run.sh info build t8lite pack
+```
+
+`t8` 的环境变量：`T8_RUNTIMES`（跑哪几档，默认 `insecure-runc runsc`，例如只要 `runsc`）、`T8_MEMORY_MB`（写进管理器配置的
+`memory_mb` 与 `max_memory_mb`）、`T8_PIDS`（`pids` 与 `max_pids`）、`T8_ONLY`（透传给 `matrix-dsh-check --only`，例如 `reply,net-isolation`）、
+`T8_LIGHT=1`（等于 `t8lite`）。
+
 `t8` 起一个 `isochk-sandboxd` 容器（唯一挂 docker.sock）和一个 `isochk-core` 容器（部署镜像里的 matrix-dsh-check：控制面与出口网关），
 管理器给每个执行单元建一张只接这个沙箱与 `isochk-core` 的 internal 网络（地址池默认 `10.214.0.0/16`，冲突时设 `T8_SUBNET_POOL`）。
 沙箱只能经出口网关出网；控制面自己要经代理出网时，设 `T8_CORE_PROXY`（容器里连得到的代理地址，不能是宿主的 127.0.0.1）。
@@ -171,9 +206,10 @@ export DEEPSEEK_API_KEY=sk-...
 
 **T8（阶段 1b）**，看 `[t8-runsc]` 与 `[t8-insecure-runc]`：两档都应该全是 ✓。`runsc` 有 ✗ 而 `insecure-runc` 全过，就是 gVisor 下的兼容性问题
 （这正是要找的，把对应的 `t8-runsc.log` 一起发回来）。`isolation` 一项另核对 Agent 的命令在 dsh 的内层 bwrap 里；
-`resource-limit` 看超额内存（退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常；
+`resource-limit` 看超额内存（申请配额 + 256 MB，退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常；
 `net-isolation` 看沙箱是不是只连得到出口网关，`key-absent` 看沙箱里有没有模型密钥（这几项都由假模型驱动，结果确定）。
 `[t8-insecure-runc]` 那一行“未达到生产隔离”是预期的：runc 档只用于对比与过渡。
+轻量模式的结果在 `[t8lite-runsc]` 与 `t8lite-runsc.log`，应该全是 ✓。`t8` / `t8lite` 开头几行是宿主的内存、CPU、磁盘与占内存最多的进程；“拒绝开跑”或“管理器没起来”时照那一行的说明改（例如设小 `T8_MEMORY_MB`）。
 
 ## 8. 参考：在另一台机器上的结果（runc，没有 gVisor）
 
