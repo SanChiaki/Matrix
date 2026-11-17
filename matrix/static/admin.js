@@ -60,6 +60,7 @@ function deny(title, text) {
   $("#models").hidden = true;
   $("#plugins").hidden = true;
   $("#im").hidden = true;
+  $("#audit").hidden = true;
   $(".admin-tabs").hidden = true;
   $("#denied").hidden = false;
   $("#denied-title").textContent = title;
@@ -739,15 +740,44 @@ function bindIm() {
   });
 }
 
+// ---------- 审计 ----------
+const auditDetail = (r) => {
+  const d = r.detail || {};
+  const parts = [];
+  if (d.keys_set?.length) parts.push(`换了密钥：${d.keys_set.join("、")}`);
+  if (d.models != null) parts.push(`${d.models} 个模型`);
+  if (d.approve != null) parts.push(d.approve ? "通过" : "退回");
+  if (d.kind) parts.push(d.kind);
+  if (d.url) parts.push(d.url);
+  if (d.values_changed) parts.push("改了配置");
+  if (d.enabled != null) parts.push(d.enabled ? "启用" : "停用");
+  return parts.map(esc).join(" · ");
+};
+
+async function loadAudit() {
+  let d;
+  try { d = await api("/api/admin/audit"); $("#audit-error").textContent = ""; }
+  catch (e) { $("#audit-error").textContent = e.message; return; }
+  table("#t-audit", [
+    { label: "时间", html: (r) => when(r.at) },
+    { label: "谁", html: (r) => esc(r.actor_email || r.actor) },
+    { label: "类别", html: (r) => esc(r.category || r.action) },
+    { label: "对象", html: (r) => r.target ? `<code>${esc(r.target)}</code>` : "" },
+    { label: "摘要", html: auditDetail },
+  ], d.entries, "还没有记录");
+}
+
 // ---------- 标签页 ----------
 function showTab() {
-  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im" }[location.hash] || "usage";
+  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im", "#audit": "audit" }[location.hash] || "usage";
   for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
   $("#dash").hidden = tab !== "usage";
   $("#models").hidden = tab !== "models";
   $("#plugins").hidden = tab !== "plugins";
   $("#im").hidden = tab !== "im";
+  $("#audit").hidden = tab !== "audit";
   if (tab === "models") loadCatalog();
+  else if (tab === "audit") loadAudit();
   else if (tab === "plugins") loadPlugins();
   else if (tab === "im") loadIm();
   else if (!S.data) load();
