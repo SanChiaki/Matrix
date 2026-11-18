@@ -730,7 +730,7 @@ function bindIm() {
   });
 }
 
-// ---------- 公共 Agent（docs/public-agents.md，不变量 26） ----------
+// ---------- 公共 Agent（docs/public-agents.md，不变量 27） ----------
 async function loadPublic() {
   let rows;
   try { rows = await api("/api/admin/public-agents"); }

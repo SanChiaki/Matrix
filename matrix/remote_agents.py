@@ -1,4 +1,4 @@
-"""外部平台 Agent（docs/remote-agents.md，不变量 27）：公司内部别的平台上建的云端 Agent，以 HTTP 会话接进 Matrix 当成员。
+"""外部平台 Agent（docs/remote-agents.md，不变量 28）：公司内部别的平台上建的云端 Agent，以 HTTP 会话接进 Matrix 当成员。
 
 部署方在平台目录里登记平台（默认 `<data>/agent-platforms.json`，`--platforms` / `MATRIX_PLATFORMS`，改了就生效）::
 

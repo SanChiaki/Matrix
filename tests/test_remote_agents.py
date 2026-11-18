@@ -1,4 +1,4 @@
-"""外部平台 Agent（docs/remote-agents.md，不变量 27）：平台只来自部署方目录；以 HTTP 流式会话接进来当成员；
+"""外部平台 Agent（docs/remote-agents.md，不变量 28）：平台只来自部署方目录；以 HTTP 流式会话接进来当成员；
 平台回调 Matrix 的 MCP 凭 Matrix 签的密钥 + 平台会话 id，只认 Matrix 发起、还没结束的那一轮；调用方的授权只透传他自己的。"""
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def env(tmp_path: Path, fake: FakeMCP):
 
 
 def test_platform_catalog_validation():
-    """不变量 27：平台地址只来自部署方目录，目录写坏了不生效。"""
+    """不变量 28：平台地址只来自部署方目录，目录写坏了不生效。"""
     with pytest.raises(PlatformError, match="url"):
         parse_platforms({"platforms": [{"id": "x", "url": "ftp://x"}]})
     with pytest.raises(PlatformError, match="请求头"):
@@ -79,7 +79,7 @@ def test_platform_catalog_validation():
 
 
 def test_basic_access_runs_on_the_platform_and_keeps_secrets_out(env: Env):
-    """不变量 27：添加时从平台读名片；API Key 只进保管库；没接 MCP 时它只能干活、不能委托。"""
+    """不变量 28：添加时从平台读名片；API Key 只进保管库；没接 MCP 时它只能干活、不能委托。"""
     net = env.net
     maya, = users(net, "maya@x.io")
     with pytest.raises(NetworkError, match="没有平台"):
@@ -101,7 +101,7 @@ def test_basic_access_runs_on_the_platform_and_keeps_secrets_out(env: Env):
 
 
 def test_full_access_callbacks_land_in_the_matrix_round(env: Env):
-    """不变量 27：配了 Matrix 的 MCP 后，平台的回调凭密钥 + 会话 id 落到 Matrix 发起的那一轮，权限照网络算；
+    """不变量 28：配了 Matrix 的 MCP 后，平台的回调凭密钥 + 会话 id 落到 Matrix 发起的那一轮，权限照网络算；
     接上之后委托由网络强制。"""
     net = env.net
     maya, = users(net, "maya@x.io")
@@ -126,7 +126,7 @@ def test_full_access_callbacks_land_in_the_matrix_round(env: Env):
 
 
 def test_callbacks_before_the_session_id_wait_and_strangers_are_refused(env: Env):
-    """不变量 27：建会话与第一条消息同一次请求时，MCP 调用比会话 id 先到：先等，流里报出 id 后落到那一轮；
+    """不变量 28：建会话与第一条消息同一次请求时，MCP 调用比会话 id 先到：先等，流里报出 id 后落到那一轮；
     密钥不对 401；在平台上直接聊天的会话（Matrix 不认识的 id）等不到就拒绝。"""
     net = env.net
     maya, = users(net, "maya@x.io")
@@ -151,7 +151,7 @@ def test_callbacks_before_the_session_id_wait_and_strangers_are_refused(env: Env
 
 
 def test_caller_authorization_is_passed_through_only_from_the_caller(env: Env):
-    """不变量 27（与不变量 26、19）：平台要调用方授权时，只透传这一轮调用方自己的；他没授权就不发起会话，
+    """不变量 28（与不变量 27、19）：平台要调用方授权时，只透传这一轮调用方自己的；他没授权就不发起会话，
     不退回到添加它的人的授权。"""
     net = env.net
     admin, maya, ann = users(net, "admin@x.io", "maya@x.io", "ann@x.io")
@@ -174,7 +174,7 @@ def test_caller_authorization_is_passed_through_only_from_the_caller(env: Env):
 
 
 def test_stopping_a_round_interrupts_the_platform_session(env: Env):
-    """不变量 27：人终止这一轮时调平台的会话中断接口，会话保留；之后这个会话的回调不再认。"""
+    """不变量 28：人终止这一轮时调平台的会话中断接口，会话保留；之后这个会话的回调不再认。"""
     net = env.net
     maya, = users(net, "maya@x.io")
     a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)

@@ -1,6 +1,6 @@
 # 公共 Agent（设计草案）
 
-> 状态：**第一版已实现**（第 10 节），不变量 26。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #69。约束见 [AGENTS.md](../AGENTS.md)、
+> 状态：**第一版已实现**（第 10 节），不变量 27。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #70。约束见 [AGENTS.md](../AGENTS.md)、
 > [reference/invariants.md](reference/invariants.md)。外部平台 Agent 的接入（远程运行时）在这之后落地，见第 7 节。
 > 调研：research: agent-definition-context-boundaries#trust-boundary-outside-agent、research: project-publishing#gpts-builder-privacy。
 

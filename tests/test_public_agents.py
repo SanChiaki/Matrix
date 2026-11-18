@@ -1,4 +1,4 @@
-"""公共 Agent（docs/public-agents.md，不变量 26）：维护组申请、管理员批准；所有用户都能私聊、拉进项目；
+"""公共 Agent（docs/public-agents.md，不变量 27）：维护组申请、管理员批准；所有用户都能私聊、拉进项目；
 服务面只为调用方做事：私有目录只读不写回、台账不列别处、不申请外溢、用调用方自己的授权、过程只给调用方、维护人只看用量。"""
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def setup(tmp_path: Path, handler, connectors: Path | None = None, authority=("w
 
 # ================= 归属：申请、批准、撤回 =================
 def test_public_needs_admin_approval_and_freezes_authority(tmp_path: Path):
-    """不变量 26：设成公共由管理员批准，批准时冻结权限；之前别人当它不存在，之后谁都能私聊、拉进项目。"""
+    """不变量 27：设成公共由管理员批准，批准时冻结权限；之前别人当它不存在，之后谁都能私聊、拉进项目。"""
     net = Network(ScriptedRuntime(lambda call: call.authority and ",".join(sorted(call.authority)) or "无"),
                   tmp_path, seed=False)
     admin, maya, ann = users(net, "admin@x.io", "maya@x.io", "ann@x.io")
@@ -81,7 +81,7 @@ def test_public_needs_admin_approval_and_freezes_authority(tmp_path: Path):
 
 
 def test_withdrawing_public_closes_it_to_others(tmp_path: Path):
-    """不变量 26：不再公共——别人和它的私聊归档为只读，没有维护人在的项目里移出；维护人自己的不动。"""
+    """不变量 27：不再公共——别人和它的私聊归档为只读，没有维护人在的项目里移出；维护人自己的不动。"""
     net, admin, maya, ann, ben, pub = setup(tmp_path, lambda call: "ok")
     dm = net.direct_chat(pub.id, actor=ann)
     g = net.create_project("Ann 的项目", "", [pub.id], actor=ann)  # 任何人都能拉进自己的项目
@@ -96,7 +96,7 @@ def test_withdrawing_public_closes_it_to_others(tmp_path: Path):
 
 
 def test_public_guards(tmp_path: Path):
-    """不变量 26：公共 Agent 只在平台云侧、不当助理；维护人能维护不能删除；迁移不把它当作跨信任域。"""
+    """不变量 27：公共 Agent 只在平台云侧、不当助理；维护人能维护不能删除；迁移不把它当作跨信任域。"""
     net, admin, maya, ann, ben, pub = setup(tmp_path, lambda call: "ok")
     with pytest.raises(NetworkError, match="不能当助理"):
         net.set_assistant(pub.id, actor=maya)
@@ -119,7 +119,7 @@ def test_public_guards(tmp_path: Path):
 
 # ================= 服务面 =================
 def test_service_face_keeps_nothing_and_shows_process_only_to_the_caller(tmp_path: Path):
-    """不变量 26：维护面写下的是公共资料，服务面只读、写了也不写回；台账不列别处；不申请外溢；
+    """不变量 27：维护面写下的是公共资料，服务面只读、写了也不写回；台账不列别处；不申请外溢；
     过程只给调用方，维护人只看用量。"""
     seen: dict[str, list] = {"home": [], "prompt": []}
 
@@ -178,7 +178,7 @@ def test_service_face_keeps_nothing_and_shows_process_only_to_the_caller(tmp_pat
 
 
 def test_service_face_uses_only_the_callers_own_connection(tmp_path: Path, fake: FakeMCP):
-    """不变量 26（与不变量 19）：要用户鉴权的系统用调用方自己的授权，从不用维护人的；调用方没授权就没有连接器。"""
+    """不变量 27（与不变量 19）：要用户鉴权的系统用调用方自己的授权，从不用维护人的；调用方没授权就没有连接器。"""
     def handler(call: ScriptCall) -> str:
         if "docs__search_docs" in call.connector_tools():
             return call.connector("docs__search_docs", q="报销进度")
@@ -203,7 +203,7 @@ def test_service_face_uses_only_the_callers_own_connection(tmp_path: Path, fake:
 
 
 def test_delegation_to_public_agent_is_for_the_caller(tmp_path: Path):
-    """不变量 26（与不变量 1、13）：委托给公共 Agent 只在项目里；为委托为之而做的人，权限在冻结的之内，
+    """不变量 27（与不变量 1、13）：委托给公共 Agent 只在项目里；为委托为之而做的人，权限在冻结的之内，
     委托只给这个人看，问题也只问他，不给维护人。"""
     def handler(call: ScriptCall) -> str:
         if call.context_id.startswith("task-"):
@@ -235,7 +235,7 @@ def test_delegation_to_public_agent_is_for_the_caller(tmp_path: Path):
 
 
 def test_public_agent_api(tmp_path: Path):
-    """不变量 26：HTTP 上的目录、申请、管理员批准、维护人设维护人与看用量。"""
+    """不变量 27：HTTP 上的目录、申请、管理员批准、维护人设维护人与看用量。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     admin, maya, ann = users(net, "admin@x.io", "maya@x.io", "ann@x.io")
     net.create_agent("Maya 的助理", "助理", [], [], actor=maya)
@@ -255,7 +255,7 @@ def test_public_agent_api(tmp_path: Path):
 
 
 def test_ledger_lists_nothing_elsewhere_and_maintainers_see_only_usage(tmp_path: Path):
-    """不变量 26：公共 Agent 的提示词里不列别处的工作（连数量都不给）；维护人看台账只看到谁、什么场合、从什么时候。"""
+    """不变量 27：公共 Agent 的提示词里不列别处的工作（连数量都不给）；维护人看台账只看到谁、什么场合、从什么时候。"""
     from matrix.engine import ExecContext
     net, admin, maya, ann, ben, pub = setup(tmp_path, lambda call: "ok")
     dm = net.direct_chat(pub.id, actor=ann)
@@ -273,7 +273,7 @@ def test_ledger_lists_nothing_elsewhere_and_maintainers_see_only_usage(tmp_path:
 
 
 def test_several_callers_in_one_round_get_no_connectors(tmp_path: Path, fake: FakeMCP):
-    """不变量 26：一轮里有几个人 @ 它时说不清用谁的授权，一个连接器都不给；只有一个人时只给他自己的。"""
+    """不变量 27：一轮里有几个人 @ 它时说不清用谁的授权，一个连接器都不给；只有一个人时只给他自己的。"""
     from matrix.engine import ExecContext
     net, admin, maya, ann, ben, pub = setup(tmp_path, lambda call: "ok", catalog_file(tmp_path, fake.url),
                                             authority=("connector.use",))

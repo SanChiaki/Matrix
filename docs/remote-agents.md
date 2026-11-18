@@ -1,6 +1,6 @@
 # 外部平台 Agent（设计与第一版实现）
 
-> 状态：**第一版已实现**，不变量 27。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #70。接真实平台的步骤见
+> 状态：**第一版已实现**，不变量 28。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #71。接真实平台的步骤见
 > [remote-agent-authoring.md](remote-agent-authoring.md)，样板见 `examples/remote-agent/`。公共 Agent 见 [public-agents.md](public-agents.md)。
 > 运行时契约与云侧、端侧的差异见 [device-runtimes.md](device-runtimes.md)。调研：research: acp-vs-a2a#external-task-authority。
 
@@ -58,7 +58,7 @@
   不进 `state.json`、事件、日志、API 返回。
 - **Matrix 密钥**（`mrk_…`）：只在签发时返回一次，`state.json` 里只有 sha256；重签旧的立刻作废。它只证明“是这个 Agent 在调”，
   单有它不够：还要带一个 Matrix 发起、还没结束的会话 id。
-- **调用方授权透传**：平台目录里写了 `caller` 的，网络取**这一轮调用方**（不变量 26 的 `principal`；个人 Agent 就是所有者）
+- **调用方授权透传**：平台目录里写了 `caller` 的，网络取**这一轮调用方**（不变量 27 的 `principal`；个人 Agent 就是所有者）
   自己授权的那个目录连接器的字段，放进 `caller.header`。他没授权就**不发起会话**，在对话里说明要先连接；
   从不退回到添加它的人或维护人的授权。一轮里有几个人同时 @ 它时说不清用谁的，这一轮不发起。
 
@@ -66,7 +66,7 @@
 
 - **不变量 10（身份由网络认定）**：平台回调的身份 = 密钥认出的 Agent + 会话 id 绑定的那一轮的执行上下文令牌；不信模型自报，
   会话 id 由平台填、不由模型填（接入验收要确认，见接入指南）。
-- **不变量 26（公共 Agent）**：外部平台的 Agent 也能设成公共；服务面的调用方授权经 `caller` 透传。平台那边会不会跨用户保留记忆
+- **不变量 27（公共 Agent）**：外部平台的 Agent 也能设成公共；服务面的调用方授权经 `caller` 透传。平台那边会不会跨用户保留记忆
   Matrix 管不到：管理员批准时要确认（[public-agents.md](public-agents.md) 第 7 节）。
 - **不变量 22（信息流）**：群聊内容发到平台就是向平台披露；私有目录不挂（它的记忆在平台上）。
 - **读隔离**（[security.md](reference/security.md)）：远程 Agent 不在服务器上执行，读不到 `--data`，不加重云侧的读隔离欠账。
