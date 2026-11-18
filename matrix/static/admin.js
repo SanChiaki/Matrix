@@ -730,15 +730,50 @@ function bindIm() {
   });
 }
 
+// ---------- 公共 Agent（docs/public-agents.md，不变量 27） ----------
+async function loadPublic() {
+  let rows;
+  try { rows = await api("/api/admin/public-agents"); }
+  catch (e) { $("#pa-error").textContent = e.message; return; }
+  renderPublic(rows);
+}
+
+function renderPublic(rows) {
+  $("#pa-error").textContent = "";
+  table("#t-public", [
+    { label: "Agent", html: (r) => `<b>${esc(r.name)}</b><div class="muted">${esc(r.description)}</div>` },
+    { label: "负责什么", html: (r) => esc(r.note) || '<span class="muted">没写</span>' },
+    { label: "维护人", html: (r) => esc(r.maintainers.join("、")) },
+    { label: "权限", html: (r) => r.status === "approved"
+        ? esc(r.approved_authority.join("、") || "无") + (r.wider.length ? `<div class="warn">待批准：${esc(r.wider.join("、"))}</div>` : "")
+        : esc(r.authority.join("、") || "无") },
+    { label: "要用的连接器", html: (r) => esc(r.connectors.join("、")) || '<span class="muted">无</span>' },
+    { label: "状态", html: (r) => r.status === "approved" ? `<span class="pill on">公共</span>${r.reviewed_by ? `<div class="muted">${esc(r.reviewed_by)} ${when(r.reviewed_at)}</div>` : ""}`
+        : '<span class="pill off">等批准</span>' },
+    { label: "", html: (r) => (r.status === "pending" || r.wider.length
+        ? `<button type="button" class="sm" data-pa="approve" data-id="${esc(r.id)}">${r.status === "pending" ? "批准" : "批准放宽"}</button> ` : "")
+        + `<button type="button" class="sm danger" data-pa="reject" data-id="${esc(r.id)}">${r.status === "pending" ? "驳回" : "撤销公共"}</button>` },
+  ], rows, "没有申请");
+  for (const b of $("#t-public").querySelectorAll("button[data-pa]")) {
+    b.addEventListener("click", async () => {
+      if (b.dataset.pa === "reject" && !confirm("确定？已公共的会撤销：别人和它的私聊归档，没有维护人在的项目里移出。")) return;
+      try { renderPublic(await api(`/api/admin/public-agents/${b.dataset.id}/${b.dataset.pa}`, { method: "POST" })); }
+      catch (e) { $("#pa-error").textContent = e.message; }
+    });
+  }
+}
+
 // ---------- 标签页 ----------
 function showTab() {
-  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im" }[location.hash] || "usage";
+  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im", "#public": "public" }[location.hash] || "usage";
   for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
   $("#dash").hidden = tab !== "usage";
   $("#models").hidden = tab !== "models";
   $("#plugins").hidden = tab !== "plugins";
   $("#im").hidden = tab !== "im";
+  $("#public").hidden = tab !== "public";
   if (tab === "models") loadCatalog();
+  else if (tab === "public") loadPublic();
   else if (tab === "plugins") loadPlugins();
   else if (tab === "im") loadIm();
   else if (!S.data) load();

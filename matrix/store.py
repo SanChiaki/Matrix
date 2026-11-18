@@ -442,16 +442,18 @@ class Store:
         for u in self.users.values():
             if u.assistant_id in self.agents and self.agents[u.assistant_id].owner_id == u.id:
                 continue
-            mine = sorted((a for a in self.agents.values() if a.owner_id == u.id), key=lambda a: a.created_at)
+            mine = sorted((a for a in self.agents.values() if a.owner_id == u.id and not a.public_status),
+                          key=lambda a: a.created_at)  # 公共 Agent 不当助理（不变量 27）
             u.assistant_id = mine[0].id if mine else None
 
     def _one_trust_domain(self) -> None:
         """Agent 不跨信任域（不变量 16）。旧版本的 public / shared Agent 可以被别人私聊、拉进别人的项目：
-        别人和它的私聊归档为只读；内部项目里不属于项目所有者的 Agent 移出，群聊里记一条事件。已有委托与记录保留。"""
+        别人和它的私聊归档为只读；内部项目里不属于项目所有者的 Agent 移出，群聊里记一条事件。已有委托与记录保留。
+        维护人算自己人；管理员批准过的公共 Agent 本来就给所有人用（不变量 27），都不动。"""
         for c in self.conversations.values():
             a = self.agents.get(c.agent_id or "")
             if c.kind == "dm" and not c.archived and a is not None and a.owner_id and c.owner_id \
-                    and a.owner_id != c.owner_id:
+                    and not a.maintained_by(c.owner_id) and not a.is_public:
                 c.archived = True
         for t in self.tasks.values():
             if not t.owners:  # 旧版委托：归对话所有者
@@ -460,7 +462,8 @@ class Store:
         for p in self.projects.values():
             if p.shared or not p.owner_id:
                 continue
-            foreign = [m for m in p.member_ids if (a := self.agents.get(m)) and a.owner_id and a.owner_id != p.owner_id]
+            foreign = [m for m in p.member_ids if (a := self.agents.get(m)) and a.owner_id
+                       and not a.maintained_by(p.owner_id) and not a.is_public]
             if not foreign:
                 continue
             p.member_ids = [m for m in p.member_ids if m not in foreign]

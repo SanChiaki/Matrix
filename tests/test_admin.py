@@ -109,7 +109,7 @@ def test_admin_dashboard(tmp_path: Path):
     ledger = (tmp_path / "usage.jsonl").read_text(encoding="utf-8")
     assert SECRET not in ledger and "好的" not in ledger
     assert all(set(json.loads(x)) <= {"ts", "ms", "user", "agent", "project", "venue", "where", "runtime", "model",
-                                      "ok", "error", "tools", "usage"} for x in ledger.splitlines())
+                                      "ok", "error", "tools", "usage", "public"} for x in ledger.splitlines())
 
     # 不是管理员：按不存在处理
     assert partner.get("/api/admin/usage").status_code == 404

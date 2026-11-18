@@ -20,6 +20,7 @@
     <a href="#models" data-tab="models">模型</a>
     <a href="#plugins" data-tab="plugins">插件</a>
     <a href="#im" data-tab="im">IM 机器人</a>
+    <a href="#public" data-tab="public">公共 Agent</a>
   </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
@@ -192,6 +193,15 @@
     <p class="error" id="im-error" role="alert"></p>
     <div id="im-driver-errors"></div>
     <div class="table-wrap"><table id="t-im"></table></div>
+  </div>
+  <div id="public" data-pane="public" hidden>
+    <div class="view-head">
+      <div><h1>公共 Agent</h1>
+        <p>维护组申请设成公共的 Agent：批准后所有人都能私聊它、把它拉进项目，它只为找它的那个人做事、用那个人自己的授权。
+          批准时冻结它现在的权限；维护人之后放宽的部分要在这里再批准才生效。</p></div>
+    </div>
+    <p class="error" id="pa-error" role="alert"></p>
+    <div class="table-wrap"><table id="t-public"></table></div>
   </div>
   <dialog id="im-dialog" class="m-dialog">
     <form id="im-form" method="dialog">
