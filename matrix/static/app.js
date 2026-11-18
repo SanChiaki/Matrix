@@ -18,7 +18,7 @@ const placeholder = (text) => `<div class="placeholder"><svg viewBox="0 0 24 24"
 const tags = (xs, cls = "") => (xs || []).map((x) => `<span class="tag ${cls}">${esc(x)}</span>`).join("") || '<span class="muted">无</span>';
 const agent = (id) => S.snap?.agents.find((a) => a.id === id);
 const proj = (id) => S.snap?.projects.find((g) => g.id === id);
-const aname = (id) => agent(id)?.name || id || "（未知）";
+const aname = (id) => agent(id)?.name || S.conv?.agent_names?.[id] || id || "（未知）";
 // 项目的对话（群聊、自己的项目会话）开在项目页的“对话”标签里；私聊、助理和归档的对话在对话视图
 const convOf = (id) => !id ? null : S.snap?.conversations.find((x) => x.id === id) || (S.conv && S.conv.id === id && !S.conv.loading ? S.conv : null);
 const inProject = (c) => !!c && (c.kind === "project" || c.kind === "session") && !!c.project_id && !c.archived && !!proj(c.project_id);
@@ -1086,6 +1086,7 @@ function renderProjects() {
   $("#project-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { location.hash = `project-${b.dataset.id}`; }));
   renderPagesForMe();
+  renderServicesForMe();
 }
 
 function renderProjectEditor(isNew = false) {
@@ -1204,7 +1205,7 @@ async function renderProjectPage(force = false) {
     : st.tab.startsWith("plugin:") || st.tab.startsWith("embed:")
     ? [g.name, st.tab, plugins.map((p) => [p.name, p.version, p.tabs, p.page_permissions]), embeds]
     : [d, g.name, g.description, st.tab, st.by, st.asc, st.note, st.dir, st.skill, st.skillNew, S.catalog, S.pluginCatalog, S.pluginSubs, st.hook, st.secret, st.rolesEdit, st.bpDraft, g.roles, g.setup_steps, g.blueprint, st.needKind, st.editNeed,
-       st.relForm, st.relEdit]);
+       st.relForm, st.relEdit, st.svcEdit, st.svcNew, st.svcUsage]);
   if (page.dataset.sig === sig) {  // 页头没变：对话标签照样要确认对话栏挂着、开的是对的对话（可能刚从别的视图回来）
     if (st.tab === "chat") showProjectChat(g, $("#pp-panel", page));
     return;
@@ -2437,6 +2438,24 @@ function bindBlueprintPublish(box, d, st) {
   });
 }
 
+// “项目”里的“给你用的服务”：别的项目对你开放的服务（不变量 29）。开一个服务会话，只有你看得到
+function renderServicesForMe() {
+  const list = (S.snap?.services || []).filter((x) => !proj(x.project_id));
+  $("#services-for-me").hidden = !list.length;
+  $("#service-list").innerHTML = list.map((x) => `<li><div class="card">
+      <div class="card-main"><div class="card-head"><span class="pill">服务</span><span class="name">${esc(x.title)}</span><span class="pill">v${x.version}</span>
+        ${x.paused ? '<span class="pill bad">暂停</span>' : ""}</div>
+        <p class="card-desc">${esc(x.description || "没有说明")}</p>
+        <div class="card-meta"><span class="muted">来自「${esc(x.project_name)}」· 由 ${esc(x.entry.name)} 接待${(x.passes || []).length
+          ? ` · 可能经过 ${x.passes.map((p) => `${esc(p.agent)}（${esc(p.owner)}）`).join("、")}` : ""}</span></div></div>
+      <div class="card-foot"><button type="button" class="sm" data-svc-open="${esc(x.id)}" ${x.paused ? "disabled" : ""}>开始对话</button></div>
+    </div></li>`).join("");
+  $("#service-list").querySelectorAll("[data-svc-open]").forEach((b) => b.addEventListener("click", async () => {
+    try { const conv = await api(`/api/services/${b.dataset.svcOpen}/sessions`, { method: "POST", body: {} }); await reload(); location.hash = conv.id; }
+    catch (err) { alert(err.message); }
+  }));
+}
+
 // “项目”里的“给你看的页面”：别的项目发给你的对外页面（原来的“发布物”入口并进这里）
 function renderPagesForMe() {
   api("/api/releases").then((list) => {
@@ -2565,12 +2584,99 @@ window.addEventListener("message", async (e) => {
 });
 
 // 项目页的“发布”标签：这个项目发出去的东西。主持人发布、切版本、改读者、撤回；参与者看得到发给了谁
+// 项目服务（docs/project-services.md，不变量 29）：项目配置好以后对外提供服务。主持人发布即生效：入口、岗位、能读的资料、收件目录、
+// 服务授予的权限、给谁用；改了就是新版本。调用方的服务会话只属于他，主持人只看用量。
+function serviceForm(d, x) {
+  const v = x || {}, agents = (d.member_ids || []).map(agent).filter(Boolean);
+  const checked = (list, val) => (list || []).includes(val) ? "checked" : "";
+  const paths = [...(d.folders || []).map((f) => f.name), ...(d.files || []).map((f) => f.name).filter((n) => !n.includes("/"))];
+  const auth = Object.entries(d.authorities || {});
+  return `<form class="rel-form" ${x ? `data-svc-form="${esc(x.id)}"` : 'id="svc-new"'}>
+    <label>标题<input name="title" maxlength="80" required value="${esc(v.title || "")}" placeholder="报销服务"></label>
+    ${x ? "" : '<label>名字（小写字母、数字、-）<input name="name" maxlength="64" required pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="expense"></label>'}
+    <label>说明（调用方看到的：这个服务能办什么）<textarea name="description" rows="2" maxlength="2000">${esc(v.description || "")}</textarea></label>
+    <label>入口（调用方只和它对话）<select name="entry">${agents.map((a) => `<option value="${esc(a.id)}" ${v.entry?.id === a.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label>
+    <fieldset><legend>岗位（入口能委托的；都不勾就是项目里全部 Agent）</legend>${agents.map((a) => `<label class="check"><input type="checkbox" name="staff" value="${esc(a.id)}" ${checked(v.staff, a.id)}>${esc(a.name)}</label>`).join("")}</fieldset>
+    <fieldset><legend>能读的资料（目录管到里面的每个文件；内容是实时的）</legend>${paths.map((p) => `<label class="check"><input type="checkbox" name="scope" value="${esc(p)}" ${checked(v.scope, p)}>${esc(p)}</label>`).join("") || '<span class="muted">资料里还没有东西。</span>'}</fieldset>
+    <label>收件目录（服务只能写到这里；空着就不能写）<input name="inbox" maxlength="200" value="${esc(v.inbox || "")}" placeholder="收件"></label>
+    <fieldset><legend>服务授予的权限（入口与岗位的权限再交它）</legend>${auth.map(([k, label]) => `<label class="check"><input type="checkbox" name="authority" value="${esc(k)}" ${checked(v.authority, k)}>${esc(label)}</label>`).join("")}</fieldset>
+    <label>给谁用（邮箱，逗号或换行分隔；项目参与者本来就能用）<textarea name="readers" rows="2">${esc((v.readers || []).join("\n"))}</textarea></label>
+    <label class="check"><input type="checkbox" name="public" ${v.public ? "checked" : ""}>所有登录用户都能用</label>
+    <div class="actions"><button type="submit">${x ? "保存（切新版本）" : "发布"}</button>${x ? '<button type="button" class="ghost" data-svc-cancel>取消</button>' : ""}</div></form>`;
+}
+
+function serviceSection(d, st) {
+  const host = d.is_host, list = d.service_list || [];
+  const usage = (x) => {
+    const u = st.svcUsage?.[x.id];
+    if (!u) return "";
+    return `<dl class="plugin-facts"><dt>最近 ${u.days} 天</dt><dd>${u.sessions} 个会话 · ${u.runs} 轮（失败 ${u.failed}）· ${u.tokens.total} token（记在项目下）</dd>
+      ${u.users.length ? `<dt>调用方</dt><dd>${u.users.map((b) => `${esc(b.user)}：${b.runs} 轮`).join("、")}</dd>` : ""}</dl>`;
+  };
+  return `<h3>服务</h3><p class="muted tab-intro">让项目外的人来办事：他们只和入口对话，入口可以委托岗位，用的是项目现在的资料。
+      会话只有调用方看得到，你只看用量；成本记在项目下。要用业务系统时用调用方自己的授权。${host ? "" : "由主持人发布。"}</p>
+    <ul class="plugins">${list.map((x) => `<li class="plugin-card${x.status === "active" ? "" : " off"}">
+      <div class="plugin-head"><span class="pill">服务</span><div><b>${esc(x.title)}</b> <span class="muted">v${x.version} · <code>${esc(x.name)}</code></span>${x.status === "active" ? "" : ' <span class="pill bad">已撤回</span>'}${x.paused && x.status === "active" ? ' <span class="pill bad">暂停：入口不在项目里</span>' : ""}
+          <div class="muted">${esc(x.description || "")}</div>
+          <div class="muted small">${esc(x.who || "")} · 入口 ${esc(x.entry.name)} · ${x.sessions} 个会话</div></div>
+        <span class="grow"></span>
+        ${x.status === "active" ? `<button type="button" class="ghost sm" data-svc-try="${esc(x.id)}" title="自己开一个服务会话试试">试用</button>` : ""}
+        ${host ? `<button type="button" class="ghost sm" data-svc-usage="${esc(x.id)}">用量</button>` : ""}
+        ${host && x.status === "active" ? `<button type="button" class="ghost sm" data-svc-edit="${esc(x.id)}">修改</button>
+          <button type="button" class="icon-btn bad" data-svc-del="${esc(x.id)}" title="撤回" aria-label="撤回 ${esc(x.title)}">${ICON.trash}</button>` : ""}</div>
+      <dl class="plugin-facts"><dt>岗位</dt><dd>${(x.staff_names || []).map(esc).join("、") || "项目里全部 Agent"}</dd>
+        <dt>能读</dt><dd>${(x.scope || []).map((p) => `<code>${esc(p)}</code>`).join(" ") || "不读资料"}</dd>
+        <dt>收件</dt><dd>${x.inbox ? `<code>${esc(x.inbox)}/</code>` : "不能写"}</dd>
+        <dt>权限</dt><dd>${(x.authority || []).map((a) => `<code>${esc(a)}</code>`).join(" ") || "无"}</dd></dl>
+      ${usage(x)}
+      ${host && st.svcEdit === x.id ? serviceForm(d, x) : ""}
+    </li>`).join("") || `<li class="empty">还没有服务${host ? "。下面发布一个" : ""}。</li>`}</ul>
+    ${host ? `<details class="svc-new"${st.svcNew ? " open" : ""}><summary>发布新服务</summary>${serviceForm(d, null)}</details>` : ""}`;
+}
+
+function bindServiceSection(box, d, st, done) {
+  const body = (f, isNew) => {
+    const out = { title: f.get("title"), description: f.get("description") || "", entry: f.get("entry"),
+      staff: f.getAll("staff"), scope: f.getAll("scope"), inbox: String(f.get("inbox") || "").trim(),
+      authority: f.getAll("authority"), readers: splitEmails(f.get("readers")), public: f.get("public") === "on" };
+    if (isNew) out.name = f.get("name");
+    return out;
+  };
+  $("#svc-new", box)?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const b = body(new FormData(e.target), true);
+    try { await api(`/api/projects/${d.id}/services`, { method: "POST", body: b }); st.svcNew = false; await done(`已发布服务「${b.title}」`); }
+    catch (err) { st.svcNew = true; await done(err.message, true); }
+  });
+  box.querySelectorAll("[data-svc-form]").forEach((f) => f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { const x = await api(`/api/projects/${d.id}/services/${f.dataset.svcForm}`, { method: "PATCH", body: body(new FormData(f), false) });
+      st.svcEdit = null; await done(`已更新到 v${x.version}`); }
+    catch (err) { await done(err.message, true); }
+  }));
+  box.querySelectorAll("[data-svc-edit]").forEach((b) => b.addEventListener("click", () => { st.svcEdit = st.svcEdit === b.dataset.svcEdit ? null : b.dataset.svcEdit; renderProjectPage(true); }));
+  $("[data-svc-cancel]", box)?.addEventListener("click", () => { st.svcEdit = null; renderProjectPage(true); });
+  box.querySelectorAll("[data-svc-usage]").forEach((b) => b.addEventListener("click", async () => {
+    try { st.svcUsage = { ...(st.svcUsage || {}), [b.dataset.svcUsage]: await api(`/api/projects/${d.id}/services/${b.dataset.svcUsage}/usage`) }; renderProjectPage(true); }
+    catch (err) { await done(err.message, true); }
+  }));
+  box.querySelectorAll("[data-svc-try]").forEach((b) => b.addEventListener("click", async () => {
+    try { const conv = await api(`/api/services/${b.dataset.svcTry}/sessions`, { method: "POST", body: {} }); await reload(); location.hash = conv.id; }
+    catch (err) { await done(err.message, true); }
+  }));
+  box.querySelectorAll("[data-svc-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("撤回这个服务？调用方的会话变成只读，之后不能再用。")) return;
+    try { await api(`/api/projects/${d.id}/services/${b.dataset.svcDel}`, { method: "DELETE" }); await done("已撤回"); }
+    catch (err) { await done(err.message, true); }
+  }));
+}
+
 function renderReleasesTab(box, d, st) {
   const host = d.is_host, list = d.release_list || [];
   const views = (d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken)
     .flatMap((p) => (p.release_views || []).map((k) => ({ plugin: p.name, tab: k, label: `${p.title} · ${(p.tabs || []).find((t) => t.key === k)?.label || k}` })));
   const nf = st.relForm || { kind: "fact" };
-  box.innerHTML = `${host ? blueprintPublishSection(d, st) : ""}<h3>对外页面</h3><p class="muted tab-intro">这个项目给项目外的人看的东西：一组档案文件的快照（可带一个插件页面，比如看板），按版本固定，只给点名的读者。
+  box.innerHTML = `${host ? blueprintPublishSection(d, st) : ""}${serviceSection(d, st)}<h3>对外页面</h3><p class="muted tab-intro">这个项目给项目外的人看的东西：一组档案文件的快照（可带一个插件页面，比如看板），按版本固定，只给点名的读者。
       读者看不到项目本身；他们的 Agent 订阅后用的是自己的授权。做法（技能、插件、角色）要给别人用，就发布成上面的模板。${host ? "" : "由主持人发布。"}</p>
     ${assetNote(st)}
     <ul class="plugins">${list.map((r) => `<li class="plugin-card${r.status === "active" ? "" : " off"}">
@@ -2603,6 +2709,7 @@ function renderReleasesTab(box, d, st) {
       <div class="actions"><button type="submit">发布</button></div></form>` : ""}`;
   const done = async (text, bad = false) => { st.note = text; st.bad = bad; await reload(); renderProjectPage(true); };
   bindBlueprintPublish(box, d, st);
+  bindServiceSection(box, d, st, done);
   box.querySelectorAll("input[name=kind]").forEach((x) => x.addEventListener("change", () => { st.relForm = { kind: x.value }; renderProjectPage(true); }));
   $("#rel-new", box)?.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -2752,9 +2859,13 @@ function renderConvList() {
   }).join("") || '<li class="empty">还没有项目</li>';
 
   // 只列出聊过的私聊（以及当前打开的那个）；要和新的 Agent 私聊，在 Agent 卡片上点“对话”
-  $("#dm-list").innerHTML = live.filter((c) => c.kind === "dm" && c !== home && (c.message_count || opened(c)))
+  // 服务会话（不变量 29）也列在这里：只有你看得到，名字写“服务 · 标题”
+  $("#dm-list").innerHTML = live.filter((c) => (c.kind === "dm" && c !== home && (c.message_count || opened(c)))
+      || (c.kind === "service" && (c.message_count || opened(c))))
     .sort((a, b) => b.updated_at - a.updated_at)
-    .map((c) => item(c.id, opened(c), avatar(aname(c.agent_id), "sm"), aname(c.agent_id), c)).join("")
+    .map((c) => c.kind === "service"
+      ? item(c.id, opened(c), avatar(c.service?.title || c.title, "sm"), `服务 · ${c.title}`, c)
+      : item(c.id, opened(c), avatar(aname(c.agent_id), "sm"), aname(c.agent_id), c)).join("")
     || '<li class="empty">还没有私聊。在 Agent 卡片上点“对话”开始。</li>';
 
   const archived = convs.filter((c) => c.archived);
@@ -3119,6 +3230,20 @@ function renderMembers() {
     bindWorkdirs(box, c);
     return;
   }
+  if (c.kind === "service") {
+    const x = c.service || {};
+    const passes = (x.passes || []).map((p) => `<li>${avatar(p.agent, "sm")}<span class="m-body"><span class="n">${esc(p.agent)}</span>
+      <span class="s">${esc(p.owner)} 的 Agent</span></span></li>`).join("");
+    if (!setHtml(box, `<h3>服务</h3><p><b>${esc(x.title || c.title)}</b> <span class="muted">v${esc(String(x.version || ""))} · 来自「${esc(x.project_name || "")}」</span></p>
+      <p>${esc(x.description || "")}</p>
+      <dl><dt>接待</dt><dd>${esc(x.entry?.name || "")}</dd></dl>
+      ${passes ? `<h3>你的请求可能经过</h3><ul class="member-list">${passes}</ul>
+        <p class="hint">这些是个人 Agent：它们的所有者能看到经过它们的那部分。</p>` : ""}
+      <p class="hint">服务会话只有你看得到，项目里的人（包括主持人）看不到；要用业务系统时用的是你自己在“连接器”页的授权。</p>
+      ${workdirsHtml(c)}`)) return;
+    bindWorkdirs(box, c);
+    return;
+  }
   if (c.kind === "dm") {
     const a = agent(c.agent_id);
     if (!setHtml(box, a ? `${workdirsHtml(c)}<ul class="member-list">${row(a)}</ul>
@@ -3194,7 +3319,11 @@ function renderThread() {
   }
   $("#msg-form").hidden = !!c.archived;
   const g = proj(c.project_id), dm = c.kind === "dm", sess = c.kind === "session", peer = agent(c.agent_id);
-  const head = sess
+  const svc = c.kind === "service" ? (c.service || {}) : null;
+  const head = svc
+    ? `${avatar(svc.title || c.title)}<div class="info"><h2 class="panel-title" style="margin:0">${esc(c.title)} ${pill(c.status)}</h2>
+        <div class="muted">${c.archived ? "服务已撤回，只读" : `服务 · 来自「${esc(svc.project_name || "")}」· 由 ${esc(svc.entry?.name || "")} 接待 · 只有你看得到`}</div></div>`
+    : sess
     ? `<span class="avatar session" aria-hidden="true">›</span><div class="info"><h2 class="panel-title" style="margin:0">${esc(c.title)} ${pill(c.status)}</h2>
         <div class="muted">${c.archived ? "已归档，只读" : `项目会话 · ${esc(g?.name || "")} · 和 ${esc(peer?.name || "助理")} 单独聊，只有你看得到`}</div></div>`
     : dm && c.is_home
@@ -3206,7 +3335,8 @@ function renderThread() {
     : `<span class="avatar group" aria-hidden="true" style="background:${g ? gcolor(g.id) : "var(--surface-3)"}">#</span>
        <div class="info"><h2 class="panel-title" style="margin:0">${esc(c.title)} ${pill(c.status)}</h2>
         <div class="muted">${c.archived ? "已归档，只读" : `${g?.shared ? "共享项目 · " : ""}${c.members.length} 名成员 · @ 谁，谁接任务${g?.description ? ` · ${esc(g.description)}` : ""}`}</div></div>`;
-  const actions = sess ? (c.archived
+  const actions = svc ? '<button type="button" class="danger" id="conv-del" title="删除这个服务会话（只有你有）">删除</button>'
+    : sess ? (c.archived
       ? `${g ? '<button type="button" class="ghost" id="sess-restore">恢复</button>' : ""}<button type="button" class="danger" id="conv-del">删除</button>`
       : '<button type="button" class="ghost" id="sess-rename">改名</button><button type="button" class="ghost" id="sess-archive">归档</button>')
     : c.archived ? '<button type="button" class="danger" id="conv-del">删除</button>'
@@ -3237,7 +3367,7 @@ function renderThread() {
   }
   $("#side-open")?.addEventListener("click", () => sideTab(S.sideTab === "task" || !S.sideTab ? "members" : S.sideTab));
   $("#conv-del")?.addEventListener("click", async () => {
-    if (!confirm("删除这个已归档的对话？")) return;
+    if (!confirm(c.kind === "service" ? "删除这个服务会话？记录只有你有，删了就没了。" : "删除这个已归档的对话？")) return;
     try { await api(`/api/conversations/${c.id}`, { method: "DELETE" }); S.convId = null; S.conv = null; location.hash = "network"; await reload(); }
     catch (err) { alert(err.message); }
   });
@@ -3302,8 +3432,9 @@ function renderThread() {
       const body = m.text ? `<div class="body md">${mentionHtml(m.text)}</div>` : "";
       return `<li class="msg user"><div class="content"><div class="who"><b>${esc(sender)}</b>${m.via ? viaPill(m.via) : ""}${to}${time(m.ts)}</div>${body}${attachmentsHtml(c.id, m.attachments)}${reqs ? `<div class="req-tags">${reqs}</div>` : ""}</div></li>`;
     }
-    return `<li class="msg agent">${avatar(who?.name, "sm")}<div class="content">
-      <div class="who"><b>${esc(who?.name || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${md(m.text)}</div>${attachmentsHtml(c.id, m.attachments)}</div></li>`;
+    const whoName = who?.name || c.agent_names?.[m.agent_id];  // 服务会话里入口不是你的 Agent：名字由对话带来
+    return `<li class="msg agent">${avatar(whoName, "sm")}<div class="content">
+      <div class="who"><b>${esc(whoName || "（已删除）")}</b>${time(m.ts)}</div>${wakeHtml(m)}${stepsHtml(m.steps || [], false)}${delegs}<div class="body md">${md(m.text)}</div>${attachmentsHtml(c.id, m.attachments)}</div></li>`;
   });
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
@@ -3330,14 +3461,15 @@ function renderThread() {
   if (typing && th.contains(document.activeElement)) { renderTask(); return; }
   if (!items.length) items.push(`<li>${placeholder(c.is_home ? "问问助理“今天有什么要我处理的”，或者让它“每天早上 9 点给我一份早报”。"
     : dm ? "发一条消息开始私聊。"
+    : svc ? `说说你要办的事：${c.service?.description || "这个服务能办的事见右边的名片"}`
     : "@ 一个成员把任务交给它。它可以自己做，也可以在项目里找合适的成员委托。")}</li>`);
   // 按条比对，只换变了的那几条（长对话整段重画会让滚动卡顿）；新换上的节点才需要绑事件
   const fresh = patchList(th, items);
   if (atBottom) th.scrollTop = th.scrollHeight;
   fresh.forEach((li) => bindThreadItem(li, th, c));
   // Agent 运行中也可以发消息：进被 @ 成员的收件箱排队，这一轮结束后送达
-  $("#msg-form button[type=submit]").disabled = !dm && !g;
-  $("#msg").disabled = !dm && !g;
+  $("#msg-form button[type=submit]").disabled = !dm && !g && !svc;
+  $("#msg").disabled = !dm && !g && !svc;
   renderComposer();
   renderTask();
 }
@@ -3821,8 +3953,8 @@ function composerHint() {
   const c = S.conv;
   if (!c) return;
   const m = $("#msg"), who = mentionedIn(m.value);
-  if (c.kind === "dm") {
-    m.placeholder = "和它说点什么";
+  if (c.kind === "dm" || c.kind === "service") {
+    m.placeholder = c.kind === "service" ? "说说你要办的事" : "和它说点什么";
     $("#msg-hint").innerHTML = SEND_HINT;
     return;
   }

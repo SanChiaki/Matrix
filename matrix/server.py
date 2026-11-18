@@ -293,6 +293,36 @@ class ReleaseIn(BaseModel):
     follow: bool = False
 
 
+class ServiceIn(BaseModel):
+    """主持人发布一个项目服务（docs/project-services.md，不变量 29）：发布即生效。入口、岗位按 Agent id 或名字，读者按邮箱。"""
+    name: str = Field(..., min_length=1, max_length=64)
+    title: str = Field(..., min_length=1, max_length=80)
+    description: str = Field("", max_length=2000)
+    entry: str = Field(..., min_length=1, max_length=200)
+    staff: list[str] | None = Field(None, max_length=50)
+    scope: list[str] | None = Field(None, max_length=50)
+    inbox: str | None = Field(None, max_length=500)
+    authority: list[str] | None = Field(None, max_length=20)
+    readers: list[str] | None = Field(None, max_length=200)
+    public: bool = False
+
+
+class ServicePatch(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=80)
+    description: str | None = Field(None, max_length=2000)
+    entry: str | None = Field(None, min_length=1, max_length=200)
+    staff: list[str] | None = Field(None, max_length=50)
+    scope: list[str] | None = Field(None, max_length=50)
+    inbox: str | None = Field(None, max_length=500)
+    authority: list[str] | None = Field(None, max_length=20)
+    readers: list[str] | None = Field(None, max_length=200)
+    public: bool | None = None
+
+
+class ServiceSessionIn(BaseModel):
+    title: str = Field("", max_length=80)
+
+
 class ReleasePatch(BaseModel):
     title: str | None = Field(None, min_length=1, max_length=80)
     description: str | None = Field(None, max_length=2000)
@@ -1360,6 +1390,43 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def withdraw_release(project_id: str, release_id: str, user: Me) -> dict:
         r = network.withdraw_release(project_id, release_id, actor=user.id)
         return network.release_detail(r.id, actor=user.id)
+
+    # ---- 项目服务（docs/project-services.md，不变量 29）：主持人发布，调用方开服务会话；主持人只看用量 ----
+    @app.get("/api/services")
+    def services(user: Me) -> list[dict]:
+        return network.services_for(user.id)
+
+    @app.post("/api/services/{service_id}/sessions")
+    def open_service_session(service_id: str, body: ServiceSessionIn, user: Me) -> dict:
+        conv = network.open_service_session(service_id, actor=user.id, title=body.title)
+        with network.store.lock:
+            return network.conversation_view(conv, user.id)
+
+    @app.get("/api/projects/{project_id}/services")
+    def project_services(project_id: str, user: Me) -> list[dict]:
+        return network.project_services(project_id, actor=user.id)
+
+    @app.post("/api/projects/{project_id}/services")
+    def create_service(project_id: str, body: ServiceIn, user: Me) -> dict:
+        x = network.create_service(project_id, actor=user.id, **body.model_dump())
+        with network.store.lock:
+            return network.service_view(x, user.id)
+
+    @app.patch("/api/projects/{project_id}/services/{service_id}")
+    def update_service(project_id: str, service_id: str, body: ServicePatch, user: Me) -> dict:
+        x = network.update_service(project_id, service_id, actor=user.id, **body.model_dump(exclude_unset=True))
+        with network.store.lock:
+            return network.service_view(x, user.id)
+
+    @app.delete("/api/projects/{project_id}/services/{service_id}")
+    def withdraw_service(project_id: str, service_id: str, user: Me) -> dict:
+        x = network.withdraw_service(project_id, service_id, actor=user.id)
+        with network.store.lock:
+            return network.service_view(x, user.id)
+
+    @app.get("/api/projects/{project_id}/services/{service_id}/usage")
+    def service_usage(project_id: str, service_id: str, user: Me, days: int = 30) -> dict:
+        return network.service_usage(project_id, service_id, days, actor=user.id)
 
     @app.post("/hooks/{token}")
     async def plugin_webhook(token: str, request: Request) -> dict:

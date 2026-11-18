@@ -1,6 +1,6 @@
 # 项目服务（设计）
 
-> 状态：**设计已定，未实现**。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #72。相关设计：[project-publishing.md](project-publishing.md)（发布物）、
+> 状态：**第一期（Matrix 用户）已实现**，不变量 29，实现说明见第 9 节；第二、三期未做。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #72。相关设计：[project-publishing.md](project-publishing.md)（发布物）、
 > [public-agents.md](public-agents.md)（服务面，不变量 27）、[remote-agents.md](remote-agents.md)（标准 HTTP 形状，不变量 28）、
 > [reference/archive.md](reference/archive.md)（可见范围，不变量 26）。调研：research: project-publishing#project-service。
 
@@ -68,12 +68,12 @@
 **谁看得到调用方的请求**：调用方自己；这次调用经过的个人 Agent 的所有者（照常看到过程）。服务名片上要写明
 “请求可能经过哪些人的 Agent”，调用方进来前就能看到。服务会话和它引出的委托**不进项目群聊、不上任务板**，项目里别的参与者看不到。
 
-草案，**不变量 29：服务调用替调用方做事、由项目付费**。一次服务调用沿途的每一轮都以调用方为 `principal`：业务授权只用调用方自己的；
+**不变量 29：服务调用替调用方做事、由项目付费**（全文见 [reference/invariants.md](reference/invariants.md)）。一次服务调用沿途的每一轮都以调用方为 `principal`：业务授权只用调用方自己的；
 档案只读圈定范围、只写收件目录；委托不出项目；用量记在项目下；主持人只看用量。
 
 ## 4. 发布一个服务
 
-主持人在项目页“对外”标签里新建服务（`Release(kind="service")`），定这些：
+主持人在项目页“对外”标签里新建服务（`ProjectService`，和发布物分开存：服务没有快照），定这些：
 
 1. **名字和说明**：调用方看到的名片，包括说明里写的“能办什么”和“请求可能经过谁的 Agent”。
 2. **入口**：一个项目成员。
@@ -111,7 +111,7 @@ POST /svc/sessions/{session_id}/interrupt 中断
 
 ## 7. 分期
 
-1. **第一期：Matrix 用户。** `Release(kind="service")` 与配置、版本；服务会话（服务面、`principal` = 调用方）；入口与岗位的委托；
+1. **第一期：Matrix 用户（已实现）。** `ProjectService` 与配置、版本；服务会话（服务面、`principal` = 调用方）；入口与岗位的委托；
    档案范围与收件目录；项目付费；主持人看用量；服务名片；不变量 29 与测试。
 2. **第二期：外部系统（系统身份）。** 服务密钥、`/svc/*` 标准 HTTP 形状、按接入方的用量。
 3. **第三期：SSO 身份**，随登录改造一起。
@@ -121,3 +121,27 @@ POST /svc/sessions/{session_id}/interrupt 中断
 
 1. **审核**（决策 10 之后）：给所有登录用户、外部系统用时要不要管理员批准。
 2. **收件目录**：调用方之后能不能读回自己提交的东西。
+
+## 9. 第一期的实现说明（2026-11-18）
+
+| 部分 | 在哪里 |
+| --- | --- |
+| 模型 | `models.ProjectService`（`state.json` 的 `project_services`）；`Conversation.kind = "service"` + `service_id`；`SERVICE_DENIED_TOOLS` |
+| 发布 | `engine.py`「项目服务」一节：`create_service` / `update_service`（改了就切版本）/ `withdraw_service`、`_service_config`（入口与岗位按 id 或名字、范围要在档案里、收件目录建好、权限在 `AUTHORITIES` 里、读者按邮箱）、`service_view`（名片；配置只给参与者）、`services_for`、`service_usage` |
+| 服务会话 | `open_service_session`（每次新开一个）；`send_message` 经 `_service_ready`：撤回只读、调用方还能用、入口还在项目里（换了入口跟着换）；调用方自己能删（`delete_conversation`）；删项目时一起删 |
+| 服务面 | `ExecContext.svc`；`_serving` / `_serve_seat` / `_serve_service`（席位），`_task_ctx`（服务会话里的委托）：`principal` 是调用方，权限交 `ProjectService.authority`，插件工具与插件服务不挂；`ExecContext.tools` 去掉 `SERVICE_DENIED_TOOLS` |
+| 档案 | `_visible_files(g, agent, svc)` 再交 `scope`（挂载、端侧材料、推送都经它）；`_archive_text` 换成 `format_service_archive`（服务说明、能读的文件、收件目录、岗位；没有纲要与决定）；`publish_file` 工具只写收件目录（不在里面的名字放进去），`publish_file(quiet=True)` 不发群聊事件、日志照记 |
+| 委托 | `_tool_delegate` 只放行 `_service_staff`；`list_members` 只列岗位；委托两端看得到：调用方与岗位的所有者 |
+| 授权 | `_caller_connections`：调用方自己的、与入口 / 岗位勾的连接器同款的（公共 Agent 仍按维护人声明的）；服务会话只有调用方看得到，共享项目里也不先问 |
+| 用量 | 台账多 `service` 与 `payer: "project"`；`service_usage` 按调用方汇总轮数、失败、工具、token |
+| 接口 | `GET /api/services`；`POST /api/services/{id}/sessions`；`GET/POST /api/projects/{id}/services`；`PATCH/DELETE /api/projects/{id}/services/{sid}`；`GET …/{sid}/usage` |
+| 界面 | 项目页“对外”标签里的“服务”（发布、修改、撤回、试用、用量）；“项目”里的“给你用的服务”；服务会话在侧栏“私聊”里（“服务 · 标题”），右栏是服务名片与“你的请求可能经过” |
+| 测试 | `tests/test_project_services.py` |
+
+**第一期的限制**：
+
+- 个人 Agent 的所有者看不到服务会话本身，只看到经过他的 Agent 的委托（委托两端可见）和用量台账里的“服务”。
+- 服务里不用项目插件（插件工具、插件服务、插件页面都不挂）；项目技能照不变量 26 的可见范围给。
+- 个人 Agent 当入口或岗位时私有目录只读挂载、改动不写回（同公共 Agent 的服务面）。
+- 外部系统（第二期）、SSO 身份（第三期）、反馈、把服务拉进别人的项目都还没有。
+
