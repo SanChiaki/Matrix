@@ -229,6 +229,8 @@ class RunRequest:
     # 密钥在 env 里（只加进这个 dsh 进程的环境，不写覆盖层）。端侧运行时从不下发这两项
     llm_provider: dict[str, Any] | None = None
     env: dict[str, str] = field(default_factory=dict, repr=False)
+    # 外部平台 Agent（docs/remote-agents.md）：remote_agents.RemoteCall —— 平台、平台上的 Agent、发起会话的请求头（含凭证，不打印）
+    remote: Any = field(default=None, repr=False)
 
 
 # 运行时错误分类（参照 Raft daemon 的 runtimeErrorDeliveryPolicy）：

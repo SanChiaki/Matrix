@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
+from .remote_agents import PlatformCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
 from .im.bridge import ImBridge
@@ -252,6 +253,20 @@ class AgentPatch(BaseModel):
     skills: list[str] | None = Field(None, max_length=50)       # 勾上的“我的技能”
     connections: list[str] | None = Field(None, max_length=50)  # 勾上的“我的连接器”
     subscriptions: list[str] | None = Field(None, max_length=30)  # 订阅的发布物（不变量 23）
+
+
+class RemoteAgentIn(BaseModel):
+    """添加外部平台上的 Agent（docs/remote-agents.md）：平台来自部署方目录，API Key 只进保管库。"""
+    platform: str = Field(..., min_length=1, max_length=40)
+    agent: str = Field(..., min_length=1, max_length=200)
+    api_key: str = Field(..., min_length=1, max_length=4000)
+    name: str = Field("", max_length=80)
+    description: str = Field("", max_length=DESCRIPTION_LIMIT)
+    authority: list[str] | None = None
+
+
+class ApiKeyIn(BaseModel):
+    api_key: str = Field(..., min_length=1, max_length=4000)
 
 
 class MaintainersIn(BaseModel):
@@ -761,6 +776,45 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def agent_ledger(agent_id: str, user: Me) -> list[dict]:
         network.visible_agent(agent_id, user.id)  # 只有所有者 / 维护人；公共 Agent 的服务面只给用量（不变量 26）
         return network.ledger(agent_id)
+
+    # ---- 外部平台 Agent（docs/remote-agents.md，不变量 27） ----
+    @app.get("/api/agent-platforms")
+    def agent_platforms(user: Me) -> list[dict]:
+        return network.platform_catalog()
+
+    @app.post("/api/remote-agents")
+    def add_remote_agent(body: RemoteAgentIn, user: Me) -> dict:
+        a = network.add_remote_agent(**body.model_dump(), actor=user.id)
+        return network.agent_view(a, user.id)
+
+    @app.put("/api/agents/{agent_id}/remote/api-key")
+    def set_remote_api_key(agent_id: str, body: ApiKeyIn, user: Me) -> dict:
+        return network.agent_view(network.set_remote_api_key(agent_id, body.api_key, actor=user.id), user.id)
+
+    @app.post("/api/agents/{agent_id}/remote/key")
+    def issue_remote_key(agent_id: str, user: Me) -> dict:
+        return network.issue_remote_key(agent_id, actor=user.id)  # 只在这里返回一次
+
+    @app.post("/mcp/remote")
+    async def remote_mcp(request: Request) -> Response:
+        """外部平台回调 Matrix 的 MCP（Agent 级配置）：凭 Matrix 签的密钥 + 平台会话 id，不走登录（不变量 27）。"""
+        auth_header = request.headers.get("authorization", "")
+        key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        try:
+            msg = await request.json()
+        except ValueError:
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "不是 JSON"}}, 400)
+        if not isinstance(msg, dict):
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "一次一条请求"}}, 400)
+        sessions = [request.headers.get(h, "") for h in network.remote_session_headers()]
+        sid = next((x for x in sessions if x), "")
+        try:
+            out = await asyncio.to_thread(network.remote_mcp, key, sid, msg)  # 可能要等流里报出会话 id
+        except NetworkError:
+            return JSONResponse({"detail": "unknown key"}, status_code=401)
+        if out is None:
+            return Response(status_code=202)
+        return JSONResponse(out)
 
     # ---- 公共 Agent（docs/public-agents.md，不变量 26） ----
     @app.get("/api/public-agents")
@@ -1699,7 +1753,7 @@ class MatrixServer(uvicorn.Server):
 
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
-                  admins: str | None = None, fetch: str | None = None) -> Network:
+                  admins: str | None = None, fetch: str | None = None, platforms: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
     admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
@@ -1710,7 +1764,8 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
                    connectors=ConnectorCatalog(Path(connectors).resolve()) if connectors else None,
                    plugins=PluginCatalog(Path(plugins).resolve()) if plugins else None,
                    admins=(admins or "").split(","),
-                   fetch=FetchConfig(Path(fetch).resolve()) if fetch else None)
+                   fetch=FetchConfig(Path(fetch).resolve()) if fetch else None,
+                   platforms=PlatformCatalog(Path(platforms).resolve()) if platforms else None)
 
 
 def main() -> None:
@@ -1729,6 +1784,8 @@ def main() -> None:
                    help="项目插件目录（JSON，改了就生效）；默认 <data>/plugins.json，没有就只能上传插件包")
     p.add_argument("--fetch", default=compat.env("FETCH"),
                    help="抓取白名单（JSON，改了就生效）；默认 <data>/fetch.json，没有就用 dsh 自带的 web_fetch（只抓公网）")
+    p.add_argument("--platforms", default=compat.env("PLATFORMS"),
+                   help="外部 Agent 平台目录（JSON，改了就生效）；默认 <data>/agent-platforms.json，没有就不能接外部平台的 Agent")
     p.add_argument("--admins", default=compat.env("ADMINS"),
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
@@ -1737,7 +1794,8 @@ def main() -> None:
     args.data = args.data or compat.data_dir()
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
-                            connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch)
+                            connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,
+                            platforms=args.platforms)
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
     if args.runtime == "dsh" and shutil.which(args.dsh_bin) is None:  # 不然启动正常，到第一轮才 FileNotFoundError
         print(f"[matrix] 警告：找不到 dsh（--dsh-bin {args.dsh_bin}，PATH={os.environ.get('PATH', '')}）："
@@ -1750,6 +1808,8 @@ def main() -> None:
     if (policy := network.fetch.policy()) is not None:
         print(f"抓取白名单：{network.fetch.path}（{'、'.join(policy.allow_entries()) or '空'}"
               f"{'' if policy.public else '，不抓公网'}{'，替代自带的 web_fetch' if policy.replace_builtin else ''}）")
+    if network.platforms.items():
+        print(f"外部 Agent 平台：{network.platforms.path}（{len(network.platforms.items())} 个）")
     if network.plugin_dir_catalog.items():
         print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
     network.start_scheduler()

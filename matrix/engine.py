@@ -59,6 +59,7 @@ from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
+from . import remote_agents as remote
 from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage
 
 
@@ -186,7 +187,8 @@ class Network:
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
                  plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None,
-                 fetch: FetchConfig | None = None):
+                 fetch: FetchConfig | None = None, platforms: "remote.PlatformCatalog | None" = None,
+                 remote_driver: Callable[[str], Any] | None = None):
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -195,6 +197,11 @@ class Network:
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
         self.question_url = tool_url.rsplit("/", 1)[0] + "/question"
         self.store = Store(data_dir, seed=seed)
+        # 外部平台 Agent（docs/remote-agents.md，不变量 27）：部署方的平台目录；MCP 回调按（Agent, 平台会话 id）落到哪一轮
+        self.platforms = platforms or remote.PlatformCatalog(self.store.root / "agent-platforms.json")
+        self.remote_bindings = remote.Bindings()
+        self.remote_runtime = remote.RemoteRuntime(self.remote_bindings, remote_driver or remote.load_driver)
+        self._remote_driver = remote_driver or remote.load_driver
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
@@ -421,6 +428,8 @@ class Network:
                     harness = None
                 if device and a.public_status:
                     raise NetworkError("公共 Agent 只能在平台云侧运行：先撤回公共再换到设备上")
+                if device and a.remote:
+                    raise NetworkError("外部平台的 Agent 在它自己的平台上运行，不能换到设备上")
                 self._check_device_runtime(device, actor)
                 self._check_harness(device, harness)
                 moved = (device is None) != (a.device_runtime is None)
@@ -554,6 +563,7 @@ class Network:
             self.store.default_assistants()  # 删掉的是助理：改用最早的另一个
             self.store.save()
         shutil.rmtree(self.store.agent_dir(agent_id), ignore_errors=True)  # 私有目录随 Agent 删除
+        self.vault.delete(self._remote_vault(agent_id))  # 外部平台的 API Key 随 Agent 删除
         self.bus.emit("agent.deleted", agent_id=agent_id)
 
     # ================= 项目管理 =================
@@ -765,7 +775,9 @@ class Network:
 
     def home_mounted(self, g: Project | None, agent: AgentNode) -> bool:
         """私有目录挂不挂：云侧总是挂（挂哪些文件由信息流规则决定，见 _home_plan）；端侧还没有来源标签，
-        只在没有别人的场合挂（第一版，docs/projects.md 第 6 节）。"""
+        只在没有别人的场合挂（第一版，docs/projects.md 第 6 节）。外部平台的 Agent 不挂：它的记忆在它自己的平台上。"""
+        if agent.remote:
+            return False
         return not agent.device_runtime or g is None or not g.shared
 
     # ================= 项目档案 =================
@@ -4821,6 +4833,8 @@ class Network:
         if agent is not None and agent.device_runtime:
             rt = self._runtimes.get(agent.device_runtime)
             return rt if rt is not None and self._serves(rt, agent) else None
+        if agent is not None and agent.remote:  # 外部平台：平台没在目录里时那一轮按失败说明原因（见 _remote_call）
+            return self.remote_runtime
         return self.runtime
 
     @staticmethod
@@ -4861,6 +4875,9 @@ class Network:
         return get(harness) if isinstance(runtime, DeviceRuntime) else get()
 
     def capabilities(self, agent: AgentNode | None = None) -> RuntimeCapabilities:
+        if agent is not None and agent.remote:  # 外部平台：接了 Matrix 的 MCP 才有网络工具；在平台上做什么 Matrix 管不到
+            # 签了 MCP 密钥就算完整接入：委托只能经网络工具，网络照样强制；平台还没配上时调不到工具而已
+            return remote.capabilities(str(agent.remote.get("platform")), bool(agent.remote.get("key_sha")))
         rt = self.runtime_for(agent)
         if rt is not None:
             return self._caps_of(rt, agent.harness if agent is not None else None)
@@ -5718,7 +5735,7 @@ class Network:
         connectors = ConnectorBridge(url=self.connector_url, token=token,
                                      list_tools=lambda: self.connector_tools(token),
                                      call=lambda name, args: self.connector_call(token, name, args)) \
-            if cloud and not agent.device_runtime else None
+            if cloud and not agent.device_runtime and not agent.remote else None
         tools = None
         if ctx.tools:  # 席位有用户任务工具；项目里有档案工具；协作工具（委托等）另外要求 delegate
             tools = ToolBridge(url=self.tool_url, token=token,
@@ -5780,8 +5797,9 @@ class Network:
         try:
             with self._lock:
                 materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime else []
-                llm_provider, llm_env = self._llm_provider(agent)
-            res = runtime.run(RunRequest(agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
+                llm_provider, llm_env = self._llm_provider(agent) if not agent.remote else (None, {})
+                remote_call = self._remote_call(ctx, agent) if agent.remote else None
+            res = runtime.run(RunRequest(remote=remote_call, agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
                                               approvals=approvals, questions=questions, materials=materials, home=home,
@@ -7051,11 +7069,20 @@ class Network:
         d["model_info"] = self.model_info(a)
         d["public"] = a.is_public
         d["maintainer_emails"] = [self._email(u) for u in a.maintainers]
+        if a.remote:  # 外部平台（不变量 27）：密钥只给哈希也不给，只说签过没有、平台连上过没有
+            spec = self.platforms.get(a.remote.get("platform"))
+            d["remote"] = {"platform": a.remote.get("platform"), "platform_name": spec.name if spec else None,
+                           "agent": a.remote.get("agent"), "key_issued": bool(a.remote.get("key_sha")),
+                           "mcp_at": a.remote.get("mcp_at"),
+                           "session_header": spec.mcp_session_header if spec else None,
+                           "caller_connector": spec.caller.connector if spec and spec.caller else None}
         if a.is_public:  # 服务面的有效权限：批准时冻结的权限之内；放宽了还没批准的部分单独列出
             d["public_wider"] = [x for x in a.authority if x not in a.public_authority]
         if not d["mine"]:  # 联合项目里别人的 Agent、公共 Agent：只给名片（名称、描述、能力、自身权限）
             d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
                                    "chat_enabled", "public")}
+            if a.remote:
+                d["remote"] = {"platform_name": (spec.name if (spec := self.platforms.get(a.remote.get("platform"))) else None)}
             if a.is_public:
                 d["authority"] = list(a.public_authority)
                 d["public_note"], d["public_connectors"] = a.public_note, list(a.public_connectors)
@@ -7589,6 +7616,154 @@ class Network:
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
         return g
+
+    # ================= 外部平台 Agent（不变量 27，docs/remote-agents.md） =================
+    # 公司内部别的平台上建的云端 Agent，以 HTTP 会话接进来当成员。平台地址只来自部署方目录；发起会话用添加它的人的 API Key
+    # （只进保管库）；调用方的授权按部署方配置的请求头透传，只取这一轮调用方自己的，没有就不发起。
+    # 平台回调 Matrix 的 MCP（Agent 级配置）时凭两样：Matrix 给这个 Agent 签的密钥（证明是它），平台会话 id（证明是哪一轮）；
+    # 只认 Matrix 自己发起、这一轮还没结束的会话。
+    @staticmethod
+    def _remote_vault(agent_id: str) -> str:
+        return f"remote-{agent_id}"
+
+    def remote_session_headers(self) -> list[str]:
+        """平台回调时会话 id 可能在的请求头（目录里各平台配置的，去重）。"""
+        return list(dict.fromkeys([p.mcp_session_header for p in self.platforms.items()] or ["X-Session-Id"]))
+
+    def platform_catalog(self) -> list[dict[str, Any]]:
+        return [p.public() for p in self.platforms.items()]
+
+    def add_remote_agent(self, platform: str, agent: str, api_key: str, name: str = "", description: str = "",
+                         authority: list[str] | None = None, actor: str | None = None) -> AgentNode:
+        """添加一个外部平台上的 Agent：名称、描述从平台读（读不到用填的）。平台 API Key 只进保管库。"""
+        spec = self.platforms.get(platform)
+        if spec is None:
+            raise NetworkError(f"部署方目录里没有平台 {platform}")
+        agent, api_key = str(agent).strip(), str(api_key).strip()
+        if not agent or len(agent) > 200 or not api_key:
+            raise NetworkError("要填平台上的 Agent id 和你的 API Key")
+        headers = {spec.auth_header: spec.auth_template.replace("{value}", api_key)}
+        try:
+            info = self._remote_driver(spec.driver).describe(spec, agent, headers)
+        except remote.PlatformError as e:
+            if not name.strip():
+                raise NetworkError(f"读不到平台上的 Agent：{e}") from e
+            info = {"name": "", "description": ""}
+        title = (name.strip() or info["name"] or agent)[:80]
+        desc = (description.strip() or info["description"] or f"{spec.name} 上的 Agent")[:DESCRIPTION_LIMIT]
+        with self._lock:
+            a = self._new_agent(title, desc, [], authority if authority is not None else ["delegate"], True, None,
+                                "human", actor)
+            a.remote = {"platform": spec.id, "agent": agent, "key_sha": None, "mcp_at": None}
+            self.vault.put(self._remote_vault(a.id), {"api_key": api_key})
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        return a
+
+    def set_remote_api_key(self, agent_id: str, api_key: str, actor: str | None = None) -> AgentNode:
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if not a.remote or not str(api_key).strip():
+                raise NetworkError("不是外部平台的 Agent，或 API Key 为空")
+            self.vault.put(self._remote_vault(a.id), {"api_key": str(api_key).strip()})
+        return a
+
+    def issue_remote_key(self, agent_id: str, actor: str | None = None) -> dict[str, Any]:
+        """给平台上这个 Agent 签 MCP 密钥（只显示这一次；再签旧的就作废）：配进平台里它的 MCP 设置就是完整接入。"""
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if not a.remote:
+                raise NetworkError(f"{a.name} 不是外部平台的 Agent")
+            spec = self.platforms.get(a.remote.get("platform"))
+            key = "mrk_" + secrets.token_urlsafe(32)
+            a.remote = {**a.remote, "key_sha": hashlib.sha256(key.encode()).hexdigest(), "mcp_at": None}
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        return {"key": key, "path": "/mcp/remote", "header": "Authorization", "value": f"Bearer {key}",
+                "session_header": spec.mcp_session_header if spec else "X-Session-Id"}
+
+    def _remote_call(self, ctx: ExecContext, agent: AgentNode) -> remote.RemoteCall:
+        """调用方持有锁。这一轮发起会话要带什么：平台凭证（添加它的人的）+ 调用方的授权（只取这一轮调用方自己的）。"""
+        info = agent.remote or {}
+        spec = self.platforms.get(info.get("platform"))
+        if spec is None:
+            dummy = remote.PlatformSpec(id=str(info.get("platform")), name="", url="http://invalid")
+            return remote.RemoteCall(dummy, str(info.get("agent")), {},
+                                     error=f"TRANSPORT 部署方目录里已经没有平台 {info.get('platform')}")
+        key = self.vault.get(self._remote_vault(agent.id)).get("api_key")
+        if not key:
+            return remote.RemoteCall(spec, str(info.get("agent")), {},
+                                     error=f"TRANSPORT 还没有 {spec.name} 的 API Key：在 Agent 设置里填上")
+        headers = {spec.auth_header: spec.auth_template.replace("{value}", key)}
+        if spec.caller is not None:
+            who = self._principal(ctx, agent)
+            if ctx.service and len(set(ctx.callers)) > 1:
+                return remote.RemoteCall(spec, str(info.get("agent")), {},
+                                         error="SERVER 这一轮有几个人同时找它，说不清该用谁的授权：请分开 @ 它")
+            conn = next((c for c in self.store.connections.values()
+                         if c.owner_id == who and c.connector_id == spec.caller.connector and c.where == "cloud"
+                         and not c.url and c.status == "ok"), None)
+            value = self.vault.get(conn.id).get(spec.caller.field) if conn is not None else None
+            if not value:
+                catalog = self.connectors.get(spec.caller.connector)
+                return remote.RemoteCall(spec, str(info.get("agent")), {},
+                                         error=f"SERVER {self._email(who)} 还没有授权「{catalog.name if catalog else spec.caller.connector}」："
+                                               f"{agent.name} 要用找它的人自己的授权，先到「连接器」页连上再找它")
+            headers[spec.caller.header] = spec.caller.template.replace("{value}", value)
+        return remote.RemoteCall(spec, str(info.get("agent")), headers)
+
+    def remote_mcp(self, key: str, session_id: str, msg: dict[str, Any]) -> dict[str, Any] | None:
+        """平台回调 Matrix 的 MCP（Streamable HTTP，一次一条 JSON-RPC）。返回响应；通知返回 None。
+        密钥不对：NetworkError("unknown key")（401）。会话不是 Matrix 发起的、或这一轮已结束：JSON-RPC 错误。"""
+        sha = hashlib.sha256(str(key).encode()).hexdigest()
+        with self._lock:
+            agent = next((a for a in self.store.agents.values() if a.remote and a.remote.get("key_sha")
+                          and hmac.compare_digest(a.remote["key_sha"], sha)), None)
+            spec = self.platforms.get(agent.remote.get("platform")) if agent is not None else None
+        if agent is None:
+            raise NetworkError("unknown key")
+        mid, method = msg.get("id"), str(msg.get("method", ""))
+        err = lambda code, text: {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": text}}  # noqa: E731
+        if mid is None:
+            return None
+        if not session_id:
+            return err(-32600, f"请求里没有平台会话 id（{spec.mcp_session_header if spec else '会话请求头'}）")
+        b = self.remote_bindings.wait(agent.id, session_id, spec.bind_wait_s if spec else 0)
+        if b is None:  # 在平台上直接聊天的会话、或 Matrix 那一轮已经结束：不认（不变量 27）
+            self.bus.emit("remote.refused", agent_id=agent.id, reason="unknown_session")
+            return err(-32001, "这个会话不是 Matrix 发起的，或那一轮已经结束：Matrix 的工具只在 Matrix 交给你的那一轮里能用")
+        if not agent.remote.get("mcp_at"):
+            with self._lock:
+                agent.remote = {**agent.remote, "mcp_at": time.time()}
+                self.store.save()
+            self.bus.emit("agent.updated", agent=agent.to_dict())
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "2025-06-18",
+                                                             "capabilities": {"tools": {}},
+                                                             "serverInfo": {"name": "matrix", "version": "1"}}}
+        if method == "ping":
+            return {"jsonrpc": "2.0", "id": mid, "result": {}}
+        tools = b.tools
+        if method == "tools/list":
+            if tools is None:
+                return {"jsonrpc": "2.0", "id": mid, "result": {"tools": []}}
+            from .mcp_server import TOOLS as NET_TOOLS
+            listed = [t for t in NET_TOOLS if tools.names is None or t["name"] in tools.names]
+            text, bad = tools.handler(LIST_TOOLS, {})
+            try:
+                listed += [t for t in (json.loads(text) if not bad else []) if isinstance(t, dict) and t.get("name")]
+            except ValueError:
+                pass
+            return {"jsonrpc": "2.0", "id": mid, "result": {"tools": listed}}
+        if method == "tools/call":
+            params = msg.get("params") or {}
+            name, args = str(params.get("name", "")), params.get("arguments") or {}
+            if tools is None:
+                return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "这一轮没有网络工具"}],
+                                                                 "isError": True}}
+            text, bad = tools.handler(name.removeprefix(MCP_PREFIX), args if isinstance(args, dict) else {})
+            return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": text}], "isError": bad}}
+        return err(-32601, f"不支持的方法 {method}")
 
     # ================= 公共 Agent（不变量 26，docs/public-agents.md） =================
     # 维护组（所有者 + 维护人）申请，管理员批准；批准时冻结权限。公共之后所有用户都能私聊它、把它拉进项目（服务面）：

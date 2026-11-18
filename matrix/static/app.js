@@ -181,6 +181,9 @@ async function start() {
   setupMore();
   setupAccount();
   $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
+  // 外部平台的 Agent（docs/remote-agents.md）：部署方登记了平台才出现入口
+  api("/api/agent-platforms").then((ps) => { S.platforms = ps; $("#agent-remote").hidden = !ps.length; }).catch(() => { S.platforms = []; });
+  $("#agent-remote").addEventListener("click", () => { S.agentSel = null; renderRemoteNew(); renderAgents(); });
   const upMine = (folder) => pickSkillPackage("/api/me/skills", folder).then(async (x) => {
     if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
   }).catch((e) => alert(e.message));
@@ -743,6 +746,7 @@ function renderAgents() {
         <div class="card-meta">${tags(a.authority)}${modelTag(a)}</div>
       </button>
       <div class="card-foot"><span>${a.public ? '<span class="vis-tag shared" title="管理员批准的公共 Agent：所有人都能用">公共</span> ' : ""}${!a.mine ? (a.public ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`)
+        : a.remote ? `<span class="muted" title="在外部平台上运行">${esc(a.remote.platform_name || "外部平台")}</span>`
         : a.device_runtime ? `<span class="muted" title="在我的电脑上运行">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "我的电脑") : "设备离线"}</span>`
         : '<span class="muted">云侧运行</span>'}</span>
         ${!a.mine && !a.public ? '<span class="muted">共享项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
@@ -814,6 +818,77 @@ async function renderPublicReadonly(box, a) {
     <p class="hint">它为当时找它的人做事：用的是你自己的授权（没连接的先到「连接器」页连上），过程只给你看，维护人只看得到用量，看不到对话。
       它不会记住你的事带到别人那里。可以私聊它，也可以把它拉进你的项目、让项目里的成员委托它。</p>
     ${a.chat_enabled ? `<div class="actions">${chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`)}</div>` : ""}`;
+}
+
+// ---- 外部平台的 Agent（docs/remote-agents.md，不变量 27） ----
+function renderRemoteNew() {
+  const box = $("#agent-editor"), ps = S.platforms || [];
+  box.innerHTML = `<h2 class="panel-title">接入外部平台的 Agent</h2>
+    <p class="muted">公司别的平台上建好的云端 Agent，接进来当成员：能被 @、接委托。它在自己的平台上跑，用它在平台上配的技能与连接器。</p>
+    <form class="editor" id="remote-form">
+      <div class="field"><label for="rf-platform">平台</label>
+        <select id="rf-platform" name="platform">${ps.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></div>
+      <div class="field"><label for="rf-agent">平台上的 Agent id</label><input id="rf-agent" name="agent" required></div>
+      <div class="field"><label for="rf-key" id="rf-key-label">${esc(ps[0]?.auth_label || "平台 API Key")}</label>
+        <input id="rf-key" name="api_key" type="password" required autocomplete="off">
+        <p class="hint">发起会话用你的 Key，只加密保存，任何接口都不回显。</p></div>
+      <div class="field"><label for="rf-name">名称（可空，默认用平台上的）</label><input id="rf-name" name="name"></div>
+      <p class="error" role="alert"></p>
+      <div class="actions"><button type="submit">接入</button></div>
+    </form>`;
+  const f = $("#remote-form");
+  f.platform.addEventListener("change", () => { $("#rf-key-label").textContent = ps.find((p) => p.id === f.platform.value)?.auth_label || "平台 API Key"; });
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const r = await api("/api/remote-agents", { method: "POST", body: {
+        platform: f.platform.value, agent: f.agent.value.trim(), api_key: f.api_key.value, name: f.name.value.trim() } });
+      S.agentSel = r.id; await reload();
+    } catch (err) { $(".error", f).textContent = err.message; }
+  });
+}
+
+function remoteSection(a) {
+  const r = a.remote;
+  return `<section class="public-box" id="af-remote"><h3>外部平台 · ${esc(r.platform_name || r.platform)}</h3>
+    <p class="hint">平台上的 Agent：<code>${esc(r.agent)}</code>。它在自己的平台上运行，Matrix 管不到它在那边做什么，权限按“仅约定”收窄。
+      ${r.caller_connector ? `找它的人要先授权连接器 <code>${esc(r.caller_connector)}</code>：网络只把那个人自己的授权透传过去。` : ""}</p>
+    <p>${r.key_issued ? (r.mcp_at ? '<span class="tag ok">完整接入：平台连上过 Matrix</span>' : '<span class="tag warn">已签密钥，平台还没连上</span>')
+      : '<span class="tag">基础接入：能干活、交付，不能委托</span>'}</p>
+    <p class="hint">完整接入：签一把密钥，在平台上这个 Agent 的 MCP 设置里填 Matrix 的地址和密钥，它就能用 Matrix 的网络工具（查成员、委托、档案）。
+      只在 Matrix 交给它的那一轮里有效；在平台上直接和它聊天时用不了。</p>
+    <div id="af-rkey">${S.remoteKey?.agent === a.id ? remoteKeyBox(S.remoteKey.k) : ""}</div>
+    <div class="field"><label for="af-rapi">换 API Key</label><input id="af-rapi" type="password" autocomplete="off" placeholder="不换就留空"></div>
+    <p class="error" role="alert" id="af-rerr"></p>
+    <div class="actions"><button type="button" class="ghost" id="af-rapi-save">保存 API Key</button>
+      <button type="button" id="af-rkey-new">${r.key_issued ? "重签 MCP 密钥（旧的作废）" : "签 MCP 密钥"}</button></div>
+  </section>`;
+}
+
+// 密钥只显示一次：签完以后界面会因为 Agent 更新而重画，所以先记在页面状态里，离开这个 Agent 就丢掉
+const remoteKeyBox = (k) => `<div class="warn-box"><p>只显示这一次，复制到平台上这个 Agent 的 MCP 设置里：</p>
+  <dl><dt>地址</dt><dd><code>${esc(location.origin + k.path)}</code></dd>
+  <dt>请求头</dt><dd><code>${esc(k.header)}: ${esc(k.value)}</code></dd>
+  <dt>会话 id</dt><dd>平台回调时要在 <code>${esc(k.session_header)}</code> 里带上平台会话 id（平台自己填）</dd></dl></div>`;
+
+function bindRemoteSection(a) {
+  if (S.remoteKey && S.remoteKey.agent !== a.id) S.remoteKey = null;
+  const err = (e) => { $("#af-rerr").textContent = e.message; };
+  $("#af-rkey-new").addEventListener("click", async () => {
+    if (a.remote.key_issued && !confirm("重签后旧密钥立刻作废，平台上要换成新的。继续？")) return;
+    try {
+      const k = await api(`/api/agents/${a.id}/remote/key`, { method: "POST" });
+      S.remoteKey = { agent: a.id, k };
+      const box = $("#af-rkey");
+      if (box) box.innerHTML = remoteKeyBox(k);
+    } catch (e) { err(e); }
+  });
+  $("#af-rapi-save").addEventListener("click", async () => {
+    const v = $("#af-rapi").value;
+    if (!v) return;
+    try { await api(`/api/agents/${a.id}/remote/api-key`, { method: "PUT", body: { api_key: v } }); $("#af-rapi").value = ""; err({ message: "已保存" }); }
+    catch (e) { err(e); }
+  });
 }
 
 function publicSection(a) {
@@ -927,7 +1002,9 @@ function renderAgentEditor(isNew = false) {
       <div class="actions"><button type="submit">${a ? "保存" : "创建"}</button>
         ${a ? `${a.chat_enabled ? '<button type="button" class="ghost" id="af-chat">私聊</button>' : ""}<button type="button" class="danger" id="af-del">删除</button>` : ""}</div>
     </form>
+    ${a?.remote ? remoteSection(a) : ""}
     ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}`;
+  if (a?.remote) bindRemoteSection(a);
   if (a && $("#af-public")) bindPublicSection(a);
   const f = $("#agent-form");
   // 启用预置模型时：云侧只能选预置模型，端侧（用户自己的 harness）仍然自由填写
@@ -939,6 +1016,8 @@ function renderAgentEditor(isNew = false) {
   };
   f.device_runtime.addEventListener("change", syncModelFields);
   syncModelFields();
+  // 外部平台的 Agent 在自己的平台上跑：运行位置、模型由平台决定，不在这里改
+  if (a?.remote) [...f.querySelectorAll("fieldset.model")].slice(0, 2).forEach((x) => { x.hidden = true; });
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = {

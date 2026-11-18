@@ -171,6 +171,10 @@ class AgentNode:
     device_runtime: str | None = None
     # 设备上的哪个 harness（HARNESSES 的键）；None = 设备的默认 harness（旧数据、旧连接器只有一个）
     harness: str | None = None
+    # 外部平台 Agent（docs/remote-agents.md，不变量 27）：{platform: 平台目录 id, agent: 平台上的 Agent id,
+    # key_sha: Matrix 给它签的 MCP 密钥的 sha256（密钥只显示一次）, mcp_at: 平台第一次凭密钥连上 Matrix 的时间}。
+    # 和 device_runtime 二选一；None = 不是外部平台的。发起会话用的平台 API Key 在保管库 remote-<Agent id>
+    remote: dict[str, Any] | None = None
     # 该运行时最近一次握手声明的强制能力（权限 -> enforced/advisory/unavailable）。
     # 设备离线时用它，避免把"未知"当成"全都不行"而误收窄委托权限。
     enforcement: dict[str, str] = field(default_factory=dict)

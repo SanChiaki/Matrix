@@ -10,8 +10,11 @@
 # Matrix 自己的登录很简陋（无 CSRF、无限流、令牌不过期），前面再加一层 basic auth。
 # 片段只在被 import 时才解析：MATRIX_BASIC_AUTH=off 时不需要 MATRIX_BASIC_HASH
 # （只剩 Matrix 自己的登录，不安全，只用于临时演示）。
+# /mcp/remote 是外部 Agent 平台回调 Matrix 的 MCP（docs/remote-agents.md）：平台带的是 Matrix 签的密钥，过不了 basic auth，
+# 由应用凭密钥 + 平台会话 id 鉴权（不变量 27）。其余路径照旧要 basic auth。
 (basic-auth-on) {
-	basic_auth {
+	@protected not path /mcp/remote
+	basic_auth @protected {
 		{$MATRIX_BASIC_USER:matrix} {$MATRIX_BASIC_HASH}
 	}
 }

@@ -1,0 +1,3 @@
+{"platforms": [
+  {"id": "demo", "name": "演示平台", "url": "http://127.0.0.1:8801", "bind_wait_s": 10}
+]}
