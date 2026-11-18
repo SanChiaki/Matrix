@@ -121,7 +121,7 @@ def test_full_access_callbacks_land_in_the_matrix_round(env: Env):
     # 那一轮结束了：拿着旧会话 id 再回调，一律拒绝
     sid = chat.seats[a.id].dsh_session_id
     out = env._mcp_post("", {"Authorization": env.demo.mcp["expense"]["headers"]["Authorization"], "X-Session-Id": sid},
-                        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+                        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_members", "arguments": {}}})
     assert out["error"]["code"] == -32001
 
 
@@ -140,7 +140,7 @@ def test_callbacks_before_the_session_id_wait_and_strangers_are_refused(env: Env
                         headers={"Authorization": "Bearer wrong", "X-Session-Id": "x"})
     assert r.status_code == 401
     started = time.time()
-    r = env.client.post("/mcp/remote", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+    r = env.client.post("/mcp/remote", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_members", "arguments": {}}},
                         headers={"Authorization": f"Bearer {key}", "X-Session-Id": "s-direct-chat"})
     assert r.json()["error"]["code"] == -32001 and time.time() - started >= 2.5
     old = key
@@ -189,3 +189,26 @@ def test_stopping_a_round_interrupts_the_platform_session(env: Env):
     net.wait_idle(dm.id)
     assert sid in env.demo.interrupted
     assert dm.seats[a.id].blocked and dm.seats[a.id].dsh_session_id == sid
+
+
+def test_platform_probe_without_a_session_lists_tools_but_cannot_call(env: Env):
+    """不变量 28：平台保存 MCP 配置时先试连（不在任何会话里）：initialize、ping、tools/list 不要会话 id、不等待，
+    tools/list 只给工具说明；真正调用工具必须带 Matrix 发起、还没结束的会话 id。密钥照样要对，试连不算“连上过”。"""
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    key = env.connect_mcp(a.id, maya)
+    auth = {"Authorization": f"Bearer {key}"}
+    post = lambda body, h=auth: env.client.post("/mcp/remote", json=body, headers=h)  # noqa: E731
+    started = time.time()
+    assert post({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).json()["result"]["serverInfo"]["name"] == "matrix"
+    assert post({"jsonrpc": "2.0", "id": 2, "method": "ping"}).json()["result"] == {}
+    names = {t["name"] for t in post({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}).json()["result"]["tools"]}
+    assert {"list_members", "delegate"} <= names
+    probe = post({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, {**auth, "X-Session-Id": "s-not-yet"}).json()
+    assert probe["result"]["tools"] and time.time() - started < 2  # 没绑定的会话也不等
+    assert post({"jsonrpc": "2.0", "method": "notifications/initialized"}).status_code == 202
+    out = post({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_members", "arguments": {}}}).json()
+    assert out["error"]["code"] == -32600
+    assert post({"jsonrpc": "2.0", "id": 1, "method": "initialize"}, {"Authorization": "Bearer wrong"}).status_code == 401
+    assert not a.remote["mcp_at"]  # 试连不算完整接入
