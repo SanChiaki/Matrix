@@ -88,6 +88,6 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 
 ## 七、安全
 
-- 平台地址只来自目录；`/mcp/remote` 只凭“密钥 + Matrix 发起且还没结束的会话 id”，不要放宽成只凭密钥。
+- 平台地址只来自目录；`/mcp/remote` 的 `tools/call` 只凭“密钥 + Matrix 发起且还没结束的会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）。
 - 不要把调用方授权换成维护人 / 服务账号的授权；缺了就不发起。
 - 驱动不要打印请求头（里面有凭证）；`RemoteCall.headers` 不进 repr。

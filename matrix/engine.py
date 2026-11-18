@@ -7911,7 +7911,10 @@ class Network:
 
     def remote_mcp(self, key: str, session_id: str, msg: dict[str, Any]) -> dict[str, Any] | None:
         """平台回调 Matrix 的 MCP（Streamable HTTP，一次一条 JSON-RPC）。返回响应；通知返回 None。
-        密钥不对：NetworkError("unknown key")（401）。会话不是 Matrix 发起的、或这一轮已结束：JSON-RPC 错误。"""
+        密钥不对：NetworkError("unknown key")（401），每个方法都要密钥。
+        initialize / ping / tools/list 不要求会话 id、不等待：平台保存 MCP 配置时会先试连一次，那时不在任何会话里。
+        tools/list 在会话已经绑定时给这一轮能用的工具，否则给全部网络工具的说明（说明本来就是公开的，不执行任何东西）。
+        tools/call 必须带 Matrix 发起、还没结束的会话 id（还没绑定就等 bind_wait_s），否则 JSON-RPC 错误（不变量 28）。"""
         sha = hashlib.sha256(str(key).encode()).hexdigest()
         with self._lock:
             agent = next((a for a in self.store.agents.values() if a.remote and a.remote.get("key_sha")
@@ -7921,46 +7924,53 @@ class Network:
             raise NetworkError("unknown key")
         mid, method = msg.get("id"), str(msg.get("method", ""))
         err = lambda code, text: {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": text}}  # noqa: E731
+        ok = lambda result: {"jsonrpc": "2.0", "id": mid, "result": result}  # noqa: E731
         if mid is None:
             return None
-        if not session_id:
-            return err(-32600, f"请求里没有平台会话 id（{spec.mcp_session_header if spec else '会话请求头'}）")
-        b = self.remote_bindings.wait(agent.id, session_id, spec.bind_wait_s if spec else 0)
-        if b is None:  # 在平台上直接聊天的会话、或 Matrix 那一轮已经结束：不认（不变量 28）
-            self.bus.emit("remote.refused", agent_id=agent.id, reason="unknown_session")
-            return err(-32001, "这个会话不是 Matrix 发起的，或那一轮已经结束：Matrix 的工具只在 Matrix 交给你的那一轮里能用")
-        if not agent.remote.get("mcp_at"):
-            with self._lock:
-                agent.remote = {**agent.remote, "mcp_at": time.time()}
-                self.store.save()
-            self.bus.emit("agent.updated", agent=agent.to_dict())
         if method == "initialize":
-            return {"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": "2025-06-18",
-                                                             "capabilities": {"tools": {}},
-                                                             "serverInfo": {"name": "matrix", "version": "1"}}}
+            return ok({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
+                       "serverInfo": {"name": "matrix", "version": "1"}})
         if method == "ping":
-            return {"jsonrpc": "2.0", "id": mid, "result": {}}
-        tools = b.tools
+            return ok({})
+        from .mcp_server import TOOLS as NET_TOOLS
         if method == "tools/list":
-            if tools is None:
-                return {"jsonrpc": "2.0", "id": mid, "result": {"tools": []}}
-            from .mcp_server import TOOLS as NET_TOOLS
-            listed = [t for t in NET_TOOLS if tools.names is None or t["name"] in tools.names]
-            text, bad = tools.handler(LIST_TOOLS, {})
+            b = self.remote_bindings.wait(agent.id, session_id, 0) if session_id else None
+            if b is None:  # 试连、或这一轮的流还没报出会话 id：只给说明，调用时再按这一轮的权限检查
+                return ok({"tools": list(NET_TOOLS)})
+            self._remote_seen(agent)
+            if b.tools is None:
+                return ok({"tools": []})
+            listed = [t for t in NET_TOOLS if b.tools.names is None or t["name"] in b.tools.names]
+            text, bad = b.tools.handler(LIST_TOOLS, {})
             try:
                 listed += [t for t in (json.loads(text) if not bad else []) if isinstance(t, dict) and t.get("name")]
             except ValueError:
                 pass
-            return {"jsonrpc": "2.0", "id": mid, "result": {"tools": listed}}
-        if method == "tools/call":
-            params = msg.get("params") or {}
-            name, args = str(params.get("name", "")), params.get("arguments") or {}
-            if tools is None:
-                return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": "这一轮没有网络工具"}],
-                                                                 "isError": True}}
-            text, bad = tools.handler(name.removeprefix(MCP_PREFIX), args if isinstance(args, dict) else {})
-            return {"jsonrpc": "2.0", "id": mid, "result": {"content": [{"type": "text", "text": text}], "isError": bad}}
-        return err(-32601, f"不支持的方法 {method}")
+            return ok({"tools": listed})
+        if method != "tools/call":
+            return err(-32601, f"不支持的方法 {method}")
+        if not session_id:
+            return err(-32600, f"请求里没有平台会话 id（{spec.mcp_session_header if spec else '会话请求头'}）："
+                               "Matrix 的工具只在 Matrix 交给你的那一轮里能用")
+        b = self.remote_bindings.wait(agent.id, session_id, spec.bind_wait_s if spec else 0)
+        if b is None:  # 在平台上直接聊天的会话、或 Matrix 那一轮已经结束：不认（不变量 28）
+            self.bus.emit("remote.refused", agent_id=agent.id, reason="unknown_session")
+            return err(-32001, "这个会话不是 Matrix 发起的，或那一轮已经结束：Matrix 的工具只在 Matrix 交给你的那一轮里能用")
+        self._remote_seen(agent)
+        params = msg.get("params") or {}
+        name, args = str(params.get("name", "")), params.get("arguments") or {}
+        if b.tools is None:
+            return ok({"content": [{"type": "text", "text": "这一轮没有网络工具"}], "isError": True})
+        text, bad = b.tools.handler(name.removeprefix(MCP_PREFIX), args if isinstance(args, dict) else {})
+        return ok({"content": [{"type": "text", "text": text}], "isError": bad})
+
+    def _remote_seen(self, agent: AgentNode) -> None:
+        """平台带着 Matrix 发起的会话连上来过：界面上显示“完整接入”。只有落到某一轮的调用才算，试连不算。"""
+        if agent.remote and not agent.remote.get("mcp_at"):
+            with self._lock:
+                agent.remote = {**agent.remote, "mcp_at": time.time()}
+                self.store.save()
+            self.bus.emit("agent.updated", agent=agent.to_dict())
 
     # ================= 公共 Agent（不变量 27，docs/public-agents.md） =================
     # 维护组（所有者 + 维护人）申请，管理员批准；批准时冻结权限。公共之后所有用户都能私聊它、把它拉进项目（服务面）：

@@ -42,13 +42,14 @@
                     ◀── SSE: session{id} → delta → tool → done ───────── 
    session 一到：Bindings.bind(Matrix Agent, 平台会话 id → 这一轮的网络工具)
  /mcp/remote ◀── Authorization: Bearer <Matrix 密钥>，X-Session-Id: <平台会话 id> ── 平台 Agent 调 Matrix 的工具
-   凭密钥认出是哪个 Matrix Agent，凭会话 id 落到这一轮（还没绑定就等 bind_wait_s）
+   凭密钥认出是哪个 Matrix Agent，凭会话 id 落到这一轮（tools/call 还没绑定就等 bind_wait_s）
  一轮结束 / 超时 / 人终止：解除绑定；超时与终止时调 POST /sessions/{id}/interrupt
 ```
 
 - **会话**：每个席位、每个委托各对应一个平台会话（存在 `dsh_session_id` 里），后续轮次续接。
 - **先等再绑**：带着陌生会话 id 的回调挂起，直到某一轮的流报出这个 id；等到 `bind_wait_s` 还没有就拒绝。
   不会认错：会话 id 只由发起那一轮的流报出来。在平台上直接聊天产生的会话 Matrix 不认识，永远等不到。
+- **试连不要会话 id**：平台保存 MCP 配置时会先调 `initialize` / `tools/list` 试连，那时不在任何会话里。这两个和 `ping` 不执行任何东西，只要密钥对就回答、不等待；`tools/list` 没落到某一轮时给全部网络工具的说明，落到某一轮时给这一轮能用的。**只有 `tools/call`** 必须带 Matrix 发起、还没结束的会话 id。试连不算“连上过”，界面上的“完整接入”要等第一次落到某一轮的调用。
 - **结束即失效**：一轮结束就解除绑定，晚到的回调（包括停了以后还在跑的）一律拒绝。
 - **并发**：同一个平台 Agent 可以同时跑多个席位，按会话 id 区分，不用串行。
 

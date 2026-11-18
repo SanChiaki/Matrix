@@ -209,7 +209,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
-- `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
+- `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准、提问应答者替人作答；覆盖层要一直关掉 dsh 的默认技能根。
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
   能抓哪些内网地址只来自部署方的 `fetch.json`（`web_fetch.plan` 每一跳都校验），不要让用户或 Agent 改它。
