@@ -105,9 +105,10 @@ RELEASE_VERSIONS_KEPT = 3  # 快照保留最近几个版本
 RELEASE_FEEDBACK = 200     # 一份发布物最多保留多少条反馈
 SERVICES_PER_PROJECT = 20   # 一个项目最多几个服务（docs/project-services.md）
 SERVICE_ITEMS = 50          # 一个服务最多圈几项档案范围、几个岗位
-# 服务面（不变量 29）里不给的网络工具：改档案的（纲要、决定、资料链接、技能、插件、提议新成员）与读决定；插件记录工具也不给
+# 服务面（不变量 29）里不给的网络工具：改档案的（纲要、决定、资料链接、技能、插件、提议新成员）与读决定。
+# 插件工具不在此列：主持人在服务里勾了哪些插件，就照插件原来的方式给（ProjectService.plugins）
 SERVICE_DENIED_TOOLS = ("record_decision", "list_decisions", "add_link", "propose_brief", "propose_skill", "propose_plugin",
-                        "propose_agent", "plugin_records", "plugin_write")
+                        "propose_agent")
 SUBSCRIPTIONS_PER_AGENT = 30
 
 
@@ -852,6 +853,7 @@ class ProjectService:
     scope: list[str] = field(default_factory=list)    # 可读的档案文件或目录（相对路径）；空 = 不读档案
     inbox: str = ""                      # 收件目录（相对路径）：服务里只能写到这里；空 = 不能写
     authority: list[str] = field(default_factory=list)  # 服务授予的权限：入口与岗位的有效权限再交它
+    plugins: list[str] = field(default_factory=list)  # 服务里能用的项目插件（记录工具、插件服务与挂点照插件原来的方式）；空 = 不用
     readers: list[str] = field(default_factory=list)  # 点名的调用方（用户 id）；项目参与者总能用
     public: bool = False                 # 所有登录用户都能用
     version: int = 1

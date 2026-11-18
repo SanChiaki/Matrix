@@ -162,7 +162,7 @@ def test_session_belongs_to_the_caller_and_archive_is_scoped(tmp_path: Path):
     log = (net.store.project_dir(g.id).parent / "log.jsonl").read_text(encoding="utf-8")
     assert '"收件/申请.md"' in log                                    # 档案日志照记（不变量 17）
 
-    assert conv.messages[-1].private_to == [ann]
+    assert set(conv.messages[-1].private_to) == {ann, maya}           # 过程给调用方与入口（个人 Agent）的所有者
     for who in (maya, ben):                                          # 主持人、参与者都看不到服务会话
         with pytest.raises(NetworkError, match="unknown conversation"):
             net.conversation_detail(conv.id, who)
@@ -278,3 +278,60 @@ def test_services_survive_reload_and_api(tmp_path: Path):
     again = Store(net.store.root)
     assert again.project_services[sid].version == 2 and again.conversations[conv["id"]].service_id == sid
     assert host.delete(f"/api/projects/{g.id}/services/{sid}").json()["status"] == "withdrawn"
+
+
+# ================= 个人 Agent 照常跑；插件照原来的方式 =================
+def test_personal_agents_run_as_usual_and_owner_sees_their_rounds(tmp_path: Path):
+    """不变量 29：个人 Agent 当入口时私有目录照常可写、写回；它的所有者照常看到它这几轮的过程（只是经过它的部分，
+    看不到整个服务会话），别人看不到；公共 Agent 的维护人仍然只看用量。"""
+    from matrix.models import AGENT_HOME
+
+    def desk_run(call: ScriptCall) -> str:
+        call.say("先查手册")
+        (call.cwd / AGENT_HOME / "笔记.md").write_text("ann 问过报销", encoding="utf-8")
+        return "查好了"
+
+    net, (maya, ben, ann, carl), g, desk, fin, legal = setup(tmp_path, None)
+    net.runtime.handler = by_agent(net, {"前台": desk_run})
+    x = publish(net, g, maya, authority=["delegate", "file.write"])
+    conv = net.open_service_session(x.id, actor=ann)
+    net.send_message(conv.id, "我的报销", actor=ann, background=False)
+    assert (net.agent_home(desk.id) / "笔记.md").read_text(encoding="utf-8") == "ann 问过报销"  # 照常写回
+    reply = conv.messages[-1]
+    assert set(reply.private_to) == {ann, maya}                    # 过程给调用方，也给入口的所有者
+
+    rounds = net.service_rounds(desk.id, actor=maya)
+    assert [r["service"] for r in rounds] == ["报销服务"] and rounds[0]["caller"] == "ann@x.io"
+    texts = [m["text"] for m in rounds[0]["messages"]]
+    assert texts == ["我的报销", "查好了"] and rounds[0]["messages"][-1]["steps"]
+    with pytest.raises(NetworkError, match="unknown conversation"):
+        net.conversation_detail(conv.id, maya)                      # 会话本身仍只属于调用方
+    assert net.workdir_files("seat", f"{conv.id}/{desk.id}", actor=maya)["files"] is not None
+    with pytest.raises(NetworkError, match="unknown agent"):
+        net.service_rounds(desk.id, actor=ben)
+
+
+def test_selected_plugins_work_as_usual(tmp_path: Path):
+    """不变量 29：主持人在服务里勾的插件，记录工具照插件原来的方式读写；没勾的不挂。"""
+    from tests.test_plugins import package
+    seen: dict[str, object] = {}
+
+    def desk_run(call: ScriptCall) -> str:
+        seen["tools"] = list(call.tool_names)
+        if "mcp__matrix_net__plugin_write" not in call.tool_names:
+            return "没有插件"
+        return call.tool("plugin_write", plugin="deals", table="leads", fields='{"company": "启明"}')
+
+    net, (maya, ben, ann, carl), g, desk, fin, legal = setup(tmp_path, None)
+    net.runtime.handler = by_agent(net, {"前台": desk_run})
+    net.upload_plugin(g.id, package(), actor=maya)
+    with pytest.raises(NetworkError, match="项目里没有插件"):
+        publish(net, g, maya, plugins=["nope"])
+    x = publish(net, g, maya, authority=["delegate", "file.write"])
+    conv = net.open_service_session(x.id, actor=ann)
+    net.send_message(conv.id, "登记一条", actor=ann, background=False)
+    assert conv.messages[-1].text == "没有插件"                      # 没勾：不挂
+    net.update_service(g.id, x.id, actor=maya, plugins=["deals"])
+    net.send_message(conv.id, "再登记一条", actor=ann, background=False)
+    assert "已新增记录" in conv.messages[-1].text
+    assert [r["fields"]["company"] for r in net.plugin_records(g.id, "deals", "leads")] == ["启明"]

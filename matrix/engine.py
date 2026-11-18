@@ -124,6 +124,7 @@ class ExecContext:
     callers: list[str] = field(default_factory=list)
     # 项目服务（docs/project-services.md，不变量 29）：这一轮属于哪个服务。档案只读圈定范围、只写收件目录，改档案的工具不给
     svc: str | None = None
+    plugin_scope: list[str] | None = None  # 这一轮能用的插件（服务里是主持人勾的那些）；None = 项目里全部
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -279,9 +280,9 @@ class Network:
             return True
         svc_conv = conv if conv is not None else (self.store.conversations.get(task.conversation_id) if task else None)
         if svc_conv is not None and svc_conv.kind == "service":  # 服务会话（不变量 29）：调用方；委托里另有个人 Agent 的所有者
-            if task is not None:
-                return actor == task.caller_id or (not a.is_public and self.can_use_agent(a, actor))
-            return actor == svc_conv.owner_id
+            if actor == (task.caller_id if task is not None else svc_conv.owner_id):
+                return True
+            return not a.is_public and self.can_use_agent(a, actor)  # 个人 Agent 的所有者照常看它这里的过程
         if not a.is_public:
             return self.can_use_agent(a, actor)
         if task is not None:
@@ -324,17 +325,40 @@ class Network:
         if agent.is_public:
             ctx.authority = [a for a in ctx.authority if a in agent.public_authority]
 
-    @staticmethod
-    def _serve_service(ctx: ExecContext, svc: ProjectService) -> None:
-        """一轮属于服务：服务面、有效权限交服务授予的、不挂插件工具与插件服务（不变量 29）。"""
+    def _serve_service(self, ctx: ExecContext, svc: ProjectService) -> None:
+        """调用方持有锁。一轮属于服务：服务面、有效权限交服务授予的；插件只给主持人勾的那些（不变量 29）。"""
         ctx.service, ctx.svc = True, svc.id
         ctx.authority = [a for a in ctx.authority if a in svc.authority]
-        ctx.plugins = ctx.services = False
+        ctx.plugin_scope = list(svc.plugins)
+        g = self.store.projects.get(svc.project_id)
+        ctx.plugins = ctx.plugins and any(self._manifest_or_none(g, n) is not None and self._manifest_or_none(g, n).agent_tools
+                                          for n in svc.plugins)
+        ctx.services = ctx.services and any(n in svc.plugins for n, _ in self._service_plugins(g))
+
+    def _manifest_or_none(self, g: Project | None, name: str) -> "pluginfs.Manifest | None":
+        if g is None or name not in g.plugins:
+            return None
+        try:
+            return self._manifest(g, name)
+        except NetworkError:
+            return None
+
+    def _ctx_service_plugins(self, ctx: ExecContext, g: Project | None) -> list[tuple[str, pluginfs.Manifest]]:
+        """调用方持有锁。这一轮能用的带服务的插件：服务里只给主持人勾的那些。"""
+        out = self._service_plugins(g)
+        return out if ctx.plugin_scope is None else [(n, m) for n, m in out if n in ctx.plugin_scope]
+
+    @staticmethod
+    def _home_frozen(ctx: ExecContext, agent: AgentNode) -> bool:
+        """私有目录只读、改动不写回：公共 Agent 的服务面（不变量 27）。项目服务里的个人 Agent 照常（不变量 29）。"""
+        return ctx.service and (agent.is_public or not ctx.svc)
 
     def _watchers(self, ctx: ExecContext, agent: AgentNode) -> list[str]:
-        """这一轮的过程、失败说明给谁看：服务面是这一轮的调用方，其余是所有者。"""
+        """这一轮的过程、失败说明给谁看：服务面是这一轮的调用方，其余是所有者。项目服务里的个人 Agent
+        照常给它的所有者看（不变量 29）。"""
         if ctx.service:
-            return _dedup([u for u in [*ctx.callers, ctx.principal] if u])
+            owner = [agent.owner_id] if ctx.svc and not agent.is_public and agent.owner_id else []
+            return _dedup([u for u in [*ctx.callers, ctx.principal, *owner] if u])
         return [agent.owner_id] if agent.owner_id else []
 
     def can_see_project(self, g: Project, actor: str | None) -> bool:
@@ -3130,9 +3154,10 @@ class Network:
         g = self._require_project(ctx, delegate=False)
         name = str(args.get("plugin", "")).strip()
         with self._lock:
-            if name not in g.plugins:
-                have = "、".join(g.plugins) or "（没有）"
-                raise NetworkError(f"项目里没有插件 {name!r}：装了的有 {have}")
+            have_names = [n for n in g.plugins if ctx.plugin_scope is None or n in ctx.plugin_scope]
+            if name not in have_names:
+                have = "、".join(have_names) or "（没有）"
+                raise NetworkError(f"{'服务里' if ctx.svc else '项目里'}没有插件 {name!r}：能用的有 {have}")
             m = self._manifest(g, name)
         if need not in m.agent_tools:
             raise NetworkError(f"插件「{m.title}」没有把{'读' if need == 'records.read' else '写'}记录开给 Agent")
@@ -3266,7 +3291,7 @@ class Network:
             return []
         with self._lock:
             g = self.store.projects.get(ctx.project_id or "")
-            plugins = self._service_plugins(g)
+            plugins = self._ctx_service_plugins(ctx, g)
         out = []
         for name, m in plugins:
             assert m.service is not None
@@ -3294,7 +3319,8 @@ class Network:
             return None
         with self._lock:
             g = self.store.projects.get(ctx.project_id or "")
-            hit = next((m for n, m in self._service_plugins(g) if n == plugin), None) if ctx.services and not ctx.home else None
+            hit = next((m for n, m in self._ctx_service_plugins(ctx, g) if n == plugin), None) \
+                if ctx.services and not ctx.home else None
         if g is None or hit is None:
             return None
         assert hit.service is not None
@@ -3320,7 +3346,7 @@ class Network:
         工具类每轮都调；全部插件合计不超过 PLUGIN_CONTEXT_TOTAL。只在本项目里的运行生效（不变量 24）。"""
         with self._lock:
             g = self.store.projects.get(ctx.project_id or "") if not ctx.home else None
-            plugins = [(n, m) for n, m in self._service_plugins(g) if m.contexts] if g is not None else []
+            plugins = [(n, m) for n, m in self._ctx_service_plugins(ctx, g) if m.contexts] if g is not None else []
             conv = self.store.conversations.get(ctx.conversation_id)
             latest = next((x.text for x in reversed(conv.messages) if x.id in ctx.addressed), "") if conv else ""
         if g is None or not plugins:
@@ -3363,7 +3389,7 @@ class Network:
         """mount 挂点要放进工作目录的文件（调用方不持有锁）：(相对工作目录的路径, 内容)。云侧拷进 plugins/，端侧随材料下发。"""
         with self._lock:
             g = self.store.projects.get(ctx.project_id or "") if not ctx.home else None
-            plugins = [(n, m) for n, m in self._service_plugins(g) if m.mounts] if g is not None else []
+            plugins = [(n, m) for n, m in self._ctx_service_plugins(ctx, g) if m.mounts] if g is not None else []
         out: list[tuple[str, bytes]] = []
         for name, m in plugins:
             try:
@@ -4667,6 +4693,12 @@ class Network:
             if bad:
                 raise NetworkError(f"没有这些权限：{'、'.join(bad)}")
             out["authority"] = auth
+        if f.get("plugins") is not None:
+            names = _dedup([str(n).strip() for n in _as_list(f["plugins"]) if str(n).strip()])
+            missing = [n for n in names if n not in g.plugins]
+            if missing:
+                raise NetworkError(f"项目里没有插件：{'、'.join(missing)}")
+            out["plugins"] = names
         if f.get("readers") is not None:
             out["readers"] = self._reader_ids(f["readers"], g)
         if f.get("public") is not None:
@@ -4772,7 +4804,7 @@ class Network:
             "published_at": x.published_at}
         if g is not None and (actor is None or actor in g.people):
             d.update(staff=list(x.staff), staff_names=[self._name(a) for a in x.staff], scope=list(x.scope),
-                     inbox=x.inbox, authority=list(x.authority), public=x.public,
+                     inbox=x.inbox, authority=list(x.authority), public=x.public, plugins=list(x.plugins),
                      readers=[self._email(u) for u in x.readers], who=self._service_who(x),
                      sessions=sum(1 for c in self.store.conversations.values() if c.service_id == x.id))
         return d
@@ -4807,6 +4839,34 @@ class Network:
             self.store.save()
         self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
         return conv
+
+    def service_rounds(self, agent_id: str, actor: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+        """个人 Agent 的所有者看它在项目服务里的那几轮（不变量 29：照常看得到过程）：交给它的消息、它的回复与过程。
+        只有经过它的部分，不是整个服务会话；会话本身仍只属于调用方。公共 Agent 的维护人在服务面只看用量（不变量 27）。"""
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if a.is_public:
+                return []
+            out = []
+            convs = sorted((c for c in self.store.conversations.values() if c.kind == "service" and a.id in c.seats),
+                           key=lambda c: -c.updated_at)[:max(1, min(int(limit), 100))]
+            for c in convs:
+                x = self.store.project_services.get(c.service_id or "")
+                g = self.store.projects.get(c.project_id or "")
+                msgs = [m for m in c.messages if (m.role == "user" and a.id in m.mentions)
+                        or (m.role in ("agent", "system") and m.agent_id == a.id)]
+                view = []
+                for m in msgs[-40:]:
+                    d = _msg(m)
+                    if m.private_to and actor is not None and actor not in m.private_to:
+                        d["steps"] = []  # 改之前的回复只给了调用方：过程没有记给所有者
+                    d.pop("audience", None)
+                    d.pop("private_to", None)
+                    view.append(d)
+                out.append({"conversation_id": c.id, "service": x.title if x else c.title,
+                            "project_name": g.name if g else "", "caller": self._email(c.owner_id),
+                            "updated_at": c.updated_at, "archived": c.archived, "messages": view})
+            return out
 
     def service_usage(self, project_id: str, service_id: str, days: int = 30, actor: str | None = None) -> dict[str, Any]:
         """主持人看服务的用量：多少轮、成没成、工具调用、token，按调用方汇总。不给内容（不变量 29）。"""
@@ -5447,7 +5507,8 @@ class Network:
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
                                    service=svc,
-                                   home_writable="file.write" in ctx.authority and not ctx.service, archive=archive,
+                                   home_writable="file.write" in ctx.authority and not self._home_frozen(ctx, agent),
+                                   archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
                                    ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals)
@@ -5537,7 +5598,7 @@ class Network:
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
         self._flow_narrow(ctx, agent, task)
-        home_writable = "file.write" in ctx.authority and not ctx.service
+        home_writable = "file.write" in ctx.authority and not self._home_frozen(ctx, agent)
         mount_home = self.home_mounted(g, agent)
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         workdir = self.store.task_dir(task.id)
@@ -5691,7 +5752,9 @@ class Network:
                     raise NetworkError("执行者用到了别处的资料，工作目录要等它的所有者确认交付后才能看")  # 不变量 22
                 return None if a is not None and a.device_runtime else self.store.task_dir(t.id)
             conv_id, _, agent_id = ref.partition("/")
-            conv = self.visible_conv(conv_id, actor)
+            raw = self.store.conversations.get(conv_id)
+            # 服务会话只属于调用方；经过个人 Agent 的那一席，它的所有者照常看得到工作目录（不变量 29）
+            conv = raw if raw is not None and raw.kind == "service" else self.visible_conv(conv_id, actor)
             a = self.store.agents.get(agent_id)
             seat = conv.seats.get(agent_id)
             self._check(seat is not None and a is not None and self.can_watch(a, actor, conv), f"seat {ref}")
@@ -5888,7 +5951,7 @@ class Network:
             discard(workdir / PLUGIN_MOUNT)
             if not agent.device_runtime:
                 discard(workdir / SKILLS)
-            if before is not None and ctx.service:  # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 27）
+            if before is not None and self._home_frozen(ctx, agent):  # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 27）
                 shutil.rmtree(workdir / HOME_DIR, ignore_errors=True)
             elif before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx)
@@ -5922,7 +5985,8 @@ class Network:
         """调用方持有锁。只列这个 Agent 看得到的文件与技能（不变量 26）。服务里只给服务说明与圈定范围里的文件（不变量 29）。"""
         if svc is not None:
             return format_service_archive(g, svc, [rel for rel, _ in self._visible_files(g, agent_id, svc)],
-                                          [self._name(x) for x in self._service_staff(g, svc)])
+                                          [self._name(x) for x in self._service_staff(g, svc)],
+                                          [m.title for n in svc.plugins if (m := self._manifest_or_none(g, n)) is not None])
         plugins = []
         for name in g.plugins:
             try:
@@ -8861,6 +8925,9 @@ class Network:
                            "plugin.submission", "im.updated"):
                 # 我的技能、我的连接器、助理起草的消息、我的定时、等我确认的输出、我的 IM 机器人与绑定：只给本人
                 return data if data.get("user_id") == actor else None
+            if ev_type == "service.updated":  # 只推 id：看得到的人自己去取（不变量 29）
+                x = self.store.project_services.get(str(data.get("service_id", "")))
+                return data if x is not None and self.can_see_service(x, actor) else None
             if ev_type == "release.updated":  # 只推 id：看得到的人自己去取（不变量 23）
                 r = self.store.releases.get(str(data.get("release_id", "")))
                 return data if r is not None and self.can_see_release(r, actor) else None

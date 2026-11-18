@@ -303,6 +303,7 @@ class ServiceIn(BaseModel):
     scope: list[str] | None = Field(None, max_length=50)
     inbox: str | None = Field(None, max_length=500)
     authority: list[str] | None = Field(None, max_length=20)
+    plugins: list[str] | None = Field(None, max_length=30)
     readers: list[str] | None = Field(None, max_length=200)
     public: bool = False
 
@@ -315,6 +316,7 @@ class ServicePatch(BaseModel):
     scope: list[str] | None = Field(None, max_length=50)
     inbox: str | None = Field(None, max_length=500)
     authority: list[str] | None = Field(None, max_length=20)
+    plugins: list[str] | None = Field(None, max_length=30)
     readers: list[str] | None = Field(None, max_length=200)
     public: bool | None = None
 
@@ -1401,6 +1403,10 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         conv = network.open_service_session(service_id, actor=user.id, title=body.title)
         with network.store.lock:
             return network.conversation_view(conv, user.id)
+
+    @app.get("/api/agents/{agent_id}/service-rounds")
+    def service_rounds(agent_id: str, user: Me) -> list[dict]:
+        return network.service_rounds(agent_id, actor=user.id)
 
     @app.get("/api/projects/{project_id}/services")
     def project_services(project_id: str, user: Me) -> list[dict]:

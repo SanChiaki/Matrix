@@ -1003,7 +1003,9 @@ function renderAgentEditor(isNew = false) {
         ${a ? `${a.chat_enabled ? '<button type="button" class="ghost" id="af-chat">私聊</button>' : ""}<button type="button" class="danger" id="af-del">删除</button>` : ""}</div>
     </form>
     ${a?.remote ? remoteSection(a) : ""}
-    ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}`;
+    ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}
+    ${a && !a.public_status ? '<section class="pub-box" id="af-service-rounds" hidden></section>' : ""}`;
+  if (a && !a.public_status) renderServiceRounds(a);
   if (a?.remote) bindRemoteSection(a);
   if (a && $("#af-public")) bindPublicSection(a);
   const f = $("#agent-form");
@@ -1055,6 +1057,20 @@ function renderAgentEditor(isNew = false) {
     try { S.me = { ...S.me, ...await api("/api/me/assistant", { method: "PUT", body: { agent_id: a.id } }) }; await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });
+}
+
+// 我的 Agent 在别的项目服务里的那几轮（不变量 29）：交给它的消息、它的回复与过程。只有经过它的部分，不是整个服务会话
+async function renderServiceRounds(a) {
+  const list = await api(`/api/agents/${a.id}/service-rounds`).catch(() => []);
+  const box = $("#af-service-rounds");
+  if (!box || !list.length) return;
+  box.hidden = false;
+  box.innerHTML = `<h3>在服务里</h3><p class="hint">它在项目服务里当入口或岗位时，经过它的那几轮你照常看得到；服务会话本身只属于调用方。</p>
+    ${list.map((r) => `<details><summary><b>${esc(r.service)}</b> <span class="muted">· ${esc(r.project_name)} · 调用方 ${esc(r.caller)} · ${time(r.updated_at)}${r.archived ? " · 只读" : ""}</span></summary>
+      <ul class="thread mini">${r.messages.map((m) => m.role === "user"
+        ? `<li class="msg user"><div class="content"><div class="who"><b>${esc(r.caller)}</b>${time(m.ts)}</div><div class="body md">${renderMarkdown(m.text)}</div></div></li>`
+        : `<li class="msg agent"><div class="content"><div class="who"><b>${esc(a.name)}</b>${time(m.ts)}</div>${stepsHtml(m.steps || [], false)}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`).join("")}</ul>
+    </details>`).join("")}`;
 }
 
 // ================= 项目管理 =================
@@ -2599,6 +2615,8 @@ function serviceForm(d, x) {
     <fieldset><legend>岗位（入口能委托的；都不勾就是项目里全部 Agent）</legend>${agents.map((a) => `<label class="check"><input type="checkbox" name="staff" value="${esc(a.id)}" ${checked(v.staff, a.id)}>${esc(a.name)}</label>`).join("")}</fieldset>
     <fieldset><legend>能读的资料（目录管到里面的每个文件；内容是实时的）</legend>${paths.map((p) => `<label class="check"><input type="checkbox" name="scope" value="${esc(p)}" ${checked(v.scope, p)}>${esc(p)}</label>`).join("") || '<span class="muted">资料里还没有东西。</span>'}</fieldset>
     <label>收件目录（服务只能写到这里；空着就不能写）<input name="inbox" maxlength="200" value="${esc(v.inbox || "")}" placeholder="收件"></label>
+    ${(d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken).length ? `<fieldset><legend>能用的插件（照插件原来的方式读写）</legend>${(d.plugin_list || []).filter((p) => p.enabled !== false && !p.broken)
+      .map((p) => `<label class="check"><input type="checkbox" name="plugins" value="${esc(p.name)}" ${checked(v.plugins, p.name)}>${esc(p.title || p.name)}</label>`).join("")}</fieldset>` : ""}
     <fieldset><legend>服务授予的权限（入口与岗位的权限再交它）</legend>${auth.map(([k, label]) => `<label class="check"><input type="checkbox" name="authority" value="${esc(k)}" ${checked(v.authority, k)}>${esc(label)}</label>`).join("")}</fieldset>
     <label>给谁用（邮箱，逗号或换行分隔；项目参与者本来就能用）<textarea name="readers" rows="2">${esc((v.readers || []).join("\n"))}</textarea></label>
     <label class="check"><input type="checkbox" name="public" ${v.public ? "checked" : ""}>所有登录用户都能用</label>
@@ -2627,6 +2645,7 @@ function serviceSection(d, st) {
       <dl class="plugin-facts"><dt>岗位</dt><dd>${(x.staff_names || []).map(esc).join("、") || "项目里全部 Agent"}</dd>
         <dt>能读</dt><dd>${(x.scope || []).map((p) => `<code>${esc(p)}</code>`).join(" ") || "不读资料"}</dd>
         <dt>收件</dt><dd>${x.inbox ? `<code>${esc(x.inbox)}/</code>` : "不能写"}</dd>
+        <dt>插件</dt><dd>${(x.plugins || []).map((n) => `<code>${esc(n)}</code>`).join(" ") || "不用"}</dd>
         <dt>权限</dt><dd>${(x.authority || []).map((a) => `<code>${esc(a)}</code>`).join(" ") || "无"}</dd></dl>
       ${usage(x)}
       ${host && st.svcEdit === x.id ? serviceForm(d, x) : ""}
@@ -2638,7 +2657,7 @@ function bindServiceSection(box, d, st, done) {
   const body = (f, isNew) => {
     const out = { title: f.get("title"), description: f.get("description") || "", entry: f.get("entry"),
       staff: f.getAll("staff"), scope: f.getAll("scope"), inbox: String(f.get("inbox") || "").trim(),
-      authority: f.getAll("authority"), readers: splitEmails(f.get("readers")), public: f.get("public") === "on" };
+      authority: f.getAll("authority"), plugins: f.getAll("plugins"), readers: splitEmails(f.get("readers")), public: f.get("public") === "on" };
     if (isNew) out.name = f.get("name");
     return out;
   };

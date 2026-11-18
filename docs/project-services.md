@@ -129,7 +129,7 @@ POST /svc/sessions/{session_id}/interrupt 中断
 | 模型 | `models.ProjectService`（`state.json` 的 `project_services`）；`Conversation.kind = "service"` + `service_id`；`SERVICE_DENIED_TOOLS` |
 | 发布 | `engine.py`「项目服务」一节：`create_service` / `update_service`（改了就切版本）/ `withdraw_service`、`_service_config`（入口与岗位按 id 或名字、范围要在档案里、收件目录建好、权限在 `AUTHORITIES` 里、读者按邮箱）、`service_view`（名片；配置只给参与者）、`services_for`、`service_usage` |
 | 服务会话 | `open_service_session`（每次新开一个）；`send_message` 经 `_service_ready`：撤回只读、调用方还能用、入口还在项目里（换了入口跟着换）；调用方自己能删（`delete_conversation`）；删项目时一起删 |
-| 服务面 | `ExecContext.svc`；`_serving` / `_serve_seat` / `_serve_service`（席位），`_task_ctx`（服务会话里的委托）：`principal` 是调用方，权限交 `ProjectService.authority`，插件工具与插件服务不挂；`ExecContext.tools` 去掉 `SERVICE_DENIED_TOOLS` |
+| 服务面 | `ExecContext.svc`；`_serving` / `_serve_seat` / `_serve_service`（席位），`_task_ctx`（服务会话里的委托）：`principal` 是调用方，权限交 `ProjectService.authority`，插件只给 `ProjectService.plugins` 里的（`ExecContext.plugin_scope`，记录工具、插件服务的工具与挂点照插件原来的方式）；个人 Agent 私有目录照常可写、写回（`_home_frozen` 只冻结公共 Agent）；`ExecContext.tools` 去掉 `SERVICE_DENIED_TOOLS` |
 | 档案 | `_visible_files(g, agent, svc)` 再交 `scope`（挂载、端侧材料、推送都经它）；`_archive_text` 换成 `format_service_archive`（服务说明、能读的文件、收件目录、岗位；没有纲要与决定）；`publish_file` 工具只写收件目录（不在里面的名字放进去），`publish_file(quiet=True)` 不发群聊事件、日志照记 |
 | 委托 | `_tool_delegate` 只放行 `_service_staff`；`list_members` 只列岗位；委托两端看得到：调用方与岗位的所有者 |
 | 授权 | `_caller_connections`：调用方自己的、与入口 / 岗位勾的连接器同款的（公共 Agent 仍按维护人声明的）；服务会话只有调用方看得到，共享项目里也不先问 |
@@ -140,8 +140,8 @@ POST /svc/sessions/{session_id}/interrupt 中断
 
 **第一期的限制**：
 
-- 个人 Agent 的所有者看不到服务会话本身，只看到经过他的 Agent 的委托（委托两端可见）和用量台账里的“服务”。
-- 服务里不用项目插件（插件工具、插件服务、插件页面都不挂）；项目技能照不变量 26 的可见范围给。
-- 个人 Agent 当入口或岗位时私有目录只读挂载、改动不写回（同公共 Agent 的服务面）。
+- 个人 Agent 的所有者看得到它在服务里的那几轮（交给它的消息、它的回复与过程、工作目录：Agent 设置里的“在服务里”，
+  `service_rounds`，回复的 `private_to` 带上所有者），看不到整个服务会话；在那里不能终止它，终止由调用方做。
+- 插件页面不进服务；项目技能照不变量 26 的可见范围给。
 - 外部系统（第二期）、SSO 身份（第三期）、反馈、把服务拉进别人的项目都还没有。
 

@@ -174,6 +174,9 @@ def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, 
         "", f"## 项目档案（服务里只读圈定的范围）",
         f"- `{MCP_PREFIX}publish_file`：把工作目录里的一个文件放进服务的收件目录（没有收件目录时不能用）。",
         f"- `./{PROJECT_FILES}/` 是服务能读的项目资料的只读副本，改动不会保存。",
+        *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in PLUGIN_TOOLS) if plugins else ()),
+        *(("- 名字是 `<插件名>__<工具名>` 的工具来自服务里能用的项目插件，直接调用；写入的内容项目里所有人都看得到。",)
+          if services else ()),
     ] if service else [
         "", f"## 项目档案：「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
@@ -311,7 +314,7 @@ def format_decision(d: Decision, name: Callable[[str | None], str], email: Calla
     return f"- [{d.id}]{state}{sup} {d.text}{reason}（{who}）"
 
 
-def format_service_archive(g: Project, svc: Any, files: list[str], staff: list[str]) -> str:
+def format_service_archive(g: Project, svc: Any, files: list[str], staff: list[str], plugins: list[str] = ()) -> str:
     """服务会话与服务里的委托每轮推送的部分（不变量 29）：服务说明、能读的资料（实时）、收件目录、岗位。
     不推纲要与决定：服务只读圈定的范围。"""
     parts = [f"## 服务「{svc.title}」（项目「{g.name}」，v{svc.version}）", svc.description or "（主持人没有写说明）",
@@ -324,6 +327,8 @@ def format_service_archive(g: Project, svc: Any, files: list[str], staff: list[s
                  if svc.inbox else "### 收件目录：没有（服务里不能往项目档案写东西）")
     if staff:
         parts += ["### 岗位（能委托的成员）", "、".join(staff)]
+    if plugins:
+        parts += ["### 能用的项目插件（照插件原来的方式读写）", "、".join(plugins)]
     return "\n".join(parts)
 
 
@@ -430,7 +435,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
     if project is not None and conv.kind in ("project", "session"):
         parts += _network_tools(project, can_delegate, plugins, services)
     if project is not None and conv.kind == "service":
-        parts += _network_tools(project, can_delegate, service=True)
+        parts += _network_tools(project, can_delegate, plugins, services, service=True)
     if project is not None and conv.kind == "session":
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
