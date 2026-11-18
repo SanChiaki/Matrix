@@ -59,7 +59,7 @@ from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
-from .usage import MAX_DAYS, UsageLog, summarize as summarize_usage
+from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage
 
 
 @dataclass
@@ -114,6 +114,11 @@ class ExecContext:
     flow_narrowed: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)  # 这一轮送达、等它回答的问题（委托方）：一轮结束仍没回答就转给人
     sent: list[dict[str, Any]] = field(default_factory=list)  # 这一轮 send_file 发出的文件（对话附件），附在这一轮的回复上
+    # 公共 Agent 的服务面（docs/public-agents.md，不变量 26）：这一轮为谁做（principal）、这一轮 @ 它的全部调用方。
+    # principal 为 None 表示普通情形：为 Agent 的所有者做
+    service: bool = False
+    principal: str | None = None
+    callers: list[str] = field(default_factory=list)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -237,15 +242,68 @@ class Network:
     # actor 是发起操作的用户 id；None 表示系统内部或测试，不做归属检查。
     # 信任域（不变量 16）：Agent 只属于它的所有者，只有所有者能用它（私聊、拉进项目）、改它；它只代表所有者运行。
     # 跨用户协作只走联合项目：群聊与项目档案对所有参与者可见，委托只给两端 Agent 的所有者看。
+    # 公共 Agent（不变量 26，docs/public-agents.md）：维护组（所有者 + maintainers）在维护面里像所有者一样用它、改它；
+    # 批准成公共之后，所有用户都能私聊它、把它拉进项目（服务面），服务面里它只为调用方做事。
     def can_use_agent(self, a: AgentNode, actor: str | None) -> bool:
-        return actor is None or a.owner_id in (None, actor)
+        """维护它：所有者或维护人（个人 Agent 只有所有者）。"""
+        return actor is None or a.owner_id is None or a.maintained_by(actor)
 
     can_edit_agent = can_use_agent
 
+    def can_call_agent(self, a: AgentNode, actor: str | None) -> bool:
+        """能私聊它、把它拉进项目：维护它的人，或者它是公共 Agent。"""
+        return self.can_use_agent(a, actor) or a.is_public
+
     def can_see_agent(self, a: AgentNode, actor: str | None) -> bool:
-        """看得到（名称、描述、能力）：自己的，或和自己在同一个联合项目里的。"""
-        return self.can_use_agent(a, actor) or any(
+        """看得到（名称、描述、能力）：自己的、公共的，或和自己在同一个联合项目里的。"""
+        return self.can_call_agent(a, actor) or any(
             a.id in g.member_ids and actor in g.people for g in self.store.projects.values() if g.shared)
+
+    def can_watch(self, a: AgentNode, actor: str | None, conv: Conversation | None = None,
+                  task: Task | None = None) -> bool:
+        """看这个 Agent 在这里的过程、终止、续接、看工作目录。个人 Agent：维护它的人。公共 Agent：只有这里的调用方
+        （私聊的主人、群聊里 @ 过它的人、委托为之而做的人）；维护人在服务面里只看用量（不变量 26）。调用方持有锁。"""
+        if actor is None or not a.is_public:
+            return self.can_use_agent(a, actor)
+        if task is not None:
+            return actor == task.caller_id
+        if conv is None:
+            return False
+        if conv.kind != "project":
+            return actor == conv.owner_id
+        seat = conv.seats.get(a.id)
+        return seat is not None and actor in seat.callers
+
+    def _principal(self, ctx: ExecContext | None, agent: AgentNode) -> str | None:
+        """这一轮为谁做：公共 Agent 的服务面是调用方，其余是 Agent 的所有者。"""
+        return ctx.principal if ctx is not None and ctx.principal else agent.owner_id
+
+    @staticmethod
+    def _serving(agent: AgentNode, conv: Conversation) -> bool:
+        """这个席位是不是公共 Agent 的服务面：公共的，而且不是维护人自己和它的私聊（那是维护面）。"""
+        return agent.is_public and not (conv.kind != "project" and agent.maintained_by(conv.owner_id))
+
+    def _serve_seat(self, ctx: ExecContext, agent: AgentNode, conv: Conversation, seat: Seat) -> None:
+        """调用方持有锁。服务面的一轮：认定调用方（私聊是对话的主人；群聊是这一轮 @ 它的人，没有新的 @ 时沿用上一个），
+        有效权限收在管理员批准时冻结的权限之内。"""
+        ctx.service = True
+        if conv.kind != "project":
+            callers = [conv.owner_id] if conv.owner_id else []
+        else:
+            msgs = {m.id: m for m in conv.messages}
+            callers = _dedup([m.user_id for mid in ctx.addressed if (m := msgs.get(mid)) is not None and m.user_id])
+            if not callers and seat.callers:
+                callers = [seat.callers[-1]]
+        ctx.callers = callers
+        ctx.principal = callers[-1] if callers else None
+        seat.callers = _dedup([u for u in seat.callers if u not in callers] + callers)[-50:]
+        ctx.authority = [a for a in ctx.authority if a in agent.public_authority]
+
+    def _watchers(self, ctx: ExecContext, agent: AgentNode) -> list[str]:
+        """这一轮的过程、失败说明给谁看：服务面是这一轮的调用方，其余是所有者。"""
+        if ctx.service:
+            return _dedup([u for u in [*ctx.callers, ctx.principal] if u])
+        return [agent.owner_id] if agent.owner_id else []
 
     def can_see_project(self, g: Project, actor: str | None) -> bool:
         return actor is None or g.owner_id is None or actor in g.people
@@ -281,6 +339,12 @@ class Network:
         return a
 
     owned_agent = visible_agent
+
+    def callable_agent(self, agent_id: str, actor: str | None) -> AgentNode:
+        """能私聊、能拉进项目的：自己维护的，或公共的。"""
+        a = self._agent(agent_id)
+        self._check(self.can_call_agent(a, actor), f"agent {agent_id}")
+        return a
 
     def visible_project(self, project_id: str, actor: str | None) -> Project:
         g = self._project(project_id)
@@ -355,6 +419,8 @@ class Network:
                 harness = fields.pop("harness", a.harness if device == a.device_runtime else None) or None
                 if device is None:
                     harness = None
+                if device and a.public_status:
+                    raise NetworkError("公共 Agent 只能在平台云侧运行：先撤回公共再换到设备上")
                 self._check_device_runtime(device, actor)
                 self._check_harness(device, harness)
                 moved = (device is None) != (a.device_runtime is None)
@@ -468,6 +534,8 @@ class Network:
     def delete_agent(self, agent_id: str, actor: str | None = None) -> None:
         with self._lock:
             a = self.owned_agent(agent_id, actor)
+            if actor is not None and a.owner_id not in (None, actor):
+                raise NetworkError("只有所有者能删除它（维护人可以维护，不能删除）")
             if a.active:
                 raise NetworkError("Agent 正在运行，不能删除")
             for g in self.store.projects.values():
@@ -495,7 +563,7 @@ class Network:
     # 主持人可以移出任何 Agent 与参与者。参与者退出 / 被移出时，他的 Agent 一并移出，之后看不到项目与群聊。
     def _check_members(self, member_ids: list[str], actor: str | None) -> list[str]:
         for m in member_ids:
-            self.visible_agent(m, actor)  # 只能加入自己的 Agent
+            self.callable_agent(m, actor)  # 只能加入自己的 Agent，或公共 Agent（不变量 26）
         return list(dict.fromkeys(member_ids))
 
     def create_project(self, name: str, description: str, member_ids: list[str], actor: str | None = None) -> Project:
@@ -543,14 +611,14 @@ class Network:
                 raise NetworkError(f"{mine.name} 是 {self._email(uid)} 的助理：这个人在项目里时不能移出"
                                    "（先换一个助理）")
         a = self.store.agents.get(agent_id)
-        if actor is None or g.owner_id in (None, actor) or (a is not None and a.owner_id == actor):
-            return
+        if actor is None or g.owner_id in (None, actor) or (a is not None and (a.maintained_by(actor) or a.is_public)):
+            return  # 公共 Agent 谁都能拉进来，也谁都能移出（docs/public-agents.md 决策 8）
         raise NetworkError(f"{self._name(agent_id)} 不是你的 Agent，只有它的所有者或主持人能把它移出")
 
     def add_member(self, project_id: str, agent_id: str, actor: str | None = None) -> Project:
         with self._lock:
             g = self.visible_project(project_id, actor)
-            self.visible_agent(agent_id, actor)
+            self.callable_agent(agent_id, actor)
             if agent_id in g.member_ids:
                 raise NetworkError(f"{self._name(agent_id)} 已经在项目里")
             members = g.member_ids + [agent_id]
@@ -1450,6 +1518,8 @@ class Network:
         if "connector.use" not in ctx.authority or ctx.tainted:
             return []
         g = self.store.projects.get(ctx.project_id or "")
+        if ctx.service:
+            return self._caller_connections(ctx, agent, g)
         grants = g.connector_grants.get(agent.id, {}) if g is not None and g.shared else None
         out = []
         for cid in agent.connections:
@@ -1464,6 +1534,26 @@ class Network:
                     continue
                 if grant == "ask":
                     ctx.asking.add(cid)
+            out.append(c)
+        return out
+
+    def _caller_connections(self, ctx: ExecContext, agent: AgentNode, g: Project | None) -> list[Connection]:
+        """调用方持有锁。公共 Agent 的服务面：只用调用方自己在部署方目录里授权过的、维护人声明要用的连接器，
+        从不用维护人的（决策 2）。这一轮有几个人 @ 它、或者说不清为谁做时一个都不给，免得一个人借到另一个人的授权。
+        共享项目里一律“用到时问”：调用方第一次用时网络先问他，回复会给项目里的人看（不变量 19）。"""
+        if ctx.principal is None or len(set(ctx.callers)) > 1:
+            return []
+        out = []
+        for c in self.store.connections.values():
+            if c.owner_id != ctx.principal or c.where != "cloud" or c.url or c.status != "ok" \
+                    or c.connector_id not in agent.public_connectors or self._spec(c) is None:
+                continue
+            if g is not None and g.shared:  # 调用方在确认卡上选过“这个项目里都可以 / 不行”的照旧
+                grant = g.connector_grants.get(agent.id, {}).get(c.id, "ask")
+                if grant == "deny":
+                    continue
+                if grant == "ask":
+                    ctx.asking.add(c.id)
             out.append(c)
         return out
 
@@ -1998,7 +2088,7 @@ class Network:
             return f"这一轮已经提醒过所有者「{name}」了", False
         ctx.suggested.add(name)
         agent = self._agent(ctx.agent_id)
-        owner = [agent.owner_id] if agent.owner_id else []
+        owner = self._watchers(ctx, agent)  # 公共 Agent 的服务面：提醒调用方去连接，用他自己的授权
         conv = self.store.conversations.get(ctx.conversation_id)
         if conv is not None:
             self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id,
@@ -3234,6 +3324,8 @@ class Network:
             a = self.owned_agent(agent_id, actor)
             u = self.store.users.get(actor)
             self._check(u is not None and a.owner_id == actor, f"agent {agent_id}")
+            if a.public_status:
+                raise NetworkError(f"{a.name} 是公共 Agent（或在申请）：助理只为主人工作，不能当助理")
             u.assistant_id = a.id
             self.store.save()
         return a
@@ -4281,7 +4373,7 @@ class Network:
     def direct_chat(self, agent_id: str, actor: str | None = None) -> Conversation:
         """当前用户和一个 Agent 的私聊：第一次打开时创建。"""
         with self._lock:
-            a = self.visible_agent(agent_id, actor)
+            a = self.callable_agent(agent_id, actor)
             created = self._dm_of(a.id, actor) is None
             conv = self._ensure_dm(a, actor)
             if created:
@@ -4365,7 +4457,7 @@ class Network:
                 peer = self._agent(conv.agent_id or "")
                 if not peer.chat_enabled:
                     raise NetworkError(f"{peer.name} 未开放直接对话")
-                if not self.can_use_agent(peer, actor):
+                if not self.can_call_agent(peer, actor):
                     raise NetworkError(f"{peer.name} 已不再对你开放")
             if conv.kind == "session":
                 g = self.store.projects.get(conv.project_id or "")
@@ -4804,7 +4896,9 @@ class Network:
             fresh = conv.messages[seat.seen:upto]  # 上次运行之后对话里的新消息：公开上下文
             shared = [k for k in self.store.knowledge.values()
                       if sid in k.visible_to and k.key not in seat.known and k.owner_task_id not in self._own_tasks(sid)]
-            fresh = [m for m in fresh if not m.audience or agent.owner_id in m.audience]  # 只给别人看的不送
+            serving = self._serving(agent, conv)
+            # 只给别人看的不送；公共 Agent 的服务面里只给某个人看的说明一律不送（它们是给所有者 / 别的调用方的）
+            fresh = [m for m in fresh if not m.audience or (not serving and agent.owner_id in m.audience)]
             mine = {q.id for q in self.store.questions.values() if q.agent_id == agent.id}
             fresh = [m for m in fresh if m.answers not in mine or m.answers is None]  # 回答它提问的消息：那一轮已经拿到
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
@@ -4816,6 +4910,10 @@ class Network:
                     if src is not None and src.role == "user" and src.user_id and src.claimed_by == agent.id \
                             and src.id not in ctx.addressed:
                         ctx.addressed.append(src.id)
+            if serving:
+                self._serve_seat(ctx, agent, conv, seat)
+            elif conv.kind == "dm" and conv.owner_id and conv.owner_id != agent.owner_id:
+                ctx.principal = conv.owner_id  # 维护人自己和它的私聊：为这个维护人做
             archive_rev = project.archive_rev if project else -1
             archive = self._archive_text(project) if project and seat.archive_seen != archive_rev else ""
             state = self._session_state(project, conv.owner_id) if project and conv.kind == "session" else ""
@@ -4847,14 +4945,14 @@ class Network:
         mount_home = self.home_mounted(project, agent)
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
-                                   home_writable="file.write" in ctx.authority, archive=archive,
+                                   home_writable="file.write" in ctx.authority and not ctx.service, archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
                                    ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals)
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
-        owner_only = [agent.owner_id] if agent.owner_id else []
+        owner_only = self._watchers(ctx, agent)  # 过程、失败说明：所有者；公共 Agent 的服务面是这一轮的调用方
         if res.ok:
             with self._lock:
                 seat.seen = upto
@@ -4937,7 +5035,7 @@ class Network:
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
         self._flow_narrow(ctx, agent, task)
-        home_writable = "file.write" in ctx.authority
+        home_writable = "file.write" in ctx.authority and not ctx.service
         mount_home = self.home_mounted(g, agent)
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         workdir = self.store.task_dir(task.id)
@@ -5013,6 +5111,10 @@ class Network:
                           constraints=list(task.effective_constraints), depth=task.depth,
                           chain=self._chain(task) + [agent.id], plugins=self._plugin_tools_on(g),
                           services=self._services_on(g))
+        if agent.is_public:  # 委托给公共 Agent：服务面，为委托为之而做的那个人（不变量 26）
+            ctx.service, ctx.principal = True, task.caller_id
+            ctx.callers = [task.caller_id] if task.caller_id else []
+            ctx.authority = [a for a in ctx.authority if a in agent.public_authority]
         if ctx.depth >= self.limits.max_depth and "delegate" in ctx.authority:
             ctx.authority.remove("delegate")  # 到达深度上限：不再挂载网络工具
         return ctx
@@ -5084,8 +5186,7 @@ class Network:
             conv = self.visible_conv(conv_id, actor)
             a = self.store.agents.get(agent_id)
             seat = conv.seats.get(agent_id)
-            self._check(seat is not None and a is not None and (actor is None or a.owner_id in (None, actor)),
-                        f"seat {ref}")
+            self._check(seat is not None and a is not None and self.can_watch(a, actor, conv), f"seat {ref}")
             return None if a.device_runtime else self.store.root / seat.workdir
 
     def workdir_files(self, kind: str, ref: str, actor: str | None = None) -> dict[str, Any]:
@@ -5279,7 +5380,9 @@ class Network:
             discard(workdir / PLUGIN_MOUNT)
             if not agent.device_runtime:
                 discard(workdir / SKILLS)
-            if before is not None:
+            if before is not None and ctx.service:  # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 26）
+                shutil.rmtree(workdir / HOME_DIR, ignore_errors=True)
+            elif before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx)
                 if conflicts:
                     self.bus.emit("home.conflict", agent_id=agent.id, context_id=ctx.id, files=conflicts)
@@ -5354,8 +5457,11 @@ class Network:
         return {agent.owner_id} if agent.owner_id else set()
 
     def _present(self, agent: AgentNode) -> Callable[[str], set[str]]:
-        """场合在场的人：项目现在的参与者 + Agent 的所有者；ME 与已删除的项目只有所有者。"""
+        """场合在场的人：项目现在的参与者 + Agent 的所有者；ME 与已删除的项目只有所有者。
+        公共 Agent：维护面（ME）写下的就是公共资料，所有用户都算在场（不变量 26：设成公共时维护人认了这一点）。"""
         def present(v: str) -> set[str]:
+            if v == flow.ME and agent.is_public:
+                return set(self.store.users)
             g = self.store.projects.get(v) if v != flow.ME else None
             return (set(g.people) if g is not None else set()) | self._owner_set(agent)
         return present
@@ -5366,13 +5472,18 @@ class Network:
         return flow.ME if ctx.session or ctx.home or not ctx.project_id else ctx.project_id
 
     def _reach(self, ctx: ExecContext, agent: AgentNode) -> set[str]:
-        """这一轮的输出能到达的人：在项目里（群聊、任务、项目会话都能写档案、能委托）是项目的全部参与者。"""
+        """这一轮的输出能到达的人：在项目里（群聊、任务、项目会话都能写档案、能委托）是项目的全部参与者。
+        公共 Agent 的服务面：项目的参与者 + 调用方（维护人不在场）。"""
         g = self.store.projects.get(ctx.project_id or "")
-        return (set(g.people) if g is not None else set()) | self._owner_set(agent)
+        people = set(g.people) if g is not None else set()
+        if ctx.service:
+            return people | set(ctx.callers) | ({ctx.principal} if ctx.principal else set())
+        # 维护人自己和它的私聊：在场的是这个维护人（principal），所有者的私下笔记他不在场
+        return people | self._owner_set(agent) | ({ctx.principal} if ctx.principal else set())
 
     def _others(self, ctx: ExecContext, agent: AgentNode) -> bool:
-        """这一轮的输出能到达所有者以外的人。"""
-        return bool(self._reach(ctx, agent) - self._owner_set(agent))
+        """这一轮的输出能到达所有者以外的人（公共 Agent 的服务面总是）。"""
+        return ctx.service or bool(self._reach(ctx, agent) - self._owner_set(agent))
 
     def _granted(self, project_id: str | None, agent_id: str) -> list[str]:
         g = self.store.projects.get(project_id or "")
@@ -5423,6 +5534,8 @@ class Network:
 
     def _tool_open_note(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         rel = str(args.get("path", "")).strip().removeprefix("./").removeprefix(f"{HOME_DIR}/")
+        if ctx.service and rel in ctx.hidden:  # 服务面只用公共资料：维护面以外写下的笔记不给（不变量 26）
+            return f"{rel} 不是公共资料：公共 Agent 服务时只能用维护人在维护面整理的资料", True
         if rel not in ctx.hidden:
             if (self.agent_home(ctx.agent_id) / rel).is_file():
                 return f"`{rel}` 已经在 ./{HOME_DIR}/ 里，直接读。", True
@@ -5464,7 +5577,7 @@ class Network:
 
     def _hold(self, kind: str, ctx: ExecContext, agent: AgentNode, text: str, over: list[str], audience: set[str],
               extra: dict[str, Any] | None = None) -> Held:
-        h = Held(id=new_id("held"), agent_id=agent.id, owner_id=agent.owner_id, project_id=ctx.project_id or "",
+        h = Held(id=new_id("held"), agent_id=agent.id, owner_id=self._principal(ctx, agent), project_id=ctx.project_id or "",
                  context_kind=ctx.kind, context_id=ctx.id, kind=kind, text=text, sources=over,
                  audience=sorted(audience - self._owner_set(agent)), extra=extra or {})
         with self._lock:
@@ -5541,6 +5654,9 @@ class Network:
     # 信任域（不变量 16）：联合项目里的运行只列出同一项目里的条目，其余只给数量——否则别的参与者 @ 它就能问出
     # 所有者在别处做什么。
     def _ledger_for(self, ctx: ExecContext) -> tuple[list[dict[str, Any]], int]:
+        agent = self.store.agents.get(ctx.agent_id)
+        if agent is not None and agent.is_public:  # 公共 Agent：别处的工作连数量都不给（不变量 26）
+            return [], 0
         items = self.ledger(ctx.agent_id, exclude=ctx.id)
         g = self.store.projects.get(ctx.project_id or "")
         if g is None or not g.shared:
@@ -5553,6 +5669,12 @@ class Network:
         with self._lock:
             for ctx in self._contexts.values():
                 if ctx.agent_id != agent_id or ctx.id == exclude or any(o["context_id"] == ctx.id for o in out):
+                    continue
+                if ctx.service:  # 公共 Agent 的服务面：维护人只看用量——谁、什么场合、从什么时候（不变量 26）
+                    who = self.store.users.get(ctx.principal or "")
+                    out.append({"context_id": "", "kind": ctx.kind, "conversation_id": None, "project_id": None,
+                                "user": who.email if who else None, "since": ctx.started_at, "what": "服务",
+                                "public": True})
                     continue
                 conv = self.store.conversations.get(ctx.conversation_id)
                 owner = self.store.users.get(conv.owner_id or "") if conv else None
@@ -5691,12 +5813,14 @@ class Network:
             model = self.run_model(agent)
         try:
             self.usage.record({
-                "ts": started, "ms": int((time.time() - started) * 1000), "user": agent.owner_id, "agent": agent.id,
+                "ts": started, "ms": int((time.time() - started) * 1000), "user": self._principal(ctx, agent),
+                "agent": agent.id,
                 "project": ctx.project_id, "venue": venue, "where": "device" if agent.device_runtime else "cloud",
                 "runtime": (agent.harness or "") if agent.device_runtime else self.runtime.name,
                 "model": " / ".join(x for x in (model.get("provider"), model.get("model")) if x) if model else None,
                 "ok": res.ok, "error": "device_offline" if offline else res.error_class,
-                "tools": len(res.tool_calls), "usage": dict(res.usage)})
+                "tools": len(res.tool_calls), "usage": dict(res.usage),
+                **({"public": True} if ctx.service else {})})  # 公共 Agent 的服务面：维护人看用量用（不变量 26）
         except OSError as e:  # 只给部署方看日志：事件会推给所有人，错误里有服务器路径
             print(f"[matrix] 用量台账写不进去：{e}", file=sys.stderr)
 
@@ -5745,6 +5869,10 @@ class Network:
         agent = self.store.agents.get(ctx.agent_id)
         if agent is None:
             return "unavailable"
+        if ctx.service:  # 公共 Agent 服务时只在沙箱里做：没有合适的人批准它动公共环境（不变量 26）
+            self.bus.emit("approval.refused", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
+                          reason="public")
+            return "rejected"
         conv = self.store.conversations.get(ctx.conversation_id)
         ap = Approval(id=new_id("appr"), agent_id=agent.id, owner_id=agent.owner_id, context_id=ctx.id,
                       conversation_id=ctx.conversation_id, tool=str(tool or ""), reason=str(reason or "")[:2000],
@@ -5864,7 +5992,9 @@ class Network:
         agent = self.store.agents.get(ctx.agent_id)
         if agent is None:
             return {"error": "提问的 Agent 已不存在"}
-        q = Question(id=new_id("q"), agent_id=agent.id, owner_id=agent.owner_id, context_kind=ctx.kind,
+        if ctx.service and not ctx.principal:
+            return {"error": "说不清这一轮为谁做，没有可以问的人：按最稳妥的方式继续，在回复里写明还没定的事"}
+        q = Question(id=new_id("q"), agent_id=agent.id, owner_id=self._principal(ctx, agent), context_kind=ctx.kind,
                      context_id=ctx.id, conversation_id=ctx.conversation_id, project_id=ctx.project_id, items=clean)
         done = threading.Event()
         kick: tuple[str, str] | None = None
@@ -5876,7 +6006,8 @@ class Network:
                 kick = self._question_to_delegator(q, ctx, agent, task)
             else:
                 conv = self.store.conversations.get(ctx.conversation_id)
-                who = self._requester(conv, agent, ctx.addressed) if conv is not None else agent.owner_id
+                who = (ctx.principal if ctx.service else
+                       self._requester(conv, agent, ctx.addressed) if conv is not None else agent.owner_id)
                 self._question_to_human(q, ctx, agent, who, "")
             self.store.questions[q.id] = q
             self._question_waits[q.id] = done
@@ -5923,6 +6054,9 @@ class Network:
     def _question_to_human(self, q: Question, ctx: ExecContext | None, agent: AgentNode, who: str | None,
                            reason: str) -> None:
         """调用方持有锁。把问题交给一个人：会话读过越界的来源、对方看不到时，改问所有者（不变量 22）。"""
+        if ctx is not None and ctx.service:  # 公共 Agent 的服务面：只问调用方，从不转给维护人（不变量 26）
+            q.target_agent_id, q.target_user_id, q.escalated = None, who or ctx.principal, reason
+            return
         if who and ctx is not None and who not in self._owner_set(agent) and self._over(ctx, agent, {who}):
             who, reason = agent.owner_id, "用到了别处的资料，只问所有者"
         q.target_agent_id, q.target_user_id = None, who or agent.owner_id
@@ -6237,7 +6371,11 @@ class Network:
                     delegator_id=delegator.id, delegatee_id=target.id if target else None,
                     parent_task_id=parent_task_id, depth=ctx.depth + 1, delegation=delegation,
                     effective_constraints=_dedup(ctx.constraints + delegation.constraints), attachments=passed,
-                    owners=_dedup([o for o in (delegator.owner_id, target.owner_id if target else None) if o]))
+                    caller_id=self._principal(ctx, delegator))
+        # 委托两端的所有者看得到它；公共 Agent 那一端是委托为之而做的人，不是维护人（不变量 26）
+        task.owners = _dedup([o for o in (task.caller_id if ctx.service else delegator.owner_id,
+                                          (task.caller_id if target.is_public else target.owner_id) if target else None)
+                              if o])
 
         reason = None
         if target is None:
@@ -6260,7 +6398,8 @@ class Network:
         # 有效权限 = 执行者自身权限 ∩ 委托授予 ∩ 运行时能强制的部分；委托授予只能来自委托方的有效权限
         offered = [a for a in delegation.authority if a in ctx.authority]
         narrowed = self.capabilities(target).narrowed([a for a in target.authority if a in offered])
-        task.granted_authority = [a for a in target.authority if a in offered and a not in narrowed]
+        own = target.public_authority if target.is_public else target.authority  # 公共 Agent：只在批准时冻结的权限之内
+        task.granted_authority = [a for a in target.authority if a in offered and a not in narrowed and a in own]
         task.denied_authority = [a for a in _dedup(delegation.authority) if a not in task.granted_authority]
         task.narrowed = narrowed
         task.inbox.append({"kind": "start"})
@@ -6397,7 +6536,7 @@ class Network:
                          conversation_id=ctx.conversation_id, project_id=g.id, name=name, description=description,
                          capabilities=_clean_caps(_as_list(args.get("capabilities"))), authority=_dedup(authority),
                          max_authority=list(ctx.authority), reason=reason,
-                         owner_id=self._agent(ctx.agent_id).owner_id)
+                         owner_id=self._principal(ctx, self._agent(ctx.agent_id)))
             self.store.proposals[p.id] = p
             self.store.save()
         self.bus.emit("proposal.updated", proposal=p.to_dict())
@@ -6754,13 +6893,15 @@ class Network:
         席位中断、等人“继续”，任务失败、可续接；会话都保留。"""
         kind = "seat" if "/" in context_id else "task"
         with self._lock:
+            conv = task = None
             if kind == "seat":
                 conv_id, _, agent_id = context_id.partition("/")
-                self.visible_conv(conv_id, actor)
+                conv = self.visible_conv(conv_id, actor)
             else:
-                agent_id = self.visible_task(context_id, actor).delegatee_id or ""
+                task = self.visible_task(context_id, actor)
+                agent_id = task.delegatee_id or ""
             agent = self.store.agents.get(agent_id)
-            if agent is None or (actor is not None and agent.owner_id not in (None, actor)):
+            if agent is None or not self.can_watch(agent, actor, conv, task):  # 公共 Agent：这里的调用方（不变量 26）
                 raise NetworkError("只有这个 Agent 的所有者能终止它的运行")
             stop = self._stops.get(context_id)
             if stop is None:
@@ -6775,7 +6916,7 @@ class Network:
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
             seats = [s for a, s in conv.seats.items() if s.blocked and (agent_id is None or a == agent_id)
-                     and (actor is None or (self.store.agents.get(a) and self.store.agents[a].owner_id in (None, actor)))]
+                     and (actor is None or (self.store.agents.get(a) and self.can_watch(self.store.agents[a], actor, conv)))]
             if not seats:
                 raise NetworkError("对话没有中断，不需要继续")
             for s in seats:
@@ -6795,7 +6936,7 @@ class Network:
         """委托方 Agent 的所有者续接一个失败的委托（人的权限在所有 Agent 之上）。"""
         t = self.visible_task(task_id, actor)
         delegator = self.store.agents.get(t.delegator_id)
-        if actor is not None and delegator is not None and delegator.owner_id not in (None, actor):
+        if actor is not None and delegator is not None and not self.can_watch(delegator, actor, task=t):
             raise NetworkError("只有委托方 Agent 的所有者能续接这个委托")
         if t.status != TaskStatus.FAILED:
             raise NetworkError(f"任务 {t.id} 当前是 {t.status.value}，只有 failed 的任务可以续接")
@@ -6908,9 +7049,16 @@ class Network:
                                      "enforcement": {x: caps.level(x) for x in a.authority}}
         d["effective_authority"] = caps.effective(a.authority)
         d["model_info"] = self.model_info(a)
-        if not d["mine"]:  # 联合项目里别人的 Agent：只给名片（名称、描述、能力、自身权限）
+        d["public"] = a.is_public
+        d["maintainer_emails"] = [self._email(u) for u in a.maintainers]
+        if a.is_public:  # 服务面的有效权限：批准时冻结的权限之内；放宽了还没批准的部分单独列出
+            d["public_wider"] = [x for x in a.authority if x not in a.public_authority]
+        if not d["mine"]:  # 联合项目里别人的 Agent、公共 Agent：只给名片（名称、描述、能力、自身权限）
             d = {k: d[k] for k in ("id", "name", "description", "capabilities", "authority", "owner_email", "mine",
-                                   "chat_enabled")}
+                                   "chat_enabled", "public")}
+            if a.is_public:
+                d["authority"] = list(a.public_authority)
+                d["public_note"], d["public_connectors"] = a.public_note, list(a.public_connectors)
         return d
 
     # ================= 模板（docs/blueprints.md） =================
@@ -7442,6 +7590,163 @@ class Network:
         self.bus.emit("project.updated", project=g.to_dict())
         return g
 
+    # ================= 公共 Agent（不变量 26，docs/public-agents.md） =================
+    # 维护组（所有者 + 维护人）申请，管理员批准；批准时冻结权限。公共之后所有用户都能私聊它、把它拉进项目（服务面）：
+    # 服务面里它只为调用方做事——私有目录只读、不写回，台账不列别处，不申请外溢，用调用方自己的授权，过程只给调用方，
+    # 维护人只看用量。撤回公共：别人和它的私聊归档、没有维护人在的项目里移出（同 Store._one_trust_domain）。
+    PUBLIC_NOTE_LIMIT = 1000
+
+    def set_maintainers(self, agent_id: str, emails: list[str], actor: str | None = None) -> AgentNode:
+        """所有者设维护人（按邮箱）：维护人和所有者一样维护它（维护面），所有者不能被移出。"""
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if actor is not None and a.owner_id != actor:
+                raise NetworkError("只有所有者能改维护人")
+            ids: list[str] = []
+            for raw in emails:
+                email = str(raw).strip().lower()
+                if not email:
+                    continue
+                u = next((x for x in self.store.users.values() if x.email == email), None)
+                if u is None:
+                    raise NetworkError(f"没有用户 {email}")
+                if u.id != a.owner_id and u.id not in ids:
+                    ids.append(u.id)
+            if len(ids) > 20:
+                raise NetworkError("维护人最多 20 个")
+            a.maintainers = ids
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        return a
+
+    def request_public(self, agent_id: str, note: str = "", connectors: list[str] | None = None,
+                       actor: str | None = None) -> AgentNode:
+        """维护人申请设成公共（或已是公共时申请按现在的权限重新批准）。只有平台云侧的、不是谁的助理的才能公共。"""
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if a.device_runtime:
+                raise NetworkError("公共 Agent 只能在平台云侧运行：在维护人电脑上跑，调用方的内容会落到维护人的机器上")
+            if any(u.assistant_id == a.id for u in self.store.users.values()):
+                raise NetworkError(f"{a.name} 是助理：助理只为主人工作，先给主人换一个助理")
+            ids = _dedup([str(c).strip() for c in (connectors if connectors is not None else a.public_connectors)
+                          if str(c).strip()])
+            unknown = [c for c in ids if self.connectors.get(c) is None]
+            if unknown:
+                raise NetworkError(f"部署方目录里没有这些连接器：{'、'.join(unknown)}")
+            a.public_connectors = ids
+            a.public_note = str(note or a.public_note).strip()[:self.PUBLIC_NOTE_LIMIT]
+            if not a.is_public:
+                a.public_status = "pending"
+            a.public_reviewed_by = a.public_reviewed_by if a.is_public else None
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        self.bus.emit("public.updated", agent_id=a.id)
+        return a
+
+    def withdraw_public(self, agent_id: str, actor: str | None = None) -> AgentNode:
+        """维护人撤回申请，或者不再公共。"""
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+            if not a.public_status:
+                raise NetworkError(f"{a.name} 不是公共的，也没有在申请")
+            self._end_public(a)
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        self.bus.emit("public.updated", agent_id=a.id)
+        return a
+
+    def review_public(self, agent_id: str, approve: bool, actor: str | None = None) -> AgentNode:
+        """管理员批准（冻结现在的权限）或驳回 / 撤销公共。"""
+        if actor is not None and not self.is_admin(actor):
+            raise NetworkError("unknown admin")
+        with self._lock:
+            a = self._agent(agent_id)
+            if not a.public_status:
+                raise NetworkError(f"{a.name} 没有申请公共")
+            if approve:
+                if a.device_runtime:
+                    raise NetworkError("公共 Agent 只能在平台云侧运行")
+                a.public_status, a.public_authority = "approved", list(a.authority)
+            else:
+                self._end_public(a)
+            a.public_reviewed_by, a.public_reviewed_at = actor, time.time()
+            self.store.save()
+        self.bus.emit("agent.updated", agent=a.to_dict())
+        self.bus.emit("public.updated", agent_id=a.id)
+        return a
+
+    def _end_public(self, a: AgentNode) -> None:
+        """调用方持有锁。不再公共：别人和它的私聊归档为只读，没有维护人在的项目里移出（群聊里记一条）。
+        已经接下的委托做完为止（同移出项目）。"""
+        was = a.is_public
+        a.public_status, a.public_authority = "", []
+        if not was:
+            return
+        for c in self.store.conversations.values():
+            if c.kind == "dm" and c.agent_id == a.id and not c.archived and not a.maintained_by(c.owner_id):
+                c.archived = True
+        for g in self.store.projects.values():
+            if a.id in g.member_ids and not any(a.maintained_by(u) for u in g.people):
+                g.member_ids.remove(a.id)
+                self._member_events(g, [], [a.id], "（不再是公共 Agent）")
+
+    def public_agents(self, actor: str | None = None) -> list[dict[str, Any]]:
+        """公共 Agent 目录：所有用户都看得到名片、负责什么、服务面要用哪些连接器（用你自己的授权）、你连上了没有。"""
+        with self._lock:
+            mine = {c.connector_id for c in self.store.connections.values()
+                    if c.owner_id == actor and c.where == "cloud" and not c.url and c.status == "ok"}
+            out = []
+            for a in sorted(self.store.agents.values(), key=lambda x: x.name):
+                if not a.is_public:
+                    continue
+                need = [{"id": c, "name": (spec.name if (spec := self.connectors.get(c)) else c), "ready": c in mine}
+                        for c in a.public_connectors]
+                out.append({"id": a.id, "name": a.name, "description": a.description, "capabilities": a.capabilities,
+                            "note": a.public_note, "connectors": need, "chat_enabled": a.chat_enabled,
+                            "maintainers": [self._email(u) for u in [a.owner_id, *a.maintainers] if u],
+                            "mine": self.can_use_agent(a, actor)})
+            return out
+
+    def public_requests(self, actor: str | None = None) -> list[dict[str, Any]]:
+        """管理员看的：等批准的，和已公共但维护人放宽了权限、放宽的部分还没批准的。"""
+        if actor is not None and not self.is_admin(actor):
+            raise NetworkError("unknown admin")
+        with self._lock:
+            out = []
+            for a in self.store.agents.values():
+                if not a.public_status:
+                    continue
+                wider = [x for x in a.authority if x not in a.public_authority] if a.is_public else []
+                out.append({"id": a.id, "name": a.name, "description": a.description, "status": a.public_status,
+                            "note": a.public_note, "authority": a.authority, "approved_authority": a.public_authority,
+                            "wider": wider, "connectors": a.public_connectors,
+                            "maintainers": [self._email(u) for u in [a.owner_id, *a.maintainers] if u],
+                            "reviewed_by": self._email(a.public_reviewed_by) if a.public_reviewed_by else None,
+                            "reviewed_at": a.public_reviewed_at})
+            return sorted(out, key=lambda x: (x["status"] != "pending", not x["wider"], x["name"]))
+
+    def public_usage(self, agent_id: str, days: int = 30, actor: str | None = None) -> dict[str, Any]:
+        """维护人看服务面的用量：谁、何时、哪种场合、调了几次工具、成没成。不给内容、项目名与对话（决策 3）。"""
+        days = max(1, min(int(days), MAX_DAYS))
+        with self._lock:
+            a = self.owned_agent(agent_id, actor)
+        since = time.time() - days * DAY_S
+        rows = [e for e in self.usage.read(since) if e.get("agent") == a.id and e.get("public")]
+        by_user: dict[str, dict[str, Any]] = {}
+        for e in rows:
+            b = by_user.setdefault(e.get("user") or "", {"user": self._email(e.get("user")), "runs": 0, "failed": 0,
+                                                         "tools": 0, "last_at": 0.0, "venues": {}})
+            b["runs"] += 1
+            b["failed"] += 0 if e.get("ok") else 1
+            b["tools"] += int(e.get("tools") or 0)
+            b["last_at"] = max(b["last_at"], float(e.get("ts") or 0))
+            v = str(e.get("venue") or "other")
+            b["venues"][v] = b["venues"].get(v, 0) + 1
+        recent = [{"ts": e.get("ts"), "user": self._email(e.get("user")), "venue": e.get("venue"), "ok": e.get("ok"),
+                   "tools": e.get("tools"), "ms": e.get("ms")} for e in rows[-50:]][::-1]
+        return {"days": days, "runs": len(rows), "users": sorted(by_user.values(), key=lambda b: -b["runs"]),
+                "recent": recent}
+
     # ================= 管理后台 =================
     # 部署方看整个网络的使用情况（docs/reference/admin.md）。只看用量，不看内容：返回计数、类别与账号邮箱，
     # 不出现项目名、Agent 名、消息正文。不是管理员的人看不到这个入口（按“不存在”处理）。
@@ -7741,7 +8046,7 @@ class Network:
                      if t.conversation_id == conv_id and self.can_see_task(t, actor)]
             proposals = [p.to_dict() for p in self.store.proposals.values()
                          if p.conversation_id == conv_id and self.can_review_proposal(p, actor)]
-            mine = {a for a in conv.seats if self.store.agents.get(a) and self.can_use_agent(self.store.agents[a], actor)}
+            mine = {a for a in conv.seats if self.store.agents.get(a) and self.can_watch(self.store.agents[a], actor, conv)}
             live = {a: list(self._live.get(seat_id(conv_id, a), [])) for a in conv.seats
                     if seat_id(conv_id, a) in self._running and a in mine}
             running = [a for a in conv.seats if seat_id(conv_id, a) in self._running]
@@ -7774,7 +8079,7 @@ class Network:
         d = c.to_dict(full=False)
         if actor is None:
             return d
-        mine = {a for a in c.seats if (ag := self.store.agents.get(a)) is not None and self.can_use_agent(ag, actor)}
+        mine = {a for a in c.seats if (ag := self.store.agents.get(a)) is not None and self.can_watch(ag, actor, c)}
         d["seats"] = {k: v for k, v in d["seats"].items() if k in mine}
         d["blocked"] = any(s.blocked for a, s in c.seats.items() if a in mine)
         last = next((m for m in reversed(c.messages) if m.role != "event" and self.can_see_message(m, actor)), None)
@@ -7871,7 +8176,7 @@ class Network:
                 if ev_type in ("run.progress", "runtime.invoke", "tool.call", "run.retry", "run.stopping",
                                "skills.shadowed", "connector.suggested"):  # 执行过程：执行方所有者
                     a = self.store.agents.get(t.delegatee_id or "")
-                    return data if a is None or self.can_use_agent(a, actor) else None
+                    return data if a is None or self.can_watch(a, actor, task=t) else None
                 return data
             if isinstance(ctx_id, str) and "/" in ctx_id:  # 席位的运行过程：只给 Agent 的所有者
                 conv_id, _, agent_id = ctx_id.partition("/")
@@ -7879,7 +8184,8 @@ class Network:
                 a = self.store.agents.get(agent_id)
                 if c is not None and not self.can_see_conv(c, actor):
                     return None
-                return data if a is None or self.can_use_agent(a, actor) else None
+                return data if a is None or (self.can_watch(a, actor, c) if c is not None else self.can_use_agent(a, actor)) \
+                    else None
             conv_id = data.get("conversation_id") or (data.get("conversation") or {}).get("id")
             if conv_id is not None:
                 c = self.store.conversations.get(conv_id)

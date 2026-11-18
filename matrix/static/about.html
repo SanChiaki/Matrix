@@ -442,6 +442,8 @@ footer a { color: var(--text-2); }
         <p>别人可以在共享项目里 @ 你的 Agent，但它仍用你的资源、按你的权限运行。越界申请找你，新 Agent 的提议也由你审核。</p></article>
       <article class="card reveal"><h3>过程只给所有者</h3>
         <p>人的消息和最终回复对全组可见；推理过程、失败说明、外溢申请只给 Agent 的所有者；委托只给两端的所有者。</p></article>
+      <article class="card reveal"><h3>公共 Agent：维护组负责，人人可用</h3>
+        <p>长期服务一个系统的 Agent（报销、请假、工单）由维护组申请、管理员批准成公共。谁都能私聊它、拉进项目；它只为当时的调用方做事，用调用方自己的授权，私有目录只读、什么都不带走，维护人只看用量。</p></article>
       <article class="card reveal"><h3>信息只流向当时在场的人</h3>
         <p>Agent 带着技能和在这个项目里写的笔记进来；别处写的笔记不挂，要用先读、读了以后的回复先给你确认。网络只比对来源标签，不用模型、不看内容。</p></article>
     </div>
@@ -528,7 +530,7 @@ footer a { color: var(--text-2); }
             <div class="part"><h4>一轮做不完的事</h4><p>Agent 用 dsh 的 <code>create_goal</code> 定下目标后，网络在同一会话里一轮接一轮地唤醒它，直到它标记完成、受阻或到轮数上限；委托里中间几轮只算进展</p></div>
             <div class="part"><h4>运行中提问</h4><p>Agent 拿不准时停下来问：席位里问交代事情的人，委托里先问委托方 Agent，它决定不了、没回答或跑不起来才转给人；回答是那次调用的结果，人直接在对话里回复也算</p></div>
             <div class="part"><h4>知识与档案</h4><p>结果只对产生者与直接委托方可见，共享必须显式；项目档案（说明、资料、技能）按版本推送给成员</p></div>
-            <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；Agent 不跨信任域，跨用户只经项目；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
+            <div class="part"><h4>身份与信任域</h4><p>调用方凭执行上下文令牌认定，不信任模型自报；个人 Agent 不跨信任域，跨用户只经项目，公共 Agent 只在服务面为调用方做事；私有目录按来源场合挂载，用到别处资料的回复与交付先给所有者确认</p></div>
             <div class="part"><h4>连接器与技能</h4><p>连接器是外部服务，凭证只属于授权的人，默认隔离，共享项目里用到时先问授权人；按 MCP 工具标注会对外产生影响的写操作，每次先给授权人确认、参数照原样列出；项目页的连接器面板汇总这个项目用到了哪些服务；技能是做法，按 项目 &gt; 连接器自带 &gt; 我的 合并进工作目录。个人和项目分开配置</p></div>
             <div class="part"><h4>项目插件</h4><p>部署方目录或主持人上传的插件包：清单声明的表（项目档案的一部分）、页面、技能与触发。触发只往群聊发 @ 消息、代表启用它的人，不硬编排；记录工具按清单开给 Agent，Agent 写记录不引发触发</p></div>
             <div class="part"><h4>插件服务与挂点</h4><p>插件可以带一个标准 MCP 服务：网络按项目托管一个进程（<code>plugin_service.py</code>，不拿凭证；主持人自己装的只在沙箱里跑、不能联网），或者连远程服务（部署方的，或插件作者自己运行、主持人填地址安装的；每次调用带签名的项目令牌）。部署方在管理后台管目录（git、上传、审核上架申请）和主持人能自己装到什么程度；Agent 可以提议装插件，主持人批准。服务的工具按原名 <code>&lt;插件&gt;__&lt;工具&gt;</code> 出现在网络工具里，和 harness 无关，读写分级、写入过信息流；挂点读服务的 MCP 资源：<code>mount</code> 只读放进 <code>plugins/</code>，<code>context</code> 往提示词里加标明来源的一段，<code>after</code> 在验收之后 @ 成员，<code>route</code> 建议群聊消息交给谁（插件只建议，网络按每条人发的消息 3 次的预算、不重复叫、只看群聊执行）。示例「项目 Wiki」与「队友协作（Raft 式）」：记忆、Wiki、协作方式都可以是插件</p></div>
@@ -617,7 +619,7 @@ footer a { color: var(--text-2); }
   <div class="wrap">
     <div class="reveal">
       <p class="eyebrow">Invariants · 网络的物理定律</p>
-      <h2>25 条不变量，<br>每一条都有一个会变红的测试。</h2>
+      <h2>26 条不变量，<br>每一条都有一个会变红的测试。</h2>
       <p class="sub">规则如果违反了也没有任何信号，它迟早会失效。Matrix 把协作的边界写进代码，而不是写进提示词里祈祷模型遵守。</p>
     </div>
     <div class="inv">
@@ -630,7 +632,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">11</span><b>越权必留痕</b><span>每次不符都写进记录、发出事件</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">13</span><b>无权限即不存在</b><span>看不到的东西一律 404，事件推送前按人过滤</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">14</span><b>外溢由所有者批准</b><span>工作目录以外的写，逐次批准、只对那一次有效</span><span class="test">✓ tested</span></div>
-      <div class="reveal"><span class="n">16</span><b>Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">16</span><b>个人 Agent 不跨信任域</b><span>只属于所有者，只代表所有者运行</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">17</span><b>项目档案只走网络</b><span>写入只经人的操作或档案工具，留变更日志</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">19</span><b>凭证只属于授权的人</b><span>网络代调用，运行时拿不到；共享项目里用到时先问授权人</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">20</span><b>插件页面只在沙箱里</b><span>页面拿不到凭证、不能联网，读写只经网络、按看的人的权限</span><span class="test">✓ tested</span></div>
@@ -639,6 +641,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">23</span><b>发布只经主持人</b><span>项目内容离开项目只经发布物；交付件只给读者；订阅只在能看到输出的人都是读者时生效</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">24</span><b>插件代码只在审核过的目录、沙箱或作者自己的服务里</b><span>主持人自己装的托管插件进沙箱、不能联网；远程服务先在确认卡上写明数据去向、每个安装一把密钥；只经挂点作用于本项目</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">25</span><b>IM 只是绑定的人的入口</b><span>只认核验过绑定码的那个身份在单聊里说的话；推出去的只到他自己的单聊</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">26</span><b>公共 Agent 只在服务面跨信任域</b><span>管理员批准、冻结权限；服务面只为调用方做事：私有目录只读、用调用方自己的授权、过程只给调用方，维护人只看用量</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>

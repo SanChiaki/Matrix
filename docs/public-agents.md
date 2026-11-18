@@ -1,6 +1,6 @@
 # 公共 Agent（设计草案）
 
-> 状态：**讨论中，未实现**。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #69。约束见 [AGENTS.md](../AGENTS.md)、
+> 状态：**第一版已实现**（第 10 节），不变量 26。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #69。约束见 [AGENTS.md](../AGENTS.md)、
 > [reference/invariants.md](reference/invariants.md)。外部平台 Agent 的接入（远程运行时）在这之后落地，见第 7 节。
 > 调研：research: agent-definition-context-boundaries#trust-boundary-outside-agent、research: project-publishing#gpts-builder-privacy。
 
@@ -105,3 +105,21 @@ Raft、Kylon 的答案是“别让这种情况发生”，信任边界划在 Age
 - 服务面跨用户的记忆（决策 1）。
 - 调用方借用维护人或服务账号的授权去访问需要用户身份的数据（决策 2）。
 - 维护人查看服务面的对话内容（决策 3）。
+
+## 10. 第一版的实现说明（2026-11-18）
+
+| 部分 | 在哪里 |
+| --- | --- |
+| 字段 | `AgentNode.maintainers / public_status / public_authority / public_connectors / public_note / public_reviewed_*`；`Task.caller_id`；`Seat.callers`；`ExecContext.service / principal / callers` |
+| 归属 | `Network.can_use_agent`（维护它：所有者或维护人）、`can_call_agent`（能私聊、拉进项目：维护人或公共）、`can_watch`（看过程、终止、续接、工作目录：服务面是调用方） |
+| 申请与批准 | `set_maintainers`（只有所有者）、`request_public`（只在平台云侧、不是谁的助理；连接器必须在部署方目录里）、`review_public`（管理员；批准时冻结权限）、`withdraw_public` / 撤销 → `_end_public`（别人的私聊归档、没有维护人在的项目里移出） |
+| 服务面 | `_serving` + `_serve_seat`（私聊是对话主人；群聊是这一轮 @ 它的人，没有新的 @ 沿用上一个）；`_task_ctx`（委托为之而做的人）；有效权限 ∩ `public_authority` |
+| 隔离 | 私有目录只读、不写回（`_run`）；`_present` 里公共 Agent 的维护面（ME）对所有人在场，维护面以外的笔记 `open_note` 不给；`_ledger_for` 返回空；`request_approval` 直接拒绝；提问只问调用方；`_caller_connections` 只用调用方自己的目录连接器、几个人同时 @ 时不给；过程、失败说明只给 `_watchers` |
+| 维护人看用量 | 用量台账多一个 `public` 标记、`user` 记调用方；`public_usage`（谁、几轮、几次工具、哪种场合，不给内容）；`ledger` 里服务面的条目只有谁、什么场合、从什么时候 |
+| 兼容 | 旧数据缺字段取默认（个人的）；`Store._one_trust_domain` 不动公共 Agent 与维护人的私聊；`default_assistants` 不选公共 Agent |
+| 接口 | `GET /api/public-agents`；`PUT /api/agents/{id}/maintainers`；`POST|DELETE /api/agents/{id}/public`；`GET /api/agents/{id}/public/usage`；`GET /api/admin/public-agents`、`POST …/{id}/approve|reject` |
+| 界面 | Agent 页：自己的 Agent 下方“公共 Agent”一节（维护人、说明、连接器、申请 / 撤回、用量）；别人的公共 Agent 显示名片、要用的连接器与你是否已连接、私聊；项目配置里“公共 Agent”勾选；管理后台“公共 Agent”页 |
+| 测试 | `tests/test_public_agents.py` |
+
+**第一版的限制**：同一轮里有几个人 @ 它时不给连接器（说不清用谁的授权）；维护面只有维护人和它的私聊（维护人在自己项目里 @ 它也算服务面，不写回私有目录）；
+设成公共之前在项目里写下的笔记服务面不用；维护人不能看服务面的过程，出了问题由调用方把对话交出来。

@@ -184,7 +184,25 @@ class AgentNode:
     subscriptions: list[str] = field(default_factory=list)
     created_by: str = "seed"             # seed | human | signup（注册时网络给的助理）| proposal:<id>
     owner_id: str | None = None          # 所有者（用户 id）：只有所有者能用它、改它、审批它在工作目录外的操作；None = 尚未认领
+    # 公共 Agent（docs/public-agents.md，不变量 26）：维护组 = 所有者 + maintainers，一起维护它（维护面）。
+    # public_status：""（个人的）| pending（维护人申请了，等管理员）| approved（公共：所有用户都能私聊、拉进项目，服务面）。
+    # public_authority：管理员批准时冻结的权限，服务面的有效权限只在它之内（之后维护人放宽权限，要再批准才生效）。
+    # public_connectors：服务面要用的连接器（部署方目录里的 id），用的是调用方自己的授权，从不用维护人的
+    maintainers: list[str] = field(default_factory=list)
+    public_status: str = ""
+    public_authority: list[str] = field(default_factory=list)
+    public_connectors: list[str] = field(default_factory=list)
+    public_note: str = ""                # 维护人申请时写给管理员的说明（负责哪个系统、给谁用）
+    public_reviewed_by: str | None = None
+    public_reviewed_at: float | None = None
     created_at: float = field(default_factory=time.time)
+
+    @property
+    def is_public(self) -> bool:
+        return self.public_status == "approved"
+
+    def maintained_by(self, user_id: str | None) -> bool:
+        return bool(user_id) and (user_id == self.owner_id or user_id in self.maintainers)
     active: int = 0                      # 运行中的会话/任务数（不持久化）
 
     @property
@@ -368,6 +386,8 @@ class Seat:
     joint_seen: str = ""                 # 助理对话：已经送达过的共享项目总览的指纹（送了新的，这一轮就不能用连接器）
     # 这个模型会话读过的别处来源（场合，matrix/flow.py）：会话续接时一直有效，换新会话才清空（不变量 22）
     session_sources: list[str] = field(default_factory=list)
+    # 公共 Agent 的席位：服务过的调用方（群聊里 @ 过它的人；私聊就是对话的主人）。过程、续接、终止、工作目录只给他们
+    callers: list[str] = field(default_factory=list)
     # dsh 的长期目标（create_goal）：网络跟踪它的状态，active 时在同一会话里一轮接一轮地唤醒（research: deepseek-harness#headless-tools）。
     # {id, objective, phase: active|complete|blocked|paused|limit, max: 轮数上限, rounds: 网络已经续了几轮}；没有目标时为空
     goal: dict[str, Any] = field(default_factory=dict)
@@ -461,6 +481,9 @@ class Task:
     retries: int = 0                     # 失败后被续接的次数
     delegations: int = 0                 # 执行者在这个任务里发起的委托数
     owners: list[str] = field(default_factory=list)  # 委托两端 Agent 的所有者：只有他们看得到这个委托
+    # 这个委托为谁做（委托方那一轮的调用方，docs/public-agents.md）：执行者是公共 Agent 时，它用这个人的授权、
+    # 过程与提问给这个人，不给维护人
+    caller_id: str | None = None
     archive_seen: int = -1               # 已经送达过的项目档案版本
     abilities_seen: str = ""             # 同 Seat.abilities_seen
     hooks_seen: str = ""                 # 同 Seat.hooks_seen

@@ -742,10 +742,10 @@ function renderAgents() {
         <p class="card-desc">${esc(a.description)}</p>
         <div class="card-meta">${tags(a.authority)}${modelTag(a)}</div>
       </button>
-      <div class="card-foot"><span>${!a.mine ? `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`
+      <div class="card-foot"><span>${a.public ? '<span class="vis-tag shared" title="管理员批准的公共 Agent：所有人都能用">公共</span> ' : ""}${!a.mine ? (a.public ? "" : `<span class="vis-tag other">${esc(a.owner_email || "他人")} 的</span>`)
         : a.device_runtime ? `<span class="muted" title="在我的电脑上运行">${a.device_online ? esc(a.harness ? harnessLabel(a.harness) : "我的电脑") : "设备离线"}</span>`
         : '<span class="muted">云侧运行</span>'}</span>
-        ${!a.mine ? '<span class="muted">共享项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
+        ${!a.mine && !a.public ? '<span class="muted">共享项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
     </div></li>`).join("") || '<li class="empty">还没有 Agent。点“新建 Agent”创建一个。</li>';
   $("#agent-list").querySelectorAll(".card-main").forEach((b) =>
     b.addEventListener("click", () => { S.agentSel = b.dataset.id; renderAgents(); renderAgentEditor(); }));
@@ -790,12 +790,81 @@ function presetOptions(sel) {
 }
 
 function renderAgentReadonly(box, a) {
+  if (a.public) { renderPublicReadonly(box, a); return; }
   box.innerHTML = `<h2 class="panel-title">${avatar(a.name)} ${esc(a.name)}</h2>
     <p class="muted">${esc(a.owner_email || "")} 的 Agent</p>
     <dl><dt>描述</dt><dd>${esc(a.description)}</dd><dt>能力</dt><dd>${tags(a.capabilities)}</dd>
     <dt>自身权限</dt><dd>${tags(a.authority, "ok")}</dd>
     <dt>所在的共享项目</dt><dd>${tags(S.snap.projects.filter((g) => g.member_ids.includes(a.id)).map((g) => g.name))}</dd></dl>
     <p class="hint">它只为它的所有者工作：你可以在共享项目里 @ 它、委托它，它以所有者的名义、用所有者的资源执行。不能私聊，也不能拉进你自己的项目。</p>`;
+}
+
+// ---- 公共 Agent（docs/public-agents.md，不变量 26） ----
+// 别人看到的：名片 + 负责什么 + 要用哪些连接器（用你自己的授权）+ 私聊。它只为你做事：过程只给你，维护人只看用量。
+async function renderPublicReadonly(box, a) {
+  const list = await api("/api/public-agents").catch(() => []);
+  const x = list.find((p) => p.id === a.id) || { connectors: [], maintainers: [], note: a.public_note || "" };
+  box.innerHTML = `<h2 class="panel-title">${avatar(a.name)} ${esc(a.name)} <span class="vis-tag shared">公共</span></h2>
+    <p class="muted">由 ${esc(x.maintainers.join("、") || "维护组")} 维护</p>
+    <dl><dt>描述</dt><dd>${esc(a.description)}</dd>
+    ${x.note ? `<dt>负责</dt><dd>${esc(x.note)}</dd>` : ""}
+    <dt>能力</dt><dd>${tags(a.capabilities)}</dd><dt>权限</dt><dd>${tags(a.authority, "ok")}</dd>
+    <dt>要用的连接器</dt><dd>${x.connectors.length ? x.connectors.map((c) =>
+      `<span class="tag ${c.ready ? "ok" : "warn"}">${esc(c.name)}${c.ready ? "" : " · 你还没连接"}</span>`).join("") : '<span class="muted">无</span>'}</dd></dl>
+    <p class="hint">它为当时找它的人做事：用的是你自己的授权（没连接的先到「连接器」页连上），过程只给你看，维护人只看得到用量，看不到对话。
+      它不会记住你的事带到别人那里。可以私聊它，也可以把它拉进你的项目、让项目里的成员委托它。</p>
+    ${a.chat_enabled ? `<div class="actions">${chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`)}</div>` : ""}`;
+}
+
+function publicSection(a) {
+  const st = a.public ? "approved" : a.public_status;
+  const owner = a.owner_id === S.me?.id;
+  const status = st === "approved" ? `<span class="tag ok">公共</span>${a.public_wider?.length
+      ? ` <span class="tag warn" title="放宽的权限要管理员再批准才对服务面生效">待批准：${esc(a.public_wider.join("、"))}</span>` : ""}`
+    : st === "pending" ? '<span class="tag warn">等管理员批准</span>' : '<span class="muted">个人的</span>';
+  return `<section class="public-box" id="af-public"><h3>公共 Agent</h3>
+    <p class="hint">长期负责一个系统、给所有人用的 Agent 设成公共（管理员批准）。别人私聊它、把它拉进项目时，它只为那个人做事：
+      用那个人自己的授权，私有目录只读、改动不写回，过程只给那个人看；你们维护人只看用量。私有目录在你们私聊里整理，就是公共资料。</p>
+    <p>状态：${status}</p>
+    <div class="field"><label for="af-maint">维护人</label>
+      <input id="af-maint" value="${esc((a.maintainer_emails || []).join(", "))}" ${owner ? "" : "disabled"} placeholder="邮箱，逗号分隔">
+      <p class="hint">${owner ? "维护人和你一样能改它、在私聊里维护它；不能删除它。" : "只有所有者能改维护人。"}</p></div>
+    <div class="field"><label for="af-pnote">负责什么（写给管理员和用的人）</label>
+      <textarea id="af-pnote" rows="2" maxlength="1000">${esc(a.public_note || "")}</textarea></div>
+    <div class="field"><label for="af-pconn">服务时要用的连接器</label>
+      <input id="af-pconn" value="${esc((a.public_connectors || []).join(", "))}" placeholder="部署方目录里的 id，逗号分隔">
+      <p class="hint">用的是找它的那个人自己的授权，从不用你们的。</p></div>
+    <p class="error" role="alert" id="af-perr"></p>
+    <div class="actions">
+      ${owner ? '<button type="button" class="ghost" id="af-psave-m">保存维护人</button>' : ""}
+      <button type="button" id="af-preq">${st === "approved" ? "按现在的权限申请重新批准" : st === "pending" ? "更新申请" : "申请设成公共"}</button>
+      ${st ? `<button type="button" class="danger" id="af-pdrop">${st === "approved" ? "不再公共" : "撤回申请"}</button>` : ""}</div>
+    ${st === "approved" ? '<div id="af-pusage" class="hint">正在取用量…</div>' : ""}
+  </section>`;
+}
+
+function bindPublicSection(a) {
+  const err = (e) => { $("#af-perr").textContent = e.message; };
+  const list = (v) => v.split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean);
+  $("#af-psave-m")?.addEventListener("click", async () => {
+    try { await api(`/api/agents/${a.id}/maintainers`, { method: "PUT", body: { emails: list($("#af-maint").value) } }); await reload(); }
+    catch (e) { err(e); }
+  });
+  $("#af-preq")?.addEventListener("click", async () => {
+    try {
+      await api(`/api/agents/${a.id}/public`, { method: "POST", body: { note: $("#af-pnote").value.trim(), connectors: list($("#af-pconn").value) } });
+      await reload();
+    } catch (e) { err(e); }
+  });
+  $("#af-pdrop")?.addEventListener("click", async () => {
+    if (!confirm(`${a.name} 不再公共？别人和它的私聊会归档，没有维护人在的项目里会移出它。`)) return;
+    try { await api(`/api/agents/${a.id}/public`, { method: "DELETE" }); await reload(); } catch (e) { err(e); }
+  });
+  const box = $("#af-pusage");
+  if (box) api(`/api/agents/${a.id}/public/usage`).then((u) => {
+    box.innerHTML = `近 ${u.days} 天服务了 ${u.runs} 轮` + (u.users.length ? "：" + u.users.map((x) =>
+      `${esc(x.user)} ${x.runs} 轮${x.failed ? `（失败 ${x.failed}）` : ""}`).join("，") : "") + "。只有用量，没有内容。";
+  }).catch(() => { box.textContent = ""; });
 }
 
 function renderAgentEditor(isNew = false) {
@@ -852,12 +921,14 @@ function renderAgentEditor(isNew = false) {
       <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
       ${a ? (S.me?.assistant_id === a.id
         ? '<p class="hint"><span class="tag ok">你的助理</span> 你加入项目时它跟着加入，项目会话里由它陪你聊。</p>'
-        : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 你加入项目时助理跟着加入，项目会话里由它陪你聊。</p>') : ""}
+        : a.public_status ? "" : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 你加入项目时助理跟着加入，项目会话里由它陪你聊。</p>') : ""}
       <p class="hint">它只为你工作。要和别人协作，把它带进共享项目：别人可以在那里 @ 它，但它仍然以你的名义、用你的资源运行，工作区外的操作由你审批。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${a ? "保存" : "创建"}</button>
         ${a ? `${a.chat_enabled ? '<button type="button" class="ghost" id="af-chat">私聊</button>' : ""}<button type="button" class="danger" id="af-del">删除</button>` : ""}</div>
-    </form>`;
+    </form>
+    ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}`;
+  if (a && $("#af-public")) bindPublicSection(a);
   const f = $("#agent-form");
   // 启用预置模型时：云侧只能选预置模型，端侧（用户自己的 harness）仍然自由填写
   const usePreset = () => !!f.model_preset && !f.device_runtime.value;
@@ -945,7 +1016,7 @@ function renderProjectEditor(isNew = false) {
   const x = g || { name: "", description: "", member_ids: [] };
   // 只能加入自己的 Agent；有别人的项目里别人的成员由他们自己加减（主持人可以移出）
   const mine = S.snap.agents.filter((a) => a.mine);
-  const theirs = (x.member_ids || []).filter((id) => !agent(id)?.mine);
+  const theirs = (x.member_ids || []).filter((id) => !agent(id)?.mine && !agent(id)?.public);
   box.innerHTML = `<h2 class="panel-title">${g ? `项目配置 ${kindTag(g)}` : "新建项目"}</h2>
     <p class="muted">委托只能在项目成员之间进行。</p>
     <form class="editor" id="project-form">
@@ -956,6 +1027,7 @@ function renderProjectEditor(isNew = false) {
         ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${x.member_ids.includes(a.id) ? "checked" : ""}>
           <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
       </fieldset>
+      ${publicBoxes(x.member_ids || [])}
       ${theirs.length ? `<p class="hint">另有 ${theirs.length} 个别人的 Agent：${theirs.map((id) => esc(aname(id))).join("、")}（在群聊侧栏里移出）。</p>` : ""}
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${g ? "保存" : "创建"}</button>
@@ -2421,6 +2493,16 @@ async function renderPeople(box, g) {
 }
 
 // 参与者看别人主持的项目：加减自己的 Agent，退出
+// 公共 Agent（不变量 26）：谁都能拉进项目、移出；它在这里只为找它的那个人做事
+function publicBoxes(memberIds) {
+  const pub = S.snap.agents.filter((a) => a.public && !a.mine);
+  if (!pub.length) return "";
+  return `<fieldset class="checks"><legend>公共 Agent</legend>
+    ${pub.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${memberIds.includes(a.id) ? "checked" : ""}>
+      <span class="opt">${esc(a.name)}<small>${esc(a.description)}</small></span></label>`).join("")}</fieldset>
+    <p class="hint">公共 Agent：谁 @ 它、委托它，它就为谁做事，用那个人自己的授权。</p>`;
+}
+
 function renderProjectGuest(box, g) {
   const mine = S.snap.agents.filter((a) => a.mine);
   box.innerHTML = `<h2 class="panel-title">项目配置 ${kindTag(g)}</h2>
@@ -2430,6 +2512,7 @@ function renderProjectGuest(box, g) {
         ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${g.member_ids.includes(a.id) ? "checked" : ""}>
           <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
       </fieldset>
+      ${publicBoxes(g.member_ids)}
       <p class="hint">它们只为你工作：别的参与者可以 @、委托它们，但它们以你的名义、用你的资源运行，工作区外的操作由你审批。私有目录默认不挂载，可以在群聊侧栏里按 Agent 打开。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">保存</button>
@@ -2439,7 +2522,7 @@ function renderProjectGuest(box, g) {
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const want = [...f.querySelectorAll('[name="member"]:checked')].map((c) => c.value);
-    const others = g.member_ids.filter((id) => !agent(id)?.mine);
+    const others = g.member_ids.filter((id) => !agent(id)?.mine && !agent(id)?.public);
     try { await api(`/api/projects/${g.id}`, { method: "PATCH", body: { member_ids: [...others, ...want] } }); await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });

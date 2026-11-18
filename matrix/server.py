@@ -254,6 +254,16 @@ class AgentPatch(BaseModel):
     subscriptions: list[str] | None = Field(None, max_length=30)  # 订阅的发布物（不变量 23）
 
 
+class MaintainersIn(BaseModel):
+    emails: list[str] = Field(default_factory=list, max_length=20)
+
+
+class PublicIn(BaseModel):
+    """维护人申请设成公共（docs/public-agents.md）：写给管理员的说明、服务面要用的连接器（部署方目录 id）。"""
+    note: str = Field("", max_length=1000)
+    connectors: list[str] | None = Field(None, max_length=20)
+
+
 class ReleaseIn(BaseModel):
     """主持人发布（docs/project-publishing.md）：技能包带技能，交付件带档案文件（可带一个插件视图）。读者按邮箱。"""
     name: str = Field(..., min_length=1, max_length=64)
@@ -749,8 +759,44 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.get("/api/agents/{agent_id}/ledger")
     def agent_ledger(agent_id: str, user: Me) -> list[dict]:
-        network.visible_agent(agent_id, user.id)  # 只有所有者
+        network.visible_agent(agent_id, user.id)  # 只有所有者 / 维护人；公共 Agent 的服务面只给用量（不变量 26）
         return network.ledger(agent_id)
+
+    # ---- 公共 Agent（docs/public-agents.md，不变量 26） ----
+    @app.get("/api/public-agents")
+    def public_agents(user: Me) -> list[dict]:
+        return network.public_agents(user.id)
+
+    @app.put("/api/agents/{agent_id}/maintainers")
+    def set_maintainers(agent_id: str, body: MaintainersIn, user: Me) -> dict:
+        return network.agent_view(network.set_maintainers(agent_id, body.emails, actor=user.id), user.id)
+
+    @app.post("/api/agents/{agent_id}/public")
+    def request_public(agent_id: str, body: PublicIn, user: Me) -> dict:
+        a = network.request_public(agent_id, body.note, body.connectors, actor=user.id)
+        return network.agent_view(a, user.id)
+
+    @app.delete("/api/agents/{agent_id}/public")
+    def withdraw_public(agent_id: str, user: Me) -> dict:
+        return network.agent_view(network.withdraw_public(agent_id, actor=user.id), user.id)
+
+    @app.get("/api/agents/{agent_id}/public/usage")
+    def public_usage(agent_id: str, user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
+        return network.public_usage(agent_id, days, actor=user.id)
+
+    @app.get("/api/admin/public-agents")
+    def admin_public_agents(user: Me) -> list[dict]:
+        return network.public_requests(user.id)
+
+    @app.post("/api/admin/public-agents/{agent_id}/approve")
+    def admin_approve_public(agent_id: str, user: Me) -> list[dict]:
+        network.review_public(agent_id, True, actor=user.id)
+        return network.public_requests(user.id)
+
+    @app.post("/api/admin/public-agents/{agent_id}/reject")
+    def admin_reject_public(agent_id: str, user: Me) -> list[dict]:
+        network.review_public(agent_id, False, actor=user.id)
+        return network.public_requests(user.id)
 
     # ---- 项目 ----
     @app.post("/api/projects")

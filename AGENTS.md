@@ -22,6 +22,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 
 - **Agent**：网络里的节点，只属于、只为它的所有者工作；有自身权限上限，可跑在云侧或用户端侧。每个人有一个**助理**（自己的一个 Agent，注册即有），进项目时自动加入。
 - **助理对话**：侧栏最上面的“助理”，和自己助理的私聊。助理在这里看得到你各个项目的进展，替你起草要发进项目的消息（你确认才发），按你的话定时提醒（默认工作日早报）。
+- **公共 Agent**：长期负责一个系统（报销、请假、工单）、给所有人用的 Agent：维护组（所有者 + 维护人）申请、管理员批准。所有用户都能私聊它、把它拉进项目；它在**服务面**只为当时的调用方做事（私有目录只读不写回、用调用方自己的授权、过程只给调用方），维护人在**维护面**（自己和它的私聊）整理公共资料、只看服务面的用量。
 - **项目**：成员集合与委托边界，没有主 Agent，也没有类型：邀请了别人就是共享的，这是跨用户协作的唯一途径。
 - **对话**：每个项目一个群聊（被 @ 的成员接任务）；人在项目里可以开多个**项目会话**，和自己的助理私下聊、带项目上下文；每个 Agent 一个私聊。**席位**是 Agent 在一个对话里的执行上下文。
 - **委托（Task）**：Agent ↔ Agent 的一次授权，异步执行、收件箱唤醒，由委托方验收。
@@ -44,6 +45,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 群聊、项目会话、私聊、@ 唤醒、成员变动、共享项目与可见性、附件与 Agent 发文件（`send_file`） | [docs/reference/conversations.md](docs/reference/conversations.md) |
 | 委托、收件箱、失败与续接、看板与用户任务、运行中提问（`ask_user_question`）、长期目标续跑与后台任务 | [docs/reference/execution.md](docs/reference/execution.md) |
 | 项目档案与档案工具 | [docs/reference/archive.md](docs/reference/archive.md) |
+| 公共 Agent：维护组、管理员批准、服务面与维护面、调用方（`principal`）、用量 | [docs/public-agents.md](docs/public-agents.md)（第 10 节是第一版的实现说明），不变量 26 |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)；接企业内部 IM（确认清单、连接方式、写驱动、本地测、上线、真机验收）见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)，样板 `examples/im-driver/`（改了驱动接口要同步改这两处） |
@@ -106,7 +108,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_teammates.py`（队友协作示例）、`test_public_agents.py`（公共 Agent：批准与冻结权限、撤回、服务面只读不写回、调用方自己的授权、委托为调用方、维护人只看用量） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -158,7 +160,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 13. **归属与可见性**：无权限一律按“不存在”（404）。
 14. **工作区外溢由所有者批准**：逐次批准，只对那一次调用生效。
 15. **并发不抢占**：私有目录写回按文件三方合并。
-16. **Agent 不跨信任域**：跨用户协作只能通过项目（邀请了别人就是共享项目）。
+16. **个人 Agent 不跨信任域**：跨用户协作只能通过项目（邀请了别人就是共享项目）；例外只有公共 Agent（不变量 26）。
 17. **项目档案只走网络**：写入只经人的操作或档案工具。
 18. **项目会话只属于它的人**：助理按所有者的可见性读取项目状态。
 19. **连接器凭证只属于授权的人**：网络代调用，共享项目里用到时先问授权人；按 MCP 标注会对外产生影响的写操作每次先给授权人确认。
@@ -168,6 +170,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 23. **发布只经主持人，交付件只流向读者**：项目内容离开项目只经发布物；订阅只在订阅者自己的 Agent 上、能到达的人都看得到时生效。
 24. **插件服务只来自部署方目录，只经网络、按挂点作用**：一个安装一个进程，不拿凭证；工具、只读挂载、标明来源的上下文、验收后的通知，只在本项目里生效。
 25. **IM 只是绑定的人的入口**：只认核验过绑定码的那个身份在单聊里说的话，推出去的只到他自己的单聊、只是他本来看得到的。
+26. **公共 Agent 只在服务面跨信任域**：管理员批准、冻结权限；服务面只为调用方做事，私有目录只读不写回、不列别处、不外溢、用调用方自己的授权、过程只给调用方，维护人只看用量。
 
 ### 二、工作方式
 
