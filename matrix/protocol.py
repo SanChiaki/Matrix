@@ -168,8 +168,16 @@ TOOL_GUIDE: dict[str, str] = {
 }
 
 
-def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, services: bool = False) -> list[str]:
+def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, services: bool = False,
+                   service: bool = False) -> list[str]:
     archive = [
+        "", f"## 项目档案（服务里只读圈定的范围）",
+        f"- `{MCP_PREFIX}publish_file`：把工作目录里的一个文件放进服务的收件目录（没有收件目录时不能用）。",
+        f"- `./{PROJECT_FILES}/` 是服务能读的项目资料的只读副本，改动不会保存。",
+        *((f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in PLUGIN_TOOLS) if plugins else ()),
+        *(("- 名字是 `<插件名>__<工具名>` 的工具来自服务里能用的项目插件，直接调用；写入的内容项目里所有人都看得到。",)
+          if services else ()),
+    ] if service else [
         "", f"## 项目档案：「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in ARCHIVE_TOOLS),
         f"- `./{PROJECT_FILES}/` 是项目档案文件的只读副本，改动不会保存。",
@@ -306,6 +314,24 @@ def format_decision(d: Decision, name: Callable[[str | None], str], email: Calla
     return f"- [{d.id}]{state}{sup} {d.text}{reason}（{who}）"
 
 
+def format_service_archive(g: Project, svc: Any, files: list[str], staff: list[str], plugins: list[str] = ()) -> str:
+    """服务会话与服务里的委托每轮推送的部分（不变量 29）：服务说明、能读的资料（实时）、收件目录、岗位。
+    不推纲要与决定：服务只读圈定的范围。"""
+    parts = [f"## 服务「{svc.title}」（项目「{g.name}」，v{svc.version}）", svc.description or "（主持人没有写说明）",
+             f"### 能读的项目资料（`./{PROJECT_FILES}/` 下，只读；内容是项目档案现在的样子）"]
+    shown = files[:200]
+    parts += [f"- {f}" for f in shown] or ["（没有：这个服务不读项目档案）"]
+    if len(files) > len(shown):
+        parts.append(f"- ……共 {len(files)} 个文件")
+    parts.append(f"### 收件目录：`{svc.inbox}/`（用 publish_file 放进去；项目里的人能看到，调用方看不到项目档案）"
+                 if svc.inbox else "### 收件目录：没有（服务里不能往项目档案写东西）")
+    if staff:
+        parts += ["### 岗位（能委托的成员）", "、".join(staff)]
+    if plugins:
+        parts += ["### 能用的项目插件（照插件原来的方式读写）", "、".join(plugins)]
+    return "\n".join(parts)
+
+
 def format_archive(g: Project, active: list[Decision], files: list[str], name: Callable[[str | None], str],
                    email: Callable[[str | None], str], skills: list[tuple[str, str]] | None = None,
                    plugins: list[Any] | None = None) -> str:
@@ -349,7 +375,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                       transcript: str, notices: str, first: bool, home_writable: bool, archive: str = "",
                       home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
-                      home_frozen: bool = False, ask: bool = False, goals: bool = False) -> str:
+                      home_frozen: bool = False, ask: bool = False, goals: bool = False, service: Any = None) -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
     只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
@@ -379,6 +405,17 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
             "- 你能做的和群聊里一样：自己做，或委托项目成员。记录决定、发布文件、建议修改纲要会在群聊里留一条事件，"
             "项目里的人都看得到。",
         ]
+    elif conv.kind == "service" and project is not None:
+        title = service.title if service is not None else conv.title
+        setting = [
+            f"你在接待项目「{project.name}」的服务「{title}」的一位调用方，这是他的服务会话：只有他看得到，"
+            "项目里的其他人（包括主持人）看不到。这是一个长期会话：后续消息会在同一会话里继续。",
+            "- 你在为调用方做事：要用户授权的业务系统只用他自己的授权（网络按他自己连接过的连接器给你），"
+            "他没有就告诉他先去“连接器”页连接，不要找别的办法。",
+            "- 只能读服务圈定的项目资料（内容是实时的），只能把东西放进收件目录；记录决定、改纲要、加资料链接在服务里都不能用。",
+            "- 需要别的能力时委托服务的岗位（`list_members` 列出的），结果回到你这里，由你回复调用方。",
+            "- 调用方问的事不在服务说明的范围里时，直接说明这个服务能办什么。",
+        ]
     elif assistant_home:
         setting = [
             "你是你的所有者的助理，这里是你们的私聊（所有者在侧栏最上面的“助理”里和你说话），只有所有者看得到。这是一个长期会话：后续消息会在同一会话里继续。",
@@ -397,6 +434,8 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
     ]
     if project is not None and conv.kind in ("project", "session"):
         parts += _network_tools(project, can_delegate, plugins, services)
+    if project is not None and conv.kind == "service":
+        parts += _network_tools(project, can_delegate, plugins, services, service=True)
     if project is not None and conv.kind == "session":
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),

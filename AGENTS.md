@@ -47,6 +47,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 项目档案与档案工具、资料的目录层级、资料与技能的可见范围 | [docs/reference/archive.md](docs/reference/archive.md) |
 | 外部平台 Agent：平台目录、驱动、远程运行时、`/mcp/remote`（密钥 + 会话 id、先等再绑）、调用方授权透传 | [docs/remote-agents.md](docs/remote-agents.md)；接公司内部平台（确认清单、目录、写驱动、本地测、验收）见 [docs/remote-agent-authoring.md](docs/remote-agent-authoring.md)，样板 `examples/remote-agent/`（改了驱动接口要同步改这两处），不变量 28 |
 | 公共 Agent：维护组、管理员批准、服务面与维护面、调用方（`principal`）、用量 | [docs/public-agents.md](docs/public-agents.md)（第 10 节是第一版的实现说明），不变量 27 |
+| 项目服务：发布（入口、岗位、档案范围、收件目录、权限、给谁用）、服务会话、服务面（`ExecContext.svc`）、项目付费与用量 | [docs/project-services.md](docs/project-services.md)（第 9 节是第一期的实现说明），不变量 29 |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)；接企业内部 IM（确认清单、连接方式、写驱动、本地测、上线、真机验收）见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)，样板 `examples/im-driver/`（改了驱动接口要同步改这两处） |
@@ -177,6 +178,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 26. **资料与项目技能只给可见范围里的 Agent**：默认所有成员可见，主持人可收窄到角色 / 成员；目录逐级只收窄，挂载、材料、推送、群聊事件都按它过滤。
 27. **公共 Agent 只在服务面跨信任域**：管理员批准、冻结权限；服务面只为调用方做事，私有目录只读不写回、不列别处、不外溢、用调用方自己的授权、过程只给调用方，维护人只看用量。
 28. **外部平台 Agent 的回调只落到 Matrix 发起的那一轮**：平台只来自部署方目录；回调凭 Matrix 签的密钥 + Matrix 发起且还没结束的会话 id；调用方授权只透传他自己的，缺了不发起。
+29. **服务调用替调用方做事、由项目付费**：项目服务由主持人发布即生效；服务会话只属于调用方；入口只委托服务的岗位；沿途都在服务面：业务授权只用调用方自己的、档案只读圈定范围、只写收件目录；用量记在项目下，主持人只看用量。
 
 ### 二、工作方式
 
