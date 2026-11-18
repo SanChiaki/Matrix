@@ -229,7 +229,7 @@ async function loadModels() {
 
 function route() {
   const hash = location.hash.slice(1);
-  const PLAIN = ["network", "projects", "blueprints", "releases", "board", "agents", "skills", "connectors", "devices"];
+  const PLAIN = ["network", "projects", "blueprints", "releases", "board", "agents", "skills", "connectors", "devices", "apps"];
   // 参照 Raft：#g-<项目> 打开项目的群聊，#dm-<Agent> 打开和它的私聊（第一次打开时创建）
   // #pair=<配对码>：连接器 setup 打开的批准页（docs/device-runtimes.md 第 2.5 节）
   const pair = hash.match(/^pair=([A-Za-z0-9-]{4,16})$/);
@@ -295,7 +295,7 @@ function show(view) {
     : view === "releases" && S.releaseSel ? `#release-${S.releaseSel}`
     : view === "blueprints" && S.blueprintSel ? `#blueprint-${S.blueprintSel}` : `#${view}`);
   if (view === "agents") loadModels();
-  if (["agents", "skills", "connectors", "projects", "chats", "devices"].includes(view)) loadMine();
+  if (["agents", "skills", "connectors", "projects", "chats", "devices", "apps"].includes(view)) loadMine();
   render();
 }
 
@@ -320,7 +320,7 @@ function render() {
   $("#todo-count").setAttribute("aria-label", `${todo} 件待处理`);
   ({ network: renderGraph, projects: renderProjectsView, board: loadBoard, agents: renderAgentsView,
      chats: renderChats, devices: renderDevicesView, skills: renderSkillsView, connectors: renderConnectorsView,
-     releases: renderReleasesView, blueprints: renderBlueprintsView })[S.view]();
+     releases: renderReleasesView, blueprints: renderBlueprintsView, apps: renderAppsView })[S.view]();
 }
 
 const REQ_OPEN = (r) => r.status === "in_progress" || r.status === "in_review";
@@ -1004,8 +1004,10 @@ function renderAgentEditor(isNew = false) {
     </form>
     ${a?.remote ? remoteSection(a) : ""}
     ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}
-    ${a && !a.public_status ? '<section class="pub-box" id="af-service-rounds" hidden></section>' : ""}`;
+    ${a && !a.public_status ? '<section class="pub-box" id="af-service-rounds" hidden></section>' : ""}
+    ${a && !a.public_status && a.owner_id === S.me?.id ? '<section class="pub-box" id="af-open-apps" hidden></section>' : ""}`;
   if (a && !a.public_status) renderServiceRounds(a);
+  if (a && !a.public_status && a.owner_id === S.me?.id) renderOpenApps(a);
   if (a?.remote) bindRemoteSection(a);
   if (a && $("#af-public")) bindPublicSection(a);
   const f = $("#agent-form");
@@ -1059,6 +1061,23 @@ function renderAgentEditor(isNew = false) {
   });
 }
 
+// 开放给外部应用（不变量 30）：勾上的应用查得到它、能把它拉进自己主持的项目；拉进去时你成为那个项目的参与者
+async function renderOpenApps(a) {
+  const d = await api("/api/apps").catch(() => null);
+  const box = $("#af-open-apps");
+  if (!box || !d || !d.apps.length) return;
+  box.hidden = false;
+  box.innerHTML = `<h3>开放给应用</h3><p class="hint">勾上的业务系统查得到「${esc(a.name)}」，能把它拉进自己主持的项目。拉进去时你会成为那个项目的参与者，
+      它照常以你的名义、用你的资源运行，审批和提问照常找你。</p>
+    <form id="af-open-form">${d.apps.map((x) => `<label class="check"><input type="checkbox" name="apps" value="${esc(x.id)}" ${(a.open_to || []).includes(x.id) ? "checked" : ""}>${esc(x.name)}</label>`).join("")}
+      <div class="actions"><button type="submit" class="ghost sm">保存</button></div><p class="error" role="alert"></p></form>`;
+  $("#af-open-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try { await api(`/api/agents/${a.id}/open`, { method: "PUT", body: { apps: new FormData(e.target).getAll("apps") } }); await reload(); }
+    catch (err) { $(".error", e.target).textContent = err.message; }
+  });
+}
+
 // 我的 Agent 在别的项目服务里的那几轮（不变量 29）：交给它的消息、它的回复与过程。只有经过它的部分，不是整个服务会话
 async function renderServiceRounds(a) {
   const list = await api(`/api/agents/${a.id}/service-rounds`).catch(() => []);
@@ -1071,6 +1090,70 @@ async function renderServiceRounds(a) {
         ? `<li class="msg user"><div class="content"><div class="who"><b>${esc(r.caller)}</b>${time(m.ts)}</div><div class="body md">${renderMarkdown(m.text)}</div></div></li>`
         : `<li class="msg agent"><div class="content"><div class="who"><b>${esc(a.name)}</b>${time(m.ts)}</div>${stepsHtml(m.steps || [], false)}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`).join("")}</ul>
     </details>`).join("")}`;
+}
+
+// ================= 外部应用（docs/open-api.md，不变量 30） =================
+// 我授权的应用（令牌只显示一次）；授权一个应用；我负责的业务系统账号（它主持的项目、代它授权连接器）
+async function renderAppsView() {
+  const box = $("#apps-body");
+  const d = await api("/api/apps").catch(() => null);
+  if (!d || S.view !== "apps") return;
+  const hosted = (S.snap?.projects || []).filter((g) => g.owner_id === S.me?.id);
+  const scopeBoxes = (app) => (app?.scopes || []).map((s) => `<label class="check"><input type="checkbox" name="scopes" value="${esc(s.key)}" checked>${esc(s.label)}</label>`).join("");
+  const sel = d.apps.find((a) => a.id === S.appPick) || d.apps[0];
+  const managed = await Promise.all(d.managed.map(async (m) => ({ ...m,
+    conns: m.system ? await api(`/api/system-accounts/${m.system.id}/connections`).catch(() => []) : [] })));
+  box.innerHTML = `${S.appToken ? `<div class="pub-box"><h3>新令牌（只显示这一次）</h3><p><code class="token">${esc(S.appToken)}</code></p>
+      <p class="hint">把它填进业务系统（请求头 <code>Authorization: Bearer …</code>）。关掉这个提示就再也看不到了；丢了就撤销，再签一把。</p>
+      <button type="button" class="ghost sm" id="app-token-done">我已保存</button></div>` : ""}
+    <h3>我授权的应用</h3>
+    <ul class="plugins">${d.grants.map((g) => `<li class="plugin-card"><div class="plugin-head"><div><b>${esc(g.app_name)}</b>
+        <div class="muted small">${g.scopes.map((s) => esc(d.scopes[s] || s)).join("、")}${g.project_names.length ? ` · 另外交给它管：${g.project_names.map(esc).join("、")}` : ""}
+          · 签于 ${new Date(g.created_at * 1000).toLocaleDateString()} · 调用 ${g.calls} 次</div></div><span class="grow"></span>
+        <button type="button" class="ghost sm" data-revoke="${esc(g.id)}">撤销</button></div></li>`).join("") || '<li class="empty">还没有授权任何应用。</li>'}</ul>
+    ${d.apps.length ? `<h3>授权一个应用代表你</h3><form id="app-grant" class="rel-form">
+      <label>应用<select name="app">${d.apps.map((a) => `<option value="${esc(a.id)}" ${a.id === sel?.id ? "selected" : ""}>${esc(a.name)}</option>`).join("")}</select></label>
+      <p class="muted">${esc(sel?.description || "")}</p>
+      <fieldset><legend>允许它做</legend>${scopeBoxes(sel)}</fieldset>
+      ${hosted.length ? `<fieldset><legend>另外交给它管的项目（它自己建的总能管）</legend>${hosted.map((g) => `<label class="check"><input type="checkbox" name="projects" value="${esc(g.id)}">${esc(g.name)}</label>`).join("")}</fieldset>` : ""}
+      <p class="hint">它做的事不会超过你自己能做的；拿不到项目里的对话、过程和任何人的凭证。</p>
+      <div class="actions"><button type="submit">签发令牌</button></div><p class="error" role="alert"></p></form>`
+      : '<p class="muted">管理员还没有登记外部应用。</p>'}
+    ${managed.length ? `<h3>我负责的业务系统账号</h3>${managed.map((m) => `<div class="pub-box"><b>${esc(m.name)}</b> <span class="muted">${esc(m.system?.email || "")}</span>
+      <p class="muted small">负责人：${(m.system?.managers || []).map(esc).join("、")}。它主持的项目你在网页上等同主持人。</p>
+      <dl><dt>它主持的项目</dt><dd>${(m.system?.projects || []).map((g) => `<a href="#project-${esc(g.id)}">${esc(g.name)}</a>`).join("、") || "还没有"}</dd>
+        <dt>它的连接器</dt><dd>${m.conns.map((c) => `${esc(c.name)}（${esc(c.status)}）`).join("、") || "还没有"}</dd></dl>
+      ${!(S.catalog || []).length ? '<p class="hint">部署方还没有配连接器目录，暂时没有能代它授权的连接器。</p>' : ""}
+      <form class="rel-form" data-sys-conn="${esc(m.system?.id || "")}" ${(S.catalog || []).length ? "" : "hidden"}><label>代它授权连接器<select name="connector">${(S.catalog || []).map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}</select></label>
+        <div class="sys-fields"></div><div class="actions"><button type="submit">授权</button></div><p class="error" role="alert"></p></form></div>`).join("")}` : ""}`;
+  $("#app-token-done", box)?.addEventListener("click", () => { S.appToken = null; renderAppsView(); });
+  box.querySelectorAll("[data-revoke]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("撤销这把令牌？应用立刻不能再代表你。它建的项目、发布的服务都留着，归你。")) return;
+    await api(`/api/grants/${b.dataset.revoke}`, { method: "DELETE" }).catch((e) => alert(e.message)); renderAppsView();
+  }));
+  const f = $("#app-grant", box);
+  f?.app.addEventListener("change", () => { S.appPick = f.app.value; renderAppsView(); });
+  f?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(f);
+    try { const r = await api(`/api/apps/${fd.get("app")}/grants`, { method: "POST", body: { scopes: fd.getAll("scopes"), projects: fd.getAll("projects") } });
+      S.appToken = r.token; renderAppsView(); }
+    catch (err) { $(".error", f).textContent = err.message; }
+  });
+  box.querySelectorAll("[data-sys-conn]").forEach((form) => {
+    const fill = () => {
+      const spec = (S.catalog || []).find((c) => c.id === form.connector.value);
+      $(".sys-fields", form).innerHTML = (spec?.fields || []).map((x) => `<label>${esc(x.label)}<input name="f-${esc(x.key)}" ${x.secret ? 'type="password"' : ""} autocomplete="off"></label>`).join("");
+    };
+    form.connector?.addEventListener("change", fill); fill();
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form), values = {};
+      for (const [k, v] of fd.entries()) if (k.startsWith("f-")) values[k.slice(2)] = v;
+      try { await api(`/api/system-accounts/${form.dataset.sysConn}/connectors/${form.connector.value}`, { method: "POST", body: { values } }); renderAppsView(); }
+      catch (err) { $(".error", form).textContent = err.message; }
+    });
+  });
 }
 
 // ================= 项目管理 =================

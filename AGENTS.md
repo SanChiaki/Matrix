@@ -48,7 +48,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 外部平台 Agent：平台目录、驱动、远程运行时、`/mcp/remote`（密钥 + 会话 id、先等再绑）、调用方授权透传 | [docs/remote-agents.md](docs/remote-agents.md)；接公司内部平台（确认清单、目录、写驱动、本地测、验收）见 [docs/remote-agent-authoring.md](docs/remote-agent-authoring.md)，样板 `examples/remote-agent/`（改了驱动接口要同步改这两处），不变量 28 |
 | 公共 Agent：维护组、管理员批准、服务面与维护面、调用方（`principal`）、用量 | [docs/public-agents.md](docs/public-agents.md)（第 10 节是第一版的实现说明），不变量 27 |
 | 项目服务：发布（入口、岗位、档案范围、收件目录、权限、给谁用）、服务会话、服务面（`ExecContext.svc`）、项目付费与用量 | [docs/project-services.md](docs/project-services.md)（第 9 节是第一期的实现说明），不变量 29 |
-| 外部应用接入（设计已定，未实现）：应用登记、两种身份（代表个人 / 业务系统账号）、查 / 组 / 发 / 调、令牌不给内容 | [docs/open-api.md](docs/open-api.md) |
+| 外部应用接入：应用登记、两种身份（代表个人 / 业务系统账号、负责人）、`/open/v1/*`（查 / 组 / 发）、`/svc/*`（调，标准 HTTP 形状）、经应用留痕 | [docs/open-api.md](docs/open-api.md)（第 12 节是实现说明），`matrix/apps.py`、`matrix/open_server.py`，不变量 30 |
 | 项目、助理、项目会话、旧数据迁移 | [docs/reference/projects.md](docs/reference/projects.md)，设计见 [docs/projects.md](docs/projects.md) |
 | 助理对话：跨项目总览、起草、定时与早报 | [docs/reference/assistant.md](docs/reference/assistant.md) |
 | IM 入口（在企业微信等 IM 里和助理单聊）、IM 驱动、绑定 | [docs/reference/im.md](docs/reference/im.md)；接企业内部 IM（确认清单、连接方式、写驱动、本地测、上线、真机验收）见 [docs/im-driver-authoring.md](docs/im-driver-authoring.md)，样板 `examples/im-driver/`（改了驱动接口要同步改这两处） |
@@ -80,6 +80,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
+| `matrix/apps.py` | 外部应用（不变量 30）：`AppsMixin` 混入 `Network`。应用登记、业务系统账号与负责人、令牌（`app_context`：认令牌、scope、限频）、开放 Agent、查 / 组 / 发（`open_*`，项目范围 `_app_project`）、调（`svc_*`）、经应用留痕 `via_app()` |
+| `matrix/open_server.py` | 外部应用的接口：`/open/v1/*` 与 `/svc/*`（标准 HTTP 形状，SSE），只认 `Authorization: Bearer mat_…` |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
 | `matrix/plugin_service.py` | 插件服务（不变量 24）的客户端：网络托管的 stdio MCP 进程（`ServiceHost` 按项目 × 插件一个，按需启动、空闲停掉、版本换了重启、连续起不来暂停；最小环境 `service_env`；按带哈希的锁文件建依赖环境 `build_env`）与远程 MCP（`RemoteService`，每次调用带 `sign_token` 签的项目令牌；目录里的用部署方的密钥，自己装的每个安装一把）；工具、资源都走标准 MCP。工具按原名 `<插件>__<工具>` 经 `mcp_server.py` 的 `__list_tools__` 动态列出；挂点与工具在 `engine.py`「插件服务」一节 |
 | `matrix/blueprints.py` | 模板（[docs/blueprints.md](docs/blueprints.md)）：格式与校验、`{param:…}` / `{role:…}` 占位符、发布时的可移植检查、`BlueprintStore`（`<data>/blueprints/<id>/v<N>/`）；发布、可见性、用模板建项目在 `engine.py`「模板」一节 |
@@ -180,6 +182,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 27. **公共 Agent 只在服务面跨信任域**：管理员批准、冻结权限；服务面只为调用方做事，私有目录只读不写回、不列别处、不外溢、用调用方自己的授权、过程只给调用方，维护人只看用量。
 28. **外部平台 Agent 的回调只落到 Matrix 发起的那一轮**：平台只来自部署方目录；回调凭 Matrix 签的密钥 + Matrix 发起且还没结束的会话 id；调用方授权只透传他自己的，缺了不发起。
 29. **服务调用替调用方做事、由项目付费**：项目服务由主持人发布即生效；服务会话只属于调用方；入口只委托服务的岗位；沿途都在服务面：业务授权只用调用方自己的、档案只读圈定范围、只写收件目录；用量记在项目下，主持人只看用量。
+30. **外部应用只以授权它的人或它自己的业务系统账号的名义、在授权范围内操作**：管理员登记应用；令牌代表个人或系统账号，只做那个主体本来能做的、再交 scope 与项目范围；拿不到内容；写操作留下“经哪个应用”；系统账号不能登录、负责人等同主持人；开放的个人 Agent 拉进项目时所有者成为参与者。
 
 ### 二、工作方式
 

@@ -1,6 +1,6 @@
 # 外部应用接入（设计）
 
-> 状态：**设计已定，未实现**。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #73。相关设计：[project-services.md](project-services.md)（项目服务，不变量 29）、
+> 状态：**第 1–3 期已实现**，不变量 30，实现说明见第 12 节；第 4 期（SSO）随登录改造。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #73。相关设计：[project-services.md](project-services.md)（项目服务，不变量 29）、
 > [public-agents.md](public-agents.md)（不变量 27）、[remote-agents.md](remote-agents.md)（标准 HTTP 形状，不变量 28）、[blueprints.md](blueprints.md)（模板）。
 > 调研：research: project-publishing#external-apps。
 
@@ -25,6 +25,8 @@
 | 6 | 开放给应用的个人 Agent 被拉进项目时，**所有者自动成为参与者**：等价于受邀加入、再把自己的 Agent 带进来，现有规则不改 |
 | 7 | 应用自己调用服务时拿到回复；它发布的服务被别人用时**只看用量**（同不变量 29） |
 | 8 | 系统账号的连接器由**负责人代为授权**，**管理员也能配** |
+| 9 | 代表个人时，令牌管**经这个应用建的项目**，加上授权人在授权时**另外交给它的**、自己主持的已有项目 |
+| 10 | 调用服务只凭**应用令牌**（`services.call`），不另发服务密钥：接入方都先由管理员登记成应用，谁在调用一目了然 |
 
 ## 3. 两种身份
 
@@ -73,26 +75,35 @@
 
 ## 5. 接口
 
-REST，`Authorization: Bearer mat_…`（应用令牌）：
+REST，`Authorization: Bearer mat_…`（应用令牌），不走登录（Caddy 里和 `/mcp/remote` 一样不加 basic auth）：
 
 ```
-GET    /open/v1/agents                       能用的 Agent（名片）
-GET    /open/v1/blueprints                   能用的模板
-GET    /open/v1/projects                     它主持（或被允许管）的项目
-POST   /open/v1/projects                     建项目 {name, brief, members[], roles} 或 {blueprint, params}
-PATCH  /open/v1/projects/{id}                纲要、角色
-PUT    /open/v1/projects/{id}/members        增减成员
-PUT    /open/v1/projects/{id}/files/{path}   上传资料；PATCH 设可见范围
-POST   /open/v1/projects/{id}/skills         项目技能
-POST   /open/v1/projects/{id}/plugins        只从部署方目录装
-POST   /open/v1/projects/{id}/services       发布服务；PATCH / DELETE；GET …/usage
+GET    /open/v1/agents                              能用的 Agent（名片）                     agents.read
+GET    /open/v1/blueprints                          能用的模板                               agents.read
+GET    /open/v1/projects[/{id}]                     它能管的项目（配置，不给内容）           projects.write 或 services.publish
+POST   /open/v1/projects                            建项目 {name, description, brief, members[]}，
+                                                    可再带 {blueprint, params, roles: {角色: 成员 id}, digest}   projects.write
+PATCH  /open/v1/projects/{id}                       描述、纲要、角色                         projects.write
+PUT    /open/v1/projects/{id}/members/{agent}       拉进来（开放的 Agent：所有者先成为参与者）；DELETE 移出
+PUT    /open/v1/projects/{id}/files/{path}          上传资料（请求体就是文件，≤5 MB）
+PATCH  /open/v1/projects/{id}/access                {path, rule} 可见范围
+POST   /open/v1/projects/{id}/skills                {name, description, body} 项目技能
+POST   /open/v1/projects/{id}/plugins               {name, digest?} 只从部署方目录装
+POST   /open/v1/projects/{id}/services              发布服务；PATCH / DELETE …/services/{sid}；GET …/usage   services.publish
+GET    /svc/agents/{service}                        服务名片                                 services.call
+POST   /svc/agents/{service}/chat                   {message, session_id?} → SSE             services.call
+POST   /svc/sessions/{session_id}/interrupt         中断                                     services.call
 ```
 
-令牌只存 sha256、只在签发时显示一次、重签即作废；限频按应用计。
+- 要确认的事（模板、插件）第一次返回 409 和 `{confirm, digest}`，带上 `digest` 再来一次才装：和网页上的确认卡一样，先看再装。
+- 认不出、撤销、停用的令牌 401；没有那个 scope 403；每把令牌每分钟最多 600 次（429）。
 
 ## 6. 调用服务
 
-就是项目服务的第二期（[project-services.md](project-services.md) 第 6 节）：标准 HTTP 形状 `/svc/agents/{service}/chat`。
+就是项目服务的第二期（[project-services.md](project-services.md) 第 6 节）：标准 HTTP 形状 `/svc/agents/{service}/chat`，
+`{service}` 是服务 id。流里先是 `session`（会话 id 就是这个服务会话的对话 id，续接时带回来），之后 `delta`（入口这一轮说的话，
+以及委托出去还在等时的中途回复）、`tool`（只给工具名与一行摘要）、最后 `done`（这一串做完时的最终回复）或 `error`。
+和外部平台的标准形状一字不差：另一个 Matrix 用内置的 `standard` 驱动、`url` 填 `…/svc`、API Key 填应用令牌就能把服务接成外部平台 Agent。
 调用方是令牌代表的主体：系统账号调用时，调用方就是这个系统账号，业务授权用系统账号自己的连接器（第 3 节）；代表一个人时是那个人。
 SSO 改造以后，系统账号还可以带上终端用户的身份，按那个用户调用（随登录改造一起定）。
 
@@ -101,7 +112,7 @@ SSO 改造以后，系统账号还可以带上终端用户的身份，按那个�
 应用的每次写操作记进档案日志：`by_user` 是令牌代表的主体（授权人或系统账号），`via_app` 是应用 id；群聊里的事件写成
 “maya 经「报销系统」发布了服务…”。管理后台的“外部应用”页看每个应用的调用次数、最近操作与它主持的项目（只看计数与类别）。
 
-## 8. 不变量 30（草案）
+## 8. 不变量 30
 
 **外部应用只以授权它的人或它自己的系统账号的名义、在授权范围内操作**：做的事等于那个主体本来就能做的、再交令牌的 scope 与项目范围；
 令牌拿不到内容（对话、过程、私有目录、凭证；它自己调用服务的会话除外）；每次写操作都留下“经哪个应用”；撤销立即生效。
@@ -109,18 +120,36 @@ SSO 改造以后，系统账号还可以带上终端用户的身份，按那个�
 
 ## 9. 分期
 
-1. **应用与身份**：应用登记（管理后台）；两种令牌；系统账号与负责人；“我的授权”；开放 Agent 给应用；`/open/v1/agents`、`/open/v1/blueprints`。
-2. **组与发**：建项目（直接建 / 用模板）、成员、资料、技能、目录插件；服务的发布与用量。
-3. **调**：项目服务第二期（服务密钥 / 应用令牌 + 标准 HTTP 形状）。
+1. **应用与身份（已实现）**：应用登记（管理后台）；两种令牌；系统账号与负责人；“外部应用”页（我的授权、我负责的系统账号）；开放 Agent 给应用；查。
+2. **组与发（已实现）**：建项目（直接建 / 用模板）、成员、纲要、角色、资料与可见范围、技能、目录插件；服务的发布与用量；经应用留痕。
+3. **调（已实现）**：`/svc/*` 标准 HTTP 形状，凭应用令牌。
 4. **SSO**：随登录改造。
 5. 可选：管理能力包成 MCP 服务，让外部平台上的 Agent 也能组项目。
 
 ## 10. 待定
 
-1. **代表一个人时的项目范围**：默认“只管它自己建的项目”，还是允许授权人把已有项目交给它管。
-2. **负责人交接**：负责人离职时管理员换人；系统账号停用时它主持的项目怎么办（只读、转交给某个负责人）。
+1. **负责人交接**：负责人离职时管理员换人（已能换）；系统账号停用时它主持的项目怎么办（只读、转交给某个负责人）。
 
 ## 11. 暂不做
 
 - **平台 Agent 的审批与提问**（2026-11-18 用户定先不管）：现在回不到 Matrix（远程运行时没有）。以后要补，可以在 `/mcp/remote` 开
   `request_approval` / `ask_user`，审批照 Matrix 的规则发（个人 Agent 给所有者，公共 Agent 与服务里给调用方），只能算 `advisory`。
+
+## 12. 实现说明（2026-11-18）
+
+| 部分 | 在哪里 |
+| --- | --- |
+| 模型 | `models.ExternalApp`、`AppGrant`（令牌只存 sha256）、`User.kind / managers / app_id`、`AgentNode.open_to`、`Project.via_app`、`APP_SCOPES` |
+| 引擎 | `matrix/apps.py`（`AppsMixin`，混入 `Network`）：管理员（`create_app` / `update_app` / `issue_system_token`）、用户（`apps_for` / `grant_app` / `revoke_grant` / `set_agent_open`）、负责人（`system_connections` / `authorize_system_connector`）、令牌（`app_context`：认令牌、查 scope、限频）、查组发（`open_*`，项目范围 `_app_project`）、调（`svc_card` / `svc_session` / `svc_interrupt`）；留痕 `via_app()`（档案日志 `via_app`、群聊事件后缀“（经「应用」）”） |
+| 引擎里改的地方 | `hosted_project` / `is_host` 认负责人；`is_admin` 不认系统账号；`invite` 不邀请系统账号；`project_view` 写“应用名（负责人 …）”；`auth.login` / `issue_reset` 拒绝系统账号 |
+| 接口 | `matrix/open_server.py`（`/open/v1/*`、`/svc/*`）；`server.py` 的 `/api/admin/apps*`、`/api/apps*`、`/api/grants/*`、`/api/agents/{id}/open`、`/api/system-accounts/*` |
+| 界面 | 管理后台“外部应用”（登记、签 / 重签系统账号令牌、负责人、停用）；“更多 → 外部应用”（我授权的应用、签令牌、我负责的系统账号与它的连接器）；Agent 设置里的“开放给应用” |
+| 测试 | `tests/test_open_api.py`（含用真实 HTTP 服务与内置 `standard` 驱动接 `/svc`） |
+
+**限制**：
+
+- 用模板时，应用先建项目、再把模板装进去：模板里的每个角色都要指给 `members` 里的成员（不新建 Agent），模板里的项目名、
+  `g.blueprint` 标记不写（装进已有项目的路径）。
+- `/svc` 一次请求等到这一串做完（入口委托出去也等），最多 15 分钟；超时返回 `error`，带着 `session_id` 再问可以接着拿。
+- 应用拿不到项目里的审批卡、提问卡：这些照常发给人（个人 Agent 的所有者、负责人、调用方本人）。
+- 取消开放只影响之后：已经在项目里的照常，要退出就退出那个项目。

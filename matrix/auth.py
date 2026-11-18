@@ -65,9 +65,9 @@ def login(store: Store, email: str, password: str) -> tuple[User, str]:
         user = next((u for u in store.users.values() if u.email == email), None)
         # 不存在的邮箱也算一次哈希，不让响应时间暴露邮箱是否注册过
         expected = user.password_hash if user else _hash(password, b"0" * 16)
-        got = _hash(password, bytes.fromhex(user.salt) if user else b"1" * 16)
-        if user is None or not hmac.compare_digest(expected, got):
-            raise AuthError("邮箱或密码不对")
+        got = _hash(password, bytes.fromhex(user.salt) if user and user.salt else b"1" * 16)
+        if user is None or user.kind == "system" or not hmac.compare_digest(expected, got):
+            raise AuthError("邮箱或密码不对")  # 业务系统账号不能登录网页（docs/open-api.md）
         token = _new_session(store, user.id)
         store.save()
     return user, token
@@ -97,6 +97,9 @@ def _reset_hash(token: str) -> str:
 
 
 def issue_reset(store: Store, user_id: str, by: str | None = None) -> tuple[str, float]:
+    u = store.users.get(user_id)
+    if u is not None and u.kind == "system":  # 业务系统账号没有密码、不能登录（docs/open-api.md）
+        raise AuthError("业务系统账号不能登录，也不能重置密码")
     """给 user_id 签发重置令牌；返回 (令牌明文, 过期时间)。调用方负责确认 by 是管理员。"""
     token = secrets.token_urlsafe(32)
     now = time.time()
