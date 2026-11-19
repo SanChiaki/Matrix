@@ -3,6 +3,7 @@
 > 状态：**第 1–3 期已实现**，不变量 30，实现说明见第 12 节；第 4 期（SSO）随登录改造。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #73。相关设计：[project-services.md](project-services.md)（项目服务，不变量 29）、
 > [public-agents.md](public-agents.md)（不变量 27）、[remote-agents.md](remote-agents.md)（标准 HTTP 形状，不变量 28）、[blueprints.md](blueprints.md)（模板）。
 > 调研：research: project-publishing#external-apps。
+> 业务系统怎么对接（拿令牌、调接口、检查清单）见 [open-api-integration.md](open-api-integration.md)。
 
 ## 1. 要解决什么
 
