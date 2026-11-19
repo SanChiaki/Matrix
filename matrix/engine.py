@@ -632,8 +632,7 @@ class Network(AppsMixin):
             g = Project(id=new_id("prj"), name=name.strip(), description=description.strip(),
                         member_ids=self._check_members(member_ids, actor), owner_id=actor)
             self.store.projects[g.id] = g
-            conv = self._project_chat(g)
-            self._bring_assistant(g, actor)
+            conv = self._project_chat(g)  # 助理不跟着进来：开项目会话时才问（不变量 18）
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
         self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
@@ -666,11 +665,7 @@ class Network(AppsMixin):
         return g
 
     def _check_removable(self, g: Project, agent_id: str, actor: str | None) -> None:
-        """调用方持有锁。主持人能移出任何成员；参与者只能移出自己的 Agent。人在项目里时，他的助理谁都不能移出。"""
-        for uid in g.people:
-            if (mine := self.assistant_of(uid)) is not None and mine.id == agent_id:
-                raise NetworkError(f"{mine.name} 是 {self._email(uid)} 的助理：这个人在项目里时不能移出"
-                                   "（先换一个助理）")
+        """调用方持有锁。主持人能移出任何成员；参与者只能移出自己的 Agent。助理和别的成员一样（移出后它的会话不能再发消息）。"""
         a = self.store.agents.get(agent_id)
         if actor is None or g.owner_id in (None, actor) or (a is not None and (a.maintained_by(actor) or a.is_public)):
             return  # 公共 Agent 谁都能拉进来，也谁都能移出（docs/public-agents.md 决策 8）
@@ -789,7 +784,6 @@ class Network(AppsMixin):
             if accept:
                 g.participants.append(actor)
                 self._people_event(g, f"{self._email(actor)} 加入了项目")
-                self._bring_assistant(g, actor)
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
         self._emit_project_chat(g)
@@ -3627,16 +3621,26 @@ class Network(AppsMixin):
             self._member_events(g, [a.id], [], f"（{self._email(user_id)} 的助理）")
         return a
 
-    def create_session(self, project_id: str, title: str = "", actor: str | None = None) -> Conversation:
+    def create_session(self, project_id: str, title: str = "", actor: str | None = None,
+                       join: str | None = None) -> Conversation:
         """开一个项目会话。这个人在项目里已有一个还没发过消息的会话（同一个助理、没归档）时沿用它，
-        不再新建：没发消息的会话不进侧栏，反复点“新会话”不该攒下一串空会话。"""
+        不再新建：没发消息的会话不进侧栏，反复点“新会话”不该攒下一串空会话。
+        助理不会自己进项目（不变量 18）：还不在项目里时先问（NeedsConfirm，digest 是助理 id），
+        带着 join=那个 id 再来一次才把它加进来；这期间换了助理就再问一次。"""
         with self._lock:
             g = self.visible_project(project_id, actor)
             user = actor if actor is not None else g.owner_id
-            joined = (a := self.assistant_of(user)) is not None and a.id not in g.member_ids
-            a = self._bring_assistant(g, user)  # 已有项目：第一次开会话时助理才加入
+            a = self.assistant_of(user)
             if a is None:
                 raise NetworkError("你还没有助理：先创建一个 Agent，或指定一个作为助理")
+            joined = a.id not in g.member_ids
+            if joined and actor is not None and join != a.id:  # actor=None 是网络自己调（不用问）
+                raise NeedsConfirm(f"你的助理「{a.name}」还不在项目里：加入后才能开会话", [
+                    f"把「{a.name}」加入项目「{g.name}」：成员列表和群聊里都看得到它，群聊里能被 @",
+                    "项目会话只有你看得到，没 @ 任何人时由它回答",
+                    "不想要时可以把它移出项目，之后它的会话不能再发消息"], a.id)
+            if joined:
+                self._bring_assistant(g, user)
             empty = next((c for c in self.store.conversations.values() if c.kind == "session" and c.project_id == g.id
                           and c.owner_id == user and c.agent_id == a.id and not c.archived and not c.messages), None)
             if empty is not None:

@@ -7,10 +7,11 @@
   私有目录在共享项目里按来源场合挂载（不变量 22，[projects.md](../projects.md) 第 6 节）。
 - **助理**（`User.assistant_id`，`Network.assistant_of`）：注册时网络给没有 Agent 的人建一个（`ensure_assistant`，见 [assistant.md](assistant.md)）；
   没指定时是用户第一个创建的 Agent（`Store.default_assistants`，删掉后取下一个），
-  `PUT /api/me/assistant` 换。人进项目（创建、接受邀请）时 `_bring_assistant` 把助理加进成员并在群聊记一条事件；
-  人在项目里时助理不能移出（`_check_removable`）。换助理不动已有项目，新助理在下次进项目或开会话时加入。
+  `PUT /api/me/assistant` 换。助理不会自己进项目（不变量 18）：只有开项目会话、这个人确认之后，
+  `_bring_assistant` 才把它加进成员并在群聊记一条事件；助理和别的成员一样能移出。换助理不动已有项目。
 - **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是开会话时的助理）：
-  `POST /api/projects/<id>/sessions` 新建（已有项目里助理还不是成员时这时才加入；这个人已有还没发过消息的会话时沿用它，
+  `POST /api/projects/<id>/sessions` 新建（助理还不是成员时返回 409 + `confirm` + `digest`（助理 id），带 `join: <digest>`
+  再发一次才加入并开会话，这期间换了助理就再问；这个人已有还没发过消息的会话时沿用它，
   侧栏也只列出发过消息的会话），`GET` 列出自己的，
   `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）。只有它的人看得到（不变量 18）；
   人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；助理不在项目里了，会话不能再发消息。

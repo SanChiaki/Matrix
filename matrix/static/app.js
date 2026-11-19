@@ -995,8 +995,8 @@ function renderAgentEditor(isNew = false) {
       </fieldset>
       <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
       ${a ? (S.me?.assistant_id === a.id
-        ? '<p class="hint"><span class="tag ok">你的助理</span> 你加入项目时它跟着加入，项目会话里由它陪你聊。</p>'
-        : a.public_status ? "" : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 你加入项目时助理跟着加入，项目会话里由它陪你聊。</p>') : ""}
+        ? '<p class="hint"><span class="tag ok">你的助理</span> 项目会话里由它陪你聊（它不会自己进项目：第一次在项目里开会话时问你）。</p>'
+        : a.public_status ? "" : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 项目会话里由它陪你聊（第一次在项目里开会话时问你要不要把它加进项目）。</p>') : ""}
       <p class="hint">它只为你工作。要和别人协作，把它带进共享项目：别人可以在那里 @ 它，但它仍然以你的名义、用你的资源运行，工作区外的操作由你审批。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${a ? "保存" : "创建"}</button>
@@ -1203,8 +1203,8 @@ function renderProjectEditor(isNew = false) {
       <div class="field"><label for="gf-name">名称</label><input id="gf-name" name="name" required value="${esc(x.name)}"></div>
       <div class="field"><label for="gf-desc">描述</label><textarea id="gf-desc" name="description" rows="2">${esc(x.description)}</textarea></div>
       <fieldset class="checks"><legend>你的 Agent</legend>
-        ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${x.member_ids.includes(a.id) ? "checked" : ""}>
-          <span class="opt">${esc(a.name)}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
+        ${mine.map((a) => `<label><input type="checkbox" name="member" value="${esc(a.id)}" ${x.member_ids.includes(a.id) || (!g && a.id === S.me?.assistant_id) ? "checked" : ""}>
+          <span class="opt">${esc(a.name)}${a.id === S.me?.assistant_id ? ' <span class="muted">（助理）</span>' : ""}<small>${esc(a.authority.join(" · ") || "无权限")}</small></span></label>`).join("") || '<p class="hint">你还没有 Agent。</p>'}
       </fieldset>
       ${publicBoxes(x.member_ids || [])}
       ${theirs.length ? `<p class="hint">另有 ${theirs.length} 个别人的 Agent：${theirs.map((id) => esc(aname(id))).join("、")}（在群聊侧栏里移出）。</p>` : ""}
@@ -3474,7 +3474,11 @@ function renderThread() {
     catch (err) { alert(err.message); }
   });
   $("#sess-new")?.addEventListener("click", async () => {
-    try { const r = await api(`/api/projects/${g.id}/sessions`, { method: "POST", body: {} }); await reload(); location.hash = r.id; }
+    try {  // 助理还不在项目里：先问一句再加进来（不变量 18）
+      const r = await withPluginConfirm((c, digest) => api(`/api/projects/${g.id}/sessions`, { method: "POST", body: c ? { join: digest } : {} }), "加入并开会话");
+      if (!r) return;
+      await reload(); location.hash = r.id;
+    }
     catch (err) { alert(err.message); }
   });
   const patchSession = async (body) => {

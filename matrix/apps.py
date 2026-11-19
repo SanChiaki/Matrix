@@ -89,7 +89,7 @@ class AppsMixin:
                     self._drop_participant(g, uid, f"{self._email(uid)} 不再是负责人，退出了项目")
 
     def _join_as_participant(self: "Network", g: Project, uid: str, text: str) -> None:
-        """调用方持有锁。和接受邀请一样：成为参与者、助理跟着进来、群聊里记一条。"""
+        """调用方持有锁。和接受邀请一样：成为参与者、群聊里记一条（助理不跟着进来，不变量 18）。"""
         if uid in g.people:
             return
         if not g.shared:
@@ -97,7 +97,6 @@ class AppsMixin:
         g.invited = [x for x in g.invited if x != uid]
         g.participants.append(uid)
         self._people_event(g, text)
-        self._bring_assistant(g, uid)
 
     # ================= 管理员：应用与系统账号 =================
     def _admin(self: "Network", actor: str | None) -> None:

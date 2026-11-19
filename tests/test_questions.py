@@ -77,7 +77,8 @@ def test_seat_question_goes_to_the_person_who_asked(tmp_path: Path):
     net.invite(g.id, "alice@x.io", actor=bob)
     net.respond_invitation(g.id, True, actor=alice)
     chat = net.project_chat(g.id, actor=bob)
-    assert pub.id in g.member_ids
+    assert pub.id not in g.member_ids  # 助理不会自己进项目（不变量 18）
+    net.add_member(g.id, pub.id, actor=alice)
     net.send_message(chat.id, "@Pub 写个报告", actor=bob)
     q = when(lambda: net.pending_questions(bob))[0]
     assert q.agent_id == pub.id and q.target_user_id == bob and q.items[0]["options"][1]["label"] == "PDF"

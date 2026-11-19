@@ -102,6 +102,7 @@ def test_discovery_lists_public_own_and_opened_agents_only(tmp_path: Path):
 # ================= 第 2 期：组与发 =================
 def test_system_account_builds_a_project_and_publishes_a_service(tmp_path: Path):
     """不变量 30：系统账号建项目当主持人；负责人成为参与者、等同主持人；开放的个人 Agent 拉进来时所有者成为参与者；
+    成员只有应用点名的那些，负责人、所有者的助理都不跟着进来（不变量 18）；
     写操作经应用留痕；令牌只拿到配置，拿不到群聊；能发布服务、看用量。"""
     net, (ops, maya, ann, ben), pub, contract, app = setup(tmp_path)
     net.set_agent_open(contract.id, [app.id], actor=ann)
@@ -114,7 +115,7 @@ def test_system_account_builds_a_project_and_publishes_a_service(tmp_path: Path)
     p = r.json()
     g = net.store.projects[p["id"]]
     sysu = net.store.users[app.system_user_id]
-    assert g.owner_id == sysu.id and g.via_app == app.id and set(g.member_ids) >= {pub.id, contract.id}
+    assert g.owner_id == sysu.id and g.via_app == app.id and sorted(g.member_ids) == sorted([pub.id, contract.id])
     assert maya in g.participants and ann in g.participants and ben not in g.people
     assert "messages" not in json.dumps(p) and p["brief"] == "报销 5000 以下直接批"
     chat = net.project_chat(g.id, actor=maya)

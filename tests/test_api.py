@@ -127,7 +127,7 @@ def test_api_flow(tmp_path: Path):
 
     # 项目管理
     g2 = c.post("/api/projects", json={"name": "财务组", "member_ids": [names["Product Strategy Agent"], new["id"]]}).json()
-    assert c.patch(f"/api/projects/{g2['id']}", json={"member_ids": [new["id"]]}).status_code == 409  # 助理不能移出
+    assert c.patch(f"/api/projects/{g2['id']}", json={"member_ids": [new["id"]]}).status_code == 200  # 助理和别的成员一样能移出
     assert c.patch(f"/api/projects/{g2['id']}", json={"member_ids": [names["Product Strategy Agent"]]}).json()["member_ids"] \
         == [names["Product Strategy Agent"]]
     assert c.post("/api/projects", json={"name": "x", "member_ids": ["agent-nope"]}).status_code == 404
