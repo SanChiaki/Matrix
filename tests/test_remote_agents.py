@@ -240,8 +240,8 @@ class _SseClient:
                 elif not line and data:
                     self.events.put((ev, "\n".join(data)))
                     ev, data = "message", []
-        except Exception:  # noqa: BLE001 — 流被关掉
-            pass
+        except Exception:  # noqa: BLE001,S110 — 流被关掉：读线程就此结束
+            return
 
     def next(self, timeout: float = 5) -> tuple[str, str]:
         return self.events.get(timeout=timeout)
