@@ -280,3 +280,26 @@ def test_another_matrix_connects_with_the_standard_driver(tmp_path: Path):
     finally:
         server.should_exit = True
         t.join(timeout=5)
+
+
+def test_app_deletes_only_projects_it_created(tmp_path: Path):
+    """不变量 30：应用只能删经它建的项目；授权人交给它管的已有项目只能管、不能删；删除照主持人删除的规则走，
+    档案日志里记“经哪个应用删的”。"""
+    net, (ops, maya, ann, ben), pub, contract, app = setup(tmp_path)
+    other = net.create_project("Ann 的旧项目", "", [], actor=ann)
+    _, token = net.grant_app(ann, app.id, ["projects.write"], projects=[other.id])
+    c = TestClient(create_app(net))
+    h = bearer(token)
+    pid = c.post("/open/v1/projects", headers=h, json={"name": "临时项目", "members": [pub.id]}).json()["id"]
+    sid = net.create_service(pid, "tmp", "临时服务", actor=ann, entry=pub.id).id
+    r = c.delete(f"/open/v1/projects/{other.id}", headers=h)
+    assert r.status_code == 409 and "只能删经这个应用建的项目" in r.json()["detail"] and other.id in net.store.projects
+    log = net.store.project_dir(pid).parent / "log.jsonl"
+    assert c.delete(f"/open/v1/projects/{pid}", headers=h).json() == {"ok": True}
+    assert pid not in net.store.projects and net.store.project_services[sid].status == "withdrawn"
+    last = json.loads(log.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["action"] == "project.delete" and last["via_app"] == app.id and last["by_user"] == ann
+    assert c.delete(f"/open/v1/projects/{pid}", headers=h).status_code == 404
+    _, readonly = net.grant_app(ann, app.id, ["agents.read"])
+    assert c.delete(f"/open/v1/projects/{other.id}", headers=bearer(readonly)).status_code == 403
+

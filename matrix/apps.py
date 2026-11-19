@@ -483,6 +483,18 @@ class AppsMixin:
             self.add_member(g.id, a.id, actor=a.owner_id if opened else c.principal)
         return self.open_project(c, project_id)
 
+    def open_delete_project(self: "Network", c: AppContext, project_id: str) -> None:
+        """删项目：只能删经这个应用建的（授权人另外交给它管的已有项目，只能管、不能删）。规则同主持人删除：
+        有进行中的对话时不能删；发布物与服务一并撤回，服务会话一起删，群聊归档为只读。档案日志里留一条“经哪个应用删的”。"""
+        from .engine import NetworkError
+        with self.via_app(c.app):
+            with self._lock:
+                g = self._app_project(c, project_id)
+                if g.via_app != c.app.id:
+                    raise NetworkError("只能删经这个应用建的项目：这个项目是授权人交给它管的，删除请在 Matrix 里由主持人操作")
+                self._archive_changed(g, "project.delete", by_user=c.principal)
+            self.delete_project(g.id, actor=c.principal)
+
     def open_remove_member(self: "Network", c: AppContext, project_id: str, agent_id: str) -> dict[str, Any]:
         with self.via_app(c.app):
             with self._lock:

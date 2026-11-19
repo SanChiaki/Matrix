@@ -126,6 +126,11 @@ def install(app: FastAPI, network: Network) -> None:
     def open_create_project(body: OpenProjectIn, request: Request) -> dict:
         return network.open_create_project(ctx(request, "projects.write"), **body.model_dump())
 
+    @app.delete("/open/v1/projects/{project_id}")
+    def open_delete_project(project_id: str, request: Request) -> dict:
+        network.open_delete_project(ctx(request, "projects.write"), project_id)
+        return {"ok": True}
+
     @app.patch("/open/v1/projects/{project_id}")
     def open_update_project(project_id: str, body: OpenProjectPatch, request: Request) -> dict:
         return network.open_update_project(ctx(request, "projects.write"), project_id, **body.model_dump(exclude_unset=True))
