@@ -52,6 +52,13 @@
 - **试连不要会话 id**：平台保存 MCP 配置时会先调 `initialize` / `tools/list` 试连，那时不在任何会话里。这两个和 `ping` 不执行任何东西，只要密钥对就回答、不等待；`tools/list` 没落到某一轮时给全部网络工具的说明，落到某一轮时给这一轮能用的。**只有 `tools/call`** 必须带 Matrix 发起、还没结束的会话 id。试连不算“连上过”，界面上的“完整接入”要等第一次落到某一轮的调用。
 - **结束即失效**：一轮结束就解除绑定，晚到的回调（包括停了以后还在跑的）一律拒绝。
 - **并发**：同一个平台 Agent 可以同时跑多个席位，按会话 id 区分，不用串行。
+- **两种传输，同一个地址**：`POST /mcp/remote` 是 Streamable HTTP（一次一条 JSON-RPC，响应就在这次 HTTP 响应里）；
+  只支持旧版传输（MCP 2024-11-05 的 HTTP+SSE）的平台 `GET /mcp/remote` 开一条 SSE 流，第一条 `endpoint` 事件给出这条流专用的
+  消息地址 `/mcp/remote/messages?session_id=…`，JSON-RPC 发到那里回 202、响应作为 `message` 事件从流里回来（`matrix/mcp_sse.py`）。
+  两种走同一个 `remote_mcp`，密钥与会话规则一样：开流就要密钥对（不对 401），每个平台 Agent 同时最多 20 条流；
+  消息地址只对开着的流有效，流断了 404；POST 没带密钥就沿用开流时的，带了就必须是同一个 Agent 的；
+  平台会话 id 先看这次 POST 的请求头，没有再用开流时的——所以平台要么每次 POST 都带会话 id，要么每个会话各开一条流。
+  空闲时每 15 秒发一行注释保活。
 
 ## 5. 凭证与调用方授权
 
@@ -82,7 +89,7 @@
 | 运行时 | `RemoteRuntime`：读流、转事件、超时与终止时中断、结束时解除绑定；`remote_agents.capabilities` |
 | 绑定 | `Bindings`（按（Matrix Agent, 平台会话 id）绑定这一轮的 `ToolBridge`，带等待） |
 | 引擎 | `AgentNode.remote`；`add_remote_agent`、`set_remote_api_key`、`issue_remote_key`、`_remote_call`（凭证与调用方请求头）、`remote_mcp`（JSON-RPC：initialize / ping / tools/list / tools/call）；`runtime_for`、`capabilities`、`home_mounted` |
-| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（不走登录，Caddy 里不加 basic auth） |
+| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，Caddy 里不加 basic auth |
 | 界面 | Agent 页“接入外部平台的 Agent”；外部 Agent 的设置里“外部平台”一节（接入状态、签 / 重签密钥、换 API Key） |
 | 样板与测试 | `examples/remote-agent/demo_platform.py`（演示平台）；`tests/test_remote_agents.py` |
 

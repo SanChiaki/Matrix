@@ -867,7 +867,7 @@ function remoteSection(a) {
 
 // 密钥只显示一次：签完以后界面会因为 Agent 更新而重画，所以先记在页面状态里，离开这个 Agent 就丢掉
 const remoteKeyBox = (k) => `<div class="warn-box"><p>只显示这一次，复制到平台上这个 Agent 的 MCP 设置里：</p>
-  <dl><dt>地址</dt><dd><code>${esc(location.origin + k.path)}</code></dd>
+  <dl><dt>地址</dt><dd><code>${esc(location.origin + k.path)}</code>（传输方式选 Streamable HTTP 或 SSE 都行）</dd>
   <dt>请求头</dt><dd><code>${esc(k.header)}: ${esc(k.value)}</code></dd>
   <dt>会话 id</dt><dd>平台回调时要在 <code>${esc(k.session_header)}</code> 里带上平台会话 id（平台自己填）</dd></dl></div>`;
 

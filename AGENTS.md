@@ -82,6 +82,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
 | `matrix/apps.py` | 外部应用（不变量 30）：`AppsMixin` 混入 `Network`。应用登记、业务系统账号与负责人、令牌（`app_context`：认令牌、scope、限频）、开放 Agent、查 / 组 / 发（`open_*`，项目范围 `_app_project`）、调（`svc_*`）、经应用留痕 `via_app()` |
 | `matrix/open_server.py` | 外部应用的接口：`/open/v1/*` 与 `/svc/*`（标准 HTTP 形状，SSE），只认 `Authorization: Bearer mat_…` |
+| `matrix/mcp_sse.py` | `/mcp/remote` 的旧版 MCP 传输（HTTP+SSE）：`GET /mcp/remote` 开流、`POST /mcp/remote/messages` 发消息，规则同 `remote_mcp`（不变量 28） |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |
 | `matrix/plugin_service.py` | 插件服务（不变量 24）的客户端：网络托管的 stdio MCP 进程（`ServiceHost` 按项目 × 插件一个，按需启动、空闲停掉、版本换了重启、连续起不来暂停；最小环境 `service_env`；按带哈希的锁文件建依赖环境 `build_env`）与远程 MCP（`RemoteService`，每次调用带 `sign_token` 签的项目令牌；目录里的用部署方的密钥，自己装的每个安装一把）；工具、资源都走标准 MCP。工具按原名 `<插件>__<工具>` 经 `mcp_server.py` 的 `__list_tools__` 动态列出；挂点与工具在 `engine.py`「插件服务」一节 |
 | `matrix/blueprints.py` | 模板（[docs/blueprints.md](docs/blueprints.md)）：格式与校验、`{param:…}` / `{role:…}` 占位符、发布时的可移植检查、`BlueprintStore`（`<data>/blueprints/<id>/v<N>/`）；发布、可见性、用模板建项目在 `engine.py`「模板」一节 |
