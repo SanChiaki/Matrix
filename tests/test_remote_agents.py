@@ -212,3 +212,120 @@ def test_platform_probe_without_a_session_lists_tools_but_cannot_call(env: Env):
     assert out["error"]["code"] == -32600
     assert post({"jsonrpc": "2.0", "id": 1, "method": "initialize"}, {"Authorization": "Bearer wrong"}).status_code == 401
     assert not a.remote["mcp_at"]  # 试连不算完整接入
+
+
+class _SseClient:
+    """旧版 MCP 传输的客户端：后台线程读 SSE 流，事件按到达顺序进队列。"""
+
+    def __init__(self, base: str, headers: dict[str, str]):
+        import queue
+        import threading
+
+        import httpx
+        self.events: queue.Queue = queue.Queue()
+        self._http = httpx.Client(base_url=base, timeout=10)
+        self._cm = self._http.stream("GET", "/mcp/remote", headers={**headers, "Accept": "text/event-stream"})
+        self.resp = self._cm.__enter__()
+        if self.resp.status_code == 200:
+            threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self):
+        ev, data = "message", []
+        try:
+            for line in self.resp.iter_lines():
+                if line.startswith("event:"):
+                    ev = line[6:].strip()
+                elif line.startswith("data:"):
+                    data.append(line[5:].strip())
+                elif not line and data:
+                    self.events.put((ev, "\n".join(data)))
+                    ev, data = "message", []
+        except Exception:  # noqa: BLE001,S110 — 流被关掉：读线程就此结束
+            return
+
+    def next(self, timeout: float = 5) -> tuple[str, str]:
+        return self.events.get(timeout=timeout)
+
+    def post(self, url: str, body: dict, headers: dict[str, str] | None = None):
+        return self._http.post(url, json=body, headers=headers or {})
+
+    def close(self):
+        import socket
+        sock = (ns := self.resp.extensions.get("network_stream")) and ns.get_extra_info("socket")
+        if sock is not None:  # 读线程还卡在 recv 上：直接断开连接，平台断线就是这样
+            sock.shutdown(socket.SHUT_RDWR)
+        self._cm.__exit__(None, None, None)
+        self._http.close()
+
+
+def test_legacy_sse_transport_follows_the_same_rules(env: Env):
+    """不变量 28：只支持旧版 MCP 传输（HTTP+SSE）的平台用同一个地址、同一把密钥接入：GET 开流，第一条 endpoint 事件
+    给出消息地址，POST 过去回 202、响应从流里回来。密钥不对开不了流；消息地址只对开着的流有效；
+    tools/call 照旧只认 Matrix 发起、还没结束的那一轮，平台会话 id 可以只在开流时带。"""
+    import socket
+    import threading
+
+    import uvicorn
+
+    from matrix.runtime import ToolBridge
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    key = env.connect_mcp(a.id, maya)
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    server = uvicorn.Server(uvicorn.Config(create_app(net), host="127.0.0.1", port=port, log_level="error"))
+    t = threading.Thread(target=server.run, daemon=True)
+    t.start()
+    for _ in range(100):
+        if server.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    clients: list[_SseClient] = []
+    try:
+        bad = _SseClient(base, {"Authorization": "Bearer wrong"})
+        clients.append(bad)
+        assert bad.resp.status_code == 401
+
+        c = _SseClient(base, {"Authorization": f"Bearer {key}"})
+        clients.append(c)
+        ev, url = c.next()
+        assert ev == "endpoint" and url.startswith("/mcp/remote/messages?session_id=")
+        assert c.post(url, {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                      {"Authorization": f"Bearer {key}"}).status_code == 202
+        ev, data = c.next()
+        assert ev == "message" and json.loads(data)["result"]["serverInfo"]["name"] == "matrix"
+        assert c.post(url, {"jsonrpc": "2.0", "method": "notifications/initialized"}).status_code == 202  # 没带密钥：沿用开流的
+        assert c.post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).status_code == 202
+        ev, data = c.next()  # 通知没有响应，下一条就是 tools/list 的
+        assert {"list_members", "delegate"} <= {x["name"] for x in json.loads(data)["result"]["tools"]}
+        call = {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_members", "arguments": {}}}
+        c.post(url, call)
+        assert json.loads(c.next()[1])["error"]["code"] == -32600  # 不在任何一轮里
+        assert c.post(url, call, {"Authorization": "Bearer wrong"}).status_code == 401
+        assert c.post("/mcp/remote/messages?session_id=nope", call).status_code == 404
+
+        net.remote_bindings.bind(a.id, "s-legacy", ToolBridge(url="", token="", handler=lambda n, _: (f"调用了 {n}", False)))
+        c2 = _SseClient(base, {"Authorization": f"Bearer {key}", "X-Session-Id": "s-legacy"})  # 会话 id 只在开流时带
+        clients.append(c2)
+        url2 = c2.next()[1]
+        c2.post(url2, call)
+        out = json.loads(c2.next()[1])["result"]
+        assert out == {"content": [{"type": "text", "text": "调用了 list_members"}], "isError": False}
+        assert a.remote["mcp_at"]
+        net.remote_bindings.unbind(a.id, "s-legacy")
+        c2.close()
+        clients.remove(c2)
+        for _ in range(50):  # 流断了，它的消息地址作废
+            if c.post(url2, call).status_code == 404:
+                break
+            time.sleep(0.05)
+        assert c.post(url2, call).status_code == 404
+    finally:
+        for x in clients:
+            x.close()
+        server.should_exit = True
+        t.join(timeout=5)

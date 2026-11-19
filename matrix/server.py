@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
-from . import open_server
+from . import mcp_sse, open_server
 from .remote_agents import PlatformCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
@@ -897,6 +897,8 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         if out is None:
             return Response(status_code=202)
         return JSONResponse(out)
+
+    mcp_sse.install(app, network)  # 同一个地址的旧版传输（HTTP+SSE）：GET 开流，消息发到流里给的地址
 
     # ---- 外部应用（docs/open-api.md，不变量 30）：管理员登记；用户授权；所有者开放 Agent；负责人代系统账号授权连接器 ----
     @app.get("/api/admin/apps")

@@ -8306,6 +8306,14 @@ class Network(AppsMixin):
             headers[spec.caller.header] = spec.caller.template.replace("{value}", value)
         return remote.RemoteCall(spec, str(info.get("agent")), headers)
 
+    def remote_agent_of_key(self, key: str) -> str | None:
+        """Matrix 密钥对应的平台 Agent id；不对就是 None。旧版 SSE 传输开流时先认密钥（mcp_sse.py）。"""
+        sha = hashlib.sha256(str(key).encode()).hexdigest()
+        with self._lock:
+            a = next((a for a in self.store.agents.values() if a.remote and a.remote.get("key_sha")
+                      and hmac.compare_digest(a.remote["key_sha"], sha)), None)
+            return a.id if a is not None else None
+
     def remote_mcp(self, key: str, session_id: str, msg: dict[str, Any]) -> dict[str, Any] | None:
         """平台回调 Matrix 的 MCP（Streamable HTTP，一次一条 JSON-RPC）。返回响应；通知返回 None。
         密钥不对：NetworkError("unknown key")（401），每个方法都要密钥。
