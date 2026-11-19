@@ -181,6 +181,9 @@ class AgentNode:
     # key_sha: Matrix 给它签的 MCP 密钥的 sha256（密钥只显示一次）, mcp_at: 平台第一次凭密钥连上 Matrix 的时间}。
     # 和 device_runtime 二选一；None = 不是外部平台的。发起会话用的平台 API Key 在保管库 remote-<Agent id>
     remote: dict[str, Any] | None = None
+    # 所有者主动开放给哪些外部应用（docs/open-api.md，不变量 30）：这些应用“查”得到它、能把它拉进自己主持的项目，
+    # 拉进去时所有者成为那个项目的参与者
+    open_to: list[str] = field(default_factory=list)
     # 该运行时最近一次握手声明的强制能力（权限 -> enforced/advisory/unavailable）。
     # 设备离线时用它，避免把"未知"当成"全都不行"而误收窄委托权限。
     enforcement: dict[str, str] = field(default_factory=dict)
@@ -336,6 +339,7 @@ class Project:
     file_access: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     skill_access: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     blueprint: dict[str, Any] | None = None   # 由模板建的：{id, name, title, version}
+    via_app: str | None = None           # 经哪个外部应用建的（docs/open-api.md，不变量 30）：代表个人的令牌默认只管这些
     setup_steps: list[dict[str, Any]] = field(default_factory=list)  # 由模板建的项目剩下的手工步骤：[{id, text, done}]
     archive_rev: int = 0                 # 档案（纲要 / 决定 / 文件 / 资源引用）每变一次 +1；席位与任务据此判断要不要重新推送
     created_at: float = field(default_factory=time.time)
@@ -634,9 +638,18 @@ class User:
     salt: str                            # hex
     assistant_id: str | None = None      # 助理：这个用户自己的一个 Agent，进项目时一定带上，项目会话的对话方
     created_at: float = field(default_factory=time.time)
+    # 业务系统账号（docs/open-api.md，不变量 30）：kind = "system"，没有密码、不能登录网页，只凭应用令牌调接口；
+    # managers 是负责人（真人），在网页上对它主持的项目等同主持人
+    kind: str = "user"                   # user | system
+    managers: list[str] = field(default_factory=list)
+    app_id: str | None = None            # 系统账号属于哪个外部应用
+
+    @property
+    def is_system(self) -> bool:
+        return self.kind == "system"
 
     def public(self) -> dict[str, Any]:
-        return {"id": self.id, "email": self.email, "assistant_id": self.assistant_id}
+        return {"id": self.id, "email": self.email, "assistant_id": self.assistant_id, "kind": self.kind}
 
 
 @dataclass
@@ -864,6 +877,57 @@ class ProjectService:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# 外部应用的授权范围（docs/open-api.md）
+APP_SCOPES: dict[str, str] = {
+    "agents.read": "查可用的 Agent 与模板",
+    "projects.write": "建项目、配置项目（成员、纲要、角色、资料、技能、目录插件）",
+    "services.publish": "发布、修改、撤回服务，看服务用量",
+    "services.call": "调用服务",
+}
+APP_TOKEN_PREFIX = "mat_"
+
+
+@dataclass
+class ExternalApp:
+    """外部应用（docs/open-api.md，不变量 30）：管理员登记。可以有一个业务系统账号（system_user_id）；
+    用户也可以授权它代表自己。scopes 是它能申请的授权范围上限。"""
+
+    id: str
+    name: str
+    description: str = ""
+    scopes: list[str] = field(default_factory=list)
+    status: str = "active"               # active | disabled
+    system_user_id: str | None = None
+    created_by: str | None = None
+    created_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class AppGrant:
+    """一把应用令牌：代表 user_id（授权它的人，或应用的系统账号）在 scopes 与项目范围内操作。令牌只存 sha256。
+    projects：代表个人时授权人另外交给它管的已有项目（它自己建的总能管）。"""
+
+    id: str
+    app_id: str
+    user_id: str
+    scopes: list[str]
+    token_sha: str
+    projects: list[str] = field(default_factory=list)
+    created_by: str | None = None
+    created_at: float = field(default_factory=time.time)
+    revoked_at: float | None = None
+    last_used_at: float | None = None
+    calls: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d.pop("token_sha")
+        return d
 
 
 @dataclass

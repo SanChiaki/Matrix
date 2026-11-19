@@ -763,16 +763,75 @@ function renderPublic(rows) {
   }
 }
 
+// ---------- 外部应用（docs/open-api.md，不变量 30） ----------
+const SCOPES = { "agents.read": "查 Agent 与模板", "projects.write": "建项目、配置项目", "services.publish": "发布服务、看用量", "services.call": "调用服务" };
+const emails = (v) => String(v || "").split(/[\s,，;；]+/).map((x) => x.trim()).filter(Boolean);
+
+async function loadApps() {
+  if (!$("#ap-scopes").dataset.ready) {
+    $("#ap-scopes").innerHTML += Object.entries(SCOPES).map(([k, v]) => `<label class="check"><input type="checkbox" name="scopes" value="${k}" checked>${esc(v)}</label>`).join("");
+    $("#ap-scopes").dataset.ready = "1";
+    $("#ap-new").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.target);
+      try {
+        renderApps(await api("/api/admin/apps", { method: "POST", body: { name: f.get("name"), description: f.get("description") || "",
+          scopes: f.getAll("scopes"), system: f.get("system") === "on", managers: emails(f.get("managers")) } }));
+        e.target.reset();
+      } catch (err) { $("#ap-error").textContent = err.message; }
+    });
+  }
+  try { renderApps(await api("/api/admin/apps")); } catch (e) { $("#ap-error").textContent = e.message; }
+}
+
+function renderApps(rows) {
+  $("#ap-error").textContent = "";
+  table("#t-apps", [
+    { label: "应用", html: (r) => `<b>${esc(r.name)}</b><div class="muted">${esc(r.description)}</div>` },
+    { label: "授权范围上限", html: (r) => esc(r.scopes.map((s) => SCOPES[s] || s).join("、")) },
+    { label: "业务系统账号", html: (r) => r.system ? `<code>${esc(r.system.email)}</code><div class="muted">负责人：${esc(r.system.managers.join("、"))}</div>
+        <div class="muted">${r.system.token ? `令牌签于 ${when(r.system.token.created_at)} · 调用 ${num(r.system.token.calls)} 次` : "还没签令牌"}</div>
+        <div class="muted">主持 ${r.system.projects.length} 个项目</div>` : '<span class="muted">没有（只能代表用户）</span>' },
+    { label: "用户授权", html: (r) => `${num(r.grants)} 把令牌 · ${num(r.calls)} 次调用` },
+    { label: "状态", html: (r) => r.status === "active" ? '<span class="pill on">启用</span>' : '<span class="pill off">停用</span>' },
+    { label: "", html: (r) => `${r.system ? `<button type="button" class="sm" data-ap="token" data-id="${esc(r.id)}">${r.system.token ? "重签令牌" : "签令牌"}</button>
+        <button type="button" class="sm" data-ap="managers" data-id="${esc(r.id)}">负责人</button> ` : ""}
+        <button type="button" class="sm ${r.status === "active" ? "danger" : ""}" data-ap="${r.status === "active" ? "disable" : "enable"}" data-id="${esc(r.id)}">${r.status === "active" ? "停用" : "启用"}</button>` },
+  ], rows, "还没有登记应用");
+  for (const b of $("#t-apps").querySelectorAll("button[data-ap]")) {
+    b.addEventListener("click", async () => {
+      const id = b.dataset.id, r = rows.find((x) => x.id === id);
+      try {
+        if (b.dataset.ap === "token") {
+          if (r.system.token && !confirm("重签后旧令牌立即作废，业务系统要换上新的。")) return;
+          const out = await api(`/api/admin/apps/${id}/system-token`, { method: "POST", body: { scopes: r.scopes } });
+          $("#ap-token").innerHTML = `<div class="notice"><b>${esc(r.name)} 的新令牌（只显示这一次）：</b> <code>${esc(out.token)}</code></div>`;
+          renderApps(await api("/api/admin/apps"));
+        } else if (b.dataset.ap === "managers") {
+          const v = prompt("负责人邮箱（逗号分隔，至少一个）", r.system.managers.join(", "));
+          if (v === null) return;
+          renderApps(await api(`/api/admin/apps/${id}`, { method: "PATCH", body: { managers: emails(v) } }));
+        } else {
+          if (b.dataset.ap === "disable" && !confirm("停用后它的所有令牌立即失效（重新启用后恢复）。")) return;
+          renderApps(await api(`/api/admin/apps/${id}`, { method: "PATCH", body: { status: b.dataset.ap === "disable" ? "disabled" : "active" } }));
+        }
+      } catch (e) { $("#ap-error").textContent = e.message; }
+    });
+  }
+}
+
 // ---------- 标签页 ----------
 function showTab() {
-  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im", "#public": "public" }[location.hash] || "usage";
+  const tab = { "#models": "models", "#plugins": "plugins", "#im": "im", "#public": "public", "#apps": "apps" }[location.hash] || "usage";
   for (const a of document.querySelectorAll(".admin-tabs a")) a.setAttribute("aria-current", a.dataset.tab === tab ? "page" : "false");
   $("#dash").hidden = tab !== "usage";
   $("#models").hidden = tab !== "models";
   $("#plugins").hidden = tab !== "plugins";
   $("#im").hidden = tab !== "im";
   $("#public").hidden = tab !== "public";
+  $("#apps").hidden = tab !== "apps";
   if (tab === "models") loadCatalog();
+  else if (tab === "apps") loadApps();
   else if (tab === "public") loadPublic();
   else if (tab === "plugins") loadPlugins();
   else if (tab === "im") loadIm();

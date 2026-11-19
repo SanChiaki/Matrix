@@ -62,6 +62,7 @@ from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, materia
                       RuntimeCapabilities, ToolBridge)
 from .store import Store
 from . import remote_agents as remote
+from .apps import AppsMixin
 from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage, tokens as usage_tokens
 
 
@@ -188,7 +189,7 @@ class NeedsConfirm(NetworkError):
         self.items, self.digest = items, digest
 
 
-class Network:
+class Network(AppsMixin):
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
@@ -237,6 +238,7 @@ class Network:
         self._cascades: dict[str, dict[str, Any]] = {}
         self._seat_cascade: dict[str, str] = {}
         self._hook_hits: dict[str, list[float]] = {}      # 外部回调限速
+        self._app_hits: dict[str, list[float]] = {}       # 应用令牌限频（不变量 30）
         self._frame_key = secrets.token_bytes(32)
         self.bus = EventBus()
         self._contexts: dict[str, ExecContext] = {}
@@ -410,8 +412,8 @@ class Network:
     def hosted_project(self, project_id: str, actor: str | None) -> Project:
         """只有所有者 / 主持人能做的操作（改名、纲要、资源引用、邀请、删除）。"""
         g = self.visible_project(project_id, actor)
-        if actor is not None and g.owner_id not in (None, actor):
-            raise NetworkError("只有主持人能这样做")
+        if actor is not None and g.owner_id not in (None, actor) and not self.manages(actor, g.owner_id):
+            raise NetworkError("只有主持人能这样做")  # 业务系统账号主持的项目：负责人等同主持人（不变量 30）
         return g
 
     def visible_conv(self, conv_id: str, actor: str | None) -> Conversation:
@@ -707,6 +709,8 @@ class Network:
     def _people_event(self, g: Project, text: str, about: str | None = None) -> None:
         """调用方持有锁。参与者变动写进群聊。about：说的是哪份资料 / 哪个技能（可见范围外的 Agent 收不到，不变量 26）。"""
         conv = self._project_chat(g)
+        if (app := self._via()) is not None:  # 经外部应用做的事，群聊里写明（不变量 30）
+            text = f"{text}（经「{app.name}」）"
         conv.messages.append(Message(id=new_id("msg"), role="event", text=text, about=about))
         conv.updated_at = time.time()
 
@@ -747,8 +751,8 @@ class Network:
         with self._lock:
             g = self.hosted_project(project_id, actor)
             user = next((u for u in self.store.users.values() if u.email == email.strip().lower()), None)
-            if user is None:
-                raise NetworkError(f"没有用户 {email.strip()}")
+            if user is None or user.is_system:
+                raise NetworkError(f"没有用户 {email.strip()}")  # 业务系统账号不能被邀请：它自己主持项目
             if user.id in g.people:
                 raise NetworkError(f"{user.email} 已经是参与者")
             if user.id in g.invited:
@@ -846,6 +850,8 @@ class Network:
         import json
         g.archive_rev += 1
         entry = {"ts": time.time(), "action": action, "by_user": by_user, "by_agent": by_agent, **detail}
+        if (app := self._via()) is not None:  # 经外部应用的写操作（不变量 30）
+            entry["via_app"] = app.id
         log = self.store.project_dir(g.id).parent / "log.jsonl"
         with log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1246,7 +1252,7 @@ class Network:
             d["invited_emails"] = {u: self._email(u) for u in g.invited} if actor in (None, g.owner_id) else {}
             if actor not in (None, g.owner_id):
                 d.pop("invited")
-            d["is_host"] = actor is None or g.owner_id in (None, actor)
+            d["is_host"] = actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id)
             if d["is_host"] and not g.shared:  # 第一次邀请前的确认框：对方进来会看到多少
                 d["chat_messages"] = sum(1 for m in self._project_chat(g).messages
                                          if m.role in ("user", "agent") and not m.audience)
@@ -3057,7 +3063,7 @@ class Network:
             if op == "context":
                 return {"project": {"id": g.id, "name": g.name, "kind": "joint" if g.shared else "internal", "shared": g.shared},
                         "plugin": {"name": m.name, "version": m.version, "title": m.title},
-                        "viewer": {"is_host": actor is None or g.owner_id in (None, actor)},
+                        "viewer": {"is_host": actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id)},
                         "tables": m.public()["tables"],
                         "permissions": list(m.page_permissions)}
             if op == "archive.read":
@@ -8527,11 +8533,12 @@ class Network:
         """部署方指定了管理员（--admins / MATRIX_ADMINS）就按邮箱认；没指定时是最早注册的那个人。"""
         with self._lock:
             u = self.store.users.get(user_id or "")
-            if u is None:
+            if u is None or u.is_system:  # 业务系统账号从不是管理员
                 return False
             if self.admins:
                 return u.email in self.admins
-            return u.id == min(self.store.users.values(), key=lambda x: x.created_at).id
+            first = min((x for x in self.store.users.values() if not x.is_system), key=lambda x: x.created_at, default=None)
+            return first is not None and u.id == first.id
 
     def admin_usage(self, actor: str | None, days: int = 30) -> dict[str, Any]:
         self._check(actor is None or self.is_admin(actor), "admin")
@@ -8839,7 +8846,8 @@ class Network:
                                   for q in self.store.questions.values()
                                   if q.conversation_id == conv_id and q.status == "pending" and q.target_user_id
                                   and (actor is None or q.target_user_id == actor)],
-                    "project_shared": bool(g and g.shared), "is_host": g is None or actor is None or g.owner_id in (None, actor),
+                    "project_shared": bool(g and g.shared),
+                    "is_host": g is None or actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id),
                     "is_home": self._is_home(conv),
                     "drafts": {d.id: self.draft_view(d) for d in self.store.drafts.values()
                                if d.home_id == conv.id and (actor is None or d.owner_id == actor)},
@@ -9004,7 +9012,12 @@ class Network:
         """调用方持有锁。列表与事件里的项目：邀请名单只给主持人。"""
         d = self._project_dict(g, actor)
         d["host_email"] = self._email(g.owner_id) if g.owner_id else None
-        if actor is not None and g.owner_id not in (None, actor):
+        host = self.store.users.get(g.owner_id or "")
+        if host is not None and host.is_system:  # 业务系统账号主持：写应用名与负责人（不变量 30）
+            app = self.store.apps.get(host.app_id or "")
+            d["host_email"] = f"{app.name if app else host.email}（负责人 {'、'.join(self._email(u) for u in host.managers)}）"
+            d["host_system"] = True
+        if actor is not None and g.owner_id not in (None, actor) and not self.manages(actor, g.owner_id):
             d.pop("invited")
             d["suggestions"] = [x for x in d["suggestions"] if x["by_user"] == actor]
         return d

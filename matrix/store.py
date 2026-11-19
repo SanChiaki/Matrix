@@ -18,7 +18,7 @@ from dataclasses import asdict, fields
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
-                     KnowledgeItem, Message, Project, Proposal, ProjectService, Question, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User,
+                     KnowledgeItem, Message, Project, Proposal, ProjectService, ExternalApp, AppGrant, Question, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User,
                      UserRequest,
                      new_id, seat_id)
 
@@ -217,6 +217,8 @@ class Store:
         self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
         self.releases: dict[str, Release] = {}    # 项目发出去的发布物（不变量 23）
         self.project_services: dict[str, ProjectService] = {}  # 项目服务（不变量 29）
+        self.apps: dict[str, ExternalApp] = {}        # 外部应用（不变量 30）
+        self.app_grants: dict[str, AppGrant] = {}     # 应用令牌（只存 sha256）
         self.im_channels: dict[str, ImChannel] = {}  # IM 机器人（个人的与部署方的）
         self.im_bindings: dict[str, ImBinding] = {}  # 人在 IM 机器人上的身份
         if self.path.exists():
@@ -324,6 +326,8 @@ class Store:
                 "schedules": [x.to_dict() for x in self.schedules.values()],
                 "releases": [r.to_dict() for r in self.releases.values()],
                 "project_services": [x.to_dict() for x in self.project_services.values()],
+                "apps": [x.to_dict() for x in self.apps.values()],
+                "app_grants": [asdict(x) for x in self.app_grants.values()],
                 "im_channels": [x.to_dict() for x in self.im_channels.values()],
                 "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
             }
@@ -432,6 +436,10 @@ class Store:
             self.releases[r["id"]] = Release(**_known(Release, r))
         for x in raw.get("project_services", []):  # 旧数据没有：缺省为空
             self.project_services[x["id"]] = ProjectService(**_known(ProjectService, x))
+        for x in raw.get("apps", []):
+            self.apps[x["id"]] = ExternalApp(**_known(ExternalApp, x))
+        for x in raw.get("app_grants", []):
+            self.app_grants[x["id"]] = AppGrant(**_known(AppGrant, x))
         for x in raw.get("im_channels", []):  # 旧数据没有：缺省为空
             self.im_channels[x["id"]] = ImChannel(**_known(ImChannel, x))
         for x in raw.get("im_bindings", []):

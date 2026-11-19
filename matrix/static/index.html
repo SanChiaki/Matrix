@@ -54,6 +54,8 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5h7.5l2.5 2.5v8.5H3z"/><path d="M5.5 7h5M5.5 9.5h5M5.5 12h3"/></svg>技能</button>
       <button type="button" class="tab" data-view="connectors" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 1.8v3M10 1.8v3"/><path d="M4 4.8h8v2.7a4 4 0 0 1-8 0z"/><path d="M8 11.5v2.7"/></svg>连接器</button>
+      <button type="button" class="tab" data-view="apps" aria-pressed="false">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="2.5" width="11" height="11" rx="2"/><path d="M6 8h4M8 6v4"/></svg>外部应用</button>
       <button type="button" class="tab" data-view="devices" aria-pressed="false">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3" width="11" height="8" rx="1.5"/><path d="M5.5 13.5h5"/></svg>设备</button>
       <button type="button" class="tab" data-view="network" aria-pressed="true">
@@ -222,6 +224,15 @@
       <ul id="release-list" class="cards"></ul>
     </div>
     <div class="pane" id="release-page" hidden></div>
+  </section>
+
+  <section id="view-apps" class="view" hidden aria-label="外部应用">
+    <div class="pane">
+      <div class="view-head">
+        <div><h1>外部应用</h1><p>管理员登记的业务系统：你签一把令牌，它就能代表你查 Agent、建项目、发布和调用服务。随时能撤销，它拿不到项目里的对话。</p></div>
+      </div>
+      <div id="apps-body"></div>
+    </div>
   </section>
 
   <section id="view-devices" class="view" hidden aria-label="设备">

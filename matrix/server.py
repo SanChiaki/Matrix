@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field, model_validator
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
+from . import open_server
 from .remote_agents import PlatformCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
@@ -319,6 +320,36 @@ class ServicePatch(BaseModel):
     plugins: list[str] | None = Field(None, max_length=30)
     readers: list[str] | None = Field(None, max_length=200)
     public: bool | None = None
+
+
+class AppIn(BaseModel):
+    """管理员登记外部应用（docs/open-api.md）；system=True 同时建它的业务系统账号，负责人按邮箱。"""
+    name: str = Field(..., min_length=1, max_length=80)
+    description: str = Field("", max_length=1000)
+    scopes: list[str] | None = Field(None, max_length=10)
+    system: bool = False
+    managers: list[str] | None = Field(None, max_length=20)
+
+
+class AppPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=80)
+    description: str | None = Field(None, max_length=1000)
+    scopes: list[str] | None = Field(None, max_length=10)
+    status: str | None = Field(None, pattern="^(active|disabled)$")
+    managers: list[str] | None = Field(None, max_length=20)
+
+
+class AppGrantIn(BaseModel):
+    scopes: list[str] = Field(..., min_length=1, max_length=10)
+    projects: list[str] | None = Field(None, max_length=100)
+
+
+class OpenToIn(BaseModel):
+    apps: list[str] = Field(default_factory=list, max_length=100)
+
+
+class SystemConnectorIn(BaseModel):
+    values: dict[str, str] = Field(default_factory=dict)
 
 
 class ServiceSessionIn(BaseModel):
@@ -866,6 +897,59 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         if out is None:
             return Response(status_code=202)
         return JSONResponse(out)
+
+    # ---- 外部应用（docs/open-api.md，不变量 30）：管理员登记；用户授权；所有者开放 Agent；负责人代系统账号授权连接器 ----
+    @app.get("/api/admin/apps")
+    def admin_apps(user: Me) -> list[dict]:
+        return network.admin_apps(user.id)
+
+    @app.post("/api/admin/apps")
+    def admin_create_app(body: AppIn, user: Me) -> list[dict]:
+        network.create_app(user.id, **body.model_dump())
+        return network.admin_apps(user.id)
+
+    @app.patch("/api/admin/apps/{app_id}")
+    def admin_update_app(app_id: str, body: AppPatch, user: Me) -> list[dict]:
+        network.update_app(user.id, app_id, **body.model_dump(exclude_unset=True))
+        return network.admin_apps(user.id)
+
+    @app.post("/api/admin/apps/{app_id}/system-token")
+    def admin_system_token(app_id: str, body: AppGrantIn, user: Me) -> dict:
+        grant, token = network.issue_system_token(user.id, app_id, body.scopes)
+        return {"token": token, "grant": grant.to_dict()}  # 只在这里出现一次
+
+    @app.delete("/api/admin/grants/{grant_id}")
+    def admin_revoke_grant(grant_id: str, user: Me) -> dict:
+        network.revoke_grant(user.id, grant_id)
+        return {"ok": True}
+
+    @app.get("/api/apps")
+    def my_apps(user: Me) -> dict:
+        return network.apps_for(user.id)
+
+    @app.post("/api/apps/{app_id}/grants")
+    def grant_app(app_id: str, body: AppGrantIn, user: Me) -> dict:
+        grant, token = network.grant_app(user.id, app_id, body.scopes, body.projects)
+        return {"token": token, "grant": grant.to_dict()}  # 只在这里出现一次
+
+    @app.delete("/api/grants/{grant_id}")
+    def revoke_grant(grant_id: str, user: Me) -> dict:
+        network.revoke_grant(user.id, grant_id)
+        return {"ok": True}
+
+    @app.put("/api/agents/{agent_id}/open")
+    def set_agent_open(agent_id: str, body: OpenToIn, user: Me) -> dict:
+        return network.agent_view(network.set_agent_open(agent_id, body.apps, actor=user.id), user.id)
+
+    @app.get("/api/system-accounts/{user_id}/connections")
+    def system_connections(user_id: str, user: Me) -> list[dict]:
+        return network.system_connections(user.id, user_id)
+
+    @app.post("/api/system-accounts/{user_id}/connectors/{connector_id}")
+    def system_connector(user_id: str, connector_id: str, body: SystemConnectorIn, user: Me) -> dict:
+        return network.authorize_system_connector(user.id, user_id, connector_id, body.values)
+
+    open_server.install(app, network)
 
     # ---- 公共 Agent（docs/public-agents.md，不变量 27） ----
     @app.get("/api/public-agents")
