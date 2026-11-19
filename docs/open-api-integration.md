@@ -9,7 +9,7 @@
 | 能力 | 说明 | 授权范围（scope） |
 | --- | --- | --- |
 | 查 | 列出能用的 Agent 与模板 | `agents.read` |
-| 组 | 建项目（直接建，或用模板建）；拉成员；写纲要、角色；上传资料、设可见范围；加项目技能；从部署方目录装插件 | `projects.write` |
+| 组 | 建项目（直接建，或用模板建）；拉成员；写纲要、角色；上传资料、设可见范围；加项目技能；从部署方目录装插件；删它自己建的项目 | `projects.write` |
 | 发 | 把项目作为服务发布、修改、撤回；看服务用量 | `services.publish` |
 | 调 | 调用服务（自己发布的，或别人开放给你的） | `services.call` |
 
@@ -174,6 +174,7 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py chat s
 | `GET /open/v1/projects` | — | 能管的项目列表 |
 | `GET /open/v1/projects/{id}` | — | 项目配置：`name`、`description`、`brief`、`members`、`participants`、`roles`、`files`（路径）、`skills`、`plugins`、`services`。**没有群聊与会话内容** |
 | `POST /open/v1/projects` | `{name, description?, brief?, members?: [agent id], blueprint?, params?, roles?: {角色 key: 成员 agent id}, digest?}` | 建项目，返回项目配置 |
+| `DELETE /open/v1/projects/{id}` | — | 删项目：**只能删经这个应用建的**（授权人另外交给它管的已有项目只能管、不能删，返回 409）。有进行中的对话时不能删（409）；发布的服务一并撤回，服务会话一起删，群聊归档为只读 |
 | `PATCH /open/v1/projects/{id}` | `{description?, brief?, roles?}` | `roles` 的格式同网页上的项目角色：`{key: {name, description, members: [agent id]}}` |
 | `PUT /open/v1/projects/{id}/members/{agent}` | — | 拉一个成员进来 |
 | `DELETE /open/v1/projects/{id}/members/{agent}` | — | 移出 |

@@ -85,6 +85,7 @@ GET    /open/v1/projects[/{id}]                     它能管的项目（配置�
 POST   /open/v1/projects                            建项目 {name, description, brief, members[]}，
                                                     可再带 {blueprint, params, roles: {角色: 成员 id}, digest}   projects.write
 PATCH  /open/v1/projects/{id}                       描述、纲要、角色                         projects.write
+DELETE /open/v1/projects/{id}                       删项目：只能删经这个应用建的             projects.write
 PUT    /open/v1/projects/{id}/members/{agent}       拉进来（开放的 Agent：所有者先成为参与者）；DELETE 移出
 PUT    /open/v1/projects/{id}/files/{path}          上传资料（请求体就是文件，≤5 MB）
 PATCH  /open/v1/projects/{id}/access                {path, rule} 可见范围
