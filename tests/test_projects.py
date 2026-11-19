@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from matrix.engine import Network, NetworkError
+from matrix.engine import NeedsConfirm, Network, NetworkError
 from matrix.models import Message
 from matrix.runtime import ScriptCall, ScriptedRuntime
 from tests.test_users import client, joint, users
@@ -64,45 +64,59 @@ def test_dm_request_assigned_by_hand(tmp_path: Path):
 
 
 # ================= 助理与项目会话 =================
-def test_assistant_joins_projects_and_stays(tmp_path: Path):
-    """第一个 Agent 默认是助理；人进项目时助理自动加入并记事件；人在项目里时助理不能移出；可以换助理；删掉助理改用最早的另一个。"""
+def test_assistant_joins_only_when_asked(tmp_path: Path):
+    """不变量 18：第一个 Agent 默认是助理；建项目、接受邀请都不会把助理带进来，助理和别的成员一样能加能移出；
+    可以换助理；删掉助理改用最早的另一个。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
-    alice, = users(net, "alice@x.io")
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=alice)
+    net.create_agent("Bob 的助理", "", [], [], actor=bob)
     assert net.store.users[alice].assistant_id == a.id
     p = net.create_project("P", "", [b.id], actor=alice)
-    assert p.member_ids == [b.id, a.id]
-    chat = net.project_chat(p.id, actor=alice)
-    assert any(m.role == "event" and m.text == "A 加入了项目（alice@x.io 的助理）" for m in chat.messages)
-    with pytest.raises(NetworkError, match="助理"):
-        net.remove_member(p.id, a.id, actor=alice)
+    assert p.member_ids == [b.id]
+    net.invite(p.id, "bob@x.io", actor=alice)
+    net.respond_invitation(p.id, True, actor=bob)
+    assert p.member_ids == [b.id]  # 人进来了，助理没有跟着
+    net.add_member(p.id, a.id, actor=alice)
+    net.remove_member(p.id, a.id, actor=alice)  # 助理也能移出
     net.set_assistant(b.id, actor=alice)
-    net.remove_member(p.id, a.id, actor=alice)  # 换了助理：旧助理去留由人决定
-    with pytest.raises(NetworkError, match="助理"):
-        net.remove_member(p.id, b.id, actor=alice)
     net.delete_agent(b.id, actor=alice)
     assert net.store.users[alice].assistant_id == a.id
 
 
-def test_session_brings_assistant_into_existing_project(tmp_path: Path):
-    """已有项目里没有助理：第一次开项目会话时加入，并在群聊里记事件；没有助理的人开不了会话。"""
+def test_session_asks_before_bringing_the_assistant(tmp_path: Path):
+    """不变量 18：项目里没有助理时，开项目会话先问（NeedsConfirm，digest 是助理 id），确认后才加入并在群聊里记事件；
+    确认期间换了助理就再问一次；没有助理的人开不了会话。"""
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     with pytest.raises(NetworkError, match="还没有助理"):
         net.create_session(net.create_project("空", "", [], actor=bob).id, actor=bob)
     a = net.create_agent("A", "a", [], [], actor=alice)
+    b = net.create_agent("B", "b", [], [], actor=alice)
     p = net.create_project("P", "", [], actor=alice)
-    p.member_ids.remove(a.id)  # 模拟迁移来的旧项目
-    s = net.create_session(p.id, "了解进度", actor=alice)
+    with pytest.raises(NeedsConfirm) as e:
+        net.create_session(p.id, "了解进度", actor=alice)
+    assert e.value.digest == a.id and a.id not in p.member_ids
+    net.set_assistant(b.id, actor=alice)
+    with pytest.raises(NeedsConfirm):  # 带回的是旧助理：再问
+        net.create_session(p.id, "了解进度", actor=alice, join=a.id)
+    net.set_assistant(a.id, actor=alice)
+    s = net.create_session(p.id, "了解进度", actor=alice, join=a.id)
     assert (s.kind, s.project_id, s.agent_id, s.owner_id, s.title) == ("session", p.id, a.id, alice, "了解进度")
-    assert a.id in p.member_ids
+    assert p.member_ids == [a.id]
+    chat = net.project_chat(p.id, actor=alice)
+    assert any(m.role == "event" and m.text == "A 加入了项目（alice@x.io 的助理）" for m in chat.messages)
+    assert net.create_session(p.id, actor=alice).id == s.id  # 已经在了：不再问，沿用空会话
     assert [x["id"] for x in net.sessions(p.id, actor=alice)] == [s.id]
     net.update_session(s.id, title="细节", archived=True, actor=alice)
     with pytest.raises(NetworkError, match="已归档"):
         net.send_message(s.id, "还在吗", actor=alice)
     net.update_session(s.id, archived=False, actor=alice)
     assert net.store.conversations[s.id].title == "细节"
+    net.remove_member(p.id, a.id, actor=alice)
+    with pytest.raises(NetworkError, match="已不在项目里"):
+        net.send_message(s.id, "还在吗", actor=alice)
 
 
 def _session_handler(out: dict):
@@ -138,7 +152,7 @@ def test_session_seat_works_like_chat_seat(tmp_path: Path):
     net.set_brief(p.id, "目标：评估出海机会", actor=alice)
     chat = net.project_chat(p.id, actor=alice)
     net.send_message(chat.id, "大家好，本周定方向", actor=alice)
-    s = net.create_session(p.id, actor=alice)
+    s = net.create_session(p.id, actor=alice, join=a.id)
     net.send_message(s.id, "记一个决定，再委托 B，然后读群聊", actor=alice, background=False)
     prompt = out["prompts"][0]
     assert "项目会话" in prompt and "目标：评估出海机会" in prompt and "项目现状" in prompt

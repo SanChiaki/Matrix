@@ -292,7 +292,7 @@ def test_after_hook_skips_private_requests(tmp_path: Path):
         return "ok"
     net, _, host, _, g, _ = setup(tmp_path, handler=handler)
     net.install_plugin(g.id, "llm-wiki", actor=host)
-    session = net.create_session(g.id, "私下", actor=host)
+    session = net.create_session(g.id, "私下", actor=host, join=net.assistant_of(host).id)
     net.send_message(session.id, "做一件事", actor=host, background=False)
     req = next(r for r in net.store.requests.values() if r.title == "私下的事")
     net.review_request(req.id, True, actor=host)

@@ -22,10 +22,15 @@ def users(net: Network, *emails: str) -> list[str]:
 
 
 def joint(net: Network, host: str, guest_email: str, guest: str, members: list[str] | None = None):
-    """主持人建联合项目、邀请 guest，guest 接受。返回 (项目, 群聊)。"""
+    """主持人建联合项目、邀请 guest，guest 接受；两边各自把自己的助理（有的话）加进来。返回 (项目, 群聊)。
+    助理不会自己进项目（不变量 18），这里替测试把它们加上。"""
     g = net.create_project("J", "联合", members or [], actor=host)
+    if (a := net.assistant_of(host)) is not None and a.id not in g.member_ids:
+        net.add_member(g.id, a.id, actor=host)
     net.invite(g.id, guest_email, actor=host)
     net.respond_invitation(g.id, True, actor=guest)
+    if (b := net.assistant_of(guest)) is not None:
+        net.add_member(g.id, b.id, actor=guest)
     return g, net.project_chat(g.id, actor=host)
 
 

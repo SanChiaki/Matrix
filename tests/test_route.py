@@ -161,7 +161,7 @@ def test_rule3_only_project_chat(tmp_path: Path):
     """不变量 24 规则 3：项目会话、私聊里的消息从不送给 route。"""
     net, host, (a, b, c), g, data, log = setup(tmp_path)
     rules(data, {"": {"wake": [{"agent": "乙"}]}})
-    session = net.create_session(g.id, "私下", actor=host)
+    session = net.create_session(g.id, "私下", actor=host, join=net.assistant_of(host).id)
     net.send_message(session.id, "私下说一句", actor=host, background=False)
     net.send_message(net.direct_chat(a.id, actor=host).id, "私聊一句", actor=host, background=False)
     calls = (data / "calls.jsonl").read_text(encoding="utf-8") if (data / "calls.jsonl").exists() else ""

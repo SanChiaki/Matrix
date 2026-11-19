@@ -485,6 +485,7 @@ class ProjectPatch(BaseModel):
 
 class SessionIn(BaseModel):
     title: str = Field("", max_length=120)
+    join: str | None = Field(None, max_length=100)   # 确认把助理加入项目：带回 409 给的 digest（助理 id）
 
 
 class SessionPatch(BaseModel):
@@ -1545,7 +1546,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.post("/api/projects/{project_id}/sessions")
     def create_session(project_id: str, body: SessionIn, user: Me) -> dict:
-        return network.create_session(project_id, body.title, actor=user.id).to_dict(full=False)
+        return network.create_session(project_id, body.title, actor=user.id, join=body.join).to_dict(full=False)
 
     @app.patch("/api/sessions/{conv_id}")
     def update_session(conv_id: str, body: SessionPatch, user: Me) -> dict:

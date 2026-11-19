@@ -497,6 +497,7 @@ def test_device_services_become_connections_and_only_allowed_ones_are_sent(tmp_p
     g = net.create_project("J", "", [], actor=guest)
     net.invite(g.id, "alice@x.io", actor=guest)
     net.respond_invitation(g.id, True, actor=alice)
+    net.add_member(g.id, a.id, actor=alice)
     chat = net.project_chat(g.id, actor=guest)
     net.send_message(chat.id, "@Local 来", actor=guest, background=False)
     assert last_request(rt)["connectors"] == []  # 电脑上的服务网络拦不到调用：没有“用到时问”，要所有者选“都可以”

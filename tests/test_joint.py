@@ -40,7 +40,8 @@ def test_invite_accept_leave(tmp_path: Path):
         net.invite(g.id, "carol@x.io", actor=bob)
     assert [x["id"] for x in net.snapshot(bob)["projects"]] == [g.id]
     assert "invited" not in net.snapshot(bob)["projects"][0]  # 邀请名单只给主持人
-    assert b.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
+    assert b.id not in g.member_ids  # 助理不会自己进项目（不变量 18）：要用就自己加
+    net.add_member(g.id, b.id, actor=bob)
     # bob 能看到 alice 的 Agent 的名片，但不能私聊、不能改、不能拉进自己的群
     seen = {x["name"]: x for x in net.snapshot(bob)["agents"]}
     assert seen["A"]["mine"] is False and seen["A"]["owner_email"] == "alice@x.io" and "model" not in seen["A"]
@@ -53,7 +54,7 @@ def test_invite_accept_leave(tmp_path: Path):
     net.add_member(g.id, a2.id, actor=alice)
     with pytest.raises(NetworkError, match="不是你的 Agent"):
         net.remove_member(g.id, a2.id, actor=bob)
-    with pytest.raises(NetworkError, match="助理"):  # 人在项目里时，其助理谁都不能移出
+    with pytest.raises(NetworkError, match="不是你的 Agent"):  # 别人的助理也一样：参与者移不了
         net.remove_member(g.id, a.id, actor=bob)
     net.remove_member(g.id, a2.id, actor=alice)
     with pytest.raises(NetworkError, match="主持人"):
@@ -81,11 +82,9 @@ def test_host_removes_participant_and_any_agent(tmp_path: Path):
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     b1, b2 = (net.create_agent(n, n, [], [], actor=bob) for n in ("B1", "B2"))
     g, _ = joint(net, alice, "bob@x.io", bob)
-    assert b1.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
+    assert b1.id in g.member_ids  # joint() 替 bob 加了助理
     net.add_member(g.id, b2.id, actor=bob)
-    net.remove_member(g.id, b2.id, actor=alice)  # 主持人能移出任何 Agent（助理除外）
-    with pytest.raises(NetworkError, match="助理"):
-        net.remove_member(g.id, b1.id, actor=alice)
+    net.remove_member(g.id, b2.id, actor=alice)  # 主持人能移出任何 Agent
     assert net.store.projects[g.id].member_ids == [b1.id]
     net.remove_participant(g.id, bob, actor=alice)
     assert net.store.projects[g.id].member_ids == [] and net.store.projects[g.id].participants == []
@@ -115,8 +114,8 @@ def test_cross_owner_delegation_visible_to_both_owners_only(tmp_path: Path):
     g, chat = joint(net, alice, "bob@x.io", bob, [a.id])
     net.invite(g.id, "carol@x.io", actor=alice)
     net.respond_invitation(g.id, True, actor=carol)
-    assert b.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
-    assert c.id in g.member_ids
+    net.add_member(g.id, c.id, actor=carol)
+    assert b.id in g.member_ids and c.id in g.member_ids
     net.send_message(chat.id, "@A 研究一下", background=False, actor=carol)  # 任何参与者能 @ 任何成员
     t = next(iter(net.store.tasks.values()))
     assert t.status == TaskStatus.COMPLETED and sorted(t.owners) == sorted([alice, bob])
