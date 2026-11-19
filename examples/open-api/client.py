@@ -4,6 +4,7 @@
     python examples/open-api/client.py build  "报销流程" <入口 Agent id> [别的成员 id …]   # 建项目并发布服务
     python examples/open-api/client.py chat   <服务 id> "我要报销 300 元" [session_id]
     python examples/open-api/client.py usage  <项目 id> <服务 id>
+    python examples/open-api/client.py delete <项目 id>                                   # 只能删经这个应用建的项目
 
 令牌是管理员（业务系统账号）或用户（代表个人）在 Matrix 里签的，只显示一次。不要把它写进代码仓库。
 """
@@ -98,6 +99,8 @@ def main(argv: list[str]) -> None:
         sid, msg = argv[1], argv[2]
         for ev, data in chat(sid, msg, argv[3] if len(argv) > 3 else None):
             print(ev, json.dumps(data, ensure_ascii=False))
+    elif cmd == "delete":
+        print(json.dumps(call("DELETE", f"/open/v1/projects/{argv[1]}"), ensure_ascii=False))
     elif cmd == "usage":
         print(json.dumps(call("GET", f"/open/v1/projects/{argv[1]}/services/{argv[2]}/usage"), ensure_ascii=False, indent=1))
     else:

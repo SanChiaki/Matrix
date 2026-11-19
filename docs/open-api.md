@@ -60,7 +60,7 @@
 | 层 | 应用能做什么 | scope | 依据 |
 | --- | --- | --- | --- |
 | 查 | 列出可用的 Agent 与模板（名片：名称、描述、能力、权限、要用的连接器、在不在线） | `agents.read` | 名片可见性同 `can_see_agent`；别人的个人 Agent 只有开放给这个应用的才看得到 |
-| 组 | 建项目（直接建，或用模板建）；增减成员；纲要、角色；上传资料、设可见范围；项目技能；只从部署方目录装插件 | `projects.write` | 以主持人身份操作；拉成员同 `can_call_agent`，加上开放给它的 Agent |
+| 组 | 建项目（直接建，或用模板建）；增减成员；纲要、角色；上传资料、设可见范围；项目技能；只从部署方目录装插件；删经它自己建的项目（交给它管的已有项目只能管、不能删） | `projects.write` | 以主持人身份操作；拉成员同 `can_call_agent`，加上开放给它的 Agent |
 | 发 | 在它主持（或被允许管）的项目里发布、修改、撤回服务；看服务用量 | `services.publish` | 不变量 29 |
 | 调 | 以自己的身份调用服务（见第 6 节） | `services.call` | 不变量 29；外部任务不带进内部权限 |
 
@@ -142,7 +142,7 @@ SSO 改造以后，系统账号还可以带上终端用户的身份，按那个�
 | 部分 | 在哪里 |
 | --- | --- |
 | 模型 | `models.ExternalApp`、`AppGrant`（令牌只存 sha256）、`User.kind / managers / app_id`、`AgentNode.open_to`、`Project.via_app`、`APP_SCOPES` |
-| 引擎 | `matrix/apps.py`（`AppsMixin`，混入 `Network`）：管理员（`create_app` / `update_app` / `issue_system_token`）、用户（`apps_for` / `grant_app` / `revoke_grant` / `set_agent_open`）、负责人（`system_connections` / `authorize_system_connector`）、令牌（`app_context`：认令牌、查 scope、限频）、查组发（`open_*`，项目范围 `_app_project`）、调（`svc_card` / `svc_session` / `svc_interrupt`）；留痕 `via_app()`（档案日志 `via_app`、群聊事件后缀“（经「应用」）”） |
+| 引擎 | `matrix/apps.py`（`AppsMixin`，混入 `Network`）：管理员（`create_app` / `update_app` / `issue_system_token`）、用户（`apps_for` / `grant_app` / `revoke_grant` / `set_agent_open`）、负责人（`system_connections` / `authorize_system_connector`）、令牌（`app_context`：认令牌、查 scope、限频）、查组发（`open_*`，项目范围 `_app_project`；`open_delete_project` 只删 `via_app` 是自己的）、调（`svc_card` / `svc_session` / `svc_interrupt`）；留痕 `via_app()`（档案日志 `via_app`、群聊事件后缀“（经「应用」）”） |
 | 引擎里改的地方 | `hosted_project` / `is_host` 认负责人；`is_admin` 不认系统账号；`invite` 不邀请系统账号；`project_view` 写“应用名（负责人 …）”；`auth.login` / `issue_reset` 拒绝系统账号 |
 | 接口 | `matrix/open_server.py`（`/open/v1/*`、`/svc/*`）；`server.py` 的 `/api/admin/apps*`、`/api/apps*`、`/api/grants/*`、`/api/agents/{id}/open`、`/api/system-accounts/*` |
 | 界面 | 管理后台“外部应用”（登记、签 / 重签系统账号令牌、负责人、停用）；“更多 → 外部应用”（我授权的应用、签令牌、我负责的系统账号与它的连接器）；Agent 设置里的“开放给应用” |

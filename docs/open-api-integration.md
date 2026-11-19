@@ -158,6 +158,12 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py build 
 MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py chat svc-79c7d01a "我要报销 300 元"
 ```
 
+不要了就删掉（只能删经这个应用建的项目）：
+
+```bash
+MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py delete prj-759811d1
+```
+
 ## 五、接口参考
 
 ### 查（`agents.read`）
