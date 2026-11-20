@@ -89,7 +89,7 @@
 | 运行时 | `RemoteRuntime`：读流、转事件、超时与终止时中断、结束时解除绑定；`remote_agents.capabilities` |
 | 绑定 | `Bindings`（按（Matrix Agent, 平台会话 id）绑定这一轮的 `ToolBridge`，带等待） |
 | 引擎 | `AgentNode.remote`；`add_remote_agent`、`set_remote_api_key`、`issue_remote_key`、`_remote_call`（凭证与调用方请求头）、`remote_mcp`（JSON-RPC：initialize / ping / tools/list / tools/call）；`runtime_for`、`capabilities`、`home_mounted` |
-| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，Caddy 里不加 basic auth |
+| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，反向代理上也不加额外的认证层（[reverse-proxy.md](reverse-proxy.md)） |
 | 界面 | Agent 页“接入外部平台的 Agent”；外部 Agent 的设置里“外部平台”一节（接入状态、签 / 重签密钥、换 API Key） |
 | 样板与测试 | `examples/remote-agent/demo_platform.py`（演示平台）；`tests/test_remote_agents.py` |
 

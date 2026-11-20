@@ -76,7 +76,7 @@
 
 ## 5. 接口
 
-REST，`Authorization: Bearer mat_…`（应用令牌），不走登录（Caddy 里和 `/mcp/remote` 一样不加 basic auth）：
+REST，`Authorization: Bearer mat_…`（应用令牌），不走登录（反向代理上和 `/mcp/remote` 一样不加额外的认证层，[reverse-proxy.md](reverse-proxy.md)）：
 
 ```
 GET    /open/v1/agents                              能用的 Agent（名片）                     agents.read

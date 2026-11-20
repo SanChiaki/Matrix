@@ -40,7 +40,7 @@
 ### 3. 网络
 
 - 业务系统能访问到 Matrix 的地址（下文写作 `$MATRIX`）。
-- 部署用的 Caddy 已经放过 `/open/v1/*` 与 `/svc/*`，这两类路径不要 basic auth，只凭令牌（`deploy/Caddyfile`）。其余路径照旧要登录，业务系统用不到。
+- Matrix 前面的反向代理加了额外的认证层（如 basic auth）时，要放行 `/open/v1/*` 与 `/svc/*`，这两类路径只凭令牌（[reverse-proxy.md](reverse-proxy.md)）。其余路径照旧要登录，业务系统用不到。
 
 ## 三、通用约定
 
@@ -269,4 +269,4 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py delete
 - [ ] `/svc/…/chat` 能拿到 `session`→`done`；续接能接上；中断能停下；读超时大于 15 分钟
 - [ ] 要用业务系统时，系统账号的连接器已经由负责人或管理员配好
 - [ ] 撤销令牌后，业务系统收到 401 并能告警
-- [ ] （上线前）Caddy 确认 `/open/v1/*`、`/svc/*` 不走 basic auth、其余路径照旧要
+- [ ] （上线前）反向代理确认 `/open/v1/*`、`/svc/*` 不走额外的认证层、其余路径照旧要

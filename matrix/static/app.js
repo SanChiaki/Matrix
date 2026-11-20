@@ -28,7 +28,7 @@ const chatShown = () => S.view === "chats"
 const gcolor = (id) => PROJECT_COLORS[Math.max(0, S.snap.projects.findIndex((g) => g.id === id)) % PROJECT_COLORS.length];
 
 // 错误带上 HTTP 状态码（断网、超时为 0）：调用方据此区分“确实不存在”（404）和“这次没拿到”。
-// 慢网、网关（如 Caddy 连不上后端时的 502）下后者很常见，不能当成前者显示。
+// 慢网、网关（如反向代理连不上后端时的 502）下后者很常见，不能当成前者显示。
 const API_TIMEOUT_MS = 30000;
 // 快捷键的修饰键按系统显示：Mac 是 ⌘，Windows / Linux 是 Ctrl（两种按法都接，见 bindComposer）
 const IS_MAC = /mac|iphone|ipad|ipod/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);

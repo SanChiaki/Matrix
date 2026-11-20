@@ -1,5 +1,5 @@
 # Matrix：Python 3.14 + uv，加上 DSH 运行时（Node 24 + @deepseek-ai/dsh）。
-# 只在 compose 网络里对 Caddy 开放 8765，不对宿主机发布端口；对外访问一律经 Caddy（HTTPS + basic auth）。
+# 容器里监听 0.0.0.0:8765；compose 只把它发布到宿主机的 127.0.0.1，对外经部署方的反向代理（docs/reverse-proxy.md）。
 FROM python:3.14-slim-bookworm
 
 ARG DSH_VERSION=0.2.1-rc.5

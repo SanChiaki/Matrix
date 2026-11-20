@@ -1,6 +1,6 @@
 """连接器本地小桥：给本机 harness 提供与云侧同形的 `/internal/tools`、`/internal/approval` 与 `/internal/question`。
 
-云侧这两个端点在 Caddy 后面只对容器内开放；端侧 harness 在本机，直接连网络不可达，
+云侧这些端点只给服务器本机用（反向代理对外挡住 `/internal/*`）；端侧 harness 在本机，直接连网络不可达，
 所以连接器在 127.0.0.1 上起一个小 HTTP 服务，收到请求后经出站连接转给服务器：
 
     harness ──stdio/MCP──▶ 本机桥 ──ws──▶ 服务器 /internal/* 的逻辑（执行上下文令牌仍是 run_id）
