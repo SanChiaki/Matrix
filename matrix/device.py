@@ -279,7 +279,7 @@ class DeviceRuntime:
         return None
 
     # ---- 读端侧工作目录里的文件（publish_file 用） ----
-    def fetch_file(self, context_id: str, path: str, timeout_s: float = 60) -> bytes | None:
+    def fetch_file(self, context_id: str, path: str, timeout_s: float = 300) -> bytes | None:  # 文件最大到 FILE_LIMIT，慢网要几分钟
         """向连接器要一个文件的字节；不在线 / 越界 / 不存在返回 None。"""
         with self._lock:
             run_id = self._by_context.get(context_id)
