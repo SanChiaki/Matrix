@@ -184,7 +184,7 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py delete
 | `PATCH /open/v1/projects/{id}` | `{description?, brief?, roles?}` | `roles` 的格式同网页上的项目角色：`{key: {name, description, members: [agent id]}}` |
 | `PUT /open/v1/projects/{id}/members/{agent}` | — | 拉一个成员进来 |
 | `DELETE /open/v1/projects/{id}/members/{agent}` | — | 移出 |
-| `PUT /open/v1/projects/{id}/files/{path}` | 请求体是文件内容（≤5 MB） | 上传资料，同名覆盖；`path` 可以带目录 |
+| `PUT /open/v1/projects/{id}/files/{path}` | 请求体是文件内容，任何类型（≤100 MB，与网页上传同一个上限） | 上传资料，同名覆盖；`path` 可以带目录 |
 | `PATCH /open/v1/projects/{id}/access` | `{path, rule: {roles?: [角色 key], agents?: [agent id]} \| null}` | 资料（文件或目录）的可见范围；`null` 是所有成员可见 |
 | `POST /open/v1/projects/{id}/skills` | `{name, description, body}` | 写一个项目技能（`name` 用小写字母、数字、`-`） |
 | `POST /open/v1/projects/{id}/plugins` | `{name, digest?}` | 从部署方的插件目录装（要确认，见第三节） |

@@ -87,7 +87,7 @@ POST   /open/v1/projects                            建项目 {name, description
 PATCH  /open/v1/projects/{id}                       描述、纲要、角色                         projects.write
 DELETE /open/v1/projects/{id}                       删项目：只能删经这个应用建的             projects.write
 PUT    /open/v1/projects/{id}/members/{agent}       拉进来（开放的 Agent：所有者先成为参与者）；DELETE 移出
-PUT    /open/v1/projects/{id}/files/{path}          上传资料（请求体就是文件，≤5 MB）
+PUT    /open/v1/projects/{id}/files/{path}          上传资料（请求体就是文件，任何类型，≤100 MB）
 PATCH  /open/v1/projects/{id}/access                {path, rule} 可见范围
 POST   /open/v1/projects/{id}/skills                {name, description, body} 项目技能
 POST   /open/v1/projects/{id}/plugins               {name, digest?} 只从部署方目录装
