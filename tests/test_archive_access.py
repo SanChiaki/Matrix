@@ -200,6 +200,28 @@ def test_folders_and_access_over_http(tmp_path: Path):
     assert r.status_code == 200 and not any(f["name"].startswith("归档/会议") for f in r.json()["files"])
 
 
+def test_upload_any_file_type_over_http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """人上传资料不限类型：请求体就是文件内容，字节原样存下（docx 这类二进制以前会被当文本读坏）；超过 FILE_LIMIT 413。"""
+    net, seen, alice, a, b, g = setup(tmp_path)
+    c = client(net, "alice@x.io")
+    base = f"/api/projects/{g.id}"
+    docx = b"PK\x03\x04\x00\x00\xff\xfe word/document.xml \x00\x01"
+    r = c.post(f"{base}/files", params={"name": "设计/方案.docx"}, content=docx,
+               headers={"Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"})
+    assert r.status_code == 200 and "设计/方案.docx" in [f["name"] for f in r.json()["files"]]
+    assert (net.store.project_dir(g.id) / "设计" / "方案.docx").read_bytes() == docx
+    assert c.get(f"{base}/files/设计/方案.docx").content == docx
+    import matrix.engine as engine_mod
+    import matrix.server as server_mod
+    monkeypatch.setattr(server_mod, "FILE_LIMIT", 10)
+    monkeypatch.setattr(engine_mod, "FILE_LIMIT", 10)
+    r = c.post(f"{base}/files", params={"name": "大.bin"}, content=b"x" * 11)
+    assert r.status_code == 413
+    assert c.post(f"{base}/files", content=b"not json").status_code == 422  # 没给名字也不是 JSON
+    with pytest.raises(NetworkError, match="太大"):
+        net.publish_file(g.id, "大.bin", b"x" * 11, agent_id=a.id)
+
+
 def test_nested_files_in_releases(tmp_path: Path):
     """交付件可以带目录里的文件，快照里保留路径。"""
     net, seen, alice, a, b, g = setup(tmp_path)

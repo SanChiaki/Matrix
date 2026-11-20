@@ -1,22 +1,21 @@
 # 部署 Matrix
 
-`compose.yml` 起两个容器：
+`compose.yml` 只起一个容器 `matrix`：应用本身，端口只发布到宿主机的 `127.0.0.1:8765`（`.env` 里的 `MATRIX_BIND` / `MATRIX_PORT` 可改）。
 
-- `matrix`：应用本身，只在 compose 内部网络监听 8765，不对宿主机发布端口。
-- `caddy`：唯一对外入口，开 80（跳转）和 443，提供 HTTPS，并在 Matrix 自己的登录前面再加一层 basic auth。`/internal/*` 对外一律返回 404。
+对外怎么暴露（HTTPS、域名、证书、要不要在 Matrix 的登录前面再加一层认证）不归这里管，用你环境里现成的反向代理或网关。
+它必须满足的要求（挡住 `/internal/*`、SSE 不缓冲、WebSocket、请求体 100 MB 等），以及一份能直接用的 Caddy 示例，
+见 [docs/reverse-proxy.md](../docs/reverse-proxy.md)。不要把 `MATRIX_BIND` 改成 `0.0.0.0` 直接对外：Matrix 自己没有 HTTPS，也不挡 `/internal/*`。
 
 ## 第一次部署
 
 ```bash
 git clone https://github.com/SanChiaki/Matrix.git /opt/matrix && cd /opt/matrix/deploy
-docker run --rm caddy:2.10 caddy hash-password --plaintext '<basic auth 密码>'   # 生成哈希
-cp env.example .env && chmod 600 .env   # 填 MATRIX_BASIC_HASH（每个 $ 写成 $$）；需要时改 MATRIX_SITE / MATRIX_BASIC_USER
+cp env.example .env && chmod 600 .env   # 按需填写，全部可选
 docker compose up -d --build
+curl -fsS http://127.0.0.1:8765/ >/dev/null && echo ok   # 在服务器本机确认 Matrix 起来了
 ```
 
-服务器的安全组要放行 TCP 80 和 443。
-
-临时关掉 basic auth：在 `.env` 里写 `MATRIX_BASIC_AUTH=off`，然后执行 `docker compose up -d`。关掉时不需要 `MATRIX_BASIC_HASH`，可以不填；只认 `on` / `off`，写成别的值 Caddy 会起不来，不会悄悄放开。关掉之后只剩 Matrix 自己的简易登录（没有 CSRF 防护、没有限流、令牌不过期），而 DSH 能在服务器上执行命令，所以这种状态只适合短时间的演示。
+然后按 [docs/reverse-proxy.md](../docs/reverse-proxy.md) 配好对外入口。
 
 ## 配置模型凭据（DSH）
 
@@ -193,6 +192,9 @@ https 源的自签 CA 放进 `deploy/ca-certificates/`。
 cd /opt/matrix && git pull && cd deploy && docker compose up -d --build
 ```
 
+旧版本的 `compose.yml` 里带着 `caddy` 容器，现在挪到了仓库外面：更新前先按 [docs/reverse-proxy.md](../docs/reverse-proxy.md)
+「从旧的部署迁移」把它单独起起来，再用 `docker compose up -d --build --remove-orphans` 更新，证书卷可以沿用。
+
 从改名前（代码包 `agentnet`）的版本升级：镜像里的环境变量已改为 `MATRIX_DATA`、`MATRIX_HOST`，数据卷不变。
 `.env` 里自己加过的 `AGENTNET_*`（`DATA`、`HOST`、`MODELS`、`CONNECTORS`、`PLUGINS`、`VAULT_KEY`）在新名字没设时照样生效
 （`matrix/compat.py`），方便时改成 `MATRIX_*`。已配对的电脑升级连接器后运行一次 `matrix-connect install`（不重新配对），
@@ -227,35 +229,18 @@ docker compose exec matrix matrix-dsh-check --live
 不想等仓库改版本号、临时换一个版本：`docker compose build --build-arg DSH_VERSION=<版本> && docker compose up -d`
 （下次不带参数构建会回到 Dockerfile 里的版本）。有问题退回：把版本号改回去重新构建，必要时用备份恢复 `dsh-home`。
 
-## 证书
-
-由 `deploy/.env` 里的 `MATRIX_TLS_ISSUER` 决定：
-
-- `internal`（默认）：Caddy 自己的内部 CA。适合只有裸 IP 的情况，浏览器会提示证书不受信任，属于正常现象。
-- `acme`：Let's Encrypt 正式证书，浏览器直接信任。要求 `MATRIX_SITE` 是能从公网解析到这台服务器的域名，且 80 / 443 对外开放。
-
-没有自己的域名时可以用 [nip.io](https://nip.io)：它是通配 DNS，`47-88-79-27.nip.io` 直接解析到 `47.88.79.27`，不转发流量、不签证书。
-
-```bash
-MATRIX_SITE=47-88-79-27.nip.io
-MATRIX_TLS_ISSUER=acme
-```
-
-改完执行 `docker compose up -d --force-recreate caddy`。nip.io 是多人共用的域名，Let's Encrypt 按注册域名限流，签发失败时 Caddy 日志会写原因；可以改用 sslip.io，或者换成自己的域名。
-
 ## 端侧连接器
 
 用户在自己的电脑上把 Claude Code、Codex 或 dsh 接进 Matrix：在「设备」页签发一个令牌，然后在本机运行
 
 ```bash
 uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
-  --url wss://<MATRIX_SITE>/api/devices/connect --token <令牌> --driver claude-code
+  --url wss://<对外地址>/api/devices/connect --token <令牌> --driver claude-code
 ```
 
-- 连接器**只发出站** WebSocket，不开入站端口；Caddy 的 `reverse_proxy` 自动处理升级，不需要额外配置。
+- 连接器**只发出站** WebSocket，不开入站端口；反向代理要支持 WebSocket 升级（[docs/reverse-proxy.md](../docs/reverse-proxy.md)）。
 - 令牌可随时在「设备」页吊销；吊销后连接立即断开，绑在该设备上的 Agent 进入等待。
-- 如果开着 basic auth（`MATRIX_BASIC_AUTH=on`），连接器还要带上 basic auth 凭据，否则握手会被 Caddy 拒绝；
-  简化起见可以在演示时关掉 basic auth，只依赖 Matrix 自己的登录。
+- 反向代理上加了额外的认证层（如示例里的 basic auth）时，连接器握手也要过这一层，见 [docs/reverse-proxy.md](../docs/reverse-proxy.md)。
 - 设备离线不是故障：任务进入 `waiting`，不消耗重试，连接器重连后继续。
 
 ## 沙箱

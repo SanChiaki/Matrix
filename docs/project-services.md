@@ -107,7 +107,7 @@ POST /svc/sessions/{session_id}/interrupt 中断
 - **服务密钥**：主持人在服务里给每个接入方签一把（`msk_…`，只显示一次，只存 sha256），重签即作废。密钥只证明“是哪个接入方”。
 - **终端用户身份**：SSO 改造之前只有**系统身份**，调用方就是这个接入方，只能用不需要用户鉴权的能力（基于档案答问、写收件目录），
   要用户授权的工具一律拒绝。SSO 改造之后，接入方带上终端用户的 SSO 凭证，Matrix 验证后按那个 Matrix 用户处理（第 5 节的规则全部适用）。
-- 外部任务不带进任何内部权限（research: acp-vs-a2a#external-task-authority）；Caddy 里和 `/mcp/remote` 一样不加 basic auth，靠服务密钥。
+- 外部任务不带进任何内部权限（research: acp-vs-a2a#external-task-authority）；反向代理上和 `/mcp/remote` 一样不加额外的认证层，靠服务密钥（[reverse-proxy.md](reverse-proxy.md)）。
 
 ## 7. 分期
 

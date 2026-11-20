@@ -11,14 +11,15 @@ import time
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .apps import AppContext
 from .engine import Network, NetworkError
+from .models import FILE_LIMIT  # 上传资料的上限，与网页上传、Agent 的 publish_file 同一个
 
 SVC_TIMEOUT_S = 900          # 一次 /svc 对话最多等多久
-MAX_FILE = 5_000_000
 
 
 class OpenProjectIn(BaseModel):
@@ -146,10 +147,16 @@ def install(app: FastAPI, network: Network) -> None:
     @app.put("/open/v1/projects/{project_id}/files/{path:path}")
     async def open_put_file(project_id: str, path: str, request: Request) -> dict:
         c = ctx(request, "projects.write")
-        data = await request.body()
-        if len(data) > MAX_FILE:
-            raise HTTPException(413, f"文件最多 {MAX_FILE // 1_000_000} MB")
-        return network.open_put_file(c, project_id, path, data)
+        too_big = HTTPException(413, f"文件最多 {FILE_LIMIT // 1_000_000} MB")
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > FILE_LIMIT:
+            raise too_big
+        buf = bytearray()  # 边收边数，不先把超限的整份读进内存
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > FILE_LIMIT:
+                raise too_big
+        return await run_in_threadpool(network.open_put_file, c, project_id, path, bytes(buf))
 
     @app.patch("/open/v1/projects/{project_id}/access")
     def open_file_access(project_id: str, body: OpenAccessIn, request: Request) -> dict:

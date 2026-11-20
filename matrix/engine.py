@@ -1001,7 +1001,7 @@ class Network(AppsMixin):
         Agent 只能写进它看得到的位置（可见范围，不变量 26）。返回档案里的路径。"""
         fname = _safe_path(name)
         if len(content) > FILE_LIMIT:
-            raise NetworkError(f"文件太大：最多 {FILE_LIMIT // 1000} KB")
+            raise NetworkError(f"文件太大：最多 {FILE_LIMIT // 1_000_000} MB")
         with self._lock:
             g = self.visible_project(project_id, actor)
             if agent_id and not self._file_visible(g, fname, agent_id):

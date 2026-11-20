@@ -28,7 +28,7 @@ const chatShown = () => S.view === "chats"
 const gcolor = (id) => PROJECT_COLORS[Math.max(0, S.snap.projects.findIndex((g) => g.id === id)) % PROJECT_COLORS.length];
 
 // 错误带上 HTTP 状态码（断网、超时为 0）：调用方据此区分“确实不存在”（404）和“这次没拿到”。
-// 慢网、网关（如 Caddy 连不上后端时的 502）下后者很常见，不能当成前者显示。
+// 慢网、网关（如反向代理连不上后端时的 502）下后者很常见，不能当成前者显示。
 const API_TIMEOUT_MS = 30000;
 // 快捷键的修饰键按系统显示：Mac 是 ⌘，Windows / Linux 是 Ctrl（两种按法都接，见 bindComposer）
 const IS_MAC = /mac|iphone|ipad|ipod/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent);
@@ -1237,7 +1237,8 @@ function renderProjectEditor(isNew = false) {
 // 连接器 = 这个项目用到的外部服务，从资料、插件、实际调用、手动添加汇总，项目从不持有谁的授权。
 // 文件：所有成员可预览、下载，主持人可上传（也可以拖进来）、删除；“更新人”取日志里最近一次发布它的人 / Agent。
 // 预览只在页面里转义后渲染（Markdown 走 renderMarkdown），不让浏览器直接打开文件：文件可能来自其他参与方或 Agent。
-const ASSET_LIMIT = 200_000;  // 与 models.FILE_LIMIT 一致
+const ASSET_LIMIT = 100_000_000;  // 与 models.FILE_LIMIT 一致；任何类型都收
+const PREVIEW_LIMIT = 5_000_000;  // 文本预览最多拉这么大，再大就只给下载（整份读进页面会卡住）
 const TEXT_EXT = ["MD", "TXT", "CSV", "TSV", "JSON", "YAML", "YML", "LOG", "XML", "HTML", "PY", "JS", "TS", "SH"];
 const IMAGE_EXT = ["PNG", "JPG", "JPEG", "GIF", "WEBP"];
 const fmtSize = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
@@ -1271,7 +1272,6 @@ const fileUrl = (pid, name) => `/api/projects/${encodeURIComponent(pid)}/files/$
 const baseName = (p) => String(p).split("/").pop();
 const parentDir = (p) => (String(p).includes("/") ? String(p).slice(0, String(p).lastIndexOf("/")) : "");
 const joinPath = (dir, name) => (dir ? `${dir}/${name}` : name);
-const isTextFile = (file) => file.type.startsWith("text/") || file.type === "application/json" || TEXT_EXT.includes(fileExt(file.name));
 const assetWho = (d) => (f) => f.by_agent ? aname(f.by_agent) : !f.by_user ? "—" : f.by_user === S.me?.id ? "你"
   : f.by_user === d.owner_id ? d.host : d.participant_emails?.[f.by_user] || "—";
 const ASSET_SORT = { name: (a, b) => a.name.localeCompare(b.name), updated_at: (a, b) => a.updated_at - b.updated_at, size: (a, b) => a.size - b.size };
@@ -1496,7 +1496,7 @@ function renderFilesTab(box, d, st) {
     : parentDir(f.name) === st.dir)).sort((a, b) => (st.asc ? 1 : -1) * ASSET_SORT[st.by](a, b));
   const dirs = () => searching ? [] : folders.filter((f) => parentDir(f.name) === st.dir).sort((a, b) => a.name.localeCompare(b.name));
   const where = st.dir ? `「${baseName(st.dir)}」` : `「${d.name}」`;
-  const upBtn = (cls = "") => `<label class="button ${cls} file-up" title="文本文件（md、txt、csv、json…），单个不超过 ${ASSET_LIMIT / 1000} KB；也可以把文件拖进列表">
+  const upBtn = (cls = "") => `<label class="button ${cls} file-up" title="任何类型的文件，单个不超过 ${ASSET_LIMIT / 1_000_000} MB；也可以把文件拖进列表">
     ${ICON.upload}上传${st.dir ? "到这里" : "文件"}<input type="file" multiple hidden data-up></label>`;
   const acts = (name, isDir) => host ? `<button type="button" class="icon-btn" data-access="${esc(name)}" data-dir="${isDir ? 1 : 0}" title="可见范围" aria-label="设置 ${esc(name)} 的可见范围">${ICON.lock}</button>
     <button type="button" class="icon-btn" data-mv="${esc(name)}" title="移动 / 改名" aria-label="移动或改名 ${esc(name)}">${ICON.move}</button>
@@ -1609,10 +1609,13 @@ async function uploadAssets(d, st, files) {
   const bar = $("#project-page .asset-bar");
   bar?.insertAdjacentHTML("afterend", `<p class="asset-note" role="status">正在上传 ${files.length} 个文件…</p>`);
   for (const file of files) {
-    if (!isTextFile(file)) { bad.push(`${file.name}（只支持文本文件）`); continue; }
-    if (file.size > ASSET_LIMIT) { bad.push(`${file.name}（超过 ${ASSET_LIMIT / 1000} KB）`); continue; }
+    if (file.size > ASSET_LIMIT) { bad.push(`${file.name}（超过 ${ASSET_LIMIT / 1_000_000} MB）`); continue; }
     const name = joinPath(dir, file.name);
-    try { await api(`/api/projects/${d.id}/files`, { method: "POST", body: { name, content: await file.text() } }); ok.push(name); }
+    try {  // 文件原样发送（请求体就是内容），不按文本读：docx、pdf、图片都不能经 file.text()
+      await api(`/api/projects/${d.id}/files?name=${encodeURIComponent(name)}`, { method: "POST", body: file,
+        headers: { "Content-Type": file.type || "application/octet-stream" }, timeoutMs: 600000 });
+      ok.push(name);
+    }
     catch (e) { bad.push(`${file.name}（${e.message}）`); }
   }
   st.note = [ok.length ? `已上传 ${ok.join("、")}` : "", bad.length ? `没有上传：${bad.join("、")}` : ""].filter(Boolean).join("；");
@@ -2292,6 +2295,11 @@ async function previewAsset(d, f) {
       if (!still()) { URL.revokeObjectURL(u); return; }
       dlg.dataset.blob = u;
       body.innerHTML = `<img src="${u}" alt="${esc(f.name)}">`;
+      return;
+    }
+    if (f.size > PREVIEW_LIMIT) {  // 大文件不整份拉进页面，直接给下载；小的照常读，二进制由 previewHtml 认出
+      r.body?.cancel();
+      if (still()) body.innerHTML = `<p class="muted">文件较大（${fmtSize(f.size)}），不在这里预览，下载后用本地应用打开。</p>`;
       return;
     }
     const text = await r.text();

@@ -130,6 +130,15 @@ def test_system_account_builds_a_project_and_publishes_a_service(tmp_path: Path)
     assert view["host_email"].startswith("报销系统（负责人 maya@x.io）")
 
     assert c.put(f"/open/v1/projects/{g.id}/files/公开/手册.md", headers=h, content="手册".encode()).status_code == 200
+    pdf = b"%PDF-1.7\n\x00\xff\xfe\x01 binary"  # 任何类型都收，字节原样存下；上限与网页上传同一个（FILE_LIMIT）
+    assert c.put(f"/open/v1/projects/{g.id}/files/公开/手册.pdf", headers=h, content=pdf).status_code == 200
+    assert (net.store.project_dir(g.id) / "公开" / "手册.pdf").read_bytes() == pdf
+    import matrix.open_server as open_mod
+    old_limit, open_mod.FILE_LIMIT = open_mod.FILE_LIMIT, 4
+    try:
+        assert c.put(f"/open/v1/projects/{g.id}/files/公开/大.bin", headers=h, content=b"x" * 5).status_code == 413
+    finally:
+        open_mod.FILE_LIMIT = old_limit
     assert c.post(f"/open/v1/projects/{g.id}/skills", headers=h,
                   json={"name": "expense-rules", "description": "报销规则", "body": "先看金额"}).status_code == 200
     r = c.post(f"/open/v1/projects/{g.id}/services", headers=h, json={

@@ -59,7 +59,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账** | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
-| 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md) |
+| 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md)；部署见 [deploy/README.md](deploy/README.md)（只管 Matrix 一个容器），对外暴露（反向代理的要求、Caddy 示例）见 [docs/reverse-proxy.md](docs/reverse-proxy.md) |
 | 管理后台：用量台账（只看用量不看内容）、云侧模型目录、给用户发重置密码链接 | [docs/reference/admin.md](docs/reference/admin.md) |
 | 前端样式：颜色、字号、间距、圆角、通用部件，插件页面的样式 | [docs/design-system.md](docs/design-system.md)，变量在 `matrix/static/tokens.css`，样式指南页 `/static/ui.html`；`tests/test_design.py` 检查迁移过的文件不写死颜色 |
 | 需求与实现状态 | [REQUIREMENTS.md](REQUIREMENTS.md) |

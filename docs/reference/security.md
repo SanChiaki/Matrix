@@ -4,6 +4,8 @@
 
 - `/api/*` 要求登录（邮箱 + 密码，`auth.py`，HttpOnly + SameSite=Lax cookie），按用户做归属与可见性检查。
   这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
+  Docker 部署里容器内监听 0.0.0.0，但 compose 只发布到宿主机的 `127.0.0.1`；对外经部署方的反向代理，
+  它负责 HTTPS 并挡住 `/internal/*`（Matrix 只凭令牌、不看来源地址），要求见 [reverse-proxy.md](../reverse-proxy.md)。
 - 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
 - **重置密码**（[admin.md](admin.md#reset)）：没有邮件，忘了密码由管理员签发一次性链接（`/#reset=<令牌>`，令牌在 `#` 后面，
   不进服务器日志与 Referer），本人打开后自己设新密码。令牌明文只在签发的那次返回给管理员，`state.json` 只存 sha256；
@@ -11,7 +13,7 @@
   **已知风险（接受）**：管理员能给任何人（包括别的管理员）发链接、自己打开就能接管那个账号，没有通知本人。
   接受理由：管理员是部署方，本来就能读写 `state.json`；复查时机：有邮件通道或多租户部署时，改成发到本人邮箱、并通知本人。
 - `/internal/tools`、`/internal/approval`、`/internal/question` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
-- `/mcp/remote`（外部平台 Agent 回调，[remote-agents.md](../remote-agents.md)，不变量 28）不走登录，Caddy 也不加 basic auth：只凭 Matrix 给那个 Agent 签的密钥（`state.json` 只存 sha256）+ Matrix 发起、还没结束的平台会话 id（调工具 `tools/call` 时；不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连只要密钥，`tools/list` 没落到某一轮时只给工具说明，说明本来就是公开的）。密钥不对直接 401、不等待；会话 id 陌生的最多等 `bind_wait_s`。**已知风险（接受）**：没有单独限频，持有密钥的平台可以让连接挂到 `bind_wait_s`；接受理由：密钥只给部署方登记的内网平台；复查时机：对公网开放之前。远程 Agent 不在服务器上执行，读不到 `--data`，不加重下面的读隔离欠账。
+- `/mcp/remote`（外部平台 Agent 回调，[remote-agents.md](../remote-agents.md)，不变量 28）不走登录，反向代理上也不加额外的认证层：只凭 Matrix 给那个 Agent 签的密钥（`state.json` 只存 sha256）+ Matrix 发起、还没结束的平台会话 id（调工具 `tools/call` 时；不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连只要密钥，`tools/list` 没落到某一轮时只给工具说明，说明本来就是公开的）。密钥不对直接 401、不等待；会话 id 陌生的最多等 `bind_wait_s`。**已知风险（接受）**：没有单独限频，持有密钥的平台可以让连接挂到 `bind_wait_s`；接受理由：密钥只给部署方登记的内网平台；复查时机：对公网开放之前。远程 Agent 不在服务器上执行，读不到 `--data`，不加重下面的读隔离欠账。
 - **网络管关系，不管 Agent 在自己环境里能碰什么**。云侧 Agent 的读隔离目前做不到（见下一条）；端侧 Agent
   读的是所有者自己的机器，不在网络管辖范围，网络只对经过它的协作工具负责。共享项目里端侧 Agent 会把群聊内容
   带到成员的机器上——这是已接受的披露（与"档案对所有参与方可见"同一逻辑），UI 要标出成员所在位置。

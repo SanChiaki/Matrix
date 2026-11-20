@@ -37,7 +37,7 @@ from .web_fetch import FetchConfig
 from .im.bridge import ImBridge
 from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
-from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, HARNESSES, User
+from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, User
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
@@ -455,7 +455,7 @@ class AssignIn(BaseModel):
 
 class FileIn(BaseModel):
     name: str = Field(min_length=1, max_length=300)   # 可以带目录：设计/方案.md
-    content: str = Field(max_length=200_000)
+    content: str = Field(max_length=FILE_LIMIT)
 
 
 class FolderIn(BaseModel):
@@ -1078,9 +1078,30 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         return network.project_detail(project_id, actor=user.id)
 
     @app.post("/api/projects/{project_id}/files")
-    def publish_file(project_id: str, body: FileIn, user: Me) -> dict:
-        network.publish_file(project_id, body.name, body.content.encode("utf-8"), actor=user.id)
-        return network.project_detail(project_id, actor=user.id)
+    async def publish_file(project_id: str, request: Request, user: Me,
+                           name: str | None = Query(None, min_length=1, max_length=300)) -> dict:
+        """上传一份资料，任何类型。请求体就是文件内容（不用 multipart，同附件上传），名字在 `?name=`（可以带目录）；
+        也收 JSON `{name, content}`（文本内容，给脚本用）。超过 FILE_LIMIT 413。"""
+        await run_in_threadpool(network.visible_project, project_id, user.id)  # 先查可见性，不收看不到的项目的内容
+        too_big = HTTPException(413, f"文件超过上限 {FILE_LIMIT // 1_000_000} MB")
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > FILE_LIMIT * (2 if name is None else 1):
+            raise too_big
+        buf = bytearray()
+        async for chunk in request.stream():
+            buf += chunk
+            if len(buf) > FILE_LIMIT * (2 if name is None else 1):  # JSON 里的文本会有转义，留些余量，真正的上限在 publish_file
+                raise too_big
+        if name is None:
+            try:
+                body = FileIn.model_validate_json(bytes(buf))
+            except ValueError as e:
+                raise HTTPException(422, "要么在 ?name= 给文件名、请求体是文件内容，要么发 JSON {name, content}") from e
+            name, data = body.name, body.content.encode("utf-8")
+        else:
+            data = bytes(buf)
+        await run_in_threadpool(network.publish_file, project_id, name, data, user.id)
+        return await run_in_threadpool(network.project_detail, project_id, user.id)
 
     @app.post("/api/projects/{project_id}/folders")
     def create_folder(project_id: str, body: FolderIn, user: Me) -> dict:
@@ -2016,8 +2037,10 @@ def main() -> None:
     im.start()
     if im.driver_errors:
         print(f"有 IM 驱动没加载上：{im.driver_errors}")
+    # 端侧 Agent 用 publish_file 发布时，连接器把整个文件 base64 放在一条消息里回传：默认 16 MiB 装不下 FILE_LIMIT 的文件，
+    # 超了 uvicorn 会直接断开这条连接
     config = uvicorn.Config(create_app(network, im), host=args.host, port=args.port, log_level="warning",
-                            timeout_graceful_shutdown=3)
+                            timeout_graceful_shutdown=3, ws_max_size=FILE_LIMIT * 4 // 3 + 1_000_000)
     MatrixServer(config, network).run()
 
 

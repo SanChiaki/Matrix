@@ -71,7 +71,8 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 ## 五、上线
 
 1. 平台目录写好，驱动包装进 Matrix 的运行环境（`uv pip install`，或加进部署镜像）。
-2. Caddy 已经把 `/mcp/remote` 与 `/mcp/remote/*` 放过 basic auth（`deploy/Caddyfile`）：平台要能访问到 Matrix 的这个地址。
+2. 平台要能访问到 Matrix 的 `/mcp/remote` 与 `/mcp/remote/*`：反向代理上加了额外的认证层（如 basic auth）时要放行这两类路径，
+   由 Matrix 凭密钥鉴权（[reverse-proxy.md](reverse-proxy.md)）。
 3. 公司 IT 给平台开出站到 Matrix、给 Matrix 开出站到平台。
 
 ## 六、真机验收（逐条打勾）
