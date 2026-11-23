@@ -44,7 +44,8 @@ TOOLS = [
                 "share": {"type": "array", "items": {"type": "string"},
                           "description": "显式共享给对方的知识 key（只能是你可见的知识）"},
                 "attachments": {"type": "string",
-                                "description": "转交给对方的附件：你工作目录里 attachments/ 下的相对路径，每行一个"},
+                                "description": ("转交给对方的附件：你工作目录里 attachments/ 下的相对路径，每行一个；"
+                                                "外部平台 Agent 写这一轮暂存到 /mcp/remote/files 的 file_id（stg_…）")},
             },
             "required": ["agent", "mission", "expected_outcome"],
             "additionalProperties": False,

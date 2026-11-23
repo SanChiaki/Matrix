@@ -15,7 +15,7 @@
 | Seat.goal / Task.goal | 这个会话里 dsh 的长期目标（`create_goal`）：id、目标、phase（active / complete / blocked / paused / limit）、上限、网络已经续了几轮。active 时网络在同一会话里续跑，见 [execution.md](execution.md)“一轮做不完的事” |
 | Question | Agent 在运行中提的一批问题（dsh 的 `ask_user_question`）：现在等谁回答（`target_agent_id` 委托方 / `target_user_id` 一个人）、转给人的原因（`escalated`）、回答（每个问题 `{id, selected, custom?}`）；pending / answered / cancelled，重启时等着的作废。见 [execution.md](execution.md)“运行中提问” |
 | Seat（席位） | 一个 Agent 在一个对话里的执行上下文，id 为 `对话/Agent`：独立 DSH 会话、收件箱、工作目录 `conversations/<conv>/<agent>/`。第一次被 @ 时创建 |
-| Task（委托） | Agent ↔ Agent 的一次授权：mission / authority / constraints / expected_outcome / share；带收件箱。`attachments` 是委托方显式转交的对话附件。`owners` 是两端 Agent 的所有者，只有他们看得到这个委托 |
+| Task（委托） | Agent ↔ Agent 的一次授权：mission / authority / constraints / expected_outcome / share；带收件箱。`attachments` 是委托方显式转交的对话附件；`sent_files` 是外部平台执行者在任务里 `send_file` 发来的（交付前在 `pending_files`，交付后才给委托方）。`owners` 是两端 Agent 的所有者，只有他们看得到这个委托 |
 | KnowledgeItem | 任务结果沉淀为知识，key 形如 `<task_id>:result` |
 | UserRequest（用户任务） | 人交代给 Agent 的一件**有交付目标**的事，看板上的一张卡。由接任务的 Agent 判断并登记（`open_request`）：闲聊、问答不算。来源消息与下发人由网络从这一轮送达的 @ 它的消息里认定，不信任模型自报。`in_progress → in_review → completed`（或 `cancelled`）；交付（`deliver_request`）前它为此发起的委托必须都有结果；下发人验收或退回（原会话返工）。为它发起的委托记在 `task_ids`，只在任务详情里展示 |
 | Proposal | Agent 提议新建的 Agent，由**提议者 Agent 的所有者**审核（`owner_id`），新 Agent 归他；`max_authority` 记录提议者当时的有效权限 |

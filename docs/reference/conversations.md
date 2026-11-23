@@ -19,11 +19,12 @@
   `attachments/<sha 前 8 位>/<文件名>`（只读副本，同 `project/`，运行后丢弃，不算产物），新消息里每个附件一行路径，模型用自己的工具读；
   端侧随 `run.request.materials` 下发。进委托任务只能由委托方用 `delegate` 的 `attachments`（每行一个路径）显式转交。
   上传、下载按对话可见性，看不到的一律 404（不变量 13）；下载一律以附件返回。不按文件类型区分，图片也是普通文件。
-- **Agent 发文件给人**（网络工具 `send_file(path, name?)`，只有席位有，委托任务里没有：产物在交付时整体拷给委托方）：
+- **Agent 发文件给人**（网络工具 `send_file(path, name?)`，只有席位有，委托任务里没有：产物在交付时整体拷给委托方；例外是外部平台 Agent，见下）：
   把当前工作目录里的一个文件（目录打成 zip，顶层是目录名）存进同一个附件区，附在**这一轮的回复**上（`Message.attachments`），
   看得到这条回复的人直接下载，之后被唤醒的席位也在 `attachments/` 里读得到。端侧经连接器取文件（`fetch_file`，不能发目录）。
-  外部平台 Agent 的文件在平台上：平台先 `POST /mcp/remote/files` 暂存拿 `file_id`，同一轮里 `send_file(file_id=…)`
-  （[remote-agents.md](../remote-agents.md)“发文件”，暂存一轮结束就删）。
+  外部平台 Agent 的文件在平台上：平台先 `POST /mcp/remote/files` 暂存拿 `file_id`，同一轮里 `send_file(file_id=…)`；
+  它的委托任务里也有 `send_file`（产物没法在交付时从工作目录拷），发的文件随交付交给委托方；附件它用 `GET /mcp/remote/files/<sha>` 取
+  （[remote-agents.md](../remote-agents.md)“传文件”，暂存一轮结束就删）。
   - 只读挂载不能发：`project/`、`agent-home/`、`skills/`、`releases/`、`plugins/`（它们各有去向规则，不变量 8、17、23、24）；
     一轮最多 10 个、每个 ≤20 MB（同人上传）。
   - 它是“会让别人看到内容”的工具（`OUTBOUND_TOOLS`）：会话读过越界的来源后不放行（不变量 22）；之前发的文件跟着被拦下的回复，

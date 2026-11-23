@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from typing import Callable
+from typing import Any, Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, CHAT_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
                      HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
@@ -117,14 +117,16 @@ TOOL_GUIDE: dict[str, str] = {
     "list_members": "查看项目成员及其能力；只能委托这些成员。",
     "delegate": ("委托一个成员：写清 mission、expected_outcome（交回什么、以什么形式），可选 authority（只能收窄对方自身权限）、"
                  "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）、"
-                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个）。**立即返回任务 id，不等待结果**。"),
+                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个；在外部平台上写暂存的 file_id）。"
+                 "**立即返回任务 id，不等待结果**。"),
     "list_tasks": "查看你发起的委托及其状态。",
     "accept_task": "接受一个已交付（in_review）的委托。",
     "request_changes": "退回一个已交付的委托并写明要改什么，对方会在原会话里修改后重新交付。",
     "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
     "send_file": ("把工作目录里的文件（或目录，打成 zip）附在这一轮的回复上发给对话里的人，人直接下载；"
                   "回复里说明是什么，不要把长内容贴进回复，也不要让人去工作目录里找。"
-                  "你在外部平台上时，先把文件传到 /mcp/remote/files，用返回的 file_id 代替 path。"),
+                  "你在外部平台上时，先把文件传到 /mcp/remote/files，用返回的 file_id 代替 path；"
+                  "在委托任务里发的文件随交付交给委托方。"),
     "answer_question": ("回答你委托的成员问你的问题（question_id 来自网络通知）。它一直在等：能替人决定的就直接答，"
                         "一个选项时写那个选项的原文。"),
     "escalate_question": ("成员问的事你决定不了（要人拍板、你没有依据）时转给人，可在 note 里写你的看法；"
@@ -727,6 +729,21 @@ def format_task_result(task: Task, agent_name: str) -> str:
     return "\n".join(head + ["已受理，正在执行。结果会作为网络通知送给你；现在不必等待。"])
 
 
+def format_remote_files(items: list[dict[str, Any]]) -> str:
+    """外部平台 Agent 的提示词末尾：附件不在它的工作目录里，写明这一轮拿得到哪些、平台怎么取，以及怎么发文件。"""
+    lines = ["", "", "## 文件（你在外部平台上）",
+             "你的工作目录在你自己的平台上，上面写的 `attachments/…` 路径在你那里不存在。"
+             "文件由平台带着调 Matrix MCP 的同一份请求头（密钥 + 会话 id）去取、去传，只在这一轮有效："]
+    if items:
+        lines.append("- 这一轮拿得到的文件（`GET /mcp/remote/files/<sha256>` 取内容）：")
+        lines += [f"  - {a.get('name', '')}（{a.get('mime', '')}，{_size(int(a.get('size', 0)))}）："
+                  f"`GET /mcp/remote/files/{a['sha']}`" for a in items]
+    lines.append("- 要发文件：先 `POST /mcp/remote/files?name=<文件名>`（请求体就是内容）拿 file_id，"
+                 "再用 send_file(file_id=…) 发给对话里的人（委托任务里就是随交付交给委托方），"
+                 "或写进 delegate 的 attachments（每行一个 file_id）转交给你委托的成员。")
+    return "\n".join(lines)
+
+
 def format_delivery(task: Task, agent_name: str) -> str:
     """交付通知：委托方据此验收。"""
     r = task.result or {}
@@ -744,6 +761,8 @@ def format_delivery(task: Task, agent_name: str) -> str:
         head.append(f"产物：已拷进你工作目录的 `{r.get('files_dir')}/`（{shown}），是你自己的副本，可以直接用、改、发布。")
     if r.get("files_note"):
         head.append(f"产物说明：{r['files_note']}")
+    if r.get("sent_files"):
+        head.append(f"执行者发来的文件：{'、'.join(r['sent_files'][:30])}，只读副本在你工作目录的 `attachments/` 下。")
     return "\n".join(head + ["", str(r.get("report", ""))[:6000],
                              "", f"用 accept_task 接受，或用 request_changes 写明要改什么（task_id: {task.id}）。"])
 

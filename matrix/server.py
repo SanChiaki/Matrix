@@ -923,6 +923,19 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
             return JSONResponse({"detail": str(e)}, status_code=e.status)
         return JSONResponse(out)
 
+    @app.get("/mcp/remote/files/{sha}")
+    async def remote_fetch_file(sha: str, request: Request) -> Response:
+        """外部平台 Agent 取这一轮拿得到的文件（对话附件、委托方转交的、它委托出去已交付的）。认证同 /mcp/remote（不变量 28）。"""
+        auth_header = request.headers.get("authorization", "")
+        key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        sid = next((x for x in (request.headers.get(h, "") for h in network.remote_session_headers()) if x), "")
+        try:
+            f, meta = await asyncio.to_thread(network.remote_file, key, sid, sha)
+        except StagingRefused as e:
+            return JSONResponse({"detail": str(e)}, status_code=e.status)
+        return FileResponse(f, media_type=meta["mime"], filename=meta["name"], content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff", "X-File-Sha256": meta["sha"]})
+
     mcp_sse.install(app, network)  # 同一个地址的旧版传输（HTTP+SSE）：GET 开流，消息发到流里给的地址
 
     # ---- 外部应用（docs/open-api.md，不变量 30）：管理员登记；用户授权；所有者开放 Agent；负责人代系统账号授权连接器 ----

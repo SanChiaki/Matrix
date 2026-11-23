@@ -509,6 +509,10 @@ class Task:
     abilities_seen: str = ""             # 同 Seat.abilities_seen
     hooks_seen: str = ""                 # 同 Seat.hooks_seen
     attachments: list[dict[str, Any]] = field(default_factory=list)  # 委托方显式转交的对话附件（同 Message.attachments）
+    # 外部平台执行者在任务里 send_file 发出的文件（对话附件）：交付时从 pending_files 并进 sent_files，
+    # 交付之后（交付要所有者确认时确认之后）委托方才拿得到（docs/remote-agents.md“发文件”）
+    sent_files: list[dict[str, Any]] = field(default_factory=list)
+    pending_files: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     delivered_at: float | None = None
     finished_at: float | None = None

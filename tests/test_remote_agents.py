@@ -20,7 +20,7 @@ from tests.test_connections import SECRET, FakeMCP, catalog_file
 from tests.test_users import users
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "examples" / "remote-agent"))
-from demo_platform import API_KEY, REPORT, DemoPlatform  # noqa: E402
+from demo_platform import API_KEY, DemoPlatform, report  # noqa: E402
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ class Env:
         data = tmp_path / "data"
         data.mkdir()
         self.net_holder: list[Network] = []
-        self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post)
+        self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post, file_get=self._file_get)
         plats = tmp_path / "agent-platforms.json"
         plats.write_text(json.dumps({"platforms": [
             {"id": "demo", "name": "演示平台", "url": self.demo.url, "bind_wait_s": 3},
@@ -54,10 +54,14 @@ class Env:
         r = self.client.post(url.removeprefix("http://matrix"), content=data, headers=headers)
         return r.status_code, r.json()
 
-    def connect_mcp(self, agent_id: str, actor: str) -> str:
+    def _file_get(self, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        r = self.client.get(url.removeprefix("http://matrix"), headers=headers)
+        return r.status_code, r.content
+
+    def connect_mcp(self, agent_id: str, actor: str, platform_agent: str = "expense") -> str:
         """扮演维护人在平台网页上给这个 Agent 填 MCP：Matrix 的地址 + Matrix 签的密钥。"""
         k = self.net.issue_remote_key(agent_id, actor=actor)
-        self.demo.mcp["expense"] = {"url": "http://matrix" + k["path"], "headers": {k["header"]: k["value"]}}
+        self.demo.mcp[platform_agent] = {"url": "http://matrix" + k["path"], "headers": {k["header"]: k["value"]}}
         return k["key"]
 
     def close(self):
@@ -346,11 +350,11 @@ def test_platform_files_are_staged_then_sent_in_the_same_round(env: Env):
     dm = net.direct_chat(a.id, actor=maya)
     net.send_message(dm.id, "发文件给我", actor=maya, background=False)
     code, staged = env.demo.uploads[-1]
-    assert code == 200 and staged["file_id"].startswith("stg_") and staged["size"] == len(REPORT)
+    assert code == 200 and staged["file_id"].startswith("stg_") and staged["size"] == len(report("expense"))
     reply = dm.messages[-1]
-    assert "已附上 报销汇总.md" in reply.text and [x["name"] for x in reply.attachments] == ["报销汇总.md"]
+    assert "已附上 报销助手汇总.md" in reply.text and [x["name"] for x in reply.attachments] == ["报销助手汇总.md"]
     f, meta = net.attachment_file(dm.id, reply.attachments[0]["sha"], actor=maya)
-    assert f.read_bytes() == REPORT and meta["mime"].startswith("text/")
+    assert f.read_bytes() == report("expense") and meta["mime"].startswith("text/")
     assert not any((net.store.root / "staging").iterdir())  # 一轮结束：暂存删掉，发出去的在对话的附件区
     net.send_message(dm.id, f"转发「{staged['file_id']}」", actor=maya, background=False)
     assert "找不到暂存文件" in dm.messages[-1].text and not dm.messages[-1].attachments
@@ -393,3 +397,69 @@ def test_staging_needs_the_key_and_a_live_matrix_round(env: Env, monkeypatch: py
     net.send_message(dm.id, "再发文件", actor=maya, background=False)
     assert env.demo.uploads[-1][0] == 413 and "暂存失败（413）" in dm.messages[-1].text
     assert not dm.messages[-1].attachments
+
+
+def test_two_platform_agents_pass_files_in_chat_and_along_a_delegation(env: Env):
+    """两个外部平台 Agent 经 Matrix 传文件：群聊里 A 发的，B 被 @ 时 GET /mcp/remote/files/<sha> 取得到；
+    A 委托 B 时 attachments 写暂存的 file_id 转交，B 在任务里取到，又 send_file 随交付交回，A 收交付那一轮取得到。
+    取文件只给这一轮本来拿得到的（同云侧挂进 attachments/ 的口径），别的 404。"""
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    b = net.add_remote_agent("demo", "travel", API_KEY, actor=maya)
+    env.connect_mcp(a.id, maya, "expense")
+    key_b = env.connect_mcp(b.id, maya, "travel")
+    g = net.create_project("报销", "", [a.id, b.id], actor=maya)
+    chat = net.project_chat(g.id, actor=maya)
+    # 群聊：A 发的文件，B 下次被 @ 时取得到
+    net.send_message(chat.id, f"@{a.name} 发文件", actor=maya, background=False)
+    assert [x["name"] for x in chat.messages[-1].attachments] == ["报销助手汇总.md"]
+    net.send_message(chat.id, f"@{b.name} 看看", actor=maya, background=False)
+    assert env.demo.downloads[-1] == ("travel", 200, report("expense"))
+    assert "收到文件：报销助手汇总.md" in chat.messages[-1].text
+    # 委托：A 暂存后把 file_id 写进 attachments；B 在任务里取到，再发一份自己的随交付交回
+    n = len(env.demo.downloads)
+    net.send_message(chat.id, f"@{a.name} 委托「{b.name}」带文件：收下附件，再发文件", actor=maya, background=False)
+    net.wait_idle(chat.id)
+    t = next(t for t in net.store.tasks.values() if t.delegatee_id == b.id)
+    assert [x["name"] for x in t.attachments] == ["报销助手汇总.md"]
+    assert [x["name"] for x in t.sent_files] == ["差旅助手汇总.md"] and not t.pending_files
+    assert t.result["sent_files"] == ["差旅助手汇总.md"]
+    got = env.demo.downloads[n:]
+    assert ("travel", 200, report("expense")) in got and ("expense", 200, report("travel")) in got
+    # 人在任务详情里下载得到交回的文件；任务里发的不进群聊
+    f, _ = net.attachment_file(chat.id, t.sent_files[0]["sha"], actor=maya)
+    assert f.read_bytes() == report("travel")
+    assert all("差旅助手汇总.md" not in [x["name"] for x in m.attachments] for m in chat.messages)
+    # 一轮结束：拿 B 的密钥和旧会话 id 取文件，一律 403；没登录的陌生密钥 401
+    r = env.client.get(f"/mcp/remote/files/{t.sent_files[0]['sha']}",
+                       headers={"Authorization": f"Bearer {key_b}", "X-Session-Id": t.dsh_session_id})
+    assert r.status_code == 403
+    assert env.client.get(f"/mcp/remote/files/{t.sent_files[0]['sha']}",
+                          headers={"Authorization": "Bearer x", "X-Session-Id": "y"}).status_code == 401
+
+
+def test_platform_agent_only_fetches_files_of_its_round(env: Env):
+    """取文件的口径：这一轮拿得到的才给，别的对话里的附件 404（不变量 13、28）。"""
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    env.connect_mcp(a.id, maya)
+    other = net.direct_chat(net.create_agent("Other", "o", [], [], actor=maya).id, actor=maya)
+    secret = net.upload_attachment(other.id, "机密.txt", b"top secret", "text/plain", actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "发文件", actor=maya, background=False)
+    live = ExecContext(kind="seat", id=f"{dm.id}/{a.id}", agent_id=a.id, conversation_id=dm.id, project_id=None,
+                       authority=[], constraints=[], depth=0, chain=[a.id])
+    with net._lock:
+        mine = [x["sha"] for x in net._attachments_for(live)]
+    assert secret["sha"] not in mine and len(mine) == 1
+    net.remote_bindings.bind(a.id, "s-live", type("T", (), {"token": "t-live", "names": None})())
+    net._contexts["t-live"] = live
+    key = env.connect_mcp(a.id, maya)
+    h = {"Authorization": f"Bearer {key}", "X-Session-Id": "s-live"}
+    assert env.client.get(f"/mcp/remote/files/{secret['sha']}", headers=h).status_code == 404
+    r = env.client.get(f"/mcp/remote/files/{mine[0]}", headers=h)
+    assert r.status_code == 200 and r.content == report("expense") and "attachment" in r.headers["content-disposition"]
+    net._contexts.pop("t-live")
+    net.remote_bindings.unbind(a.id, "s-live")

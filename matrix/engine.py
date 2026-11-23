@@ -41,7 +41,7 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_
                      Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, ProjectService, Proposal, Question,
                      Release, ResourceRef,
                      Schedule, Seat, Task, TaskStatus, UserRequest, attachment_rel, new_id, seat_id)
-from .protocol import (build_notice_prompt, build_seat_prompt, build_task_prompt, format_archive, format_chat, format_service_archive,
+from .protocol import (build_notice_prompt, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat, format_service_archive,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_goal_limit, format_goal_round, format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
@@ -128,6 +128,8 @@ class ExecContext:
     # 项目服务（docs/project-services.md，不变量 29）：这一轮属于哪个服务。档案只读圈定范围、只写收件目录，改档案的工具不给
     svc: str | None = None
     plugin_scope: list[str] | None = None  # 这一轮能用的插件（服务里是主持人勾的那些）；None = 项目里全部
+    # 外部平台 Agent：工作目录在平台上，委托任务里也有 send_file（产物没法在交付时从工作目录拷给委托方）
+    remote: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -143,6 +145,8 @@ class ExecContext:
     def tools(self) -> list[str]:
         out = network_tools_for(self.kind, self.in_project, self.can_delegate, self.session, self.plugins, self.home,
                                 bool(self.hidden))
+        if self.remote and self.kind == "task" and "send_file" not in out:
+            out = [*out, "send_file"]
         return [n for n in out if n not in SERVICE_DENIED_TOOLS] if self.svc else out
 
     @property
@@ -5149,25 +5153,27 @@ class Network(AppsMixin):
             meta = next((a for m in conv.messages if self.can_see_message(m, actor)
                          for a in m.attachments if a["sha"] == sha), None) or next(
                 (a for t in self.store.tasks.values() if t.conversation_id == conv.id and self.can_see_task(t, actor)
-                 for a in t.attachments if a["sha"] == sha), None)
+                 for a in t.attachments + t.sent_files + t.pending_files if a["sha"] == sha), None)
             f = self.store.attachment_dir(conv.id) / sha if meta is not None else None
             self._check(f is not None and f.is_file(), f"attachment {sha}")
             return f, meta
 
     def _attachments_for(self, ctx: ExecContext) -> list[dict[str, Any]]:
         """调用方持有锁。这个执行上下文能拿到的附件：席位是对话里它能看到的消息上的，任务是委托方转交的。"""
+        # 它发起、已经交付的委托里执行者发出的文件（外部平台执行者的产物）：只给直接委托方
+        delivered = [a for t in self.store.tasks.values()
+                     if t.delivered_at is not None and t.delegator_id == ctx.agent_id
+                     and (t.parent_task_id == ctx.id if ctx.kind == "task"
+                          else t.parent_task_id is None and t.conversation_id == ctx.conversation_id)
+                     for a in t.sent_files]
         if ctx.kind == "task":
             t = self.store.tasks.get(ctx.id)
-            return list(t.attachments) if t else []
+            return _merge_files(list(t.attachments) if t else [], delivered)
         conv = self.store.conversations.get(ctx.conversation_id)
         agent = self.store.agents.get(ctx.agent_id)
         owner = agent.owner_id if agent else None
-        out: dict[str, dict[str, Any]] = {}
-        for m in conv.messages if conv else []:
-            if not m.audience or owner in m.audience:
-                for a in m.attachments:
-                    out.setdefault(attachment_rel(a), a)
-        return list(out.values())
+        mine = [a for m in (conv.messages if conv else []) if not m.audience or owner in m.audience for a in m.attachments]
+        return _merge_files(mine, delivered)
 
     def _mount_attachments(self, ctx: ExecContext, workdir: Path) -> None:
         """附件拷进工作目录的 attachments/（每轮刷新，只读副本）。"""
@@ -5185,7 +5191,8 @@ class Network(AppsMixin):
         """调用方持有锁。清空 / 删除对话后，删掉不再被消息或委托引用的附件。"""
         conv = self.store.conversations.get(conv_id)
         keep = {a["sha"] for m in (conv.messages if conv else []) for a in m.attachments}
-        keep |= {a["sha"] for t in self.store.tasks.values() if t.conversation_id == conv_id for a in t.attachments}
+        keep |= {a["sha"] for t in self.store.tasks.values() if t.conversation_id == conv_id
+                 for a in t.attachments + t.sent_files + t.pending_files}
         d = self.store.root / "attachments" / conv_id
         for f in d.iterdir() if d.is_dir() else []:
             if f.name not in keep:
@@ -5656,6 +5663,9 @@ class Network(AppsMixin):
         else:
             prompt = build_notice_prompt("\n\n".join(filter(None, [inbox, archive])))
         res = self._run(ctx, agent, prompt, workdir, task, agent.timeout_s, mount_home=mount_home, hide=set(hidden))
+        if ctx.sent:  # 外部平台执行者 send_file 发出的文件：随下一次交付给委托方（失败了也留着，续接后照样交）
+            with self._lock:
+                task.pending_files = _merge_files(task.pending_files, ctx.sent)
         if res.ok:
             with self._lock:
                 task.archive_seen = archive_rev
@@ -5711,7 +5721,7 @@ class Network(AppsMixin):
                           project_id=g.id, authority=list(task.granted_authority),
                           constraints=list(task.effective_constraints), depth=task.depth,
                           chain=self._chain(task) + [agent.id], plugins=self._plugin_tools_on(g),
-                          services=self._services_on(g))
+                          services=self._services_on(g), remote=bool(agent.remote))
         svc = self._service_of(task.conversation_id)
         if svc is not None:  # 服务会话里的委托（不变量 29）：服务面，为调用方做
             ctx.principal = task.caller_id
@@ -5744,6 +5754,10 @@ class Network(AppsMixin):
                                                       content=text, project_id=g.id, owner_task_id=task.id,
                                                       visible_to=visible)
             task.result = {"summary": _first_line(text)[:200], "report": text, "knowledge_key": key}
+            if task.pending_files:  # 交付了（要确认的已经确认）：任务里发出的文件这时才给委托方
+                task.sent_files, task.pending_files = _merge_files(task.sent_files, task.pending_files), []
+            if task.sent_files:
+                task.result["sent_files"] = [a["name"] for a in task.sent_files]
             dst = self._delivery_dir(task)
         task.result.update(self._hand_over(task, agent, dst))
         with self._lock:
@@ -6340,6 +6354,10 @@ class Network(AppsMixin):
         token = secrets.token_urlsafe(18)
         conns = conns or []
         ctx.connections = [c.id for c in conns]
+        ctx.remote = bool(agent.remote)
+        if agent.remote:  # 附件不在平台的工作目录里：告诉它这一轮拿得到哪些、怎么取（docs/remote-agents.md“发文件”）
+            with self._lock:
+                prompt += format_remote_files(self._attachments_for(ctx))
         cloud = [c for c in conns if c.where == "cloud"]
         connectors = ConnectorBridge(url=self.connector_url, token=token,
                                      list_tools=lambda: self.connector_tools(token),
@@ -7076,12 +7094,23 @@ class Network(AppsMixin):
         return format_task_result(task, target.name), False
 
     def _pass_attachments(self, ctx: ExecContext, value: Any) -> list[dict[str, Any]]:
-        """委托方转交的附件：每行一个工作目录里 attachments/ 下的路径，只能是这个上下文自己拿得到的。"""
+        """委托方转交的附件：每行一个工作目录里 attachments/ 下的路径，只能是这个上下文自己拿得到的；
+        外部平台 Agent 也可以写这一轮暂存的 file_id（stg_…），存进对话的附件区再转交。"""
         with self._lock:
             mine = {attachment_rel(a): a for a in self._attachments_for(ctx)}
         out: list[dict[str, Any]] = []
         for raw in _as_lines(value):
             rel = raw.strip("`'\" ").removeprefix("./")
+            if rel.startswith("stg_"):
+                with ctx.lock:
+                    item = ctx.staged.get(rel)
+                if item is None:
+                    raise NetworkError(f"找不到暂存文件 {rel}：只认这一轮上传到 /mcp/remote/files 的文件")
+                a = self._store_attachment(ctx.conversation_id, item["name"],
+                                           (self.store.root / "staging" / rel).read_bytes(), item["mime"])
+                if a not in out:
+                    out.append(a)
+                continue
             if rel not in mine:
                 raise NetworkError(f"附件 {raw} 不存在：只能转交你工作目录里 {ATTACHMENTS}/ 下的文件（写它的相对路径）")
             if mine[rel] not in out:
@@ -8420,8 +8449,27 @@ class Network(AppsMixin):
         return ok({"content": [{"type": "text", "text": text}], "isError": bad})
 
     def remote_staging_round(self, key: str, session_id: str) -> ExecContext:
-        """平台要暂存文件时先认这一轮（读请求体之前）：规则同 tools/call（不变量 28）——Matrix 签的密钥、
-        Matrix 发起且还没结束的平台会话 id（还没绑定就等 bind_wait_s），这一轮还得有 send_file。"""
+        """平台要暂存文件时先认这一轮（读请求体之前）：这一轮还得有 send_file 或 delegate，暂存了才发得出去。"""
+        ctx, names = self._remote_round(key, session_id)
+        if names is not None and not {"send_file", "delegate"} & set(names):
+            raise StagingRefused("这一轮没有 send_file 也没有 delegate，暂存了也发不出去", 403)
+        return ctx
+
+    def remote_file(self, key: str, session_id: str, sha: str) -> tuple[Path, dict[str, Any]]:
+        """平台取这一轮拿得到的文件（GET /mcp/remote/files/<sha>）：口径同云侧挂进工作目录 attachments/ 的——
+        席位是对话里它看得到的消息上的，任务是委托方转交的，再加它发起、已经交付的委托里执行者发出的。其余 404。"""
+        ctx, _ = self._remote_round(key, session_id)
+        sha = str(sha).lower()
+        with self._lock:
+            meta = next((a for a in self._attachments_for(ctx) if a["sha"] == sha), None)
+        f = self.store.root / "attachments" / ctx.conversation_id / sha
+        if meta is None or not re.fullmatch(r"[0-9a-f]{64}", sha) or not f.is_file():
+            raise StagingRefused("这一轮拿不到这个文件", 404)
+        return f, meta
+
+    def _remote_round(self, key: str, session_id: str) -> tuple[ExecContext, list[str] | None]:
+        """外部平台传文件、取文件时认这一轮：规则同 tools/call（不变量 28）——Matrix 签的密钥、
+        Matrix 发起且还没结束的平台会话 id（还没绑定就等 bind_wait_s）。返回这一轮的上下文与能用的网络工具。"""
         sha = hashlib.sha256(str(key).encode()).hexdigest()
         with self._lock:
             agent = next((a for a in self.store.agents.values() if a.remote and a.remote.get("key_sha")
@@ -8436,11 +8484,9 @@ class Network(AppsMixin):
             ctx = self._contexts.get(b.tools.token) if b is not None and b.tools is not None else None
         if ctx is None:
             self.bus.emit("remote.refused", agent_id=agent.id, reason="unknown_session")
-            raise StagingRefused("这个会话不是 Matrix 发起的，或那一轮已经结束：只能在 Matrix 交给你的那一轮里暂存文件", 403)
-        if b.tools.names is not None and "send_file" not in b.tools.names:
-            raise StagingRefused("这一轮没有 send_file（委托任务里产物在交付时整体交给委托方），暂存了也发不出去", 403)
+            raise StagingRefused("这个会话不是 Matrix 发起的，或那一轮已经结束：只能在 Matrix 交给你的那一轮里传、取文件", 403)
         self._remote_seen(agent)
-        return ctx
+        return ctx, b.tools.names
 
     def stage_remote_file(self, ctx: ExecContext, name: str, data: bytes, mime: str = "") -> dict[str, Any]:
         """外部平台 Agent 的文件暂存（/mcp/remote/files）：存到 <data>/staging/<file_id>，返回 file_id，
@@ -9378,6 +9424,15 @@ def _as_lines(v: Any) -> list[str]:
 
 def _dedup(items: list[str]) -> list[str]:
     return list(dict.fromkeys(items))
+
+
+def _merge_files(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """几组附件说明合成一组：同一个路径（sha 前 8 位 + 文件名）只留第一个。"""
+    out: dict[str, dict[str, Any]] = {}
+    for g in groups:
+        for a in g:
+            out.setdefault(attachment_rel(a), a)
+    return list(out.values())
 
 
 def _first_line(text: str) -> str:
