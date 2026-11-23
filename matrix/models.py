@@ -642,7 +642,8 @@ class User:
     salt: str                            # hex
     assistant_id: str | None = None      # 助理：这个用户自己的一个 Agent，进项目时一定带上，项目会话的对话方
     created_at: float = field(default_factory=time.time)
-    # 业务系统账号（docs/open-api.md，不变量 30）：kind = "system"，没有密码、不能登录网页，只凭应用令牌调接口；
+    # 业务系统账号（docs/open-api.md，不变量 30）：kind = "system"，凭应用令牌调接口；默认没有密码，管理员开了网页登录后
+    # 能登录一个只读页面（/system），只看它调用服务的会话与它发布的服务的用量；
     # managers 是负责人（真人），在网页上对它主持的项目等同主持人
     kind: str = "user"                   # user | system
     managers: list[str] = field(default_factory=list)

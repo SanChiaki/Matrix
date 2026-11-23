@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>业务系统账号 · Matrix</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<link rel="stylesheet" href="/static/tokens.css">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/admin.css">
+<script>document.documentElement.dataset.theme = localStorage.getItem("theme")
+  || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");</script>
+</head>
+<body class="admin">
+<!-- 业务系统账号登录网页后的只读页面（docs/open-api.md，不变量 30）：它调用服务的会话、它发布的服务的用量。 -->
+<header class="admin-top">
+  <a class="brand" href="/system"><img class="brand-mark" src="/static/logo.svg" alt="" width="22" height="22">Matrix</a>
+  <span class="admin-title" id="sys-title">业务系统账号</span>
+  <span class="grow"></span>
+  <span class="muted" id="me"></span>
+  <button type="button" class="sm" id="logout">退出登录</button>
+</header>
+
+<main class="admin-main">
+  <section id="denied" class="admin-denied" hidden>
+    <h1 id="denied-title">没有权限</h1>
+    <p class="muted" id="denied-text"></p>
+    <p><a href="/">去登录</a></p>
+  </section>
+
+  <div id="home" hidden>
+    <div class="view-head">
+      <div><h1>服务调用</h1>
+        <p>只读：这个账号调用服务的会话，和它发布的服务被调用的用量。<span id="managers"></span></p></div>
+      <div class="seg" role="radiogroup" aria-label="用量的时间范围">
+        <label><input type="radio" name="days" value="7">近 7 天</label>
+        <label><input type="radio" name="days" value="30" checked>近 30 天</label>
+        <label><input type="radio" name="days" value="90">近 90 天</label>
+      </div>
+    </div>
+
+    <h3>它调用的服务</h3>
+    <p class="muted">经 <code>/svc</code> 调用产生的服务会话，内容完整可看（这个账号就是调用方）。</p>
+    <div class="table-wrap"><table id="t-sessions"></table></div>
+
+    <h3>它发布的服务</h3>
+    <p class="muted">别人调用这些服务时只看用量，不看内容。</p>
+    <div class="table-wrap"><table id="t-published"></table></div>
+    <div id="usage-detail"></div>
+    <p class="error" id="sys-error" role="alert"></p>
+  </div>
+
+  <div id="session" hidden>
+    <p><a href="#" id="back">← 回到服务调用</a></p>
+    <div class="view-head"><div><h1 id="s-title"></h1><p id="s-sub"></p></div></div>
+    <ul class="messages sys-messages" id="s-messages"></ul>
+  </div>
+</main>
+<script type="module" src="/static/system.js"></script>
+</body>
+</html>

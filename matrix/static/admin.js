@@ -791,11 +791,14 @@ function renderApps(rows) {
     { label: "授权范围上限", html: (r) => esc(r.scopes.map((s) => SCOPES[s] || s).join("、")) },
     { label: "业务系统账号", html: (r) => r.system ? `<code>${esc(r.system.email)}</code><div class="muted">负责人：${esc(r.system.managers.join("、"))}</div>
         <div class="muted">${r.system.token ? `令牌签于 ${when(r.system.token.created_at)} · 调用 ${num(r.system.token.calls)} 次` : "还没签令牌"}</div>
-        <div class="muted">主持 ${r.system.projects.length} 个项目</div>` : '<span class="muted">没有（只能代表用户）</span>' },
+        <div class="muted">主持 ${r.system.projects.length} 个项目</div>
+        <div class="muted">网页登录（只读）：${r.system.web_login ? "已开" : "没开"}</div>` : '<span class="muted">没有（只能代表用户）</span>' },
     { label: "用户授权", html: (r) => `${num(r.grants)} 把令牌 · ${num(r.calls)} 次调用` },
     { label: "状态", html: (r) => r.status === "active" ? '<span class="pill on">启用</span>' : '<span class="pill off">停用</span>' },
     { label: "", html: (r) => `${r.system ? `<button type="button" class="sm" data-ap="token" data-id="${esc(r.id)}">${r.system.token ? "重签令牌" : "签令牌"}</button>
-        <button type="button" class="sm" data-ap="managers" data-id="${esc(r.id)}">负责人</button> ` : ""}
+        <button type="button" class="sm" data-ap="managers" data-id="${esc(r.id)}">负责人</button>
+        <button type="button" class="sm" data-ap="web" data-id="${esc(r.id)}">${r.system.web_login ? "重设登录密码" : "开网页登录"}</button>
+        ${r.system.web_login ? `<button type="button" class="sm danger" data-ap="web-off" data-id="${esc(r.id)}">关网页登录</button>` : ""} ` : ""}
         <button type="button" class="sm ${r.status === "active" ? "danger" : ""}" data-ap="${r.status === "active" ? "disable" : "enable"}" data-id="${esc(r.id)}">${r.status === "active" ? "停用" : "启用"}</button>` },
   ], rows, "还没有登记应用");
   for (const b of $("#t-apps").querySelectorAll("button[data-ap]")) {
@@ -807,6 +810,17 @@ function renderApps(rows) {
           const out = await api(`/api/admin/apps/${id}/system-token`, { method: "POST", body: { scopes: r.scopes } });
           $("#ap-token").innerHTML = `<div class="notice"><b>${esc(r.name)} 的新令牌（只显示这一次）：</b> <code>${esc(out.token)}</code></div>`;
           renderApps(await api("/api/admin/apps"));
+        } else if (b.dataset.ap === "web") {
+          // 一次性设密码链接：交给负责人去设；设好后用系统账号的邮箱登录，只能看它调用服务的会话与它发布的服务的用量
+          if (r.system.web_login && !confirm("发新链接设新密码后，原来的密码和所有登录立即失效。")) return;
+          const out = await api(`/api/admin/apps/${id}/web-login`, { method: "POST", body: {} });
+          const link = new URL(out.path, location.origin).href;
+          $("#ap-token").innerHTML = `<div class="notice"><b>${esc(r.name)} 的设密码链接（只显示这一次，24 小时内有效）：</b> <code>${esc(link)}</code>
+            <div class="muted">交给负责人打开、设密码。之后用 <code>${esc(out.email)}</code> 登录网页，只读。</div></div>`;
+          renderApps(await api("/api/admin/apps"));
+        } else if (b.dataset.ap === "web-off") {
+          if (!confirm("关掉后密码清空、已有的登录立即失效。令牌不受影响。")) return;
+          renderApps(await api(`/api/admin/apps/${id}/web-login`, { method: "DELETE" }));
         } else if (b.dataset.ap === "managers") {
           const v = prompt("负责人邮箱（逗号分隔，至少一个）", r.system.managers.join(", "));
           if (v === null) return;

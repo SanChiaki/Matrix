@@ -42,7 +42,12 @@
 
 ### 系统账号
 
-- 用户表里一种账号，`User.kind = "system"`：没有密码、不能登录网页，只凭令牌调接口；由管理员创建，至少一名**负责人**（真人）。
+- 用户表里一种账号，`User.kind = "system"`：凭令牌调接口；由管理员创建，至少一名**负责人**（真人）。
+- **网页登录（只读，2026-11-23）**：默认没有密码、登录不了。管理员在后台“外部应用”里点“开网页登录”，拿到一条一次性设密码链接（24 小时内有效），
+  交给负责人设密码；之后用系统账号的邮箱登录，进的是只读页面 `/system`：它调用服务的会话（完整内容，它就是调用方）、
+  它发布的服务被调用的用量（只有计数与调用方，不看内容）。不能发消息、不能改任何东西，也看不到它主持项目的群聊（那些由负责人用自己的账号看）。
+  服务端按路由白名单（`server.SYSTEM_WEB_ROUTES`，只放 GET）挡住其余接口。管理员随时能“关网页登录”（清空密码、作废已有登录），
+  应用停用时登录也立即失效；令牌不受这两者影响。密码是负责人之间共用的，网页上的访问按系统账号记，只读是为了把这个代价压到最小。
 - 在网络里的地位和用户一样：能当主持人、当服务的调用方、有自己的连接器授权、用量台账里单独一行。归属、可见性、
   不变量 16 与 29 都不用另写。
 - **不能新建 Agent**（决策 5）：它的项目成员只来自公共 Agent 与开放给它的 Agent。
@@ -118,7 +123,7 @@ SSO 改造以后，系统账号还可以带上终端用户的身份，按那个�
 
 **外部应用只以授权它的人或它自己的系统账号的名义、在授权范围内操作**：做的事等于那个主体本来就能做的、再交令牌的 scope 与项目范围；
 令牌拿不到内容（对话、过程、私有目录、凭证；它自己调用服务的会话除外）；每次写操作都留下“经哪个应用”；撤销立即生效。
-系统账号不能登录网页、不能新建 Agent、至少一名负责人；开放给应用的个人 Agent 被拉进项目时，所有者成为参与者。
+系统账号的网页登录只读（只看它调用服务的会话与它发布的服务的用量，管理员开关、应用停用即失效）、不能新建 Agent、至少一名负责人；开放给应用的个人 Agent 被拉进项目时，所有者成为参与者。
 
 ## 9. 分期
 
@@ -143,9 +148,9 @@ SSO 改造以后，系统账号还可以带上终端用户的身份，按那个�
 | --- | --- |
 | 模型 | `models.ExternalApp`、`AppGrant`（令牌只存 sha256）、`User.kind / managers / app_id`、`AgentNode.open_to`、`Project.via_app`、`APP_SCOPES` |
 | 引擎 | `matrix/apps.py`（`AppsMixin`，混入 `Network`）：管理员（`create_app` / `update_app` / `issue_system_token`）、用户（`apps_for` / `grant_app` / `revoke_grant` / `set_agent_open`）、负责人（`system_connections` / `authorize_system_connector`）、令牌（`app_context`：认令牌、查 scope、限频）、查组发（`open_*`，项目范围 `_app_project`；`open_delete_project` 只删 `via_app` 是自己的）、调（`svc_card` / `svc_session` / `svc_interrupt`）；留痕 `via_app()`（档案日志 `via_app`、群聊事件后缀“（经「应用」）”） |
-| 引擎里改的地方 | `hosted_project` / `is_host` 认负责人；`is_admin` 不认系统账号；`invite` 不邀请系统账号；`project_view` 写“应用名（负责人 …）”；`auth.login` / `issue_reset` 拒绝系统账号 |
-| 接口 | `matrix/open_server.py`（`/open/v1/*`、`/svc/*`）；`server.py` 的 `/api/admin/apps*`、`/api/apps*`、`/api/grants/*`、`/api/agents/{id}/open`、`/api/system-accounts/*` |
-| 界面 | 管理后台“外部应用”（登记、签 / 重签系统账号令牌、负责人、停用）；“更多 → 外部应用”（我授权的应用、签令牌、我负责的系统账号与它的连接器）；Agent 设置里的“开放给应用” |
+| 引擎里改的地方 | `hosted_project` / `is_host` 认负责人；`is_admin` 不认系统账号；`invite` 不邀请系统账号；`project_view` 写“应用名（负责人 …）”；`auth.login` / `user_of` 对系统账号要求有密码且应用启用中（`_may_sign_in`），`close_web_login` 关掉；`ensure_assistant` 不给系统账号建助理 |
+| 接口 | `matrix/open_server.py`（`/open/v1/*`、`/svc/*`）；`server.py` 的 `/api/admin/apps*`、`/api/apps*`、`/api/grants/*`、`/api/agents/{id}/open`、`/api/system-accounts/*`；系统账号的网页登录：`/api/admin/apps/{id}/web-login`（POST 发设密码链接、DELETE 关）、`/api/system/overview`、`/api/system/sessions/{id}[/attachments/{sha}]`（引擎 `system_overview` / `system_session`），`current_user` 对系统账号只放行 `SYSTEM_WEB_ROUTES` |
+| 界面 | 管理后台“外部应用”（登记、签 / 重签系统账号令牌、负责人、开 / 关网页登录、停用）；系统账号的只读页面 `/system`（`system.html` / `system.js`，主界面认出系统账号就转过去）；“更多 → 外部应用”（我授权的应用、签令牌、我负责的系统账号与它的连接器）；Agent 设置里的“开放给应用” |
 | 测试 | `tests/test_open_api.py`（含用真实 HTTP 服务与内置 `standard` 驱动接 `/svc`） |
 
 **限制**：

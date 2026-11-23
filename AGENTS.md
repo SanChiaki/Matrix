@@ -115,7 +115,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/llm-wiki/` | 项目 Wiki 演示：两份演示资料（`materials/`）与 `setup_demo.py`（装插件、建知识管家、放资料），见该目录 README |
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
-| `matrix/static/` | 单页前端（原生 JS）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
+| `matrix/static/` | 单页前端（原生 JS）；`system.html` / `system.js` 是业务系统账号登录后的只读页面（`/system`）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
 | `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_archive_access.py`（资料的目录层级、资料与技能的可见范围，不变量 26）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_remote_agents.py`（外部平台 Agent：基础 / 完整接入、先等再绑、陌生会话与旧密钥拒绝、调用方授权透传、中断、传文件：暂存再 `send_file`、取文件、两个外部 Agent 沿委托传文件）、`test_public_agents.py`（公共 Agent：批准与冻结权限、撤回、服务面只读不写回、调用方自己的授权、委托为调用方、维护人只看用量）、`test_teammates.py`（队友协作示例） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
@@ -183,7 +183,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 27. **公共 Agent 只在服务面跨信任域**：管理员批准、冻结权限；服务面只为调用方做事，私有目录只读不写回、不列别处、不外溢、用调用方自己的授权、过程只给调用方，维护人只看用量。
 28. **外部平台 Agent 的回调只落到 Matrix 发起的那一轮**：平台只来自部署方目录；回调凭 Matrix 签的密钥 + Matrix 发起且还没结束的会话 id；调用方授权只透传他自己的，缺了不发起。
 29. **服务调用替调用方做事、由项目付费**：项目服务由主持人发布即生效；服务会话只属于调用方；入口只委托服务的岗位；沿途都在服务面：业务授权只用调用方自己的、档案只读圈定范围、只写收件目录；用量记在项目下，主持人只看用量。
-30. **外部应用只以授权它的人或它自己的业务系统账号的名义、在授权范围内操作**：管理员登记应用；令牌代表个人或系统账号，只做那个主体本来能做的、再交 scope 与项目范围；拿不到内容；写操作留下“经哪个应用”；系统账号不能登录、负责人等同主持人；开放的个人 Agent 拉进项目时所有者成为参与者。
+30. **外部应用只以授权它的人或它自己的业务系统账号的名义、在授权范围内操作**：管理员登记应用；令牌代表个人或系统账号，只做那个主体本来能做的、再交 scope 与项目范围；拿不到内容；写操作留下“经哪个应用”；系统账号的网页登录只读（只看它调用服务的会话与它发布的服务的用量）、负责人等同主持人；开放的个人 Agent 拉进项目时所有者成为参与者。
 
 ### 二、工作方式
 
@@ -216,6 +216,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
+- 业务系统账号的网页登录只读：`server.SYSTEM_WEB_ROUTES` 只放 `/api/me` 与 `/api/system/*` 的 GET，不要把别的接口加进去。
 - `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准、提问应答者替人作答；覆盖层要一直关掉 dsh 的默认技能根。
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
