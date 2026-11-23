@@ -3773,7 +3773,7 @@ function questionBody(q, canAnswer, board = false) {
     return `<fieldset class="q-item" data-qitem="${esc(it.id)}"><legend>${it.header ? `<span class="tag">${esc(it.header)}</span> ` : ""}${esc(it.question)}${it.multi_select ? '<span class="muted q-multi">可多选</span>' : ""}</legend>
       ${it.detail ? `<p class="reason">${esc(it.detail)}</p>` : ""}${opts ? `<div class="q-opts">${opts}</div>` : ""}
       ${canAnswer ? `<label class="sr-only" for="${name}-c">自己写</label>
-      <textarea id="${name}-c" class="q-custom" rows="${it.options.length ? 1 : 2}" maxlength="4000" placeholder="${it.options.length ? "或者自己写（单选题写了就以这里为准）" : "你的回答"}"></textarea>` : ""}</fieldset>`;
+      <textarea id="${name}-c" class="q-custom" rows="${it.options.length ? 1 : 2}" maxlength="4000" placeholder="${!it.options.length ? "你的回答" : it.multi_select ? "还可以补充（和勾选的一起交给它）" : "或者自己写（写了就以这里为准）"}"></textarea>` : ""}</fieldset>`;
   }).join("");
   if (!canAnswer) return `${head}<div class="q-items">${items}</div><p class="hint">等对方回答。</p>`;
   const look = board ? `<a href="#${esc(q.conversation_id)}" class="muted">查看对话</a>` : "";
