@@ -3427,7 +3427,7 @@ function renderThread() {
     $("#thread").innerHTML = `<li>${placeholder(c.missing ? "这个对话不存在或已删除。" : c.loading ? "正在加载…"
       : `对话加载失败：${esc(S.convError || "网络错误")}。正在自动重试… <button type="button" class="ghost sm" id="conv-retry">立即重试</button>`)}</li>`;
     $("#conv-retry")?.addEventListener("click", () => { S.convRetryN = 0; refreshConv(); });
-    $("#msg-form").hidden = true; renderTask(); return;
+    $("#msg-form").hidden = true; renderQuestionDock(null); renderTask(); return;
   }
   $("#msg-form").hidden = !!c.archived;
   const g = proj(c.project_id), dm = c.kind === "dm", sess = c.kind === "session", peer = agent(c.agent_id);
@@ -3555,8 +3555,6 @@ function renderThread() {
   (c.proposals || []).forEach((p) => items.push(proposalCard(p)));
   (c.approvals || []).forEach((ap) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card">
     ${approvalBody(ap, ap.can_decide)}</div></div></li>`));
-  (c.questions || []).forEach((q) => items.push(`<li class="msg proposal"><div class="content"><div class="proposal-card approval-card question-card">
-    ${questionBody(q, q.can_answer)}</div></div></li>`));
   if (c.status === "waiting") {
     const open = c.tasks.filter((t) => t.status === "running" && !t.parent_task_id);
     items.push(`<li class="msg system"><div class="content"><div class="body">等 ${open.length} 个委托回报：
@@ -3586,8 +3584,19 @@ function renderThread() {
   // Agent 运行中也可以发消息：进被 @ 成员的收件箱排队，这一轮结束后送达
   $("#msg-form button[type=submit]").disabled = !dm && !g && !svc;
   $("#msg").disabled = !dm && !g && !svc;
+  renderQuestionDock(c);
   renderComposer();
   renderTask();
+}
+
+// 等你回答的问题不进消息流，停在输入框上方：Agent 停在那里等，回答和打字在同一个地方（直接回复也算回答）。
+// 按条打补丁，选到一半、写到一半的回答不会被刷新清掉
+function renderQuestionDock(c) {
+  const dock = $("#q-dock"), qs = c?.questions || [];
+  dock.hidden = !qs.length;
+  const fresh = patchList(dock, qs.map((q, i) => `<li class="q-card${q.can_answer ? "" : " readonly"}">
+    ${questionBody(q, q.can_answer, false, qs.length > 1 ? `${i + 1}/${qs.length}` : "")}</li>`));
+  fresh.forEach((li) => bindQuestions(li));
 }
 
 // 列表按条打补丁：每一项是一个 <li> 的 HTML，和上次一样的节点原样保留（展开的“过程”、选中状态都还在）。返回新放进去的节点
@@ -3695,27 +3704,30 @@ function bindApprovals(root, after) {
 
 // Agent 在做事时提的问题（ask_user_question）：它一直在等，回答直接交给那次调用（不是一条消息）。
 // 有选项的选（多选题可以多选），也可以自己写；不想答就“不回答”，它会按没得到回答处理。直接在对话里回复也算回答。
-function questionBody(q, canAnswer, board = false) {
+function questionBody(q, canAnswer, board = false, count = "") {
   const id = esc(q.id);
-  const head = `<div class="who">${board ? avatar(q.agent_name, "sm") : ""}<b>${esc(q.agent_name)}</b> 有问题要问你
-    <span class="pill status pending">等你回答</span>${board ? `<span class="muted">${time(q.created_at)}</span>` : ""}</div>
+  const head = `<div class="who">${board ? avatar(q.agent_name, "sm") : ""}<b>${esc(q.agent_name)}</b> ${canAnswer ? "在等你回答" : "在等回答"}
+    ${board ? `<span class="pill status pending">等你回答</span><span class="muted">${time(q.created_at)}</span>`
+      : `<span class="q-wait" aria-hidden="true"></span>${count ? `<span class="muted q-count">${count}</span>` : ""}`}</div>
     ${q.escalated ? `<p class="hint">${esc(q.escalated)}</p>` : ""}`;
   const items = q.items.map((it, n) => {
     const name = `qa-${id}-${n}`, kind = it.multi_select ? "checkbox" : "radio";
     const opts = it.options.map((o, k) => `<label class="q-opt"><input type="${kind}" name="${name}" value="${esc(o.label)}" ${canAnswer ? "" : "disabled"}>
-      <span><b>${esc(o.label)}</b>${o.description ? `<span class="muted"> · ${esc(o.description)}</span>` : ""}</span></label>`).join("");
-    return `<fieldset class="q-item" data-qitem="${esc(it.id)}"><legend>${it.header ? `<span class="tag">${esc(it.header)}</span> ` : ""}${esc(it.question)}</legend>
-      ${it.detail ? `<p class="reason">${esc(it.detail)}</p>` : ""}${opts}
+      <span class="q-key" aria-hidden="true">${k + 1}</span>
+      <span class="q-text"><b>${esc(o.label)}</b>${o.description ? `<span class="muted">${esc(o.description)}</span>` : ""}</span></label>`).join("");
+    return `<fieldset class="q-item" data-qitem="${esc(it.id)}"><legend>${it.header ? `<span class="tag">${esc(it.header)}</span> ` : ""}${esc(it.question)}${it.multi_select ? '<span class="muted q-multi">可多选</span>' : ""}</legend>
+      ${it.detail ? `<p class="reason">${esc(it.detail)}</p>` : ""}${opts ? `<div class="q-opts">${opts}</div>` : ""}
       ${canAnswer ? `<label class="sr-only" for="${name}-c">自己写</label>
-      <textarea id="${name}-c" class="q-custom" rows="2" maxlength="4000" placeholder="${it.options.length ? "或者自己写（单选题写了就以这里为准）" : "你的回答"}"></textarea>` : ""}</fieldset>`;
+      <textarea id="${name}-c" class="q-custom" rows="${it.options.length ? 1 : 2}" maxlength="4000" placeholder="${it.options.length ? "或者自己写（单选题写了就以这里为准）" : "你的回答"}"></textarea>` : ""}</fieldset>`;
   }).join("");
-  if (!canAnswer) return `${head}${items}<p class="hint">等对方回答。</p>`;
+  if (!canAnswer) return `${head}<div class="q-items">${items}</div><p class="hint">等对方回答。</p>`;
   const look = board ? `<a href="#${esc(q.conversation_id)}" class="muted">查看对话</a>` : "";
   return `${head}<div class="q-items" data-qid="${id}">${items}</div>
-    <div class="actions"><button type="button" data-qanswer="${id}">回答</button>
-      <button type="button" class="ghost" data-qdecline="${id}">不回答</button>${look}</div>
+    <div class="actions">${board ? "" : `<span class="hint">回答直接交给它，接着原来的工作做；也可以在下面直接回复</span>`}
+      <button type="button" class="ghost" data-qdecline="${id}">不回答</button>
+      <button type="button" data-qanswer="${id}">回答</button>${look}</div>
     <p class="error" role="alert"></p>
-    <p class="hint">${esc(q.agent_name)} 停在这里等你；回答直接交给它，在原来的工作里接着做。也可以直接在对话里回复。</p>`;
+    ${board ? `<p class="hint">${esc(q.agent_name)} 停在这里等你；回答直接交给它，在原来的工作里接着做。也可以直接在对话里回复。</p>` : ""}`;
 }
 
 function bindQuestions(root, after) {
