@@ -14,6 +14,8 @@
 - 消息里有“委托”：经 MCP 调 delegate（委托给消息里「」括起来的成员）；
 - 消息里有“慢慢来”：一直不答，直到被中断；
 - 消息里有“抢跑”：先经 MCP 调 list_members、过一会儿才在流里报出会话 id（建会话与第一条消息同一次请求时的时序）；
+- 消息里有“发文件”：在平台上写一份演示报告，POST 到 Matrix 的 `<MCP 地址>/files`（同一份请求头 + `X-Session-Id`）拿 file_id，
+  再经 MCP 调 send_file(file_id=…) 附在回复上；“转发「stg_…」”是拿一个给定的 file_id 调 send_file；
 - 最后一句回复里写明收没收到调用方的授权（`X-User-Token`），只说有没有，不回显内容。
 
 运行：`uv run python examples/remote-agent/demo_platform.py --port 8801`（只听 127.0.0.1）。
@@ -26,6 +28,8 @@ import json
 import re
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +39,8 @@ API_KEY = "demo-platform-key"
 AGENTS = {"expense": {"name": "报销助手（演示平台）", "description": "查报销进度、提交报销单"}}
 
 McpPost = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
+FilePost = Callable[[str, dict[str, str], bytes], tuple[int, dict[str, Any]]]
+REPORT = "# 报销汇总（演示）\n\n- 已报销 3 笔，共 1,280 元\n- 待审批 1 笔\n".encode("utf-8")
 
 
 def http_mcp_post(url: str, headers: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
@@ -46,9 +52,21 @@ def http_mcp_post(url: str, headers: dict[str, str], body: dict[str, Any]) -> di
     return json.loads(raw) if raw else {}
 
 
+def http_file_post(url: str, headers: dict[str, str], data: bytes) -> tuple[int, dict[str, Any]]:
+    req = urllib.request.Request(url, data=data, headers=headers)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=120) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
 class DemoPlatform:
-    def __init__(self, mcp_post: McpPost = http_mcp_post, port: int = 0):
+    def __init__(self, mcp_post: McpPost = http_mcp_post, port: int = 0, file_post: FilePost = http_file_post):
         self.mcp_post = mcp_post
+        self.file_post = file_post
+        self.uploads: list[tuple[int, dict[str, Any]]] = []  # 暂存文件的（状态码, 返回）
         self.mcp: dict[str, dict[str, Any]] = {}        # agent → {url, headers}（Agent 级 MCP 配置）
         self.sessions: dict[str, list[str]] = {}        # 会话 → 收到过的消息
         self.interrupted: set[str] = set()
@@ -176,6 +194,20 @@ class DemoPlatform:
                 send("tool", {"name": "delegate", "input": {"agent": m.group(1)}})
                 parts.append(self._tool(agent, sid, "delegate", {"agent": m.group(1), "mission": "演示委托",
                                                                  "expected_outcome": "一句话结论"}))
+            if "发文件" in message:  # 平台上产出的文件：先暂存到 Matrix 拿 file_id，再 send_file
+                cfg = self.mcp[agent]
+                url = cfg["url"] + "/files?" + urllib.parse.urlencode({"name": "报销汇总.md"})
+                code, out = self.file_post(url, {**cfg.get("headers", {}), "X-Session-Id": sid,
+                                                 "Content-Type": "text/markdown"}, REPORT)
+                self.uploads.append((code, out))
+                if code == 200:
+                    send("tool", {"name": "send_file", "input": {"file_id": out["file_id"]}})
+                    parts.append(self._tool(agent, sid, "send_file", {"file_id": out["file_id"]}))
+                else:
+                    parts.append(f"暂存失败（{code}）：{out.get('detail')}")
+            m = re.search(r"转发「(stg_[\w-]+)」", message)
+            if m:
+                parts.append(self._tool(agent, sid, "send_file", {"file_id": m.group(1)}))
         token = next((v for k, v in headers.items() if k.lower() == "x-user-token"), "")
         parts.append("收到了调用方的授权" if token else "没有调用方的授权")
         send("delta", {"text": "处理中"})

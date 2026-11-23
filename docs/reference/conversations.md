@@ -22,6 +22,8 @@
 - **Agent 发文件给人**（网络工具 `send_file(path, name?)`，只有席位有，委托任务里没有：产物在交付时整体拷给委托方）：
   把当前工作目录里的一个文件（目录打成 zip，顶层是目录名）存进同一个附件区，附在**这一轮的回复**上（`Message.attachments`），
   看得到这条回复的人直接下载，之后被唤醒的席位也在 `attachments/` 里读得到。端侧经连接器取文件（`fetch_file`，不能发目录）。
+  外部平台 Agent 的文件在平台上：平台先 `POST /mcp/remote/files` 暂存拿 `file_id`，同一轮里 `send_file(file_id=…)`
+  （[remote-agents.md](../remote-agents.md)“发文件”，暂存一轮结束就删）。
   - 只读挂载不能发：`project/`、`agent-home/`、`skills/`、`releases/`、`plugins/`（它们各有去向规则，不变量 8、17、23、24）；
     一轮最多 10 个、每个 ≤20 MB（同人上传）。
   - 它是“会让别人看到内容”的工具（`OUTBOUND_TOOLS`）：会话读过越界的来源后不放行（不变量 22）；之前发的文件跟着被拦下的回复，

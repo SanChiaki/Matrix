@@ -65,7 +65,9 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 ```
 
 然后在 Agent 页“接入外部平台的 Agent”：平台选“演示平台”，Agent id 填 `expense`，API Key 填 `demo-platform-key`。
-签 MCP 密钥后，按 `examples/remote-agent/README.md` 把地址和密钥填进演示平台（模拟平台网页上的配置），在私聊里说“抢跑”“成员”试。
+签 MCP 密钥后，按 `examples/remote-agent/README.md` 把地址和密钥填进演示平台（模拟平台网页上的配置），在私聊里说“抢跑”“成员”“发文件”试。
+
+平台 Agent 要把文件发给人时，平台那边（不是模型）把文件 `POST` 到 `<MCP 地址>/files?name=…`，请求头和调 MCP 时一样（密钥 + 会话 id），拿回 `file_id` 后由模型调 `send_file(file_id=…)`（[remote-agents.md](remote-agents.md)“发文件”，演示平台 `chat` 里“发文件”那段是样板）。
 你的驱动照 `tests/test_remote_agents.py` 写一份对假平台的测试。
 
 ## 五、上线

@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from matrix.connector_catalog import ConnectorCatalog
-from matrix.engine import Network, NetworkError
+from matrix.engine import ExecContext, Network, NetworkError
 from matrix.remote_agents import PlatformCatalog, PlatformError, parse_platforms
 from matrix.runtime import ScriptedRuntime
 from matrix.server import create_app
@@ -20,7 +20,7 @@ from tests.test_connections import SECRET, FakeMCP, catalog_file
 from tests.test_users import users
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "examples" / "remote-agent"))
-from demo_platform import API_KEY, DemoPlatform  # noqa: E402
+from demo_platform import API_KEY, REPORT, DemoPlatform  # noqa: E402
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ class Env:
         data = tmp_path / "data"
         data.mkdir()
         self.net_holder: list[Network] = []
-        self.demo = DemoPlatform(mcp_post=self._mcp_post)
+        self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post)
         plats = tmp_path / "agent-platforms.json"
         plats.write_text(json.dumps({"platforms": [
             {"id": "demo", "name": "演示平台", "url": self.demo.url, "bind_wait_s": 3},
@@ -49,6 +49,10 @@ class Env:
     def _mcp_post(self, url: str, headers: dict[str, str], body: dict) -> dict:
         r = self.client.post("/mcp/remote", json=body, headers=headers)
         return r.json() if r.content else {}
+
+    def _file_post(self, url: str, headers: dict[str, str], data: bytes) -> tuple[int, dict]:
+        r = self.client.post(url.removeprefix("http://matrix"), content=data, headers=headers)
+        return r.status_code, r.json()
 
     def connect_mcp(self, agent_id: str, actor: str) -> str:
         """扮演维护人在平台网页上给这个 Agent 填 MCP：Matrix 的地址 + Matrix 签的密钥。"""
@@ -329,3 +333,52 @@ def test_legacy_sse_transport_follows_the_same_rules(env: Env):
             x.close()
         server.should_exit = True
         t.join(timeout=5)
+
+
+def test_platform_files_are_staged_then_sent_in_the_same_round(env: Env):
+    """外部平台 Agent 发文件：平台把文件 POST 到 /mcp/remote/files 拿 file_id，同一轮 send_file(file_id=…) 附在回复上；
+    暂存只属于那一轮，一轮结束就删，下一轮拿旧 file_id 发不出去；没有 file_id 时 path 读不到平台上的文件，提示先暂存。"""
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    assert env.net.issue_remote_key(a.id, actor=maya)["files_path"] == "/mcp/remote/files"
+    env.connect_mcp(a.id, maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "发文件给我", actor=maya, background=False)
+    code, staged = env.demo.uploads[-1]
+    assert code == 200 and staged["file_id"].startswith("stg_") and staged["size"] == len(REPORT)
+    reply = dm.messages[-1]
+    assert "已附上 报销汇总.md" in reply.text and [x["name"] for x in reply.attachments] == ["报销汇总.md"]
+    f, meta = net.attachment_file(dm.id, reply.attachments[0]["sha"], actor=maya)
+    assert f.read_bytes() == REPORT and meta["mime"].startswith("text/")
+    assert not any((net.store.root / "staging").iterdir())  # 一轮结束：暂存删掉，发出去的在对话的附件区
+    net.send_message(dm.id, f"转发「{staged['file_id']}」", actor=maya, background=False)
+    assert "找不到暂存文件" in dm.messages[-1].text and not dm.messages[-1].attachments
+    # 外部 Agent 给 path：文件在它自己的平台上，Matrix 读不到，提示先暂存
+    ctx = ExecContext(kind="seat", id=f"{dm.id}/{a.id}", agent_id=a.id, conversation_id=dm.id, project_id=None,
+                      authority=[], constraints=[], depth=0, chain=[a.id])
+    text, bad = net._tool_send_file(ctx, {"path": "report.md"})
+    assert bad and "/mcp/remote/files" in text
+
+
+def test_staging_needs_the_key_and_a_live_matrix_round(env: Env, monkeypatch: pytest.MonkeyPatch):
+    """不变量 28：暂存和 tools/call 一样，只认 Matrix 签的密钥 + Matrix 发起、还没结束的会话 id，认过了才收请求体；
+    超过附件上限 413。"""
+    import matrix.server as server
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    key = env.connect_mcp(a.id, maya)
+    post = lambda h: env.client.post("/mcp/remote/files?name=x.txt", content=b"hi", headers=h)  # noqa: E731
+    assert post({"Authorization": "Bearer wrong", "X-Session-Id": "x"}).status_code == 401
+    assert post({"Authorization": f"Bearer {key}"}).status_code == 400
+    assert post({"Authorization": f"Bearer {key}", "X-Session-Id": "s-direct-chat"}).status_code == 403  # 平台上直接聊的
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "发文件", actor=maya, background=False)
+    sid = dm.seats[a.id].dsh_session_id
+    r = post({"Authorization": f"Bearer {key}", "X-Session-Id": sid})  # 那一轮已经结束
+    assert r.status_code == 403 and "已经结束" in r.json()["detail"]
+    monkeypatch.setattr(server, "ATTACHMENT_LIMIT", 10)
+    net.send_message(dm.id, "再发文件", actor=maya, background=False)
+    assert env.demo.uploads[-1][0] == 413 and "暂存失败（413）" in dm.messages[-1].text
+    assert not dm.messages[-1].attachments

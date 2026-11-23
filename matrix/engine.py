@@ -118,6 +118,8 @@ class ExecContext:
     flow_narrowed: list[str] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)  # 这一轮送达、等它回答的问题（委托方）：一轮结束仍没回答就转给人
     sent: list[dict[str, Any]] = field(default_factory=list)  # 这一轮 send_file 发出的文件（对话附件），附在这一轮的回复上
+    # 外部平台 Agent 这一轮暂存的文件（/mcp/remote/files）：file_id → {name, size, sha, mime}；只属于这一轮，结束就删
+    staged: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 公共 Agent 的服务面（docs/public-agents.md，不变量 27）：这一轮为谁做（principal）、这一轮 @ 它的全部调用方。
     # principal 为 None 表示普通情形：为 Agent 的所有者做
     service: bool = False
@@ -180,6 +182,17 @@ class HookRateLimited(NetworkError):
     pass
 
 
+class StagingRefused(NetworkError):
+    """外部平台暂存文件被拒（/mcp/remote/files）：status 是给平台的 HTTP 状态码。"""
+
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+STAGED_PER_ROUND = 20  # 外部平台 Agent 一轮最多暂存几个文件（发出去的仍受 ATTACHMENTS_PER_MESSAGE 约束）
+
+
 class NeedsConfirm(NetworkError):
     """安装 / 升级前要主持人看过再确认的事（结构变化、数据去向）。digest 是这次看到的包的指纹：确认时带回来，
     包在这期间变了就重新确认。"""
@@ -204,6 +217,7 @@ class Network(AppsMixin):
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
         self.question_url = tool_url.rsplit("/", 1)[0] + "/question"
         self.store = Store(data_dir, seed=seed)
+        shutil.rmtree(self.store.root / "staging", ignore_errors=True)  # 暂存文件只属于某一轮：重启时那些轮都已结束
         # 外部平台 Agent（docs/remote-agents.md，不变量 28）：部署方的平台目录；MCP 回调按（Agent, 平台会话 id）落到哪一轮
         self.platforms = platforms or remote.PlatformCatalog(self.store.root / "agent-platforms.json")
         self.remote_bindings = remote.Bindings()
@@ -6408,6 +6422,7 @@ class Network(AppsMixin):
             with self._lock:
                 self._contexts.pop(token, None)
                 agent.active = max(0, agent.active - 1)
+            self._drop_staged(ctx)
             self._cancel_questions(ctx, "提问的那一轮已经结束")
             self.bus.emit("agent.updated", agent=agent.to_dict())
         if cancel is not None and cancel.is_set() and res.error_class != "stopped":
@@ -6894,15 +6909,28 @@ class Network(AppsMixin):
     def _tool_send_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         """把工作目录里的一个文件（目录打成 zip）存进对话的附件区，附在这一轮的回复上发给对话里的人。
         只读挂载（项目档案、私有目录、技能、订阅的发布物、插件挂载）不能发：它们各有自己的去向规则（不变量 8、17、23、24）。"""
-        rel = str(args.get("path", "")).strip()
+        rel, fid = str(args.get("path", "")).strip(), str(args.get("file_id", "")).strip()
+        name = str(args.get("name", "")).strip()
+        agent = self.store.agents.get(ctx.agent_id)
+        if fid or (agent is not None and agent.remote):
+            # 外部平台 Agent：工作目录在平台上，Matrix 读不到；平台先把文件传到 /mcp/remote/files，拿 file_id 来发
+            with ctx.lock:
+                item = ctx.staged.get(fid) if fid else None
+            if item is None:
+                return ((f"找不到暂存文件 {fid}：只认这一轮上传到 /mcp/remote/files 的文件，一轮结束就删了" if fid else
+                         "你的文件在你自己的平台上，Matrix 读不到 path：先把文件 POST 到 /mcp/remote/files（同一把密钥与会话 id），"
+                         "再用返回的 file_id 调 send_file"), True)
+            if len(ctx.sent) >= ATTACHMENTS_PER_MESSAGE:
+                return f"一轮回复最多附 {ATTACHMENTS_PER_MESSAGE} 个文件：多的打包成一个 zip 再发", True
+            data = (self.store.root / "staging" / fid).read_bytes()
+            return self._attach_sent(ctx, self._store_attachment(ctx.conversation_id, name or item["name"], data,
+                                                                 item["mime"])), False
         top = Path(rel).parts[0] if Path(rel).parts else ""
         where = f"只能发当前工作目录里的文件（不含 {PROJECT_FILES}/、{HOME_DIR}/、{SKILLS}/、{RELEASES}/、{PLUGIN_MOUNT}/）"
         if top in (PROJECT_FILES, HOME_DIR, SKILLS, RELEASES, PLUGIN_MOUNT) or workdir.safe_rel(rel) is None:
             return f"找不到 {rel}：{where}", True
         if len(ctx.sent) >= ATTACHMENTS_PER_MESSAGE:
             return f"一轮回复最多附 {ATTACHMENTS_PER_MESSAGE} 个文件：多的打包成一个目录再发（目录会打成 zip）", True
-        name = str(args.get("name", "")).strip()
-        agent = self.store.agents.get(ctx.agent_id)
         if agent is not None and agent.device_runtime:
             # 端侧：工作目录在用户电脑上，向连接器要文件（越界由连接器再挡一次）
             dev = self._device_of_context(ctx.id)
@@ -6921,12 +6949,16 @@ class Network(AppsMixin):
                 name, data = (name if name.endswith(".zip") else f"{name}.zip"), workdir.pack(src)
             else:
                 name, data = name or src.name, src.read_bytes()
-        a = self._store_attachment(ctx.conversation_id, name, data)
+        return self._attach_sent(ctx, self._store_attachment(ctx.conversation_id, name, data)), False
+
+    @staticmethod
+    def _attach_sent(ctx: ExecContext, a: dict[str, Any]) -> str:
+        """send_file 发出的附件记到这一轮（同名同内容只算一个），返回给 Agent 的说明。"""
         with ctx.lock:
             ctx.sent = [x for x in ctx.sent if attachment_rel(x) != attachment_rel(a)] + [a]
         size = f"{a['size'] / 1_000_000:.1f} MB" if a["size"] >= 1_000_000 else f"{max(1, a['size'] // 1000)} KB"
         return (f"已附上 {a['name']}（{size}），会随你这一轮的回复一起发给对话里的人，他们直接下载。"
-                "回复里简单说明这是什么就行，不用把内容贴进回复。"), False
+                "回复里简单说明这是什么就行，不用把内容贴进回复。")
 
     def _tool_add_link(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_project(ctx, delegate=False)
@@ -8290,7 +8322,8 @@ class Network(AppsMixin):
             a.remote = {**a.remote, "key_sha": hashlib.sha256(key.encode()).hexdigest(), "mcp_at": None}
             self.store.save()
         self.bus.emit("agent.updated", agent=a.to_dict())
-        return {"key": key, "path": "/mcp/remote", "header": "Authorization", "value": f"Bearer {key}",
+        return {"key": key, "path": "/mcp/remote", "files_path": "/mcp/remote/files", "header": "Authorization",
+                "value": f"Bearer {key}",
                 "session_header": spec.mcp_session_header if spec else "X-Session-Id"}
 
     def _remote_call(self, ctx: ExecContext, agent: AgentNode) -> remote.RemoteCall:
@@ -8385,6 +8418,57 @@ class Network(AppsMixin):
             return ok({"content": [{"type": "text", "text": "这一轮没有网络工具"}], "isError": True})
         text, bad = b.tools.handler(name.removeprefix(MCP_PREFIX), args if isinstance(args, dict) else {})
         return ok({"content": [{"type": "text", "text": text}], "isError": bad})
+
+    def remote_staging_round(self, key: str, session_id: str) -> ExecContext:
+        """平台要暂存文件时先认这一轮（读请求体之前）：规则同 tools/call（不变量 28）——Matrix 签的密钥、
+        Matrix 发起且还没结束的平台会话 id（还没绑定就等 bind_wait_s），这一轮还得有 send_file。"""
+        sha = hashlib.sha256(str(key).encode()).hexdigest()
+        with self._lock:
+            agent = next((a for a in self.store.agents.values() if a.remote and a.remote.get("key_sha")
+                          and hmac.compare_digest(a.remote["key_sha"], sha)), None)
+            spec = self.platforms.get(agent.remote.get("platform")) if agent is not None else None
+        if agent is None:
+            raise StagingRefused("unknown key", 401)
+        if not session_id:
+            raise StagingRefused(f"请求里没有平台会话 id（{spec.mcp_session_header if spec else '会话请求头'}）", 400)
+        b = self.remote_bindings.wait(agent.id, session_id, spec.bind_wait_s if spec else 0)
+        with self._lock:
+            ctx = self._contexts.get(b.tools.token) if b is not None and b.tools is not None else None
+        if ctx is None:
+            self.bus.emit("remote.refused", agent_id=agent.id, reason="unknown_session")
+            raise StagingRefused("这个会话不是 Matrix 发起的，或那一轮已经结束：只能在 Matrix 交给你的那一轮里暂存文件", 403)
+        if b.tools.names is not None and "send_file" not in b.tools.names:
+            raise StagingRefused("这一轮没有 send_file（委托任务里产物在交付时整体交给委托方），暂存了也发不出去", 403)
+        self._remote_seen(agent)
+        return ctx
+
+    def stage_remote_file(self, ctx: ExecContext, name: str, data: bytes, mime: str = "") -> dict[str, Any]:
+        """外部平台 Agent 的文件暂存（/mcp/remote/files）：存到 <data>/staging/<file_id>，返回 file_id，
+        同一轮里 send_file(file_id=…) 发给对话里的人。暂存只属于这一轮，一轮结束（或重启）就删。"""
+        if len(data) > ATTACHMENT_LIMIT:
+            raise StagingRefused(f"文件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB", 413)
+        with self._lock:
+            if not any(c is ctx for c in self._contexts.values()):
+                raise StagingRefused("那一轮已经结束：只能在 Matrix 交给你的那一轮里暂存文件", 403)
+        fname = _safe_filename(name or "file")
+        d = self.store.root / "staging"
+        d.mkdir(parents=True, exist_ok=True)
+        with ctx.lock:
+            if len(ctx.staged) >= STAGED_PER_ROUND:
+                raise StagingRefused(f"一轮最多暂存 {STAGED_PER_ROUND} 个文件：多的打包成一个 zip 再传", 429)
+            fid = "stg_" + secrets.token_urlsafe(16)
+            (d / fid).write_bytes(data)
+            item = {"name": fname, "size": len(data), "sha": hashlib.sha256(data).hexdigest(), "mime": _clean_mime(mime, fname)}
+            ctx.staged[fid] = item
+        return {"file_id": fid, "name": fname, "size": item["size"], "sha256": item["sha"],
+                "note": "这一轮里用 send_file(file_id=…) 发给对话里的人；一轮结束就删"}
+
+    def _drop_staged(self, ctx: ExecContext) -> None:
+        """一轮结束：删掉这一轮暂存的文件（发出去的已经拷进对话的附件区）。"""
+        with ctx.lock:
+            ids, ctx.staged = list(ctx.staged), {}
+        for fid in ids:
+            (self.store.root / "staging" / fid).unlink(missing_ok=True)
 
     def _remote_seen(self, agent: AgentNode) -> None:
         """平台带着 Matrix 发起的会话连上来过：界面上显示“完整接入”。只有落到某一轮的调用才算，试连不算。"""

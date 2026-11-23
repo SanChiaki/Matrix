@@ -59,6 +59,15 @@
   消息地址只对开着的流有效，流断了 404；POST 没带密钥就沿用开流时的，带了就必须是同一个 Agent 的；
   平台会话 id 先看这次 POST 的请求头，没有再用开流时的——所以平台要么每次 POST 都带会话 id，要么每个会话各开一条流。
   空闲时每 15 秒发一行注释保活。
+- **发文件（暂存 + `file_id`）**：平台 Agent 的文件在平台上，Matrix 读不到，`send_file(path)` 对它没有意义。平台先把文件
+  `POST /mcp/remote/files?name=<文件名>`（请求体就是文件内容，类型取 `Content-Type`；同一把密钥 + 同一个会话 id 请求头），
+  拿回 `{file_id, name, size, sha256}`，再在**同一轮**里经 MCP 调 `send_file(file_id=…)`，文件附在这一轮的回复上（同 [conversations.md](reference/conversations.md)“Agent 发文件给人”）。
+  - 规则同 `tools/call`：密钥不对 401、没有会话 id 400、不是 Matrix 发起或那一轮已经结束 403（陌生会话照样先等 `bind_wait_s`）；
+    这一轮没有 `send_file`（委托任务）也 403。**先认密钥与这一轮，再收请求体**。
+  - 单个 ≤20 MB（同附件，超了 413），一轮最多暂存 20 个（429），发出去的仍是一轮最多 10 个；`send_file` 的信息流检查照旧（不变量 22）。
+  - 暂存只属于那一轮：存在 `<data>/staging/<file_id>`，`file_id` 只在那一轮的 `send_file` 里认，一轮结束（或服务重启）就删；
+    发出去的已经拷进对话的附件区。签密钥时返回的 `files_path` 就是这个地址。
+  - 上传要由**平台**做（它的文件处理 / 代码沙箱），不是模型：密钥配在平台的 MCP 设置里，模型看不到，也不该看到。
 
 ## 5. 凭证与调用方授权
 
@@ -89,13 +98,14 @@
 | 运行时 | `RemoteRuntime`：读流、转事件、超时与终止时中断、结束时解除绑定；`remote_agents.capabilities` |
 | 绑定 | `Bindings`（按（Matrix Agent, 平台会话 id）绑定这一轮的 `ToolBridge`，带等待） |
 | 引擎 | `AgentNode.remote`；`add_remote_agent`、`set_remote_api_key`、`issue_remote_key`、`_remote_call`（凭证与调用方请求头）、`remote_mcp`（JSON-RPC：initialize / ping / tools/list / tools/call）；`runtime_for`、`capabilities`、`home_mounted` |
-| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，反向代理上也不加额外的认证层（[reverse-proxy.md](reverse-proxy.md)） |
+| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`POST /mcp/remote/files`（暂存要发的文件，`stage_remote_file`）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，反向代理上也不加额外的认证层（[reverse-proxy.md](reverse-proxy.md)） |
 | 界面 | Agent 页“接入外部平台的 Agent”；外部 Agent 的设置里“外部平台”一节（接入状态、签 / 重签密钥、换 API Key） |
 | 样板与测试 | `examples/remote-agent/demo_platform.py`（演示平台）；`tests/test_remote_agents.py` |
 
 **第一版的限制**：
 
-- 只送文本：附件、项目文件、技能正文平台拿不到（完整接入时可以用档案工具读）；平台产出的文件还收不回来。
+- 只送文本：附件、项目文件、技能正文平台拿不到（完整接入时可以用档案工具读）。平台产出的文件完整接入时能经暂存发给人（第 4 节“发文件”），
+  委托任务里还交不回来（没有 `send_file`，交付只有文本）。
 - 运行中提问（`ask_user_question`）、工作区外溢审批都没有：平台自己的权限弹窗转不回来。
 - Matrix 的连接器不经 `/mcp/remote` 提供；要用户鉴权的系统走调用方授权透传。
 - 平台上 Agent 的工具名前缀可能和提示词里写的 `mcp__matrix_net__*` 不一样：模型一般能对上，对不上时要在平台的 Agent 说明里写一句。

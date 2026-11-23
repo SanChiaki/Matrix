@@ -107,14 +107,16 @@ TOOLS = [
     {
         "name": "send_file",
         "description": ("把你当前工作目录里的一个文件（或一个目录，打成 zip）发给对话里的人：附在你这一轮的回复上，"
-                        "人在对话里直接下载。回复里说明这是什么就行，不用把内容贴进回复。"),
+                        "人在对话里直接下载。回复里说明这是什么就行，不用把内容贴进回复。"
+                        "外部平台上的 Agent 文件不在 Matrix：先把文件 POST 到 /mcp/remote/files 拿 file_id，再传 file_id。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "工作目录里的相对路径，如 report.md 或 out/charts"},
+                "file_id": {"type": "string",
+                            "description": "外部平台 Agent 用：这一轮上传到 /mcp/remote/files 返回的 file_id（stg_ 开头），代替 path"},
                 "name": {"type": "string", "description": "可选：给人看的文件名（默认用原文件名，目录是 <目录名>.zip）"},
             },
-            "required": ["path"],
             "additionalProperties": False,
         },
     },
