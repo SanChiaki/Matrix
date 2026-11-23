@@ -3590,13 +3590,67 @@ function renderThread() {
 }
 
 // 等你回答的问题不进消息流，停在输入框上方：Agent 停在那里等，回答和打字在同一个地方（直接回复也算回答）。
-// 按条打补丁，选到一半、写到一半的回答不会被刷新清掉
+// 一次只看一题，前后切换（所有在等的问题排成一串）；按条打补丁，选到一半、写到一半的回答不会被刷新清掉
+let qCur = "";  // 正在看的那一题："问题 id/题目 id"
 function renderQuestionDock(c) {
   const dock = $("#q-dock"), qs = c?.questions || [];
   dock.hidden = !qs.length;
-  const fresh = patchList(dock, qs.map((q, i) => `<li class="q-card${q.can_answer ? "" : " readonly"}">
-    ${questionBody(q, q.can_answer, false, qs.length > 1 ? `${i + 1}/${qs.length}` : "")}</li>`));
-  fresh.forEach((li) => bindQuestions(li));
+  const fresh = patchList(dock, qs.map((q) => `<li class="q-card${q.can_answer ? "" : " readonly"}" data-q="${esc(q.id)}">
+    ${questionBody(q, q.can_answer)}</li>`));
+  fresh.forEach((li) => { bindQuestions(li); bindQuestionNav(li); });
+  showQuestion();
+}
+
+function qPages() {
+  return [...$("#q-dock").querySelectorAll(".q-item")].map((f) => ({ f, li: f.closest(".q-card"), key: `${f.closest(".q-card").dataset.q}/${f.dataset.qitem}` }));
+}
+
+function showQuestion(key = qCur, focus = false) {
+  const pages = qPages();
+  if (!pages.length) return;
+  let i = pages.findIndex((p) => p.key === key);
+  if (i < 0) i = 0;
+  const cur = pages[i];
+  qCur = cur.key;
+  pages.forEach((p) => { p.f.hidden = p !== cur; p.li.hidden = p.li !== cur.li; });
+  const mine = [...cur.li.querySelectorAll(".q-item")], last = mine[mine.length - 1] === cur.f;
+  cur.li.querySelector(".q-step").textContent = pages.length > 1 ? `${i + 1} / ${pages.length}` : "";
+  cur.li.querySelector(".q-nav").hidden = pages.length < 2;
+  cur.li.querySelector("[data-qprev]").disabled = i === 0;
+  cur.li.querySelector("[data-qnext]").disabled = i === pages.length - 1;
+  // 这组问题的最后一题才交回答；前面的题“下一题”
+  cur.li.querySelector(".q-next")?.toggleAttribute("hidden", last);
+  cur.li.querySelector("[data-qanswer]")?.toggleAttribute("hidden", !last);
+  if (focus) (cur.f.querySelector("input:checked") || cur.f.querySelector("input, textarea"))?.focus({ preventScroll: true });
+}
+
+function stepQuestion(d, focus = true) {
+  const pages = qPages(), i = pages.findIndex((p) => p.key === qCur);
+  const to = pages[Math.max(0, Math.min(pages.length - 1, i + d))];
+  if (to) showQuestion(to.key, focus);
+}
+
+function bindQuestionNav(li) {
+  li.querySelector("[data-qprev]").addEventListener("click", () => stepQuestion(-1));
+  li.querySelector("[data-qnext]").addEventListener("click", () => stepQuestion(1));
+  li.querySelector(".q-next")?.addEventListener("click", () => stepQuestion(1));
+  // 单选题选完自动到下一题（不是这组最后一题时）
+  li.querySelectorAll('.q-opt input[type="radio"]').forEach((r) => r.addEventListener("change", () => {
+    const f = r.closest(".q-item"), mine = [...li.querySelectorAll(".q-item")];
+    if (f !== mine[mine.length - 1]) setTimeout(() => qCur.endsWith(`/${f.dataset.qitem}`) && stepQuestion(1), 180);
+  }));
+  // 键盘：数字键选第几项，←/→ 切题（在文本框里打字时不管）
+  li.addEventListener("keydown", (e) => {
+    if (e.target.matches("textarea") || e.altKey || e.ctrlKey || e.metaKey) return;
+    const f = li.querySelector(".q-item:not([hidden])");
+    if (/^[1-9]$/.test(e.key) && f) {
+      const inp = f.querySelectorAll(".q-opt input")[+e.key - 1];
+      if (inp && !inp.disabled) { e.preventDefault(); inp.click(); inp.focus({ preventScroll: true }); }
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      if (e.target.matches('input[type="radio"]')) return;  // 单选组自己用方向键换选项
+      e.preventDefault(); stepQuestion(e.key === "ArrowLeft" ? -1 : 1);
+    }
+  });
 }
 
 // 列表按条打补丁：每一项是一个 <li> 的 HTML，和上次一样的节点原样保留（展开的“过程”、选中状态都还在）。返回新放进去的节点
@@ -3704,11 +3758,12 @@ function bindApprovals(root, after) {
 
 // Agent 在做事时提的问题（ask_user_question）：它一直在等，回答直接交给那次调用（不是一条消息）。
 // 有选项的选（多选题可以多选），也可以自己写；不想答就“不回答”，它会按没得到回答处理。直接在对话里回复也算回答。
-function questionBody(q, canAnswer, board = false, count = "") {
+function questionBody(q, canAnswer, board = false) {
   const id = esc(q.id);
   const head = `<div class="who">${board ? avatar(q.agent_name, "sm") : ""}<b>${esc(q.agent_name)}</b> ${canAnswer ? "在等你回答" : "在等回答"}
     ${board ? `<span class="pill status pending">等你回答</span><span class="muted">${time(q.created_at)}</span>`
-      : `<span class="q-wait" aria-hidden="true"></span>${count ? `<span class="muted q-count">${count}</span>` : ""}`}</div>
+      : `<span class="q-wait" aria-hidden="true"></span><span class="q-nav"><button type="button" class="ghost icon sm" data-qprev aria-label="上一题">‹</button>
+        <span class="q-step muted" aria-live="polite"></span><button type="button" class="ghost icon sm" data-qnext aria-label="下一题">›</button></span>`}</div>
     ${q.escalated ? `<p class="hint">${esc(q.escalated)}</p>` : ""}`;
   const items = q.items.map((it, n) => {
     const name = `qa-${id}-${n}`, kind = it.multi_select ? "checkbox" : "radio";
@@ -3725,6 +3780,7 @@ function questionBody(q, canAnswer, board = false, count = "") {
   return `${head}<div class="q-items" data-qid="${id}">${items}</div>
     <div class="actions">${board ? "" : `<span class="hint">回答直接交给它，接着原来的工作做；也可以在下面直接回复</span>`}
       <button type="button" class="ghost" data-qdecline="${id}">不回答</button>
+      ${board ? "" : `<button type="button" class="q-next">下一题</button>`}
       <button type="button" data-qanswer="${id}">回答</button>${look}</div>
     <p class="error" role="alert"></p>
     ${board ? `<p class="hint">${esc(q.agent_name)} 停在这里等你；回答直接交给它，在原来的工作里接着做。也可以直接在对话里回复。</p>` : ""}`;

@@ -457,13 +457,17 @@ button.link:hover { background: none; text-decoration: underline; }
 .q-card.readonly { border-color: var(--border); background: var(--surface); }
 .q-card p { margin: 0; }
 .q-card .who { display: flex; align-items: center; gap: 8px; font-size: var(--fs-md); }
-.q-card .q-count { margin-left: auto; font-size: var(--fs-sm); }
+.q-card[hidden], .q-card [hidden] { display: none !important; }
+.q-nav { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; }
+.q-nav button { width: 28px; height: 28px; padding: 0; font-size: var(--fs-lg); line-height: 1; }
+.q-step { min-width: 40px; text-align: center; font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.q-card .q-item { animation: q-in .14s ease-out; }
 .q-wait { width: 7px; height: 7px; border-radius: 50%; background: var(--human); animation: pulse 1.4s ease-in-out infinite; }
 .q-card .actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
 .q-card .actions .hint { flex: 1; min-width: 160px; margin: 0; }
 .q-card .error:empty { display: none; }
 @keyframes q-in { from { opacity: 0; transform: translateY(4px); } }
-@media (prefers-reduced-motion: reduce) { .q-card, .q-wait { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .q-card, .q-card .q-item, .q-wait { animation: none; } }
 .board-cols { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; }
 .board-col { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; min-height: 120px; }
 .board-col h3 { display: flex; align-items: center; justify-content: space-between; font-size: var(--fs-md); margin: 0 0 12px; color: var(--text-2); }
