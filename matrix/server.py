@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import auth, compat
 from .device import BLOCKING, HELLO, PROTOCOL, DeviceRuntime, WebSocketLink, capabilities_from_hello
-from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError
+from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError, StagingRefused
 from . import mcp_sse, open_server
 from .remote_agents import PlatformCatalog
 from .connector_catalog import ConnectorCatalog
@@ -898,6 +898,43 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         if out is None:
             return Response(status_code=202)
         return JSONResponse(out)
+
+    @app.post("/mcp/remote/files")
+    async def remote_stage_file(request: Request, name: str = Query("", max_length=200)) -> JSONResponse:
+        """外部平台 Agent 暂存要发的文件：请求体就是文件内容（类型取 Content-Type），返回 file_id，同一轮里
+        send_file(file_id=…) 发给对话里的人。认证同 /mcp/remote（不变量 28）：先认密钥与这一轮，再收请求体。"""
+        auth_header = request.headers.get("authorization", "")
+        key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        sid = next((x for x in (request.headers.get(h, "") for h in network.remote_session_headers()) if x), "")
+        try:
+            ctx = await asyncio.to_thread(network.remote_staging_round, key, sid)  # 可能要等流里报出会话 id
+            too_big = StagingRefused(f"文件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB", 413)
+            declared = request.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > ATTACHMENT_LIMIT:
+                raise too_big
+            buf = bytearray()
+            async for chunk in request.stream():
+                buf += chunk
+                if len(buf) > ATTACHMENT_LIMIT:
+                    raise too_big
+            out = await run_in_threadpool(network.stage_remote_file, ctx, name, bytes(buf),
+                                          request.headers.get("content-type", ""))
+        except StagingRefused as e:
+            return JSONResponse({"detail": str(e)}, status_code=e.status)
+        return JSONResponse(out)
+
+    @app.get("/mcp/remote/files/{sha}")
+    async def remote_fetch_file(sha: str, request: Request) -> Response:
+        """外部平台 Agent 取这一轮拿得到的文件（对话附件、委托方转交的、它委托出去已交付的）。认证同 /mcp/remote（不变量 28）。"""
+        auth_header = request.headers.get("authorization", "")
+        key = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        sid = next((x for x in (request.headers.get(h, "") for h in network.remote_session_headers()) if x), "")
+        try:
+            f, meta = await asyncio.to_thread(network.remote_file, key, sid, sha)
+        except StagingRefused as e:
+            return JSONResponse({"detail": str(e)}, status_code=e.status)
+        return FileResponse(f, media_type=meta["mime"], filename=meta["name"], content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff", "X-File-Sha256": meta["sha"]})
 
     mcp_sse.install(app, network)  # 同一个地址的旧版传输（HTTP+SSE）：GET 开流，消息发到流里给的地址
 

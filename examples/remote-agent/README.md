@@ -22,7 +22,7 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 curl -X PUT http://127.0.0.1:8801/agents/expense/mcp -H "Authorization: Bearer demo-platform-key" -H "Content-Type: application/json" -d '{"url": "http://127.0.0.1:8765/mcp/remote", "headers": {"Authorization": "Bearer mrk_粘贴你的密钥"}}'
 ```
 
-4. 和它私聊或在项目里 @ 它：说“成员”（经 MCP 查成员）、“抢跑”（先调工具后报会话 id）、“慢慢来”（然后点停止，看中断）。
+4. 和它私聊或在项目里 @ 它：说“成员”（经 MCP 查成员）、“抢跑”（先调工具后报会话 id）、“慢慢来”（然后点停止，看中断）、“发文件”（平台把文件暂存到 `/mcp/remote/files` 拿 `file_id`，再 `send_file`，回复上带附件）；目录里有两个演示 Agent（`expense`、`travel`），都接上 MCP 拉进同一个项目后，@ 一个说“委托「另一个的名字」带文件：再发文件”，看文件转交过去、随交付交回（Matrix 列在提示词里的文件，演示平台会自动取下来）。
 
 演示 Agent 最后一句会说收没收到调用方的授权（`X-User-Token`）：平台目录里加 `caller` 配置后可以看到透传。
 
