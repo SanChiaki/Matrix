@@ -12,7 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from matrix.connector_catalog import ConnectorCatalog
-from matrix.engine import ExecContext, Network, NetworkError
+from matrix.engine import ExecContext, Network, NetworkError, StagingRefused
 from matrix.remote_agents import PlatformCatalog, PlatformError, parse_platforms
 from matrix.runtime import ScriptedRuntime
 from matrix.server import create_app
@@ -376,6 +376,17 @@ def test_staging_needs_the_key_and_a_live_matrix_round(env: Env, monkeypatch: py
     dm = net.direct_chat(a.id, actor=maya)
     net.send_message(dm.id, "发文件", actor=maya, background=False)
     sid = dm.seats[a.id].dsh_session_id
+    # 不限文件类型（二进制照收，类型按 Content-Type 或文件名猜），只清洗文件名：清洗后为空 400
+    live = ExecContext(kind="seat", id="x", agent_id=a.id, conversation_id=dm.id, project_id=None,
+                       authority=[], constraints=[], depth=0, chain=[])
+    net._contexts["t-live"] = live
+    with pytest.raises(StagingRefused) as e:
+        net.stage_remote_file(live, "....", b"x")
+    assert e.value.status == 400
+    out = net.stage_remote_file(live, "../../a/模型.qzx9", bytes(range(256)))
+    assert out["name"] == "模型.qzx9" and live.staged[out["file_id"]]["mime"] == "application/octet-stream"
+    net._contexts.pop("t-live")
+    net._drop_staged(live)
     r = post({"Authorization": f"Bearer {key}", "X-Session-Id": sid})  # 那一轮已经结束
     assert r.status_code == 403 and "已经结束" in r.json()["detail"]
     monkeypatch.setattr(server, "ATTACHMENT_LIMIT", 10)

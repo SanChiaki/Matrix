@@ -8450,7 +8450,10 @@ class Network(AppsMixin):
         with self._lock:
             if not any(c is ctx for c in self._contexts.values()):
                 raise StagingRefused("那一轮已经结束：只能在 Matrix 交给你的那一轮里暂存文件", 403)
-        fname = _safe_filename(name or "file")
+        try:
+            fname = _safe_filename(name or "file")
+        except NetworkError as e:
+            raise StagingRefused(f"{e}：name 要是一个普通文件名，如 报告.pdf", 400) from e
         d = self.store.root / "staging"
         d.mkdir(parents=True, exist_ok=True)
         with ctx.lock:
