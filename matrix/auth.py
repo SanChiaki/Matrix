@@ -66,8 +66,8 @@ def login(store: Store, email: str, password: str) -> tuple[User, str]:
         # 不存在的邮箱也算一次哈希，不让响应时间暴露邮箱是否注册过
         expected = user.password_hash if user else _hash(password, b"0" * 16)
         got = _hash(password, bytes.fromhex(user.salt) if user and user.salt else b"1" * 16)
-        if user is None or user.kind == "system" or not hmac.compare_digest(expected, got):
-            raise AuthError("邮箱或密码不对")  # 业务系统账号不能登录网页（docs/open-api.md）
+        if user is None or not user.password_hash or not hmac.compare_digest(expected, got) or not _may_sign_in(store, user):
+            raise AuthError("邮箱或密码不对")  # 业务系统账号：管理员开了网页登录、应用在启用中才能登录（docs/open-api.md）
         token = _new_session(store, user.id)
         store.save()
     return user, token
@@ -83,7 +83,29 @@ def user_of(store: Store, token: str | None) -> User | None:
     if not token:
         return None
     s = store.sessions.get(token)
-    return store.users.get(s["user_id"]) if s else None
+    u = store.users.get(s["user_id"]) if s else None
+    return u if u is not None and _may_sign_in(store, u) else None
+
+
+def _may_sign_in(store: Store, user: User) -> bool:
+    """业务系统账号（不变量 30）的网页登录只在它的应用启用中时有效：停用立即作废已有的登录。普通用户总是可以。"""
+    if not user.is_system:
+        return True
+    app = store.apps.get(user.app_id or "")
+    return app is not None and app.status == "active"
+
+
+def close_web_login(store: Store, user_id: str) -> None:
+    """关掉业务系统账号的网页登录：清掉密码、作废它所有的登录与没用过的设密码链接。调用方负责确认是管理员。"""
+    with store.lock:
+        u = store.users.get(user_id)
+        if u is None or not u.is_system:
+            raise AuthError("只有业务系统账号能这样关掉网页登录")
+        u.password_hash, u.salt = "", ""
+        store.sessions = {t: s for t, s in store.sessions.items() if s["user_id"] != user_id}
+        for h in [h for h, r in store.resets.items() if r["user_id"] == user_id]:
+            del store.resets[h]
+        store.save()
 
 
 # ---- 管理员重置密码：一次性链接，用户自己设新密码 ----
@@ -97,10 +119,8 @@ def _reset_hash(token: str) -> str:
 
 
 def issue_reset(store: Store, user_id: str, by: str | None = None) -> tuple[str, float]:
-    u = store.users.get(user_id)
-    if u is not None and u.kind == "system":  # 业务系统账号没有密码、不能登录（docs/open-api.md）
-        raise AuthError("业务系统账号不能登录，也不能重置密码")
-    """给 user_id 签发重置令牌；返回 (令牌明文, 过期时间)。调用方负责确认 by 是管理员。"""
+    """给 user_id 签发重置令牌；返回 (令牌明文, 过期时间)。调用方负责确认 by 是管理员。
+    业务系统账号也用它开网页登录（只读，不变量 30）：管理员把链接交给负责人设密码。"""
     token = secrets.token_urlsafe(32)
     now = time.time()
     with store.lock:

@@ -1,6 +1,6 @@
 """外部应用接入（docs/open-api.md，不变量 30）：管理员登记应用；两种身份（代表个人 / 业务系统账号）；
 查（公共、自己的、开放给它的 Agent）、组（建项目、成员、资料、技能、模板）、发（服务）、调（标准 HTTP 形状）；
-令牌拿不到内容；每次写操作留下“经哪个应用”；撤销 / 停用立即生效；系统账号不能登录、负责人等同主持人。"""
+令牌拿不到内容；每次写操作留下“经哪个应用”；撤销 / 停用立即生效；系统账号的网页登录只读、负责人等同主持人。"""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def bearer(token: str) -> dict[str, str]:
 
 # ================= 第 1 期：应用、身份、查 =================
 def test_admin_registers_apps_and_system_accounts_cannot_log_in(tmp_path: Path):
-    """不变量 30：只有管理员登记应用、签系统账号的令牌；系统账号至少一名负责人，不能登录、不能重置密码、不能被邀请、不是管理员。"""
+    """不变量 30：只有管理员登记应用、签系统账号的令牌；系统账号至少一名负责人，默认不能登录（没有密码）、不能被邀请、不是管理员。"""
     net, (ops, maya, ann, ben), pub, contract, app = setup(tmp_path)
     with pytest.raises(NetworkError, match="unknown admin"):
         net.create_app(maya, "偷偷的应用")
@@ -53,8 +53,8 @@ def test_admin_registers_apps_and_system_accounts_cannot_log_in(tmp_path: Path):
     assert sysu.is_system and sysu.managers == [maya] and not net.is_admin(sysu.id)
     with pytest.raises(auth.AuthError):
         auth.login(net.store, sysu.email, "")
-    with pytest.raises(auth.AuthError, match="不能登录"):
-        auth.issue_reset(net.store, sysu.id, by=ops)
+    with pytest.raises(auth.AuthError):
+        auth.login(net.store, sysu.email, "x" * 8)
     g = net.create_project("Ann 的项目", "", [], actor=ann)
     with pytest.raises(NetworkError, match="没有用户"):
         net.invite(g.id, sysu.email, actor=ann)
@@ -338,3 +338,85 @@ def test_managers_are_hosts_in_the_web_ui(tmp_path: Path):
         net.remove_participant(g["id"], maya, actor=maya)
     with pytest.raises(NetworkError, match="负责人"):
         net.leave_project(g["id"], actor=maya)
+
+
+# ================= 系统账号的网页登录（只读） =================
+def test_system_web_login_is_read_only(tmp_path: Path):
+    """不变量 30：管理员给系统账号开网页登录（一次性设密码链接）；登录后只看它调用服务的会话（完整内容）与它发布的服务的用量
+    （不看内容），别的接口一律 403，写操作一律拒绝；看不到别人的会话、它主持项目的群聊；应用停用 / 关掉登录立即失效。"""
+    from matrix.server import SYSTEM_WEB_ROUTES
+    net, (ops, maya, ann, ben), pub, contract, app = setup(tmp_path, lambda call: "服务的回复")
+    sysu = net.store.users[app.system_user_id]
+    # 别人发布、点名给系统账号的服务：系统账号经 /svc 调用
+    g = net.create_project("报销", "", [pub.id], actor=maya)
+    x = net.create_service(g.id, "baoxiao", "报销服务", "报销咨询", actor=maya, entry=pub.id, readers=[sysu.email])
+    _, token = net.issue_system_token(ops, app.id)
+    api = TestClient(create_app(net))
+    evs = sse(api.post(f"/svc/agents/{x.id}/chat", headers=bearer(token), json={"message": "我的报销单"}).text)
+    sid = evs[0][1]["session_id"]
+    other = net.open_service_session(x.id, actor=maya)                             # 别人的服务会话
+    # 系统账号自己主持的项目发布的服务，被 ben 调用
+    own = api.post("/open/v1/projects", headers=bearer(token), json={"name": "对外", "members": [pub.id]}).json()
+    y = api.post(f"/open/v1/projects/{own['id']}/services", headers=bearer(token),
+                 json={"name": "chaxun", "title": "查询服务", "description": "查", "entry": pub.id, "readers": ["ben@x.io"]}).json()
+    bs = net.open_service_session(y["id"], actor=ben)
+    net.send_message(bs.id, "ben 的私事", [], actor=ben)
+    group = next(c for c in net.store.conversations.values() if c.kind == "project" and c.project_id == own["id"])
+
+    # 只有管理员能开；开之前登录不了
+    admin = client(net, "ops@x.io")
+    other_user = client(net, "maya@x.io")
+    assert other_user.post(f"/api/admin/apps/{app.id}/web-login").status_code == 404
+    r = admin.post(f"/api/admin/apps/{app.id}/web-login")
+    assert r.status_code == 200 and r.json()["email"] == sysu.email
+    link = r.json()["token"]
+    assert next(a for a in admin.get("/api/admin/apps").json() if a["id"] == app.id)["system"]["web_login"] is False
+    c = TestClient(create_app(net))
+    assert c.post("/api/auth/reset", json={"token": link, "password": "sys-pass-123"}).status_code == 200
+    assert next(a for a in admin.get("/api/admin/apps").json() if a["id"] == app.id)["system"]["web_login"] is True
+    c = TestClient(create_app(net))
+    assert c.post("/api/auth/login", json={"email": sysu.email, "password": "sys-pass-123"}).status_code == 200
+    me = c.get("/api/me").json()
+    assert me["kind"] == "system" and me["admin"] is False
+    assert not any(a.owner_id == sysu.id for a in net.store.agents.values())      # 不补助理（不新建 Agent）
+
+    # 看得到：自己的服务会话（完整内容）、自己发布的服务的用量（不给内容）
+    ov = c.get("/api/system/overview").json()
+    assert [(s["id"], s["first_message"]) for s in ov["sessions"]] == [(sid, "我的报销单")]
+    assert ov["account"]["app"] == "报销系统" and ov["account"]["managers"] == ["maya@x.io"]
+    pubd = {p["id"]: p for p in ov["published"]}
+    assert set(pubd) == {y["id"]} and pubd[y["id"]]["usage"]["sessions"] == 1
+    assert "ben 的私事" not in json.dumps(ov)
+    d = c.get(f"/api/system/sessions/{sid}").json()
+    assert [m["text"] for m in d["messages"] if m["role"] in ("user", "agent")] == ["我的报销单", "服务的回复"]
+    # 看不到：别人的服务会话、调用它服务的会话、它主持项目的群聊
+    for conv in (other.id, bs.id, group.id):
+        assert c.get(f"/api/system/sessions/{conv}").status_code == 404
+    # 别的接口一律 403，写操作也是（哪怕是放行的路径换个方法）
+    for method, path in (("get", "/api/network"), ("get", "/api/board"), ("get", f"/api/conversations/{sid}"),
+                         ("get", f"/api/conversations/{group.id}"), ("get", "/api/events"), ("get", "/api/apps"),
+                         ("get", f"/api/projects/{own['id']}"), ("get", "/api/services"),
+                         ("post", f"/api/conversations/{sid}/messages"), ("post", "/api/projects"),
+                         ("post", f"/api/services/{x.id}/sessions"), ("post", "/api/agents"),
+                         ("delete", f"/api/conversations/{sid}"), ("post", "/api/system/overview")):
+        r = getattr(c, method)(path, **({"json": {}} if method == "post" else {}))
+        assert r.status_code in (403, 405), (method, path, r.status_code)
+    # 放行的只有这几个只读路由，且每个都真的存在
+    routes = {getattr(rt, "path", None) for rt in create_app(net).routes}
+    assert SYSTEM_WEB_ROUTES <= routes
+    assert all(p == "/api/me" or p.startswith("/api/system/") for p in SYSTEM_WEB_ROUTES)
+    # 普通用户用不了 /api/system/*：按不存在
+    assert other_user.get("/api/system/overview").status_code == 404
+    assert other_user.get(f"/api/system/sessions/{sid}").status_code == 404
+
+    # 应用停用：登录立即失效，也登录不了；重新启用后恢复
+    net.update_app(ops, app.id, status="disabled")
+    assert c.get("/api/system/overview").status_code == 401
+    assert TestClient(create_app(net)).post("/api/auth/login", json={"email": sysu.email, "password": "sys-pass-123"}).status_code == 400
+    net.update_app(ops, app.id, status="active")
+    assert c.get("/api/system/overview").status_code == 200
+    # 关掉网页登录：密码清空、已有登录失效；令牌不受影响
+    assert admin.delete(f"/api/admin/apps/{app.id}/web-login").status_code == 200
+    assert c.get("/api/system/overview").status_code == 401
+    assert TestClient(create_app(net)).post("/api/auth/login", json={"email": sysu.email, "password": "sys-pass-123"}).status_code == 400
+    assert api.get(f"/svc/agents/{x.id}", headers=bearer(token)).status_code == 200

@@ -646,7 +646,7 @@ footer a { color: var(--text-2); }
       <div class="reveal"><span class="n">27</span><b>公共 Agent 只在服务面跨信任域</b><span>管理员批准、冻结权限；服务面只为调用方做事：私有目录只读、用调用方自己的授权、过程只给调用方，维护人只看用量</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">28</span><b>外部平台 Agent 的回调只落到 Matrix 发起的那一轮</b><span>平台只来自部署方目录；回调凭 Matrix 签的密钥 + 那一轮的会话 id；调用方授权只透传他自己的</span><span class="test">✓ tested</span></div>
       <div class="reveal"><span class="n">29</span><b>服务调用替调用方做事、由项目付费</b><span>服务会话只属于调用方；沿途只用调用方自己的授权、只读圈定的资料、只写收件目录；主持人只看用量</span><span class="test">✓ tested</span></div>
-      <div class="reveal"><span class="n">30</span><b>外部应用只以授权它的人或它自己的系统账号的名义操作</b><span>做的不超过那个主体本来能做的；令牌拿不到内容；每次写操作留下“经哪个应用”；撤销立即生效</span><span class="test">✓ tested</span></div>
+      <div class="reveal"><span class="n">30</span><b>外部应用只以授权它的人或它自己的系统账号的名义操作</b><span>做的不超过那个主体本来能做的；令牌拿不到内容；每次写操作留下“经哪个应用”；撤销立即生效；系统账号的网页登录只读</span><span class="test">✓ tested</span></div>
     </div>
   </div>
 </section>

@@ -3626,7 +3626,7 @@ class Network(AppsMixin):
         带一条工作日早报定时（在定时列表里能停）。已有 Agent 的人不补建（他们已经有助理）。"""
         with self._lock:
             u = self.store.users.get(user_id)
-            if u is None:
+            if u is None or u.is_system:  # 业务系统账号不新建 Agent（不变量 30），网页登录后也不补助理
                 return None
             if any(a.owner_id == user_id for a in self.store.agents.values()):
                 return self.assistant_of(user_id)

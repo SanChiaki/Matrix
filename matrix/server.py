@@ -634,11 +634,25 @@ class ToolCallIn(BaseModel):
     args: dict[str, Any] = Field(default_factory=dict)
 
 
+# 业务系统账号登录网页后只能走这几个接口（不变量 30：只读，只看它调用服务的会话与它发布的服务的用量）。
+# 按路由模板认，只放 GET；新加的接口默认不给系统账号用，要放行必须写进这里（test_system_web_login_is_read_only 逐个核对）。
+SYSTEM_WEB_ROUTES = frozenset({
+    "/api/me",
+    "/api/system/overview",
+    "/api/system/sessions/{conv_id}",
+    "/api/system/sessions/{conv_id}/attachments/{sha}",
+})
+
+
 def current_user(request: Request) -> User:
-    """登录用户；没登录 401。"""
+    """登录用户；没登录 401。业务系统账号只能用 SYSTEM_WEB_ROUTES 里的 GET 接口，别的 403。"""
     user = auth.user_of(request.app.state.network.store, request.cookies.get(auth.COOKIE))
     if user is None:
         raise HTTPException(401, "请先登录")
+    if user.is_system:
+        route = request.scope.get("route")
+        if request.method != "GET" or getattr(route, "path", None) not in SYSTEM_WEB_ROUTES:
+            raise HTTPException(403, "业务系统账号在网页上只读：只能看它调用服务的会话与它发布的服务的用量")
     return user
 
 
@@ -744,6 +758,11 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         """产品简介页：静态内容，不需要登录。"""
         return FileResponse(STATIC / "about.html")
 
+    @app.get("/system")
+    def system_page() -> FileResponse:
+        """业务系统账号的只读页面（不变量 30）：页面是静态的，数据经 /api/system/*。"""
+        return FileResponse(STATIC / "system.html")
+
     @app.get("/admin")
     def admin_page() -> FileResponse:
         """管理后台页面：页面本身是静态的，数据经 /api/admin/*，只给管理员。"""
@@ -790,6 +809,8 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     @app.get("/api/me")
     def whoami(user: Me) -> dict:
+        if user.is_system:  # 业务系统账号（不变量 30）：没有 Agent、不是管理员，前端据此转到只读页面 /system
+            return {**user.public(), "agent_count": 0, "home_id": None, "admin": False}
         network.ensure_assistant(user.id)  # 有了这个功能之前注册、还没有 Agent 的人：补一个助理
         own = [a for a in store.agents.values() if a.owner_id == user.id]
         home = network.home_of(user.id)
@@ -957,6 +978,35 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     def admin_system_token(app_id: str, body: AppGrantIn, user: Me) -> dict:
         grant, token = network.issue_system_token(user.id, app_id, body.scopes)
         return {"token": token, "grant": grant.to_dict()}  # 只在这里出现一次
+
+    @app.post("/api/admin/apps/{app_id}/web-login")
+    def admin_open_web_login(app_id: str, user: Me) -> dict:
+        """开系统账号的网页登录（只读）：发一条一次性设密码链接，管理员交给负责人去设。再发一条，旧链接作废；
+        设了新密码，原有的登录全部失效。"""
+        sysu = network.system_user_of_app(user.id, app_id)
+        token, expires_at = auth.issue_reset(store, sysu.id, by=user.id)
+        return {"token": token, "path": f"/#reset={token}", "expires_at": expires_at, "email": sysu.email}
+
+    @app.delete("/api/admin/apps/{app_id}/web-login")
+    def admin_close_web_login(app_id: str, user: Me) -> list[dict]:
+        auth.close_web_login(store, network.system_user_of_app(user.id, app_id).id)
+        return network.admin_apps(user.id)
+
+    # ---- 业务系统账号自己的只读页面（不变量 30；只有系统账号能用，别人按不存在处理） ----
+    @app.get("/api/system/overview")
+    def system_overview(user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
+        return network.system_overview(user.id, days)
+
+    @app.get("/api/system/sessions/{conv_id}")
+    def system_session(conv_id: str, user: Me) -> dict:
+        return network.system_session(user.id, conv_id)
+
+    @app.get("/api/system/sessions/{conv_id}/attachments/{sha}")
+    def system_attachment(conv_id: str, sha: str, user: Me) -> FileResponse:
+        network.system_session(user.id, conv_id)  # 只认它自己的服务会话
+        path, meta = network.attachment_file(conv_id, sha, actor=user.id)
+        return FileResponse(path, filename=meta["name"], media_type=meta["mime"], content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff"})
 
     @app.delete("/api/admin/grants/{grant_id}")
     def admin_revoke_grant(grant_id: str, user: Me) -> dict:

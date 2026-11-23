@@ -7,7 +7,9 @@
 - 做的事等于令牌代表的主体本来就能做的，再交令牌的 scope 与项目范围（代表个人时：经这个应用建的，加上授权人交给它管的）；
 - 令牌拿不到内容（对话、过程、私有目录、凭证），它自己调用服务的会话除外；
 - 每次写操作都留下“经哪个应用”（档案日志 `via_app`、群聊事件后缀）；撤销 / 停用立即生效；
-- 系统账号不能登录网页、不能新建 Agent、至少一名负责人；负责人在网页上对它主持的项目等同主持人；
+- 系统账号不能新建 Agent、至少一名负责人；负责人在网页上对它主持的项目等同主持人；
+- 系统账号的网页登录只读：管理员开（发一次性设密码链接）、随时关，应用停用即失效；登录后只看它自己调用服务的会话
+  与它发布的服务的用量（`system_overview` / `system_session`），别的接口一律拒绝（`server.SYSTEM_WEB_ROUTES`）；
 - 开放给应用的个人 Agent 被拉进项目时，所有者成为那个项目的参与者（等价于受邀加入后带进自己的 Agent）。
 
 这里是 Network 的一个混入（mixin），用 Network 的锁、存储与已有的操作；不另开一套权限。
@@ -135,6 +137,7 @@ class AppsMixin:
         sysu = self.store.users.get(app.system_user_id or "")
         if sysu is not None:
             d["system"] = {"id": sysu.id, "email": sysu.email, "managers": [self._email(u) for u in sysu.managers],
+                           "web_login": bool(sysu.password_hash),
                            "token": next(({"id": g.id, "scopes": g.scopes, "created_at": g.created_at,
                                            "last_used_at": g.last_used_at, "calls": g.calls}
                                           for g in self.store.app_grants.values()
@@ -320,6 +323,51 @@ class AppsMixin:
         u = self.store.users.get(user_id)
         self._check(u is not None and u.is_system and (actor is None or self.manages(actor, u.id) or self.is_admin(actor)),
                     f"user {user_id}")
+
+    # ================= 系统账号的网页登录（只读，不变量 30） =================
+    def system_user_of_app(self: "Network", actor: str | None, app_id: str) -> User:
+        """管理员开 / 关某个应用的系统账号的网页登录：找到那个系统账号。"""
+        from .engine import NetworkError
+        self._admin(actor)
+        with self._lock:
+            app = self.store.apps.get(app_id)
+            self._check(app is not None, f"app {app_id}")
+            sysu = self.store.users.get(app.system_user_id or "")
+            if sysu is None:
+                raise NetworkError("这个应用没有业务系统账号")
+            return sysu
+
+    def _system_self(self: "Network", actor: str | None) -> User:
+        u = self.store.users.get(actor or "")
+        self._check(u is not None and u.is_system, "system account")
+        return u
+
+    def system_overview(self: "Network", actor: str | None, days: int = 30) -> dict[str, Any]:
+        """系统账号登录网页后看到的全部：它调用服务的会话（它就是调用方，不变量 29），它主持的项目发布的服务与用量
+        （被别人调用时只看用量，不看内容）。不含群聊、委托过程、档案。"""
+        with self._lock:
+            u = self._system_self(actor)
+            app = self.store.apps.get(u.app_id or "")
+            sessions = [{**self.conversation_view(c, u.id),  # 经 /svc 开的会话都叫服务名：用第一句问话区分
+                         "first_message": next((m.text[:120] for m in c.messages if m.role == "user"), "")}
+                        for c in sorted((c for c in self.store.conversations.values()
+                                         if c.kind == "service" and c.owner_id == u.id), key=lambda c: -c.updated_at)]
+            published = [(x.project_id, x.id, self.service_view(x, u.id)) for x in sorted(
+                self.store.project_services.values(), key=lambda x: -x.published_at)
+                if (g := self.store.projects.get(x.project_id)) is not None and g.owner_id == u.id]
+            account = {"email": u.email, "app": app.name if app else "", "managers": [self._email(m) for m in u.managers]}
+        out = []
+        for pid, sid, view in published:  # service_usage 自己拿锁、读台账
+            out.append({**view, "usage": self.service_usage(pid, sid, days, actor=u.id)})
+        return {"account": account, "sessions": sessions, "published": out, "days": days}
+
+    def system_session(self: "Network", actor: str | None, conv_id: str) -> dict[str, Any]:
+        """系统账号看自己的一个服务会话（只读）。别的对话（哪怕它是所有者）按不存在处理。"""
+        with self._lock:
+            u = self._system_self(actor)
+            conv = self.store.conversations.get(conv_id)
+            self._check(conv is not None and conv.kind == "service" and conv.owner_id == u.id, f"conversation {conv_id}")
+        return self.conversation_detail(conv_id, actor=u.id)
 
     # ================= 令牌 =================
     def app_context(self: "Network", token: str | None, scope: str | tuple[str, ...]) -> AppContext:

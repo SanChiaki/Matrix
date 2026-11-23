@@ -110,6 +110,7 @@ async function submitAuth(e) {
 // 登录后：拿到身份（第一次会带上网络给的助理）
 async function enter() {
   S.me = await api("/api/me");
+  if (S.me.kind === "system") { location.replace("/system"); return; }  // 业务系统账号只有只读页面（不变量 30）
   $("#me-email").textContent = S.me.email;
   $("#me-initial").textContent = (S.me.email[0] || "?").toUpperCase();
   $("#me-btn").title = S.me.email;
