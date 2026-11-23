@@ -313,3 +313,28 @@ def test_app_deletes_only_projects_it_created(tmp_path: Path):
     _, readonly = net.grant_app(ann, app.id, ["agents.read"])
     assert c.delete(f"/open/v1/projects/{other.id}", headers=bearer(readonly)).status_code == 403
 
+
+
+def test_managers_are_hosts_in_the_web_ui(tmp_path: Path):
+    """不变量 30：业务系统账号主持的项目里，负责人在网页上等同主持人：项目列表给 is_host（界面据此给邀请框、项目配置），
+    能邀请、看到邀请名单、移出别人的 Agent；不是负责人的参与者不行。负责人只在管理后台改：不能在项目里被移出、不能自己退出。"""
+    net, (ops, maya, ann, ben), pub, contract, app = setup(tmp_path)
+    net.set_agent_open(contract.id, [app.id], actor=ann)
+    _, token = net.issue_system_token(ops, app.id)
+    c = TestClient(create_app(net))
+    g = c.post("/open/v1/projects", headers=bearer(token), json={"name": "报销", "members": [contract.id]}).json()
+    view = lambda uid: next(p for p in net.snapshot(uid)["projects"] if p["id"] == g["id"])  # noqa: E731
+    assert view(maya)["is_host"] is True and view(ann)["is_host"] is False
+    net.invite(g["id"], "ben@x.io", actor=maya)
+    assert "invited" in view(maya) and "invited" not in view(ann)
+    with pytest.raises(NetworkError, match="主持人"):
+        net.invite(g["id"], "ops@x.io", actor=ann)
+    net.remove_member(g["id"], contract.id, actor=maya)  # 负责人能移出别人的 Agent
+    assert contract.id not in net.store.projects[g["id"]].member_ids
+    d = net.project_detail(g["id"], actor=maya)
+    assert d["is_host"] and d["invited_emails"] and d["managers"] == [maya] and d["host"] == "报销系统（业务系统账号）"
+    assert not net.project_detail(g["id"], actor=ann)["invited_emails"]
+    with pytest.raises(NetworkError, match="负责人"):  # 负责人只在管理后台改：不能被移出、不能自己退出
+        net.remove_participant(g["id"], maya, actor=maya)
+    with pytest.raises(NetworkError, match="负责人"):
+        net.leave_project(g["id"], actor=maya)
