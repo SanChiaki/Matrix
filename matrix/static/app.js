@@ -1170,7 +1170,7 @@ function renderProjectsView() {
 const kindTag = (g) => g.shared
   ? `<span class="vis-tag shared">与 ${g.participants.length + (g.invited || []).length} 人共享</span>`
   : '<span class="vis-tag private">仅你</span>';
-const isHost = (g) => !!g && (!g.owner_id || g.owner_id === S.me?.id);
+const isHost = (g) => !!g && (g.is_host ?? (!g.owner_id || g.owner_id === S.me?.id));  // 服务端给的：负责人也算（不变量 30）
 
 function renderProjects() {
   $("#project-list").innerHTML = S.snap.projects.map((g) => `
@@ -2860,7 +2860,9 @@ async function renderPeople(box, g) {
   box.innerHTML = `<h3>参与者</h3>
     <ul class="member-list">
       <li>${avatar(d.host, "sm")}<span class="m-body"><span class="n">${esc(d.host)}</span><span class="s">主持人</span></span></li>
-      ${d.participants.map((u) => `<li>${avatar(emails[u], "sm")}<span class="m-body"><span class="n">${esc(emails[u])}</span><span class="s">参与者</span></span>
+      ${d.participants.map((u) => (d.managers || []).includes(u)  // 业务系统账号的负责人：在管理后台改，不在这里移出
+        ? `<li>${avatar(emails[u], "sm")}<span class="m-body"><span class="n">${esc(emails[u])}</span><span class="s">负责人（等同主持人）</span></span></li>`
+        : `<li>${avatar(emails[u], "sm")}<span class="m-body"><span class="n">${esc(emails[u])}</span><span class="s">参与者</span></span>
         <button type="button" class="ghost sm" data-rm="${esc(u)}">移出</button></li>`).join("")}
       ${Object.entries(d.invited_emails || {}).map(([u, e]) => `<li>${avatar(e, "sm")}<span class="m-body"><span class="n">${esc(e)}</span><span class="s">已邀请，等对方接受</span></span>
         <button type="button" class="ghost sm" data-rm="${esc(u)}">撤回</button></li>`).join("")}

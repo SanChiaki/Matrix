@@ -409,10 +409,14 @@ class Network(AppsMixin):
         self._check(self.can_see_project(g, actor), f"project {project_id}")
         return g
 
+    def hosts(self, g: Project | None, actor: str | None) -> bool:
+        """actor 在这个项目里算不算主持人：所有者本人，或业务系统账号主持的项目的负责人（不变量 30）。"""
+        return actor is None or (g is not None and (g.owner_id in (None, actor) or self.manages(actor, g.owner_id)))
+
     def hosted_project(self, project_id: str, actor: str | None) -> Project:
         """只有所有者 / 主持人能做的操作（改名、纲要、资源引用、邀请、删除）。"""
         g = self.visible_project(project_id, actor)
-        if actor is not None and g.owner_id not in (None, actor) and not self.manages(actor, g.owner_id):
+        if not self.hosts(g, actor):
             raise NetworkError("只有主持人能这样做")  # 业务系统账号主持的项目：负责人等同主持人（不变量 30）
         return g
 
@@ -667,7 +671,7 @@ class Network(AppsMixin):
     def _check_removable(self, g: Project, agent_id: str, actor: str | None) -> None:
         """调用方持有锁。主持人能移出任何成员；参与者只能移出自己的 Agent。助理和别的成员一样（移出后它的会话不能再发消息）。"""
         a = self.store.agents.get(agent_id)
-        if actor is None or g.owner_id in (None, actor) or (a is not None and (a.maintained_by(actor) or a.is_public)):
+        if self.hosts(g, actor) or (a is not None and (a.maintained_by(actor) or a.is_public)):
             return  # 公共 Agent 谁都能拉进来，也谁都能移出（docs/public-agents.md 决策 8）
         raise NetworkError(f"{self._name(agent_id)} 不是你的 Agent，只有它的所有者或主持人能把它移出")
 
@@ -795,6 +799,8 @@ class Network(AppsMixin):
             g = self.visible_project(project_id, actor)
             if g.owner_id == actor:
                 raise NetworkError("主持人不能退出；不再需要这个项目可以删除它")
+            if self.manages(actor, g.owner_id):
+                raise NetworkError("你是这个业务系统账号的负责人：要退出，请管理员在管理后台把你从负责人里去掉")
             self._drop_participant(g, actor, f"{self._email(actor)} 退出了项目")
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
@@ -807,6 +813,8 @@ class Network(AppsMixin):
             if user_id in g.invited:  # 撤回邀请
                 g.invited.remove(user_id)
             elif user_id in g.participants:
+                if self.manages(user_id, g.owner_id):
+                    raise NetworkError(f"{self._email(user_id)} 是这个业务系统账号的负责人：要让他退出，请管理员在管理后台改负责人")
                 self._drop_participant(g, user_id, f"{self._email(user_id)} 被主持人移出了项目")
             else:
                 raise NetworkError("不是这个项目的参与者")
@@ -1240,13 +1248,18 @@ class Network(AppsMixin):
             d["authorities"] = dict(AUTHORITIES)
             d["embed_tabs"] = self.embed_tabs(g)
             d["embeddable"] = {r.id: s.name for r in g.refs if (s := self._embed_spec(r)) is not None}
-            d["release_skills"] = sorted(self._release_skill_sources(g)) if actor in (None, g.owner_id) else []
+            d["is_host"] = self.hosts(g, actor)  # 业务系统账号主持的项目：负责人等同主持人（不变量 30）
+            d["release_skills"] = sorted(self._release_skill_sources(g)) if d["is_host"] else []
             d["host"] = self._email(g.owner_id)
+            sysu = self.store.users.get(g.owner_id or "")
+            if sysu is not None and sysu.is_system:  # 参与者列表：主持人写应用名，负责人单独标出（在管理后台改，不在这里移出）
+                app = self.store.apps.get(sysu.app_id or "")
+                d["host"] = f"{app.name if app else sysu.email}（业务系统账号）"
+                d["managers"] = [u for u in sysu.managers if u in g.participants]
             d["participant_emails"] = {u: self._email(u) for u in g.people}
-            d["invited_emails"] = {u: self._email(u) for u in g.invited} if actor in (None, g.owner_id) else {}
-            if actor not in (None, g.owner_id):
+            d["invited_emails"] = {u: self._email(u) for u in g.invited} if d["is_host"] else {}
+            if not d["is_host"]:
                 d.pop("invited")
-            d["is_host"] = actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id)
             if d["is_host"] and not g.shared:  # 第一次邀请前的确认框：对方进来会看到多少
                 d["chat_messages"] = sum(1 for m in self._project_chat(g).messages
                                          if m.role in ("user", "agent") and not m.audience)
@@ -4173,7 +4186,7 @@ class Network(AppsMixin):
              "view": {k: r.view[k] for k in ("title", "label")} if r.view else None,
              "skills": [i.public() for i in skillfs.listing(vdir / releasefs.SKILLS_DIR)] if r.kind == "method" and man else [],
              "files": releasefs.listing(vdir) if man else [],
-             "inside": inside, "is_host": actor is None or (g is not None and g.owner_id in (None, actor)),
+             "inside": inside, "is_host": self.hosts(g, actor),
              "mine": [a.id for a in self.store.agents.values()
                       if r.id in a.subscriptions and actor is not None and a.owner_id == actor]}
         if inside:
@@ -7709,7 +7722,7 @@ class Network(AppsMixin):
         """调用方持有锁。"""
         g = self.store.projects.get(meta.get("project_id") or "")
         inside = g is not None and (actor is None or actor in g.people)
-        host = g is not None and (actor is None or g.owner_id == actor)
+        host = g is not None and self.hosts(g, actor)
         return {k: meta.get(k) for k in ("id", "name", "title", "description", "version", "rev", "source", "public",
                                          "published_at", "status", "uses")} | {
             "published_by": self._email(meta.get("published_by")),
@@ -7948,7 +7961,7 @@ class Network(AppsMixin):
         meta = self._bp_meta(bid, actor)
         with self._lock:
             g = self.store.projects.get(meta.get("project_id") or "")
-            ok = (g is not None and (actor is None or g.owner_id == actor)) or \
+            ok = (g is not None and self.hosts(g, actor)) or \
                  (meta.get("source") == "catalog" and (actor is None or self.is_admin(actor)))
             self._check(ok, f"blueprint {bid}")
         meta = self.blueprints.update(bid, status="withdrawn")
@@ -9024,12 +9037,13 @@ class Network(AppsMixin):
         """调用方持有锁。列表与事件里的项目：邀请名单只给主持人。"""
         d = self._project_dict(g, actor)
         d["host_email"] = self._email(g.owner_id) if g.owner_id else None
+        d["is_host"] = self.hosts(g, actor)  # 界面按它判断：负责人在网页上等同主持人（不变量 30）
         host = self.store.users.get(g.owner_id or "")
         if host is not None and host.is_system:  # 业务系统账号主持：写应用名与负责人（不变量 30）
             app = self.store.apps.get(host.app_id or "")
             d["host_email"] = f"{app.name if app else host.email}（负责人 {'、'.join(self._email(u) for u in host.managers)}）"
             d["host_system"] = True
-        if actor is not None and g.owner_id not in (None, actor) and not self.manages(actor, g.owner_id):
+        if not d["is_host"]:
             d.pop("invited")
             d["suggestions"] = [x for x in d["suggestions"] if x["by_user"] == actor]
         return d
