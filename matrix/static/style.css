@@ -426,22 +426,21 @@ button.link:hover { background: none; text-decoration: underline; }
 .todo-item.approval { flex-direction: column; align-items: stretch; }
 .todo-item .who, .approval-card .who { display: flex; align-items: center; gap: 8px; }
 .reason { margin: 0; font-size: var(--fs-md); color: var(--text-2); white-space: pre-wrap; word-break: break-word; }
-.q-items { display: flex; flex-direction: column; gap: 14px; }
+.q-items { display: flex; flex-direction: column; gap: 16px; }
 .q-item { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .q-item legend { padding: 0; margin-bottom: 2px; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
 .q-multi { font-weight: 400; font-size: var(--fs-sm); margin-left: 6px; }
 .q-opts { display: flex; flex-direction: column; gap: 6px; }
 /* 选项是整行可点的卡片：序号 + 标题 + 说明，选中时整行高亮 */
-.q-opt { position: relative; display: flex; align-items: flex-start; gap: 10px; padding: 7px 12px; font-size: var(--fs-md); cursor: pointer;
+.q-opt { position: relative; display: flex; align-items: flex-start; gap: 8px; padding: 8px 12px; font-size: var(--fs-md); cursor: pointer;
   border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); transition: border-color .12s, background .12s; }
 .q-opt:hover { border-color: var(--border-strong); }
 .q-opt:has(input:checked) { border-color: var(--accent-line); background: var(--accent-soft); }
 .q-opt:has(input:focus-visible) { box-shadow: 0 0 0 3px var(--accent-soft); border-color: var(--accent-line); }
 .q-opt:has(input:disabled) { cursor: default; }
 .q-opt input[type="radio"], .q-opt input[type="checkbox"] { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
-.q-key { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-top: 1px; border-radius: 6px;
+.q-key { flex: none; display: inline-grid; place-items: center; width: 20px; height: 20px; margin-top: 1px; border-radius: var(--radius-sm);
   font-size: var(--fs-xs); font-weight: 600; color: var(--muted); background: var(--surface-3); }
-.q-opt:has(input[type="checkbox"]) .q-key { border-radius: 4px; }
 .q-opt:has(input:checked) .q-key { color: var(--surface); background: var(--accent); }
 .q-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; word-break: break-word; }
 .q-text .muted { font-size: var(--fs-sm); }
@@ -452,7 +451,7 @@ button.link:hover { background: none; text-decoration: underline; }
 /* 题多时只滚题目，谁在问、回答按钮始终看得见 */
 .q-card > .q-items { max-height: min(40vh, 360px); overflow-y: auto; overscroll-behavior: contain; margin: 0 -4px; padding: 0 4px; }
 .q-dock[hidden] { display: none; }
-.q-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 16px; border-radius: var(--radius-lg);
+.q-card { display: flex; flex-direction: column; gap: 12px; padding: 12px 16px; border-radius: var(--radius-lg);
   border: 1px solid color-mix(in srgb, var(--human) 35%, transparent); background: color-mix(in srgb, var(--human) 4%, var(--surface));
   box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 6%, transparent); animation: q-in .18s ease-out; }
 .q-card.readonly { border-color: var(--border); background: var(--surface); }
