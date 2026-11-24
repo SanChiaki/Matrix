@@ -9,6 +9,9 @@
 一台电脑一个连接器：本机装了的 claude / codex / dsh 都会报告给网络，Agent 选“设备 + harness”。
 令牌只存在本机配置文件里（0600），不出现在命令行与服务定义中。
 
+不装 uv / git / Python 也能用：设备页给的安装脚本下载独立二进制（`packaging/`，docs/device-runtimes.md 第 2.7 节）。
+二进制里没有 Python 解释器，harness 按 `[sys.executable, <脚本>]` 拉起的 MCP 服务由二进制自己跑（`run_bundled_script`）。
+
 旧用法仍然可用（手动签发的令牌）：
 
     matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver claude-code
@@ -19,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import random
 import shutil
 import socket
@@ -36,6 +40,27 @@ from .drivers.base import Driver
 from .drivers.claude import ClaudeDriver
 from .drivers.codex import CodexDriver
 from .drivers.dsh import DshDriver
+
+# 独立二进制（PyInstaller）里没有 Python 解释器，sys.executable 是二进制自己。网络工具、连接器、受控抓取这三个
+# stdio MCP 服务照旧写成 [sys.executable, <脚本路径>]（runtime.py、drivers/claude.py），二进制看到这样的参数就跑对应模块
+BUNDLED_SCRIPTS = {"mcp_server.py": "matrix.mcp_server", "mcp_connectors.py": "matrix.mcp_connectors",
+                   "web_fetch.py": "matrix.web_fetch"}
+
+
+def frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+
+def run_bundled_script(argv: list[str]) -> bool:
+    """独立二进制被当成 Python 拉起一个打包进来的脚本时，就地运行它；不是这种调用返回 False。"""
+    if not frozen() or not argv:
+        return False
+    module = BUNDLED_SCRIPTS.get(Path(argv[0]).name)
+    if module is None:
+        return False
+    sys.argv = list(argv)
+    importlib.import_module(module).main()  # 三个模块都是 `if __name__ == "__main__": main()`
+    return True
 
 # 顺序即默认优先级：第一个检测到的是这台设备的默认 harness
 DRIVERS = {"claude-code": ClaudeDriver, "codex": CodexDriver, "dsh": DshDriver}
@@ -140,13 +165,15 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"配置：{path}")
 
 def _exe() -> str:
+    if frozen():  # 独立二进制：就是正在跑的这个（~/.local/bin 里的是指向它的链接）
+        return str(Path(sys.executable).resolve())
     found = shutil.which("matrix-connect")
     return str(Path(found).resolve()) if found else str(Path(sys.argv[0]).resolve())
 
 def _install_service(config_path: Path) -> None:
     exe = _exe()
     if service.is_ephemeral(exe):
-        print("这是 uvx 的临时环境，不能装成开机自启。要后台运行，先安装再 setup：\n"
+        print("这是 uvx 的临时环境，不能装成开机自启。要后台运行，先安装再 setup（设备页有免依赖的安装命令）：\n"
               "  uv tool install git+https://github.com/SanChiaki/Matrix.git\n"
               "现在可以先前台运行：matrix-connect run")
         return
@@ -220,9 +247,11 @@ def _legacy(argv: list[str]) -> None:
     run(args.url, args.token, args.driver, Path(args.workroot), args.bin)
 
 def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if run_bundled_script(argv):  # 先于 utf8_stdio：MCP 服务自己管 stdio
+        return
     from .. import utf8_stdio
     utf8_stdio()
-    argv = list(sys.argv[1:] if argv is None else argv)
     if any(a == "--url" or a.startswith("--url=") for a in argv):
         _legacy(argv)
         return

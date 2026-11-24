@@ -4204,19 +4204,31 @@ const placementOf = (v) => {
   return { device_runtime: device || null, harness: harness || null };
 };
 
-// 在电脑上执行的一条命令：安装（或更新）连接器，然后配对并装成后台服务。命令里没有任何密钥。
-const setupCmd = () =>
-  `uv tool install --force git+https://github.com/SanChiaki/Matrix.git && matrix-connect setup ${location.origin}`;
-// 备用：手动签发的令牌（没有浏览器的机器）。令牌只显示一次。
+// 在电脑上执行的一条命令：下载连接器的独立程序（不需要 uv、git、Python），然后配对并装成后台服务。
+// 安装脚本由这台服务器提供（/connect/install.*，docs/device-runtimes.md 第 2.7 节）。命令里没有任何密钥。
+const IS_WIN = /win/i.test(navigator.userAgentData?.platform || navigator.platform || navigator.userAgent) && !IS_MAC;
+const SETUP_OS = [["unix", "macOS / Linux"], ["windows", "Windows"], ["uv", "用 uv 安装"]];
+const setupCmd = (os) => {
+  const o = location.origin;
+  if (os === "windows") return `$env:MATRIX_SERVER="${o}"; irm ${o}/connect/install.ps1 | iex`;
+  if (os === "uv") return `uv tool install --force git+https://github.com/SanChiaki/Matrix.git && matrix-connect setup ${o}`;
+  return `curl -fsSL ${o}/connect/install.sh | sh -s -- ${o}`;
+};
+const SETUP_HINT = {
+  unix: "在终端里执行。只用到系统自带的 curl 和 tar。",
+  windows: "在 PowerShell 里执行（不需要管理员）。",
+  uv: "开发者用：需要先装好 uv 和 git，从源码安装。",
+};
+// 备用：手动签发的令牌（没有浏览器的机器）。令牌只显示一次。先只装程序（不配对），再用令牌前台运行
 const connectCmd = (token) => {
-  const origin = location.origin.replace(/^http/, "ws");
-  return `uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect --url ${origin}/api/devices/connect --token ${token} --driver claude-code`;
+  const o = location.origin, ws = o.replace(/^http/, "ws");
+  return `curl -fsSL ${o}/connect/install.sh | MATRIX_CONNECT_NO_SETUP=1 sh -s -- ${o} && ~/.local/bin/matrix-connect --url ${ws}/api/devices/connect --token ${token} --driver claude-code`;
 };
 
 function copyButton(btnSel, preSel, statusSel, text) {
   $(btnSel).addEventListener("click", async () => {
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(typeof text === "function" ? text() : text);
       $(statusSel).textContent = "已复制到剪贴板。";
     } catch {  // 剪贴板不可用（非安全上下文等）：选中文本，让人手动复制
       const r = document.createRange(); r.selectNodeContents($(preSel));
@@ -4232,10 +4244,13 @@ function renderDeviceDetail() {
   const box = $("#device-detail"), panel = S.devicePanel;
   if (panel === "new") {
     if (box.querySelector("#device-setup")) return;  // 已在：不重绘，免得冲掉正在输入的内容
-    const cmd = setupCmd();
+    let os = IS_WIN ? "windows" : "unix";
     box.innerHTML = `<h2 class="panel-title">连接一台设备</h2>
-      <p class="muted">在要运行 Agent 的电脑上执行（需要 <a href="https://docs.astral.sh/uv/" target="_blank" rel="noopener">uv</a>）：</p>
-      <pre class="cmd" id="device-setup" tabindex="0">${esc(cmd)}</pre>
+      <p class="muted">在要运行 Agent 的电脑上执行，电脑上不需要预先装任何东西：</p>
+      <div class="seg" role="radiogroup" aria-label="电脑的系统">${SETUP_OS.map(([k, label]) =>
+        `<label><input type="radio" name="dv-os" value="${k}" ${k === os ? "checked" : ""}>${label}</label>`).join("")}</div>
+      <pre class="cmd" id="device-setup" tabindex="0">${esc(setupCmd(os))}</pre>
+      <p class="hint" id="dv-os-hint">${esc(SETUP_HINT[os])}</p>
       <div class="actions"><button type="button" id="dv-copy-setup">复制命令</button></div>
       <p class="hint" id="dv-copied-setup" role="status"></p>
       <p class="hint">它会装好 Matrix 客户端，检测本机装了的 Claude Code、Codex、dsh，打开浏览器让你批准这台电脑，再设成开机后自动运行。命令里没有密钥；授权只保存在那台电脑上。</p>
@@ -4252,7 +4267,13 @@ function renderDeviceDetail() {
           <div class="actions"><button type="submit" class="ghost">生成设备授权码</button></div>
         </form>
       </details>`;
-    copyButton("#dv-copy-setup", "#device-setup", "#dv-copied-setup", cmd);
+    box.querySelectorAll("input[name=dv-os]").forEach((r) => r.addEventListener("change", () => {
+      os = r.value;
+      $("#device-setup").textContent = setupCmd(os);
+      $("#dv-os-hint").textContent = SETUP_HINT[os];
+      $("#dv-copied-setup").textContent = "";
+    }));
+    copyButton("#dv-copy-setup", "#device-setup", "#dv-copied-setup", () => setupCmd(os));
     $("#dv-cancel").addEventListener("click", () => { S.devicePanel = null; renderDeviceDetail(); });
     $("#pair-form").addEventListener("submit", (e) => {
       e.preventDefault();

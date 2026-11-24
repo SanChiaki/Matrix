@@ -159,9 +159,39 @@ matrix-connect setup <服务器>
   日志写 `%LOCALAPPDATA%\matrix-connect\matrix-connect.log`；每 5 分钟重复触发、已在运行就忽略，相当于 KeepAlive。
   装完等连接器在日志里写下启动行才算成功，没起来就撤销并报错（在 MSIX 打包应用的终端里装时 AppData 被重定向，
   任务看不到那里的 Python）。其他系统前台运行 `matrix-connect run`。
-- uvx 的临时环境会被清理，不写进开机自启；设备页给的命令先 `uv tool install`，再 `setup`。
+- uvx 的临时环境会被清理，不写进开机自启；用 uv 装时先 `uv tool install`，再 `setup`。
 - 不做桌面客户端（签名、公证、自动更新对本地 Demo 太重），也不改写用户各 harness 的全局配置
   （Reason Network 那种做法会把网络工具注入人正在用的会话，违反不变量 7；research: reason-network#setup）。
+
+### 2.7 免依赖安装（独立程序 + 安装脚本）
+
+用户电脑上不要求预先装 uv、git 或 Python：
+
+- **独立程序**：`packaging/matrix-connect.spec` 用 PyInstaller 把连接器连同 Python 打成一个目录（onedir，不用 onefile：
+  onefile 每次启动都解压到临时目录，MCP 子进程每轮都要拉起，慢，且插件文件的路径不稳定）。连接器只依赖标准库和
+  websockets，服务端的依赖（FastAPI 等）显式排除，包约 40 MB。CI（`.github/workflows/connect-release.yml`）在
+  macOS arm64 / x64、Linux x64 / arm64、Windows x64 上构建并冒烟测试；打 `connect-v*` 的 tag 时发成 GitHub Release，
+  每个包带一个 `.sha256`。Windows 只出 x64（ARM 的 Windows 用自带仿真跑）。
+- **二进制里没有 Python 解释器**：harness 拉起网络工具等 stdio MCP 服务时用的是 `[sys.executable, <脚本路径>]`
+  （`runtime.py`、`drivers/claude.py`），独立程序里 `sys.executable` 就是它自己，`main.run_bundled_script` 看到
+  `mcp_server.py` / `mcp_connectors.py` / `web_fetch.py` 就跑对应模块；dsh 覆盖层按路径引用的 `dsh_plugins/*.mjs` 作为文件打进包里。
+  Windows 上包里另有无控制台版 `matrix-connectw.exe`，后台任务用它（代替 pythonw，`service.windows_command`）；
+  服务定义指向程序本身（`main._exe` 取 `sys.executable`），不是 PATH 上的链接。
+- **安装脚本由 Matrix 服务器提供**，不需要登录、不含密钥，服务器地址由命令行给（服务器不知道自己对外的地址）：
+  - macOS / Linux：`curl -fsSL https://<服务器>/connect/install.sh | sh -s -- https://<服务器>`，只用系统自带的 curl（或 wget）和 tar；
+    装到 `~/.local/share/matrix-connect/app`，`~/.local/bin/matrix-connect` 是指向它的链接，不在 PATH 里就写进 shell 配置。
+  - Windows：`$env:MATRIX_SERVER="https://<服务器>"; irm https://<服务器>/connect/install.ps1 | iex`，不需要管理员；
+    装到 `%LOCALAPPDATA%\matrix-connect\app`，加进用户 PATH。
+  - 脚本按系统与架构下载 `matrix-connect-<系统>-<架构>.tar.gz|zip`，核对 sha256，换上新的一份，然后跑 `setup`；
+    本机已经有配置（配对过）就只跑 `install`（重装后台服务、不重新配对），所以同一条命令也是升级命令。
+    Linux 的 `install` 会 `systemctl --user restart`，换上新程序。
+- **下载从哪来**：脚本只找这台服务器的 `/connect/dist/<包名>`。部署方在 `MATRIX_CONNECT_DIST` 目录里放了包就直接给
+  （内网、出不了公网的电脑）；没放就 302 到 GitHub Release 的最新版（`MATRIX_CONNECT_RELEASE` 可换地址，设成 `off` 不转）。
+  包名按白名单匹配，不是任意文件下载。
+- 设备页按浏览器所在系统默认显示对应的命令，也可以切到另一个系统或“用 uv 安装”（开发者从源码装，需要 uv 和 git）。
+  手动签发令牌的备用命令也改成先用脚本只装程序（`MATRIX_CONNECT_NO_SETUP=1`），再带令牌前台运行。
+- 没做的：代码签名与公证（macOS 用 curl 下载不带隔离属性，Gatekeeper 不拦；Windows SmartScreen 只管浏览器下载的文件），
+  自动更新（重跑安装命令即升级）。
 
 ---
 

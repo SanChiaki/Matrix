@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -21,7 +22,7 @@ from typing import Any, Literal
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 import uvicorn
@@ -42,6 +43,10 @@ from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
 STATIC = Path(__file__).parent / "static"
+CONNECT_INSTALL = Path(__file__).parent / "connect_install"  # matrix-connect 的安装脚本（docs/device-runtimes.md 第 2.7 节）
+# 连接器独立程序的下载：部署方放在 MATRIX_CONNECT_DIST 目录里的直接给；没有就转到这里（MATRIX_CONNECT_RELEASE 可改，设成 off 不转）
+CONNECT_RELEASE = "https://github.com/SanChiaki/Matrix/releases/latest/download"
+CONNECT_ASSET = re.compile(r"matrix-connect-(macos|linux|windows)-(x64|arm64)\.(tar\.gz|zip)(\.sha256)?")
 # 插件页面里 ../_matrix/<名字> 取到的网络自带文件：桥客户端，和主界面同一份设计变量（docs/design-system.md）
 FRAME_ASSETS = {"_matrix/sdk.js": ("plugin-sdk.js", "text/javascript"),
                 "_matrix/tokens.css": ("tokens.css", "text/css")}
@@ -1917,6 +1922,29 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         """签发一个连接器令牌。明文只在这里返回一次，之后只能看到设备列表。"""
         dev, token = auth.issue_device_token(store, user.id, body.name)
         return {**dev.public(), "token": token}
+
+    # 连接器的免依赖安装：安装脚本与独立程序，不需要登录（电脑上还没有任何凭据）。脚本里没有密钥，服务器地址由命令行给
+    @app.get("/connect/install.sh")
+    def connect_install_sh() -> PlainTextResponse:
+        return PlainTextResponse((CONNECT_INSTALL / "install.sh").read_text(encoding="utf-8"),
+                                 media_type="text/x-shellscript; charset=utf-8")
+
+    @app.get("/connect/install.ps1")
+    def connect_install_ps1() -> PlainTextResponse:
+        return PlainTextResponse((CONNECT_INSTALL / "install.ps1").read_text(encoding="utf-8"),
+                                 media_type="text/plain; charset=utf-8")
+
+    @app.get("/connect/dist/{asset}")
+    def connect_dist(asset: str) -> Response:
+        if not CONNECT_ASSET.fullmatch(asset):
+            raise HTTPException(404, "没有这个安装包")
+        local = compat.env("CONNECT_DIST")
+        if local and (Path(local) / asset).is_file():
+            return FileResponse(Path(local) / asset, media_type="text/plain" if asset.endswith(".sha256") else None)
+        release = compat.env("CONNECT_RELEASE", CONNECT_RELEASE) or ""
+        if release.lower() in ("", "off", "none"):
+            raise HTTPException(404, "这台服务器没有放 matrix-connect 的安装包（MATRIX_CONNECT_DIST）")
+        return RedirectResponse(f"{release.rstrip('/')}/{asset}", status_code=302)
 
     # 设备码配对：连接器申请与轮询不需要登录（它还没有令牌）；看与批准需要登录，批准的人就是设备的所有者
     pairings = network.pairings

@@ -19,6 +19,12 @@
   人在已登录的网页（`#pair=<码>`）里批准，令牌经轮询只交付一次，存进本机 0600 配置文件；再装成 launchd / systemd 用户服务（Windows 是任务计划程序里的登录任务）。
   `/api/devices/pair` 与 `…/pair/poll` 不需要登录，所以同时等待的申请数、每个用户输错配对码的次数都有上限（`auth.PAIR_*`），
   不要去掉。手动签发令牌（`POST /api/devices`）留作没有浏览器时的备用。
+- **免依赖安装**（[设计](../device-runtimes.md) 第 2.7 节）：用户电脑上不需要 uv、git、Python。CI 用 PyInstaller
+  （`packaging/matrix-connect.spec`，`.github/workflows/connect-release.yml`，`connect-v*` tag 发 Release）打五个平台的独立程序；
+  服务器提供 `/connect/install.sh`、`/connect/install.ps1`（不需要登录）与 `/connect/dist/<包>`（`MATRIX_CONNECT_DIST` 里有就给，
+  没有就转到 `MATRIX_CONNECT_RELEASE`，默认 GitHub Release 最新版）。脚本装好后跑 `setup`，配对过的跑 `install`，同一条命令也用来升级。
+  独立程序里没有 Python：harness 按 `[sys.executable, <脚本>]` 拉起的 MCP 服务由程序自己跑（`main.run_bundled_script`，
+  新加这类脚本要同步加进 `BUNDLED_SCRIPTS` 和 spec 的 `hiddenimports`）；Windows 后台任务用包里的 `matrix-connectw.exe`。
 - **升级不重新配对**：后台服务定义指向装它时的那份安装（`service.runs_from` 看得出来，`matrix-connect status` 会提示）。
   换了安装位置（代码包从 agentnet 改名为 matrix 后，`uv tool install --force git+…` 装进了新的工具目录）要运行
   `matrix-connect install`：按本机已有配置重新装服务，设备和绑在它上面的 Agent 不变；不要重跑 `setup`（那会配对成一台新设备）。

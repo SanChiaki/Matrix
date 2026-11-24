@@ -3,7 +3,8 @@
 - macOS：`~/Library/LaunchAgents/<LABEL>.plist`，`launchctl bootstrap gui/<uid>`。
 - Linux：`~/.config/systemd/user/matrix-connect.service`，`systemctl --user enable --now`。
 - Windows：任务计划程序里当前用户的“登录时”任务（`schtasks /Create /XML`，不需要管理员），定义另存在
-  `%LOCALAPPDATA%\\matrix-connect\\task.xml`。用 pythonw 跑（没有控制台窗口），日志写文件；每 5 分钟重复触发、
+  `%LOCALAPPDATA%\\matrix-connect\\task.xml`。用 pythonw 跑（没有控制台窗口；独立二进制用旁边的无窗口版
+  `matrix-connectw.exe`），日志写文件；每 5 分钟重复触发、
   已在运行就忽略，进程退出后最多 5 分钟重新拉起（相当于 KeepAlive / Restart=always）。
   装完要等连接器在日志里写下启动行才算成功，没起来就撤销任务并报错（任务计划程序自己不报告这个）。
   不做成 Windows 服务：那要管理员，而且以 SYSTEM 身份运行，拿不到用户自己的 harness 凭据。
@@ -29,6 +30,7 @@ from xml.sax.saxutils import escape
 LABEL = "dev.matrix.connect"
 UNIT = "matrix-connect.service"
 TASK = "MatrixConnect"  # Windows 任务计划程序里的任务名
+WINDOWLESS_EXE = "matrix-connectw.exe"  # 独立二进制里和 matrix-connect.exe 并排的无控制台版（packaging/）
 
 Run = Callable[[list[str]], None]
 
@@ -117,9 +119,22 @@ def windows_launcher(exe: str, python: str | None = None) -> Path:
     raise ServiceError(f"找不到 {' 或 '.join(map(str, tried))}：后台服务要用 pythonw 运行（没有控制台窗口）")
 
 
-def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path) -> str:
+def windows_command(exe: str, python: str | None = None, frozen: bool | None = None) -> tuple[Path, str]:
+    """后台任务跑什么：(可执行文件, 参数前缀)。独立二进制用旁边的 matrix-connectw.exe（没有控制台窗口），
+    pip / uv 装的用 pythonw -m。"""
+    frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
+    if frozen:
+        w = Path(exe).with_name(WINDOWLESS_EXE)
+        if not w.exists():
+            raise ServiceError(f"找不到 {w}：安装不完整，请重新运行安装命令")
+        return w, ""
+    return windows_launcher(exe, python), "-m matrix.connector.main "
+
+
+def windows_task_xml(launcher: Path, config: Path, log: Path, user: str, workdir: Path,
+                     prefix: str = "-m matrix.connector.main ") -> str:
     q = lambda s: escape(f'"{s}"')  # noqa: E731 —— 路径可能带空格
-    args = f"-m matrix.connector.main run --config {q(config)} --log {q(log)}"
+    args = f"{prefix}run --config {q(config)} --log {q(log)}"
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Matrix connector (matrix-connect)</Description></RegistrationInfo>
@@ -173,7 +188,7 @@ def unit_path(system: str | None = None, home: Path | None = None) -> Path:
 
 def install(exe: str, config: Path, *, system: str | None = None, home: Path | None = None,
             run: Run = _run, env_path: str | None = None, python: str | None = None,
-            started: Callable[[Path, float], bool] = _started) -> Path:
+            started: Callable[[Path, float], bool] = _started, frozen: bool | None = None) -> Path:
     system, home = system or platform.system(), Path(home or Path.home())
     path = unit_path(system, home)
     env_path = env_path or os.environ.get("PATH", "/usr/bin:/bin")
@@ -190,7 +205,8 @@ def install(exe: str, config: Path, *, system: str | None = None, home: Path | N
         run(["launchctl", "bootstrap", domain, str(path)])
     elif system == "Windows":
         log = windows_log(home)
-        xml = windows_task_xml(windows_launcher(exe, python), Path(config), log, windows_user(), home)
+        launcher, prefix = windows_command(exe, python, frozen)
+        xml = windows_task_xml(launcher, Path(config), log, windows_user(), home, prefix)
         path.write_text(xml, encoding="utf-16")  # schtasks /XML 要 UTF-16
         try:  # 已经装过：先停掉在跑的那个，再按新定义注册
             run(["schtasks", "/End", "/TN", TASK])
@@ -208,7 +224,8 @@ def install(exe: str, config: Path, *, system: str | None = None, home: Path | N
     else:
         path.write_text(systemd_unit(exe, config, env_path), encoding="utf-8")
         run(["systemctl", "--user", "daemon-reload"])
-        run(["systemctl", "--user", "enable", "--now", UNIT])
+        run(["systemctl", "--user", "enable", UNIT])
+        run(["systemctl", "--user", "restart", UNIT])  # 已在跑（升级后重装）也换成新的一份
     return path
 
 
