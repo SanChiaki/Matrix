@@ -62,27 +62,37 @@ async function api(path, opts = {}) {
 
 // ---------- 登录（注册即有一个助理，不再引导创建第一个 Agent） ----------
 function showGate(mode) {
+  // 公司账号登录：部署方配了入口就在表单上方列出来；关了邮箱密码时表单收起，只留给管理员（点“管理员用邮箱和密码登录”展开）
+  const L = S.info?.login || { providers: [], password: true };
+  if (mode === "register" && !L.password) mode = "login";
   S.gate = mode;
   $("#gate").hidden = false;
   document.body.classList.add("gated");
   $("#auth-form").hidden = false;
   const reg = mode === "register", reset = mode === "reset";
+  const sso = !reset && L.providers.length > 0, pw = reset || L.password || !sso || S.gatePassword;
+  $("#auth-sso").hidden = !sso;
+  $("#auth-sso").innerHTML = !sso ? "" : L.providers.map((p) =>
+    `<a class="button" href="/api/auth/sso/${encodeURIComponent(p.id)}/start">用${esc(p.name)}登录</a>`).join("");
   $("#auth-title").textContent = reset ? "设置新密码" : reg ? "注册" : "登录";
   $("#auth-sub").textContent = reset ? `为 ${S.reset.email} 设一个新密码，设好后其他地方的登录都会退出。`
     : reg ? (S.info?.has_unclaimed ? "你是第一个注册的人，会接管这里已有的 Agent、项目和对话。"
-    : "用邮箱和密码注册一个账号。") : "用邮箱和密码登录。";
+    : "用邮箱和密码注册一个账号。") : !pw ? "用公司账号登录。" : sso ? "用公司账号登录，或者用邮箱和密码。" : "用邮箱和密码登录。";
   $("#auth-submit").textContent = reset ? "保存并登录" : reg ? "注册并登录" : "登录";
   $("#auth-switch-text").textContent = reg ? "已经有账号？" : "还没有账号？";
   $("#auth-switch").textContent = reg ? "登录" : "注册";
-  $("#auth-switch").parentElement.hidden = reset;
-  $("#auth-forgot").hidden = mode !== "login";
-  $("#auth-email-field").hidden = reset;
+  $("#auth-switch").parentElement.hidden = reset || !L.password;
+  $("#auth-forgot").hidden = mode !== "login" || !pw;
+  $("#auth-admin").hidden = pw;
+  $("#auth-email-field").hidden = reset || !pw;
+  $("#auth-pass-field").hidden = $("#auth-submit").hidden = !pw;
   $('label[for="auth-pass"]').textContent = reset ? "新密码" : "密码";
-  $("#auth-email").required = !reset;
+  $("#auth-email").required = !reset && pw;
+  $("#auth-pass").required = pw;
   $("#auth-email").value = reset ? S.reset.email : $("#auth-email").value;
   $("#auth-pass").autocomplete = reg || reset ? "new-password" : "current-password";
   $("#auth-error").textContent = "";
-  (reset ? $("#auth-pass") : $("#auth-email")).focus();
+  if (pw) (reset ? $("#auth-pass") : $("#auth-email")).focus();
 }
 
 function hideGate() {
@@ -128,6 +138,15 @@ async function init() {
     await api("/api/auth/logout", { method: "POST", body: {} }).catch(() => {});
     location.reload();
   });
+  $("#auth-admin-btn").addEventListener("click", () => { S.gatePassword = true; showGate("login"); });
+  // 公司账号登录没成：服务器带着原因跳回 /#login_error=<原因>
+  const failed = location.hash.match(/^#login_error=(.*)$/);
+  if (failed) {
+    history.replaceState(null, "", location.pathname + location.search);
+    showGate("login");
+    try { $("#auth-error").textContent = decodeURIComponent(failed[1]); } catch { $("#auth-error").textContent = "登录没有成功"; }
+    return;
+  }
   // 管理员发的重置链接：/#reset=<令牌>。令牌在 # 后面，不进服务器日志；读到就从地址栏抹掉
   const m = location.hash.match(/^#reset=([\w-]+)$/);
   if (m) {

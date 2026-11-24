@@ -59,6 +59,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账** | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
+| 用公司账号登录（单点登录）：`login.json`、内置 OAuth2 驱动、登录驱动接口、身份怎么对到用户 | [docs/login-driver-authoring.md](docs/login-driver-authoring.md)，样板 `examples/login-driver/`（改了驱动接口、`login.json` 字段要同步改这两处） |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md)；部署见 [deploy/README.md](deploy/README.md)（只管 Matrix 一个容器），对外暴露（反向代理的要求、Caddy 示例）见 [docs/reverse-proxy.md](docs/reverse-proxy.md) |
 | 管理后台：用量台账（只看用量不看内容）、云侧模型目录、给用户发重置密码链接 | [docs/reference/admin.md](docs/reference/admin.md) |
 | 前端样式：颜色、字号、间距、圆角、通用部件，插件页面的样式 | [docs/design-system.md](docs/design-system.md)，变量在 `matrix/static/tokens.css`，样式指南页 `/static/ui.html`；`tests/test_design.py` 检查迁移过的文件不写死颜色 |
@@ -73,7 +74,8 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/runtime.py` | `AgentRuntime` 抽象；`DshRuntime`（`--patch` 覆盖层按权限禁用插件 + 沙箱 + 挂载 MCP + 按 Agent 设模型）；`ScriptedRuntime`；运行时错误分类 |
 | `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
 | `matrix/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
-| `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据；管理员签发的一次性重置密码链接 |
+| `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库）；第一个注册的用户接管已有数据；管理员签发的一次性重置密码链接；公司账号对到 Matrix 用户（`sso_login`：按入口 + 标识绑定） |
+| `matrix/login/` | 用公司账号登录：`base.py` 驱动接口（`authorize_url` / `identify`）、`registry.py` 内置驱动 + entry point `matrix.login_drivers`、`service.py`（部署方的 `login.json`，热加载；进行中的登录：只认发起的浏览器、核对 state、一次性）、`oauth2.py` 通用 OAuth2 授权码驱动、`testing.py` 驱动一致性检查。接口在 `server.py` 的 `/api/auth/sso/{入口}/start` 与 `/callback` |
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `matrix/dsh_plugins/jobs.mjs` | dsh 后台任务守护：Agent 要收尾时还有后台任务在跑，追加一条消息让它先收完或结束（headless 退出会结束它们） |
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
@@ -110,6 +112,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/scripted.py` | 脚本运行时的场景处理器 |
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/im-driver/` | IM 驱动样板：虚构的“演示 IM”（能改消息、不能发卡片）的驱动包（entry point `matrix.im_drivers`）、能在终端里扮演 IM 用户的本地服务 `devserver.py`、驱动自己的测试（在默认 `testpaths` 里）；企业内部 IM 照它改 |
+| `examples/login-driver/` | 登录驱动样板：虚构的票据式“演示 SSO”的驱动包（entry point `matrix.login_drivers`）、能在浏览器里点的假身份系统 `devserver.py`、配它的 `login.json`、驱动自己的测试（在默认 `testpaths` 里）；公司的统一登录不是 OAuth2 时照它改 |
 | `examples/remote-agent/` | 外部平台 Agent 样板：虚构的“演示平台”`demo_platform.py`（标准 HTTP 形状、流开头带会话 id、Agent 级 MCP 回调、中断）与平台目录 `agent-platforms.json`；接公司内部平台照它改 |
 | `examples/business-system/` | 业务系统对接演示：模拟的「报销系统」（`biz_system.py`，标准库，令牌只在服务端）把 `/open/v1` 与 `/svc` 的能力一步一步真的调一遍（查、组、发、调、错误、清理），有对话入口（找自己的或别人的服务聊，每个对话一个服务会话），多 Agent 协同（入口分头委托三个岗位、其中一个再委托第四个，页面拼成协作树），流式显示被委托方的进展与心跳、能追问能中断；`setup_demo.py` 搭 Matrix 这边已有的东西（应用与系统账号、公共 Agent、开放的个人 Agent、模板、别人的服务）；脚本场景在 `scripted.py`「业务系统对接演示」一节 |
 | `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
@@ -118,7 +121,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `examples/delivery-dashboard/` | 交付看板示例（发布与订阅的验证场景）：演示交付数据 MCP 服务、部署方连接器与插件目录、交付看板插件（`release_views`）、`setup_demo.py` 搭演示数据 |
 | `examples/plugins/` | 示例插件：销售漏斗（表、看板页面、技能、三种触发）；队友协作（`teammates`，Raft 式：route 被动投递、任务板与认领锁、任务板页面）；项目 Wiki（`llm-wiki`：插件服务 `service/wiki_engine.py`（stdio 托管或 `--http` 远程，带 MCP 资源）、三种挂点、技能 wiki-ingest / wiki-query / wiki-lint、Wiki 页面）；`examples/plugins.json` 是对应的部署方目录 |
 | `matrix/static/` | 单页前端（原生 JS）；`system.html` / `system.js` 是业务系统账号登录后的只读页面（`/system`）；`tokens.css` 是设计变量的唯一来源（主界面、管理后台、插件页面经 `../_matrix/tokens.css` 共用），`ui.html` 是样式指南；`about.html` 是产品介绍页（`/about`），含可展开的系统架构图 |
-| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_archive_access.py`（资料的目录层级、资料与技能的可见范围，不变量 26）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_remote_agents.py`（外部平台 Agent：基础 / 完整接入、先等再绑、陌生会话与旧密钥拒绝、调用方授权透传、中断、传文件：暂存再 `send_file`、取文件、两个外部 Agent 沿委托传文件）、`test_public_agents.py`（公共 Agent：批准与冻结权限、撤回、服务面只读不写回、调用方自己的授权、委托为调用方、维护人只看用量）、`test_teammates.py`（队友协作示例）、`test_business_system.py`（业务系统对接演示，真实 HTTP 走完每一步） |
+| `tests/` | `test_models.py`（预置模型目录）、`test_network.py`（引擎不变量、结构检查）、`test_api.py`（HTTP + MCP 回调）、`test_users.py`（登录、重置密码、信任域、外溢审批、台账、看板）、`test_login.py`（公司账号登录：只认发起的浏览器、一次性、已有账号的绑定、谁能进来、关掉邮箱密码、`login.json` 出错不拖垮、OAuth2 驱动对假身份系统）、`test_joint.py`（共享项目、项目档案）、`test_flow.py`（信息流）、`test_archive_access.py`（资料的目录层级、资料与技能的可见范围，不变量 26）、`test_projects.py`（项目、助理、项目会话）、`test_assistant.py`（助理对话、起草、定时）、`test_migration.py`（旧数据迁移）、`test_rename.py`（改名兼容）、`test_attachments.py`（对话附件）、`test_skills.py`（技能）、`test_connections.py`（连接器）、`test_plugins.py`（项目插件）、`test_admin.py`（管理后台、用量台账）、`test_im.py`（IM 桥、绑定、不变量 25）、`test_wecom.py`（企业微信驱动对假长连接服务）、`test_dsh_check.py`（dsh 冒烟检查的配置解析与插件清单）、`test_questions.py`（运行中提问：问谁、委托方回答 / 转交 / 自动转给人、直接回复即回答）、`test_goals.py`（长期目标的续跑与停止、后台任务守护）、`test_send_file.py`（Agent 发文件给人：附在回复上、路径与上限、信息流、失败时不丢）、`test_device_materials.py`（端侧材料：清单 + 本机缓存、只传缺的、按轮限定、校验与清理）、`test_design.py`（设计变量只有一个来源、刻度、对比度、页头说明长度）、`test_markdown.py`（前端 Markdown 渲染的链接，要 node）、`test_releases.py`（发布与订阅）、`test_connector_writes.py`（连接器写操作逐次确认）、`test_links.py`（`add_link`）、`test_dashboard_system.py`（接入已有看板系统的示例）、`test_delivery_dashboard.py`（交付看板示例，走演示交付数据服务）、`test_web_fetch.py`（带白名单的网页抓取）、`test_plugin_services.py`（插件服务与挂点、项目 Wiki 示例）、`test_route.py`（route 挂点的四条规则）、`test_remote_agents.py`（外部平台 Agent：基础 / 完整接入、先等再绑、陌生会话与旧密钥拒绝、调用方授权透传、中断、传文件：暂存再 `send_file`、取文件、两个外部 Agent 沿委托传文件）、`test_public_agents.py`（公共 Agent：批准与冻结权限、撤回、服务面只读不写回、调用方自己的授权、委托为调用方、维护人只看用量）、`test_teammates.py`（队友协作示例）、`test_business_system.py`（业务系统对接演示，真实 HTTP 走完每一步） |
 | `REQUIREMENTS.md` | 全部需求、实现状态与核心思路 |
 | `docs/reference/` | 当前实现的分主题说明（见上方“按需阅读”） |
 | `docs/device-runtimes.md` | 云侧 / 端侧运行时、运行时能力报告、可达性与信任边界（草案） |
@@ -135,6 +138,7 @@ uv run matrix --models models.json              # 云侧只允许 models.json �
 uv run matrix --connectors connectors.json      # 云端连接器目录（默认 <data>/connectors.json，改文件即生效）
 uv run matrix --runtime scripted --plugins examples/plugins.json   # 部署方插件目录（默认 <data>/plugins.json）
 uv run matrix --admins you@example.com                             # 管理后台 /admin 给谁看（默认最早注册的人）
+uv run matrix --login login.json                                   # 用公司账号登录的配置（默认 <data>/login.json，改文件即生效），见 docs/login-driver-authoring.md
 uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platforms.json   # 外部 Agent 平台目录（演示平台：uv run python examples/remote-agent/demo_platform.py）
 uv run matrix --fetch fetch.json                                   # 抓取白名单：云侧 Agent 能抓哪些内网地址（默认 <data>/fetch.json，改文件即生效）
 uv run matrix-plugin check examples/plugins/sales-pipeline           # 本地校验一个插件目录或 zip（--strict：提醒也算失败）
@@ -219,6 +223,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。
+- 公司账号登录：一次登录只认发起它的浏览器（一次性 cookie + state），不要放宽；邮箱撞上已有账号默认不绑（`link_by_email` 由部署方打开），不要改成默认绑；身份系统的地址与密钥只来自部署方的 `login.json`（密钥经名字带 `KEY` 的环境变量），不要做成用户可填。
 - 业务系统账号的网页登录只读：`server.SYSTEM_WEB_ROUTES` 只放 `/api/me` 与 `/api/system/*` 的 GET，不要把别的接口加进去。
 - `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准、提问应答者替人作答；覆盖层要一直关掉 dsh 的默认技能根。

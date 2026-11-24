@@ -1,6 +1,6 @@
 """FastAPI 服务：REST + SSE 事件流 + 静态页面 + 运行时回调端点。
 
-/api/* 需要登录（邮箱 + 密码，HttpOnly cookie）；每个用户只看得到自己的数据与对自己开放的 Agent。
+/api/* 需要登录（邮箱 + 密码，或部署方在 login.json 里配的公司账号，HttpOnly cookie）；每个用户只看得到自己的数据与对自己开放的 Agent。
 这仍是最简实现（无 HTTPS、无 CSRF 令牌、无登录限流），只监听 127.0.0.1，不要暴露到公网。
 /internal/* 由 MCP 服务与 dsh 审批插件调用，凭运行时调用期间才有效的执行上下文令牌识别调用方。
 """
@@ -18,6 +18,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 from typing import Annotated
 
@@ -36,6 +37,8 @@ from .remote_agents import PlatformCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
 from .im.bridge import ImBridge
+from .login.base import LoginError
+from .login.service import FLOW_COOKIE, FLOW_TTL_S, LoginService
 from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
 from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, User
@@ -720,9 +723,11 @@ PLUGIN_FRAME_HEADERS = {
 }
 
 
-def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
-    """im：IM 桥。不传时建一个不连 IM 的（测试与只看 REST 的场合）；服务进程里由 main() 建好并 start()。"""
+def create_app(network: Network, im: ImBridge | None = None, login: LoginService | None = None) -> FastAPI:
+    """im：IM 桥。不传时建一个不连 IM 的（测试与只看 REST 的场合）；服务进程里由 main() 建好并 start()。
+    login：公司账号登录（部署方的 login.json）。不传时读 `<data>/login.json`，没有这个文件就只有邮箱密码。"""
     im = im or ImBridge(network)
+    logins = login or LoginService(network.store.root / "login.json")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -750,6 +755,7 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
 
     app.state.network = network
     app.state.im = im
+    app.state.login = logins
 
     def set_cookie(resp: Response, token: str) -> None:
         resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, path="/")
@@ -778,11 +784,13 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
         return {"runtime": network.runtime.name, "limits": network.limits.__dict__,
                 "default_model": getattr(network.runtime, "default_model", lambda: None)(),
                 "has_users": bool(store.users), "has_unclaimed": not store.users and bool(store.agents),
-                "harnesses": HARNESSES, "attachment_limit": ATTACHMENT_LIMIT}
+                "harnesses": HARNESSES, "attachment_limit": ATTACHMENT_LIMIT, "login": logins.public()}
 
     # ---- 用户与登录 ----
     @app.post("/api/auth/register")
     def register(body: CredentialsIn, response: Response) -> dict:
+        if not logins.password_login:
+            raise auth.AuthError("这里用公司账号登录，不能用邮箱注册")
         user, token, first = auth.register(store, body.email, body.password)
         set_cookie(response, token)
         claimed = first and bool(store.agents)
@@ -792,8 +800,45 @@ def create_app(network: Network, im: ImBridge | None = None) -> FastAPI:
     @app.post("/api/auth/login")
     def login(body: CredentialsIn, response: Response) -> dict:
         user, token = auth.login(store, body.email, body.password)
+        # 部署方关了邮箱密码时，只留管理员（应急）与业务系统账号（只读页面，不变量 30）
+        if not logins.password_login and not user.is_system and not network.is_admin(user.id):
+            auth.logout(store, token)
+            raise auth.AuthError("这里用公司账号登录")
         set_cookie(response, token)
         return user.public()
+
+    # 公司账号登录（docs/login-driver-authoring.md）：发起时跳去身份系统，回调时由登录驱动认人，再发 Matrix 自己的登录 cookie。
+    # 两个都是浏览器直接打开的地址，出错时带着原因回到登录页（原因在 # 后面，不进服务器日志）
+    def sso_failed(why: str) -> RedirectResponse:
+        resp = RedirectResponse("/#login_error=" + quote(why[:300], safe=""), status_code=303)
+        resp.delete_cookie(FLOW_COOKIE, path="/api/auth/sso")
+        return resp
+
+    @app.get("/api/auth/sso/{provider}/start")
+    def sso_start(provider: str, request: Request) -> RedirectResponse:
+        try:
+            url, key = logins.begin(provider, str(request.base_url))
+        except LoginError as e:
+            return sso_failed(str(e))
+        resp = RedirectResponse(url, status_code=303)
+        # 只在回调时带回来；Lax：从身份系统跳回来（顶层导航、GET）时浏览器会带上
+        resp.set_cookie(FLOW_COOKIE, key, httponly=True, samesite="lax", max_age=FLOW_TTL_S, path="/api/auth/sso",
+                        secure=request.url.scheme == "https")
+        return resp
+
+    @app.get("/api/auth/sso/{provider}/callback")
+    def sso_callback(provider: str, request: Request) -> RedirectResponse:
+        try:
+            p, ident = logins.complete(provider, request.cookies.get(FLOW_COOKIE), dict(request.query_params))
+            user, token, _ = auth.sso_login(store, p.id, ident.subject, ident.email, auto_create=p.auto_create,
+                                            link_by_email=p.link_by_email, allow_domains=p.allow_domains)
+        except (LoginError, auth.AuthError) as e:
+            return sso_failed(str(e))
+        network.ensure_assistant(user.id)  # 和注册一样：进来就有助理
+        resp = RedirectResponse("/", status_code=303)
+        resp.delete_cookie(FLOW_COOKIE, path="/api/auth/sso")
+        set_cookie(resp, token)
+        return resp
 
     # 重置密码：令牌在链接的 # 后面（不进服务器日志与 Referer），页面用 POST 交上来
     @app.post("/api/auth/reset/check")
@@ -2121,6 +2166,8 @@ def main() -> None:
                    help="抓取白名单（JSON，改了就生效）；默认 <data>/fetch.json，没有就用 dsh 自带的 web_fetch（只抓公网）")
     p.add_argument("--platforms", default=compat.env("PLATFORMS"),
                    help="外部 Agent 平台目录（JSON，改了就生效）；默认 <data>/agent-platforms.json，没有就不能接外部平台的 Agent")
+    p.add_argument("--login", default=compat.env("LOGIN"),
+                   help="公司账号登录的配置（JSON，改了就生效）；默认 <data>/login.json，没有就只有邮箱密码")
     p.add_argument("--admins", default=compat.env("ADMINS"),
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
@@ -2152,9 +2199,15 @@ def main() -> None:
     im.start()
     if im.driver_errors:
         print(f"有 IM 驱动没加载上：{im.driver_errors}")
+    login = LoginService(Path(args.login).resolve() if args.login else network.store.root / "login.json")
+    if login.providers():
+        print(f"公司账号登录：{login.path}（{'、'.join(p.name for p in login.providers())}"
+              f"{'' if login.password_login else '，邮箱密码只留给管理员'}）")
+    if login.driver_errors:
+        print(f"有登录驱动没加载上：{login.driver_errors}")
     # 端侧 Agent 用 publish_file 发布时，连接器把整个文件 base64 放在一条消息里回传：默认 16 MiB 装不下 FILE_LIMIT 的文件，
     # 超了 uvicorn 会直接断开这条连接
-    config = uvicorn.Config(create_app(network, im), host=args.host, port=args.port, log_level="warning",
+    config = uvicorn.Config(create_app(network, im, login), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3, ws_max_size=FILE_LIMIT * 4 // 3 + 1_000_000)
     MatrixServer(config, network).run()
 

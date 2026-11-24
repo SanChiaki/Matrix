@@ -1,4 +1,5 @@
-"""用户与登录：邮箱 + 密码（scrypt，仅标准库），登录令牌存在 state.json 里，经 HttpOnly cookie 传递。
+"""用户与登录：邮箱 + 密码（scrypt，仅标准库），或公司账号（`sso_login`，身份由 matrix/login 的驱动认定）；
+登录令牌存在 state.json 里，经 HttpOnly cookie 传递。
 
 这是最简实现：没有邮箱验证、令牌过期轮换；令牌在退出登录时作废。忘了密码由管理员发一条一次性的重置链接
 （`issue_reset` / `reset_password`），用户自己设新密码，管理员看不到新密码。
@@ -106,6 +107,45 @@ def close_web_login(store: Store, user_id: str) -> None:
         for h in [h for h, r in store.resets.items() if r["user_id"] == user_id]:
             del store.resets[h]
         store.save()
+
+
+# ---- 公司账号登录（docs/login-driver-authoring.md）----
+def sso_login(store: Store, provider: str, subject: str, email: str, *, auto_create: bool = True,
+              link_by_email: bool = False, allow_domains: tuple[str, ...] = ()) -> tuple[User, str, bool]:
+    """身份系统认定的人（登录入口 provider 下的 subject）→ Matrix 用户，并登录；返回 (用户, 登录令牌, 是否新建)。
+
+    先按绑定找（入口 + 标识）；没绑定过的按邮箱：邮箱没人用就新建（auto_create），已有账号的只有部署方打开
+    link_by_email 才绑上去，否则拒绝（不然谁能在身份系统里填上别人的邮箱，谁就能进别人的账号）。
+    绑定以后只认标识：身份系统里改了邮箱，Matrix 里的邮箱不跟着变。业务系统账号不能这样登录。
+    """
+    subject, email = str(subject).strip(), normalize_email(email)
+    if not subject or not EMAIL_RE.match(email):
+        raise AuthError("公司账号没有给出可用的邮箱")
+    with store.lock:
+        user = next((u for u in store.users.values() if u.sso.get(provider) == subject), None)
+        created = False
+        if user is None:
+            if allow_domains and email.rsplit("@", 1)[1] not in allow_domains:
+                raise AuthError("这个邮箱域名不能登录这里")
+            user = next((u for u in store.users.values() if u.email == email), None)
+            if user is not None:
+                if user.is_system or not link_by_email or user.sso.get(provider):
+                    raise AuthError(f"{email} 已经有账号，但没有和这个公司账号绑定，请联系管理员")
+                user.sso[provider] = subject
+            elif not auto_create:
+                raise AuthError("还没有你的账号，请联系管理员")
+            else:
+                first = not store.users
+                user = User(id=new_id("user"), email=email, password_hash="", salt="", sso={provider: subject})
+                store.users[user.id] = user
+                if first:
+                    store.claim_orphans(user.id)
+                created = True
+        if user.is_system:
+            raise AuthError("业务系统账号不能用公司账号登录")
+        token = _new_session(store, user.id)
+        store.save()
+    return user, token, created
 
 
 # ---- 管理员重置密码：一次性链接，用户自己设新密码 ----

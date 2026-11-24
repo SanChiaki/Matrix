@@ -4,7 +4,7 @@
 
 | 概念 | 含义 |
 | --- | --- |
-| User | 邮箱 + 密码（scrypt）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent；注册时还没有 Agent 就由网络建一个，否则默认最早创建的），开项目会话时经这个人确认才加入项目、项目会话里陪这个人聊；和它的私聊就是侧栏最上面的“助理”（[assistant.md](assistant.md)） |
+| User | 邮箱 + 密码（scrypt），或公司账号：`sso` 是登录入口 id → 这个人在那个身份系统里的标识，用公司账号建的账号没有密码（[login-driver-authoring.md](../login-driver-authoring.md)）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent；注册时还没有 Agent 就由网络建一个，否则默认最早创建的），开项目会话时经这个人确认才加入项目、项目会话里陪这个人聊；和它的私聊就是侧栏最上面的“助理”（[assistant.md](assistant.md)） |
 | Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（云侧启用模型目录时是预置模型 id `model_preset`，否则是 provider / model / reasoning_effort；空则用默认）；
 运行上限 `timeout_s`（每轮运行超时秒数）与 `max_delegations`（每次被 @ / 每个任务的委托次数），默认都不限制；`skills`（勾上的我的技能名）、`connections`（勾上的我的连接）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
 | 公共 Agent | 维护组（所有者 + `maintainers`）申请、管理员批准（`public_status`：pending / approved）后所有用户都能私聊、拉进项目的 Agent；批准时冻结权限（`public_authority`，服务面只在它之内），`public_connectors` 是服务面要用的连接器（用调用方自己的授权）。服务面每一轮的调用方是 `ExecContext.principal`（委托里是 `Task.caller_id`，群聊席位记在 `Seat.callers`）。见 [public-agents.md](../public-agents.md)、不变量 27 |

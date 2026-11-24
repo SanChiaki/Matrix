@@ -1,0 +1,12 @@
+{
+  "public_url": "http://127.0.0.1:8765",
+  "password_login": true,
+  "providers": [
+    {
+      "id": "demo",
+      "name": "演示 SSO",
+      "driver": "demo-sso",
+      "config": {"url": "http://127.0.0.1:9300", "app_id": "matrix", "app_secret": "${DEMO_SSO_KEY}"}
+    }
+  ]
+}

@@ -186,6 +186,18 @@ https 源的自签 CA 放进 `deploy/ca-certificates/`。
 然后 `docker compose up -d --build`：构建镜像时装进去。后台“IM 机器人”页首没有“有 IM 驱动没加载上”就是装好了。
 只支持一个 Matrix 进程：同一个机器人两条连接会互相顶掉。
 
+## 用公司账号登录（可选）
+
+默认是邮箱 + 密码。要接公司的统一登录（单点登录），照 [docs/login-driver-authoring.md](../docs/login-driver-authoring.md)
+写一份 `login.json` 放进数据卷（`/data/login.json`，改了就生效），密钥写在 `.env` 里、在 `login.json` 里用 `${变量名}` 引用
+（变量名里要带 `KEY`），然后 `docker compose up -d`。公司的登录是 OAuth2 / OIDC 时用内置的 `oauth2` 驱动，不用装东西；
+别的协议写成驱动包，在 `.env` 里写 `MATRIX_LOGIN_DRIVERS`，`docker compose up -d --build`。
+启动日志里有一行“公司账号登录：…”就是读到了；某个入口没启用时日志里有原因。
+
+```bash
+docker compose cp login.json matrix:/data/login.json
+```
+
 ## 更新
 
 ```bash
