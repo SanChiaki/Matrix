@@ -1,7 +1,30 @@
 // 模拟报销系统的前端：只和报销系统自己的后端说话（/api/*），令牌不在浏览器里。
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const S = { state: {}, steps: [], claims: [], current: null, reviews: {}, done: new Set(), streaming: false };
+const S = { state: {}, steps: [], claims: [], targets: [], current: null, reviews: {}, done: new Set(), streaming: false,
+  chats: [], chat: null, chatBusy: false };
+// 回复是 Markdown：这里只认演示用得到的几种（标题、列表、加粗），先整体转义再识别，不会带进页面原样的 HTML
+function md(text) {
+  const inline = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+  const out = [];
+  let list = null;
+  for (const line of String(text || "").split("\n")) {
+    const li = line.match(/^\s*(?:[-*]|(\d+)\.)\s+(.*)$/);
+    if (li) {
+      const tag = li[1] ? "ol" : "ul";
+      if (list !== tag) { if (list) out.push(`</${list}>`); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline(li[2])}</li>`);
+      continue;
+    }
+    if (list) { out.push(`</${list}>`); list = null; }
+    const h = line.match(/^#{1,6}\s+(.*)$/);
+    if (h) out.push(`<p class="h">${inline(h[1])}</p>`);
+    else if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join("");
+}
+
 const STATUS = { running: "在做", waiting: "等执行方上线", in_review: "交付了，等验收", completed: "验收通过", failed: "失败", rejected: "没批准" };
 
 async function api(path, body) {
@@ -19,6 +42,32 @@ function renderIds() {
   bits.push(`<a href="${esc(s.matrix_url)}/system" target="_blank" rel="noopener">在 Matrix 里查看 ↗</a>`);
   $("#ids").innerHTML = bits.join("");
   $("#setup-banner").hidden = !!s.service;
+}
+
+// ---------------- 协作：谁把哪块交给了谁 ----------------
+// 从 progress 的 task 事件拼出委托树（from → agent），每个节点带状态与它最近在做的事（progress 的 tool / text）
+function collabHtml(events) {
+  const tasks = new Map(), last = new Map();
+  for (const [event, d] of events) {
+    if (event !== "progress") continue;
+    if (d.kind === "task") tasks.set(d.task_id, { ...(tasks.get(d.task_id) || {}), ...d });
+    else if (d.kind === "tool") last.set(d.agent, `在用 ${d.tool}${d.brief ? " · " + d.brief : ""}`);
+    else if (d.kind === "text") last.set(d.agent, d.text);
+  }
+  if (!tasks.size) return "";
+  const list = [...tasks.values()], agents = new Set(list.map((t) => t.agent));
+  const root = (list.find((t) => !agents.has(t.from)) || list[0]).from;
+  const node = (name, depth) => {
+    const kids = list.filter((t) => t.from === name);
+    if (!kids.length || depth > 6) return "";
+    return `<ul>${kids.map((t) => `<li><span class="node ${esc(t.status)}"><i></i>${esc(t.agent)}</span>
+      <span class="st">${esc(STATUS[t.status] || t.status)}</span>
+      ${t.status === "running" && last.get(t.agent) ? `<span class="act">${esc(last.get(t.agent))}</span>` : ""}
+      ${node(t.agent, depth + 1)}</li>`).join("")}</ul>`;
+  };
+  const done = list.filter((t) => t.status === "completed").length;
+  return `<div class="collab"><div class="c-title">协作 · ${agents.size + 1} 个 Agent · ${done}/${list.length} 份已验收</div>
+    <div class="tree"><span class="node root"><i></i>${esc(root)}</span><span class="st">入口</span>${node(root, 0)}</div></div>`;
 }
 
 // ---------------- 报销单 ----------------
@@ -66,9 +115,36 @@ function renderReview() {
   const c = S.claims.find((x) => x.id === S.current), rv = S.reviews[S.current];
   $("#rv-title").textContent = c ? `${c.id} · ${c.title}（¥${Number(c.amount).toLocaleString("zh-CN")}）` : "选一张报销单提交审核";
   $("#rv-sub").textContent = c ? `${c.who}提交 · 经 Matrix 服务「报销审核」` : "过程会实时显示：入口说的话、调的工具、交给了谁、被委托方在做什么。";
+  $("#collab").innerHTML = rv ? collabHtml(rv.items.map((it) => [it.event, it.data])) : "";
   $("#timeline").innerHTML = rv ? rv.items.map(itemHtml).join("") : "";
   $("#interrupt").hidden = !(rv && rv.status === "running" && rv.session_id);
   $("#followup").hidden = !(rv && rv.session_id && rv.status !== "running");
+}
+
+// 调报销系统后端的 /api/chat：后端带着令牌调 Matrix 的 /svc/…/chat，把 SSE 原样转回来。每个事件交给 onEvent。
+async function streamChat(body, onEvent) {
+  const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "", ended = false;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      let event = "message", data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      if (event === "done" || event === "error") ended = true;
+      onEvent(event, JSON.parse(data));
+    }
+  }
+  if (!ended) onEvent("error", { message: "连接断了：带着会话 id 再问一次可以接着拿" });
 }
 
 async function review(id, message) {
@@ -78,33 +154,13 @@ async function review(id, message) {
   S.streaming = true;
   renderClaims(); renderReview();
   try {
-    const r = await fetch("/api/review", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, session_id: rv.session_id }) });
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
-    const reader = r.body.getReader(), dec = new TextDecoder();
-    let buf = "", ended = false;
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let i;
-      while ((i = buf.indexOf("\n\n")) >= 0) {
-        const block = buf.slice(0, i); buf = buf.slice(i + 2);
-        let event = "message", data = "";
-        for (const line of block.split("\n")) {
-          if (line.startsWith("event:")) event = line.slice(6).trim();
-          else if (line.startsWith("data:")) data += line.slice(5).trim();
-        }
-        if (!data) continue;
-        const d = JSON.parse(data);
-        if (event === "session") { if (rv.session_id === d.session_id) continue; rv.session_id = d.session_id; }
-        rv.items.push({ event, data: d });
-        if (event === "done" || event === "error") { rv.status = event === "done" ? "done" : "error"; ended = true; }
-        renderReview();
-        $("#timeline").lastElementChild?.scrollIntoView({ block: "nearest" });
-      }
-    }
-    if (!ended) { rv.status = "error"; rv.items.push({ event: "error", data: { message: "连接断了：带着会话 id 再问一次可以接着拿" } }); }
+    await streamChat({ service: "own", message, session_id: rv.session_id }, (event, d) => {
+      if (event === "session") { if (rv.session_id === d.session_id) return; rv.session_id = d.session_id; }
+      rv.items.push({ event, data: d });
+      if (event === "done" || event === "error") rv.status = event === "done" ? "done" : "error";
+      renderReview();
+      $("#timeline").scrollTop = $("#timeline").scrollHeight;  // 只滚时间线自己，协作树留在上面看得见
+    });
   } catch (e) {
     rv.status = "error";
     rv.items.push({ event: "error", data: { message: e.message } });
@@ -134,7 +190,7 @@ $("#prepare").addEventListener("click", async (e) => {
     if (bad) alert(`准备到「${bad.step}」停下了：${bad.error || "请求失败"}（详情见“对接能力”）`);
   } catch (err) { alert(err.message); }
   e.target.disabled = false;
-  renderIds(); renderSteps();
+  renderIds(); renderSteps(); refreshTargets();
 });
 
 // ---------------- 对接能力 ----------------
@@ -188,6 +244,7 @@ async function runStep(id, btn) {
     logRun(r);
   } catch (e) { alert(e.message); }
   renderIds(); renderSteps();
+  if (["service", "withdraw", "delete"].includes(id)) refreshTargets();
 }
 
 $("#run-all").addEventListener("click", async (e) => {
@@ -201,20 +258,116 @@ $("#reset").addEventListener("click", async () => {
   if (!confirm("只清空报销系统这边记的项目 / 服务 id（Matrix 里的不动）。要删掉 Matrix 里的，先执行“清理”。")) return;
   S.state = (await api("/api/reset", {})).state;
   S.done.clear();
-  renderIds(); renderSteps();
+  renderIds(); renderSteps(); refreshTargets();
 });
+
+// ---------------- 对话 ----------------
+// 一个对话 = Matrix 上的一个服务会话：第一条消息不带 session_id（新开），之后都带上（续接）。
+// 回复下面的“过程”：入口说的话、调的工具、委托与被委托方的进展、心跳；做完后收起，只留结论。
+const target = () => S.targets.find((t) => t.key === $("#target").value) || S.targets[0];
+
+function stepHtml(event, d) {
+  const row = (cls, k, v) => `<li class="${cls}"><span class="k">${esc(k)}</span><span class="v">${v}</span></li>`;
+  if (event === "delta") return row("", "入口", esc(d.text.trim()));
+  if (event === "tool") return row("tool", "工具", `${esc(d.name)} ${esc(d.input?.brief || "")}`);
+  if (event !== "progress") return "";
+  if (d.kind === "task") return row("task sub", "委托", `${esc(d.from)} → <b>${esc(d.agent)}</b>：${esc(STATUS[d.status] || d.status)}`);
+  if (d.kind === "tool") return row("tool sub", d.agent, `${esc(d.tool)} ${esc(d.brief || "")}`);
+  if (d.kind === "text") return row("sub", d.agent, esc(d.text));
+  if (d.kind === "heartbeat") return row("beat", "心跳", `还在做：${esc((d.working || []).join("、") || "收尾中")} · 已 ${d.elapsed_s} 秒`);
+  return "";
+}
+
+function renderChatList() {
+  $("#chat-list").innerHTML = S.chats.map((c) => `<li><button data-id="${esc(c.id)}" aria-current="${c === S.chat}">
+    <span>${esc(c.title)}</span><span class="s">${esc(c.target.title)}${c.session_id ? " · " + esc(c.session_id) : ""}</span></button></li>`).join("");
+  for (const b of document.querySelectorAll("#chat-list button")) {
+    b.addEventListener("click", () => { S.chat = S.chats.find((c) => c.id === b.dataset.id); renderChat(); });
+  }
+}
+
+function renderChat() {
+  const c = S.chat, t = c ? c.target : target();
+  $("#chat-title").textContent = c ? c.title : "新对话";
+  $("#chat-sub").textContent = c?.session_id ? `服务「${t.title}」· 会话 ${c.session_id}` : `服务「${t?.title || ""}」`;
+  $("#target-owner").textContent = t ? `${t.owner}服务` : "";
+  const msgs = c ? c.messages : [];
+  $("#thread").innerHTML = msgs.length ? msgs.map((m) => {
+    if (m.role === "user") return `<li class="msg user"><span class="who">我</span><div class="bubble">${esc(m.text)}</div></li>`;
+    const steps = m.steps.map(([e, d]) => stepHtml(e, d)).join("");
+    const box = collabHtml(m.steps) + (steps ? `<details class="steps" ${m.status === "running" ? "open" : ""}><summary>过程 · ${m.steps.length} 步</summary><ol>${steps}</ol></details>` : "");
+    const body = m.status === "running" ? '<div class="typing">处理中…</div>'
+      : `<div class="bubble md">${m.status === "error" ? esc(m.text) : md(m.text)}</div>`;
+    return `<li class="msg ${m.status === "error" ? "err" : ""}"><span class="who">${esc(t.title)}</span>${box}${body}</li>`;
+  }).join("") : `<li class="empty">${esc(t?.hint || "")}</li>`;
+  $("#thread").scrollTop = $("#thread").scrollHeight;
+  for (const ol of document.querySelectorAll("#thread .steps[open] ol")) ol.scrollTop = ol.scrollHeight;  // 过程跟着最新一步
+  $("#chat-stop").hidden = !(S.chatBusy && c?.session_id);
+  $("#chat-send").disabled = S.chatBusy;
+  renderChatList();
+}
+
+async function sendChat(text) {
+  if (!S.chat) {
+    S.chat = { id: String(Date.now()), target: target(), title: text.slice(0, 24), session_id: null, messages: [] };
+    S.chats.unshift(S.chat);
+  }
+  const c = S.chat, reply = { role: "assistant", steps: [], text: "", status: "running" };
+  c.messages.push({ role: "user", text }, reply);
+  S.chatBusy = true;
+  renderChat();
+  try {
+    await streamChat({ service: c.target.key, message: text, session_id: c.session_id }, (event, d) => {
+      if (event === "session") c.session_id = d.session_id;
+      else if (event === "done") { reply.text = d.text; reply.status = "done"; }
+      else if (event === "error") { reply.text = d.message; reply.status = "error"; }
+      else reply.steps.push([event, d]);
+      renderChat();
+    });
+  } catch (e) { reply.text = e.message; reply.status = "error"; }
+  S.chatBusy = false;
+  renderChat();
+}
+
+$("#composer").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = $("#chat-input").value.trim();
+  if (!text || S.chatBusy) return;
+  $("#chat-input").value = "";
+  sendChat(text);
+});
+$("#chat-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("#composer").requestSubmit(); }
+});
+$("#new-chat").addEventListener("click", () => { S.chat = null; renderChat(); $("#chat-input").focus(); });
+$("#target").addEventListener("change", () => { if (S.chat && S.chat.target.key !== $("#target").value) S.chat = null; renderChat(); });
+$("#chat-stop").addEventListener("click", async () => {
+  if (S.chat?.session_id) await api("/api/interrupt", { session_id: S.chat.session_id }).catch((e) => alert(e.message));
+});
+
+function renderTargets() {
+  const cur = $("#target").value;
+  $("#target").innerHTML = S.targets.map((t) => `<option value="${esc(t.key)}" ${t.service ? "" : "disabled"}>${esc(t.title)}${t.service ? "" : "（还没发布）"}</option>`).join("");
+  const ok = S.targets.find((t) => t.key === cur && t.service) || S.targets.find((t) => t.service) || S.targets[0];
+  if (ok) $("#target").value = ok.key;
+}
+
+async function refreshTargets() {
+  const r = await api("/api/state");
+  S.targets = r.targets;
+  renderTargets(); renderChat();
+}
 
 // ---------------- 标签 ----------------
 for (const t of document.querySelectorAll(".tabs button")) {
   t.addEventListener("click", () => {
     for (const x of document.querySelectorAll(".tabs button")) x.setAttribute("aria-selected", String(x === t));
-    $("#claims").hidden = t.dataset.tab !== "claims";
-    $("#console").hidden = t.dataset.tab !== "console";
+    for (const id of ["chat", "claims", "console"]) $("#" + id).hidden = t.dataset.tab !== id;
   });
 }
 
 (async () => {
   const r = await api("/api/state");
-  Object.assign(S, { state: r.state, steps: r.steps, claims: r.claims });
-  renderIds(); renderClaims(); renderSteps();
+  Object.assign(S, { state: r.state, steps: r.steps, claims: r.claims, targets: r.targets });
+  renderIds(); renderClaims(); renderSteps(); renderTargets(); renderChat();
 })();

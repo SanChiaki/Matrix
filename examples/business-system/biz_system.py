@@ -30,11 +30,14 @@ MATERIALS = ROOT / "materials"
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 
 PROJECT = "报销审核"
+TEAM = ("财务助手", "票据核验", "合同审核", "预算管家", "法务顾问")   # 项目成员：多 Agent 协同
+ROLES = (("intake", "接待", "财务助手"), ("invoice", "票据", "票据核验"), ("contract", "合同", "合同审核"),
+         ("budget", "预算", "预算管家"), ("legal", "法务", "法务顾问"))
 SERVICE = "baoxiao"
 CLAIMS = [  # 报销系统自己的数据（演示）
     {"id": "BX-1001", "who": "李雷", "title": "打车", "amount": 280,
      "message": "请审核报销单 BX-1001：李雷，打车 280 元，事由：客户拜访，票据齐全。"},
-    {"id": "BX-1002", "who": "韩梅梅", "title": "技术咨询费（附合同）", "amount": 12000,
+    {"id": "BX-1002", "who": "韩梅梅", "title": "技术咨询费（附合同，多 Agent 协同）", "amount": 12000,
      "message": "请审核报销单 BX-1002：韩梅梅，技术咨询费 12,000 元，附合同《技术咨询服务合同》，发票一张。"},
     {"id": "BX-1003", "who": "王芳", "title": "批量报销 8 张发票", "amount": 3560,
      "message": "请批量核对报销单 BX-1003：王芳，8 张发票，合计 3,560 元。"},
@@ -169,15 +172,16 @@ class BizSystem:
             self._call(log, "GET", "/open/v1/agents", token=self.cfg["personal_token"])
 
         # ---------------- 组 ----------------
-        @step("project", "组", "建项目", "系统账号当主持人；拉进开放的「合同审核」时，它的所有者自动成为参与者",
+        @step("project", "组", "建项目", "五个 Agent 组成一个小组；拉进开放的「合同审核」「预算管家」时，它们的所有者自动成为参与者",
               "POST /open/v1/projects")
         def _(log):
             self.need("agents")
             ag = S["agents"]
             status, resp = self._call(log, "POST", "/open/v1/projects", {
                 "name": PROJECT, "description": "报销系统提交的报销单在这里审核",
-                "brief": "审核报销单：5000 元以下直接给结论；5000 元以上或附合同的，交给合同审核看条款。",
-                "members": [ag["财务助手"], ag["合同审核"]]})
+                "brief": "审核报销单：5000 元以下财务助手直接给结论；5000 元以上的分头交给票据核验、预算管家，附合同的再交给合同审核，"
+                         "合同里有风险条款的由合同审核转给法务顾问；财务助手验收各方结果后给结论。",
+                "members": [ag[n] for n in TEAM]})
             if status == 200:
                 S["project"] = resp["id"]
 
@@ -186,9 +190,8 @@ class BizSystem:
             self.need("project", "agents")
             ag = S["agents"]
             self._call(log, "PATCH", f"/open/v1/projects/{S['project']}", {
-                "description": "报销系统提交的报销单在这里审核（经 Matrix 服务）",
-                "roles": {"intake": {"name": "接待", "members": [ag["财务助手"]]},
-                          "contract": {"name": "合同", "members": [ag["合同审核"]]}}})
+                "description": "报销系统提交的报销单在这里审核（经 Matrix 服务，五个 Agent 协同）",
+                "roles": {key: {"name": label, "members": [ag[name]]} for key, label, name in ROLES}})
 
         @step("members", "组", "增减成员", "移出、再拉回一个成员", "DELETE / PUT /open/v1/projects/{id}/members/{agent}")
         def _(log):
@@ -203,10 +206,10 @@ class BizSystem:
             for rel, src in (("公开/报销制度.md", "报销制度.md"), ("合同/合同模板.md", "合同模板.md")):
                 self._call(log, "PUT", f"/open/v1/projects/{S['project']}/files/{rel}", raw=(MATERIALS / src).read_bytes())
 
-        @step("access", "组", "资料的可见范围", "合同目录只给角色“合同”看（要先有角色）", "PATCH /open/v1/projects/{id}/access")
+        @step("access", "组", "资料的可见范围", "合同目录只给角色“合同”“法务”看（要先有角色）", "PATCH /open/v1/projects/{id}/access")
         def _(log):
             self.need("project")
-            self._call(log, "PATCH", f"/open/v1/projects/{S['project']}/access", {"path": "合同", "rule": {"roles": ["contract"]}})
+            self._call(log, "PATCH", f"/open/v1/projects/{S['project']}/access", {"path": "合同", "rule": {"roles": ["contract", "legal"]}})
 
         @step("skill", "组", "项目技能", "把审核步骤写成项目技能，成员都能用", "POST /open/v1/projects/{id}/skills")
         def _(log):
@@ -237,13 +240,13 @@ class BizSystem:
             self._call(log, "GET", "/open/v1/projects")
 
         # ---------------- 发 ----------------
-        @step("service", "发", "发布服务", "入口、岗位、能读的资料、权限、给谁用；发布即生效", "POST /open/v1/projects/{id}/services")
+        @step("service", "发", "发布服务", "入口财务助手，岗位是另外四个（能被委托的）；能读的资料、权限、给谁用；发布即生效", "POST /open/v1/projects/{id}/services")
         def _(log):
             self.need("project", "agents")
             ag = S["agents"]
             status, resp = self._call(log, "POST", f"/open/v1/projects/{S['project']}/services", {
-                "name": SERVICE, "title": "报销审核", "description": "审核报销单：金额、票据、制度；附合同的看合同条款",
-                "entry": ag["财务助手"], "staff": [ag["合同审核"]], "scope": ["公开", "合同"],
+                "name": SERVICE, "title": "报销审核", "description": "审核报销单：金额、票据、预算、制度；附合同的看合同条款与风险",
+                "entry": ag["财务助手"], "staff": [ag[n] for n in TEAM if n != "财务助手"], "scope": ["公开", "合同"],
                 "authority": ["delegate"], "readers": ["maya@demo.local"]})
             if status == 200:
                 S["service"] = resp["id"]
@@ -360,6 +363,23 @@ class BizSystem:
                 "system_login": self.cfg.get("system_login"),
                 **{k: v for k, v in self.state.items() if k in ("agents", "blueprint", "project", "project_bp", "service", "session")}}
 
+    def targets(self) -> list[dict[str, Any]]:
+        """对话页能找谁说话：自己发布的服务（发布了才有），和别人点名给这个应用的服务。"""
+        out = [{"key": "own", "title": "报销审核", "owner": "报销系统自己发布的", "service": self.state.get("service"),
+                "hint": "发报销单号与金额，例如“BX-2001 技术咨询费 9,800 元，附合同”；也可以问“报销制度是什么”"}]
+        for title, sid in (self.cfg.get("services") or {}).items():
+            out.append({"key": title, "title": title, "owner": "别人发布、点名给报销系统用的", "service": sid,
+                        "hint": "问差旅标准，例如“去上海出差住宿标准是多少？”"})
+        return out
+
+    def target_service(self, key: str) -> str:
+        t = next((t for t in self.targets() if t["key"] == (key or "own")), None)
+        if t is None:
+            raise StepError(f"没有这个服务：{key}")
+        if not t["service"]:
+            raise StepError("还没有报销审核服务：先点“一键准备”，或在“对接能力”里建项目、发布服务")
+        return t["service"]
+
     def steps_view(self) -> list[dict[str, str]]:
         return [{k: s[k] for k in ("id", "group", "title", "desc", "api")} for s in self.steps]
 
@@ -390,7 +410,8 @@ def make_handler(biz: BizSystem):
         def do_GET(self) -> None:
             path = urllib.parse.urlparse(self.path).path
             if path == "/api/state":
-                return self._json({"state": biz.public_state(), "steps": biz.steps_view(), "claims": CLAIMS})
+                return self._json({"state": biz.public_state(), "steps": biz.steps_view(), "claims": CLAIMS,
+                                   "targets": biz.targets()})
             f = STATIC / ("index.html" if path == "/" else path.lstrip("/"))
             if f.resolve().parent != STATIC.resolve() or not f.is_file():
                 return self._json({"detail": "not found"}, 404)
@@ -413,8 +434,8 @@ def make_handler(biz: BizSystem):
                         biz.state.clear()
                         biz.save()
                     return self._json({"state": biz.public_state()})
-                if path == "/api/review":
-                    return self._review(self._body())
+                if path in ("/api/chat", "/api/review"):
+                    return self._chat(self._body())
                 if path == "/api/interrupt":
                     sid = str(self._body().get("session_id") or "")
                     status, resp = biz.matrix.call("POST", f"/svc/sessions/{sid}/interrupt")
@@ -423,11 +444,10 @@ def make_handler(biz: BizSystem):
                 return self._json({"detail": str(e)}, 409)
             return self._json({"detail": "not found"}, 404)
 
-        def _review(self, body: dict[str, Any]) -> None:
-            """报销单送审：把 Matrix 的 SSE 原样转给浏览器（令牌留在这里）。"""
-            service = biz.state.get("service")
-            if not service:
-                return self._json({"detail": "还没有报销审核服务：先点“一键准备”，或在“对接能力”里建项目、发布服务"}, 409)
+        def _chat(self, body: dict[str, Any]) -> None:
+            """对话 / 报销单送审：调 service（own = 自己发布的报销审核，或别人的服务），把 Matrix 的 SSE 原样转给浏览器
+            （令牌留在这里）。带 session_id 就是续接同一个服务会话。"""
+            service = biz.target_service(str(body.get("service") or "own"))
             req = {"message": str(body.get("message") or "")[:20000]}
             if body.get("session_id"):
                 req["session_id"] = str(body["session_id"])

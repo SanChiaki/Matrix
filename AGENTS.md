@@ -110,7 +110,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/cli.py` | 无 UI 跑一轮对话并打印事件流 |
 | `examples/im-driver/` | IM 驱动样板：虚构的“演示 IM”（能改消息、不能发卡片）的驱动包（entry point `matrix.im_drivers`）、能在终端里扮演 IM 用户的本地服务 `devserver.py`、驱动自己的测试（在默认 `testpaths` 里）；企业内部 IM 照它改 |
 | `examples/remote-agent/` | 外部平台 Agent 样板：虚构的“演示平台”`demo_platform.py`（标准 HTTP 形状、流开头带会话 id、Agent 级 MCP 回调、中断）与平台目录 `agent-platforms.json`；接公司内部平台照它改 |
-| `examples/business-system/` | 业务系统对接演示：模拟的「报销系统」（`biz_system.py`，标准库，令牌只在服务端）把 `/open/v1` 与 `/svc` 的能力一步一步真的调一遍（查、组、发、调、错误、清理），报销单送审时流式显示被委托方的进展与心跳、能追问能中断；`setup_demo.py` 搭 Matrix 这边已有的东西（应用与系统账号、公共 Agent、开放的个人 Agent、模板、别人的服务）；脚本场景在 `scripted.py`「业务系统对接演示」一节 |
+| `examples/business-system/` | 业务系统对接演示：模拟的「报销系统」（`biz_system.py`，标准库，令牌只在服务端）把 `/open/v1` 与 `/svc` 的能力一步一步真的调一遍（查、组、发、调、错误、清理），有对话入口（找自己的或别人的服务聊，每个对话一个服务会话），多 Agent 协同（入口分头委托三个岗位、其中一个再委托第四个，页面拼成协作树），流式显示被委托方的进展与心跳、能追问能中断；`setup_demo.py` 搭 Matrix 这边已有的东西（应用与系统账号、公共 Agent、开放的个人 Agent、模板、别人的服务）；脚本场景在 `scripted.py`「业务系统对接演示」一节 |
 | `examples/dashboard-system/` | 接入已有看板系统的示例：公开的看板系统 HTTP API（`board_api.py`）包成标准远程 MCP（`board_mcp.py`，带工具标注），部署方目录登记；Agent 建草稿、`add_link` 进资料、发布前所有者确认；`setup_demo.py` |
 | `examples/teammates/` | 队友协作（Raft 式）演示：前端、后端、测试三个队友，被动投递、任务板认领、略过不发言、人说“#N 完成”，`setup_demo.py`（加 `--prepare` 只搭项目），见该目录 README |
 | `examples/llm-wiki/` | 项目 Wiki 演示：两份演示资料（`materials/`）与 `setup_demo.py`（装插件、建知识管家、放资料），见该目录 README |

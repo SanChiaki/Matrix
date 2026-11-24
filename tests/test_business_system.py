@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -118,17 +119,22 @@ def test_every_capability_runs_against_a_real_matrix(demo):
 
 
 def test_claim_review_streams_delegatee_progress_and_can_be_interrupted(demo):
-    """报销单送审：附合同的交给合同审核，流里有委托、被委托方的话与工具、心跳，最后是结论；批量核对中途能中断。"""
+    """报销单送审，多 Agent 协同：入口分头交给票据核验、预算管家、合同审核，合同审核再转给法务顾问（第二层委托）；
+    流里看得到每一份委托与状态、被委托方的话与工具、心跳、入口每收到一份时说还在等谁，最后的结论汇总各方。批量核对中途能中断。"""
     base, net, cfg = demo
     r = post(base, "/api/prepare")
     assert r["state"].get("service"), r
     evs = review(base, biz_system.CLAIMS[1]["message"])
     prog = [d for e, d in evs if e == "progress"]
-    assert ("合同审核", "running") == next((p["agent"], p["status"]) for p in prog if p["kind"] == "task")
-    assert any(p["kind"] == "tool" and p["tool"] == "read_file" and p["brief"] == "合同/合同模板.md" for p in prog)
-    assert any(p["kind"] == "text" and p["agent"] == "合同审核" for p in prog)
-    assert any(p["kind"] == "heartbeat" and "合同审核" in p["working"] for p in prog)
-    assert evs[-1][0] == "done" and "审核通过" in evs[-1][1]["text"]
+    tasks = {(p["from"], p["agent"]) for p in prog if p["kind"] == "task"}
+    assert tasks == {("财务助手", "票据核验"), ("财务助手", "预算管家"), ("财务助手", "合同审核"), ("合同审核", "法务顾问")}
+    done = {(p["agent"]) for p in prog if p["kind"] == "task" and p["status"] == "completed"}
+    assert done == {"票据核验", "预算管家", "合同审核", "法务顾问"}                     # 每一份都验收了
+    assert any(p["kind"] == "tool" and p["agent"] == "法务顾问" and p["brief"] == "合同/合同模板.md" for p in prog)
+    assert {p["agent"] for p in prog if p["kind"] == "text"} >= {"票据核验", "预算管家", "合同审核", "法务顾问"}
+    assert any(p["kind"] == "heartbeat" and "法务顾问" in p["working"] for p in prog)
+    assert any(e == "delta" and "还在等" in d["text"] for e, d in evs)                 # 入口收到一份说一声
+    assert evs[-1][0] == "done" and all(n in evs[-1][1]["text"] for n in ("票据核验", "预算管家", "合同审核"))
 
     out: list = []
     t = threading.Thread(target=lambda: out.extend(review(base, biz_system.CLAIMS[2]["message"])))
@@ -144,3 +150,28 @@ def test_claim_review_streams_delegatee_progress_and_can_be_interrupted(demo):
     assert post(base, "/api/interrupt", {"session_id": sid})["status"] == 200
     t.join(20)
     assert out[-1][0] == "error" and "终止" in out[-1][1]["message"]
+
+
+def test_chat_entry_talks_to_own_and_others_services(demo):
+    """对话入口：没发布自己的服务时也能找别人的服务聊；自己的服务要先发布（409）；带 session_id 续接同一个服务会话。"""
+    base, net, cfg = demo
+    with urllib.request.urlopen(base + "/api/state") as r:
+        targets = {t["key"]: t for t in json.loads(r.read())["targets"]}
+    assert targets["own"]["service"] is None and targets["差旅咨询"]["service"] == cfg["services"]["差旅咨询"]
+    evs = chat(base, "去上海出差住宿标准是多少？", "差旅咨询")
+    assert evs[-1][0] == "done" and "600 元" in evs[-1][1]["text"]
+    with pytest.raises(urllib.error.HTTPError) as e:
+        chat(base, "BX-2001 打车 50 元", "own")
+    assert e.value.code == 409
+    post(base, "/api/prepare")
+    first = chat(base, "BX-2001 打车 50 元", "own")
+    sid = first[0][1]["session_id"]
+    again = chat(base, "依据是什么？", "own", sid)
+    assert again[0][1]["session_id"] == sid and "报销制度" in again[-1][1]["text"]
+
+
+def chat(base: str, message: str, service: str, session_id: str | None = None) -> list[tuple[str, dict]]:
+    req = urllib.request.Request(base + "/api/chat", method="POST", headers={"Content-Type": "application/json"},
+                                 data=json.dumps({"message": message, "service": service, "session_id": session_id}).encode())
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return list(biz_system.parse_sse(iter(r)))
