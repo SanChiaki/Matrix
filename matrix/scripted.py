@@ -393,7 +393,90 @@ def _team(call: ScriptCall) -> str | None:
     return "（略过）"
 
 
+# ---- 业务系统对接演示（examples/business-system）：报销系统调用 Matrix 的服务 ----
+# 入口「财务助手」：小额直接给结论；附合同的委托「合同审核」（被委托方慢一点，好在 /svc 流里看到进展与心跳）；
+# “批量核对”自己一张张做，可以被中断。测试把这两个时长调短。
+EXPENSE_PAUSE_S = 16.0        # 合同审核中间有一段不出声的时间：长过 /svc 的心跳间隔（15 秒）
+EXPENSE_STEP_S = 2.0          # 批量核对每张发票之间的间隔
+POLICY = "公开/报销制度.md"
+CONTRACT = "合同/合同模板.md"
+
+
+def _project_text(call: ScriptCall, rel: str) -> str:
+    f = call.cwd / "project" / rel
+    try:
+        return f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _expense(call: ScriptCall) -> str | None:
+    # 会话的第一轮提示词里有自己的名字与服务；续接的轮次只有新消息：按会话记下是谁、在哪个服务
+    key = f"expense:{call.session_id}"
+    if "服务「" in call.prompt and _name(call.prompt) in ("财务助手", "合同审核"):
+        svc = m.group(1) if (m := re.search(r"服务「(.+?)」", call.prompt)) else ""
+        _SESSION.setdefault(key, {}).update(me=_name(call.prompt), service=svc)
+    st = _SESSION.get(key)
+    if st is None:
+        return None
+    me = st["me"]
+    if me == "合同审核":
+        call.say("在核对合同条款：服务期、金额、付款节点")
+        call.use("read_file", {"path": CONTRACT}, _project_text(call, CONTRACT)[:200] or "（没有合同模板）")
+        if call.stopped.wait(EXPENSE_PAUSE_S):
+            return "合同审核被中断了"
+        call.use("compare_terms", {"query": "付款节点 vs 发票"}, "一致")
+        call.say("条款核对完：付款节点与发票一致")
+        return ("合同条款与报销内容一致：服务期、金额与发票相符，付款节点为验收后一次付清；没有发现风险，建议通过。")
+    if st.get("service") == "差旅咨询":
+        call.use("read_file", {"path": "公开/差旅标准.md"}, "ok")
+        return "差旅标准：一线城市住宿每晚 600 元以内，其他城市 400 元；高铁二等座、飞机经济舱；出差补助每天 100 元。"
+    reports = []
+    for block in call.prompt.split("## 网络通知：")[1:]:
+        m = re.match(r"(.+?) 交付了任务 (task-[0-9a-f]{8})", block)
+        if m:
+            call.tool("accept_task", task_id=m.group(2))
+            parts = block.split("\n\n")
+            reports.append((m.group(1), parts[1].strip() if len(parts) > 2 else ""))
+    if reports:
+        claim = st.get("claim", "这张报销单")
+        return f"{claim}审核通过：金额与合同、发票一致，符合《报销制度》第 2 条。\n\n" + \
+            "\n".join(f"- {who}：{r.splitlines()[0] if r else '已交付'}" for who, r in reports)
+    text = _asked(call.prompt)
+    if not text:
+        return "（没有新消息）"
+    bid = m.group(1) if (m := re.search(r"(BX-\d+)", text)) else None
+    amount = int(m.group(1).replace(",", "")) if (m := re.search(r"(\d[\d,]*)\s*元", text)) else None
+    if "批量" in text:
+        n = int(m.group(1)) if (m := re.search(r"(\d+)\s*张", text)) else 6
+        for i in range(1, n + 1):
+            call.say(f"核对第 {i}/{n} 张发票")
+            call.use("verify_invoice", {"query": f"发票 {i}"}, "真伪：通过")
+            if call.stopped.wait(EXPENSE_STEP_S):
+                return f"批量核对中断了：已核对 {i - 1} 张"
+        return f"批量核对完成：{n} 张发票都通过了真伪校验。"
+    if bid or amount:
+        st["claim"] = f"报销单 {bid or ''}（{amount or '?'} 元）".replace("  ", " ")
+        policy = _project_text(call, POLICY)
+        call.use("read_file", {"path": POLICY}, policy[:200] or "（没有报销制度）")
+        if (amount or 0) >= 5000 or "合同" in text:
+            call.say(f"{st['claim']}超过 5000 元并附了合同：按制度要合同审核，先交给它看条款。")
+            if not call.can_delegate:
+                return f"{st['claim']}要合同审核，但这个服务没给我委托权限：请人工审核合同。"
+            r = call.tool("delegate", agent="合同审核", mission=f"审核{st['claim']}附的合同：{text}",
+                          expected_outcome="合同条款与报销内容是否一致、有没有风险：一句结论加理由")
+            return f"已交给合同审核，等它的意见。（{r.splitlines()[0]}）"
+        return f"{st['claim']}在 5000 元以下，符合《报销制度》第 1 条，建议直接通过。"
+    if "为什么" in text or "依据" in text or "制度" in text:
+        policy = _project_text(call, POLICY)
+        call.use("read_file", {"path": POLICY}, policy[:200] or "（没有报销制度）")
+        return "依据《报销制度》：\n\n" + (policy or "（项目资料里还没有报销制度）")
+    return "我是报销服务：发报销单号和金额（例如“BX-1001 打车 280 元”）我来审核；也可以问报销制度。"
+
+
 def scenario_handler(call: ScriptCall) -> str:
+    if (reply := _expense(call)) is not None:
+        return reply
     if (reply := _from_release(call)) is not None:
         return reply
     if (reply := _dashboard(call)) is not None:

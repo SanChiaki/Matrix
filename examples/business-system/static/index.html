@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>报销系统 · 对接 Matrix 演示</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">报</span><div><b>报销系统</b><small>演示：业务系统对接 Matrix</small></div></div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="claims" aria-selected="true">报销单</button>
+    <button role="tab" data-tab="console" aria-selected="false">对接能力</button>
+  </nav>
+  <div class="ids" id="ids"></div>
+</header>
+
+<main>
+  <!-- 业务界面：员工的报销单送 Matrix 的服务审核 -->
+  <section id="claims" class="pane">
+    <div class="banner" id="setup-banner" hidden>
+      <div><b>还没有接入 Matrix 的报销审核服务。</b> 一键准备会按顺序调：查 Agent → 建项目 → 角色 → 资料 → 可见范围 → 技能 → 发布服务。</div>
+      <button class="primary" id="prepare">一键准备</button>
+    </div>
+    <div class="claims-layout">
+      <div class="claim-list">
+        <h2>待审核的报销单</h2>
+        <ul id="claim-list"></ul>
+        <p class="hint">提交审核 = 调用 Matrix 服务 <code>POST /svc/agents/{服务}/chat</code>，令牌只在报销系统的服务端。</p>
+      </div>
+      <div class="review">
+        <div class="review-head">
+          <div><h2 id="rv-title">选一张报销单提交审核</h2><p class="muted" id="rv-sub">过程会实时显示：入口说的话、调的工具、交给了谁、被委托方在做什么。</p></div>
+          <button class="danger" id="interrupt" hidden>中断</button>
+        </div>
+        <ol class="timeline" id="timeline"></ol>
+        <form id="followup" class="followup" hidden>
+          <input id="fu-text" placeholder="追问（续接同一个服务会话，例如：依据是什么？）" autocomplete="off">
+          <button class="primary" type="submit">发送</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <!-- 开发者视角：每个接口一步，真的调一次 -->
+  <section id="console" class="pane" hidden>
+    <div class="console-head">
+      <div><h2>对接能力</h2>
+        <p class="muted">一个业务系统接入的顺序：查 → 组 → 发 → 调 → 看 → 错误处理 → 清理。每一步都是对 Matrix 的真实请求，右边列出请求与响应。</p></div>
+      <div class="actions"><button id="run-all" class="primary">按顺序全部执行</button><button id="reset">清空本地记录</button></div>
+    </div>
+    <div class="console-layout">
+      <div id="steps"></div>
+      <div class="log-wrap"><h3>请求与响应</h3><ol id="log" class="log"><li class="empty">点左边的“执行”</li></ol></div>
+    </div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

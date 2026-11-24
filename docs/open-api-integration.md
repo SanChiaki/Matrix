@@ -2,7 +2,8 @@
 
 > 给业务系统（报销、CRM、工单……）的开发者看：怎么拿到令牌、怎么调接口、要注意什么。规则与取舍见设计文档
 > [open-api.md](open-api.md)（不变量 30）；可以直接跑的示例客户端在 `examples/open-api/client.py`（只用 Python 标准库）。
-> 改了 `matrix/apps.py`、`matrix/open_server.py` 的接口，要同步改这份指南与示例。
+> 想先看效果：`examples/business-system/` 是一个模拟的报销系统，把下面每个接口点一下就真的调一次，报销单送审时流式显示过程（见该目录 README）。
+> 改了 `matrix/apps.py`、`matrix/open_server.py` 的接口，要同步改这份指南与两个示例。
 
 ## 一、能做什么
 
