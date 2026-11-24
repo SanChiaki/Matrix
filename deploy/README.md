@@ -231,12 +231,23 @@ docker compose exec matrix matrix-dsh-check --live
 
 ## 端侧连接器
 
-用户在自己的电脑上把 Claude Code、Codex 或 dsh 接进 Matrix：在「设备」页签发一个令牌，然后在本机运行
+用户在自己的电脑上把 Claude Code、Codex 或 dsh 接进 Matrix：在「设备」页点“连接一台设备”，复制一条命令在本机运行，
+电脑上不需要预先装 uv、git 或 Python：
 
 ```bash
-uvx --from git+https://github.com/SanChiaki/Matrix.git matrix-connect \
-  --url wss://<对外地址>/api/devices/connect --token <令牌> --driver claude-code
+# macOS / Linux
+curl -fsSL https://<对外地址>/connect/install.sh | sh -s -- https://<对外地址>
+# Windows（PowerShell）
+$env:MATRIX_SERVER="https://<对外地址>"; irm https://<对外地址>/connect/install.ps1 | iex
 ```
+
+脚本下载连接器的独立程序、打开浏览器让人批准这台电脑，再装成后台服务；重跑同一条命令就是升级（不重新配对）。
+安装包默认从 GitHub Release 下载（Matrix 把 `/connect/dist/` 转过去）。用户电脑出不了公网时，把 Release 里的
+`matrix-connect-*.tar.gz`、`*.zip` 和对应的 `.sha256` 放进数据卷里的一个目录，在 `.env` 里设
+`MATRIX_CONNECT_DIST=/data/connect-dist`（还可以设 `MATRIX_CONNECT_RELEASE=off`，不往外转）。
+反向代理上加了额外的认证层时，安装脚本的下载也要能过（或者对 `/connect/` 放行：里面没有任何数据或密钥）。
+
+没有浏览器的机器仍可以在「设备」页手动签发令牌，用页面给的命令带令牌运行。
 
 - 连接器**只发出站** WebSocket，不开入站端口；反向代理要支持 WebSocket 升级（[docs/reverse-proxy.md](../docs/reverse-proxy.md)）。
 - 令牌可随时在「设备」页吊销；吊销后连接立即断开，绑在该设备上的 Agent 进入等待。

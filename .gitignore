@@ -11,3 +11,5 @@ __pycache__/
 *.pyc
 .gstack/
 deploy/.env
+build/
+dist/

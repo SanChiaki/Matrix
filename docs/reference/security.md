@@ -17,6 +17,9 @@
   应用停用时 `user_of` 不认它的登录。不要把写接口或主界面的接口加进白名单。**已知风险（接受）**：密码由负责人共用，网页上的访问只能记到系统账号、
   分不出是哪位负责人；接受理由：只读，且看到的只是这个账号作为调用方本来就拿得到的会话与它自己服务的用量；
   复查时机：要让系统账号在网页上做任何写操作，或接 SSO 时（届时改成负责人用自己的身份切换查看）。
+- `/connect/install.sh`、`/connect/install.ps1`、`/connect/dist/<包>`（端侧连接器的免依赖安装，[device-runtimes.md](../device-runtimes.md) 第 2.7 节）
+  不走登录：电脑上还没有任何凭据。里面没有数据与密钥；`/connect/dist/` 只认白名单里的包名（`server.CONNECT_ASSET`），不要改成任意路径。
+  安装包的完整性靠同源的 `.sha256`（防传输损坏，不防服务器本身被篡改；没做代码签名）。
 - `/internal/tools`、`/internal/approval`、`/internal/question` 只能凭有效执行上下文令牌调用，不走登录；不要放宽这一校验。
 - `/mcp/remote`（外部平台 Agent 回调，[remote-agents.md](../remote-agents.md)，不变量 28）不走登录，反向代理上也不加额外的认证层：只凭 Matrix 给那个 Agent 签的密钥（`state.json` 只存 sha256）+ Matrix 发起、还没结束的平台会话 id（调工具 `tools/call` 时；不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连只要密钥，`tools/list` 没落到某一轮时只给工具说明，说明本来就是公开的）。密钥不对直接 401、不等待；会话 id 陌生的最多等 `bind_wait_s`。传、取文件 `POST` / `GET /mcp/remote/files` 同 `tools/call`：先认密钥与这一轮、再收请求体（≤20 MB），一轮最多暂存 20 个，一轮结束就删，`file_id` 只在那一轮认；取文件只给这一轮本来拿得到的，别的 404，一律以附件返回。**已知风险（接受）**：没有单独限频，持有密钥的平台可以让连接挂到 `bind_wait_s`；接受理由：密钥只给部署方登记的内网平台；复查时机：对公网开放之前。远程 Agent 不在服务器上执行，读不到 `--data`，不加重下面的读隔离欠账。
 - **网络管关系，不管 Agent 在自己环境里能碰什么**。云侧 Agent 的读隔离目前做不到（见下一条）；端侧 Agent

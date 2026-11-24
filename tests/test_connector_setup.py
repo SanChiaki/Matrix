@@ -172,7 +172,8 @@ def test_install_writes_the_unit_and_loads_it(tmp_path):
     unit = service.install("/opt/bin/matrix-connect", tmp_path / "config.json", system="Linux", home=home,
                            run=lambda cmd: ran.append(cmd), env_path="/usr/bin")
     assert unit == home / ".config/systemd/user/matrix-connect.service" and unit.exists()
-    assert ["systemctl", "--user", "enable", "--now", "matrix-connect.service"] in ran
+    assert ran[-2:] == [["systemctl", "--user", "enable", "matrix-connect.service"],
+                        ["systemctl", "--user", "restart", "matrix-connect.service"]]  # 升级后重装：换成新的一份
     with pytest.raises(service.ServiceError):
         service.install("/x", tmp_path / "c.json", system="Plan9", home=home, run=lambda c: None)
 
@@ -306,3 +307,74 @@ def test_run_log_captures_output(tmp_path, monkeypatch):
     sys.stderr.close()
     assert "启动" in log.read_text(encoding="utf-8") and "setup" in log.read_text(encoding="utf-8")
     assert (tmp_path / "logs" / "matrix-connect.log.1").read_text(encoding="utf-8") == "旧" * 10
+
+
+# ================= 独立二进制（packaging/，docs/device-runtimes.md 第 2.7 节） =================
+def test_frozen_binary_runs_bundled_mcp_scripts(monkeypatch):
+    """二进制里没有 Python：harness 按 [sys.executable, …/mcp_server.py] 拉起网络工具时，二进制自己跑那个模块。"""
+    from matrix.connector import main as m
+    from matrix.runtime import CONNECTOR_SCRIPT, FETCH_SCRIPT, MCP_SERVER_SCRIPT
+    import matrix.mcp_connectors, matrix.mcp_server, matrix.web_fetch  # noqa: E401
+    ran = []
+    for mod in (matrix.mcp_server, matrix.mcp_connectors, matrix.web_fetch):
+        monkeypatch.setattr(mod, "main", lambda name=mod.__name__: ran.append(name))
+    monkeypatch.setattr(sys, "argv", list(sys.argv))
+    assert not m.run_bundled_script([str(MCP_SERVER_SCRIPT)])  # 不是独立二进制：照常当命令行解析
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    for script in (MCP_SERVER_SCRIPT, CONNECTOR_SCRIPT, FETCH_SCRIPT):
+        main([str(script)])
+    assert ran == ["matrix.mcp_server", "matrix.mcp_connectors", "matrix.web_fetch"]
+    assert not m.run_bundled_script(["status"]) and not m.run_bundled_script([])
+
+
+def test_frozen_binary_installs_the_service_for_itself(tmp_path, monkeypatch):
+    """独立二进制：服务定义指向二进制本身（不是 PATH 上的链接）；Windows 用旁边的无窗口版，不找 pythonw。"""
+    from matrix.connector import main as m
+    app = tmp_path / "app"
+    app.mkdir()
+    exe = app / "matrix-connect"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    assert m._exe() == str(exe.resolve())
+
+    ran, up = [], lambda log, since: True
+    win = tmp_path / "AppData" / "Local" / "matrix-connect" / "app"
+    win.mkdir(parents=True)
+    (win / "matrix-connect.exe").write_text("", encoding="utf-8")
+    config = tmp_path / "config.json"
+    with pytest.raises(service.ServiceError, match="matrix-connectw"):  # 安装不完整：不装
+        service.install(str(win / "matrix-connect.exe"), config, system="Windows", home=tmp_path / "h",
+                        run=ran.append, started=up, frozen=True)
+    (win / "matrix-connectw.exe").write_text("", encoding="utf-8")
+    path = service.install(str(win / "matrix-connect.exe"), config, system="Windows", home=tmp_path / "h",
+                           run=ran.append, started=up, frozen=True)
+    xml = path.read_text(encoding="utf-16")
+    assert f"<Command>{win / 'matrix-connectw.exe'}</Command>" in xml
+    assert f'<Arguments>run --config "{config}"' in xml and "-m matrix" not in xml
+
+
+def test_server_serves_install_scripts_and_binaries(tmp_path, monkeypatch):
+    """免依赖安装：脚本与安装包不需要登录；部署方放了安装包就直接给，没放转到 GitHub Release，可以关掉。"""
+    c = TestClient(create_app(build(tmp_path)))
+    sh = c.get("/connect/install.sh")
+    assert sh.status_code == 200 and sh.text.startswith("#!/bin/sh") and "matrix-connect setup" in sh.text
+    ps = c.get("/connect/install.ps1")
+    assert ps.status_code == 200 and "matrix-connect-windows-x64.zip" in ps.text
+
+    monkeypatch.delenv("MATRIX_CONNECT_DIST", raising=False)
+    monkeypatch.delenv("MATRIX_CONNECT_RELEASE", raising=False)
+    r = c.get("/connect/dist/matrix-connect-linux-x64.tar.gz", follow_redirects=False)
+    assert r.status_code == 302 and r.headers["location"].endswith("/releases/latest/download/matrix-connect-linux-x64.tar.gz")
+    assert c.get("/connect/dist/..%2Fstate.json").status_code == 404           # 只认安装包的名字
+    assert c.get("/connect/dist/matrix-connect-linux-x64.exe").status_code == 404
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "matrix-connect-macos-arm64.tar.gz").write_bytes(b"pkg")
+    (dist / "matrix-connect-macos-arm64.tar.gz.sha256").write_text("abc  matrix-connect-macos-arm64.tar.gz\n", encoding="utf-8")
+    monkeypatch.setenv("MATRIX_CONNECT_DIST", str(dist))
+    assert c.get("/connect/dist/matrix-connect-macos-arm64.tar.gz").content == b"pkg"
+    assert c.get("/connect/dist/matrix-connect-macos-arm64.tar.gz.sha256").text.startswith("abc")
+    monkeypatch.setenv("MATRIX_CONNECT_RELEASE", "off")  # 内网部署：不往外转
+    assert c.get("/connect/dist/matrix-connect-linux-x64.tar.gz", follow_redirects=False).status_code == 404

@@ -78,6 +78,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/dsh_plugins/jobs.mjs` | dsh 后台任务守护：Agent 要收尾时还有后台任务在跑，追加一条消息让它先收完或结束（headless 退出会结束它们） |
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
+| `matrix/connect_install/`、`packaging/` | 连接器的免依赖安装：服务器在 `/connect/install.sh`、`/connect/install.ps1` 提供的安装脚本，PyInstaller 配方（CI：`.github/workflows/connect-release.yml`）；设计见 docs/device-runtimes.md 第 2.7 节 |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
 | `matrix/apps.py` | 外部应用（不变量 30）：`AppsMixin` 混入 `Network`。应用登记、业务系统账号与负责人、令牌（`app_context`：认令牌、scope、限频）、开放 Agent、查 / 组 / 发（`open_*`，项目范围 `_app_project`）、调（`svc_*`；`svc_progress` 把服务会话里委托的进展按 `event_view` 过滤后给 `/svc` 流）、经应用留痕 `via_app()` |

@@ -1,0 +1,101 @@
+# matrix-connect 的独立程序：用 PyInstaller 在五个平台上各打一个自带 Python 的包，用户电脑上不需要 uv、git、Python。
+# 打 connect-v* 的 tag 时发成 GitHub Release（Matrix 服务器的 /connect/dist/ 默认转到最新的那个 Release）；
+# PR 改到连接器或打包时只构建并冒烟测试，不发布。设计见 docs/device-runtimes.md 第 2.7 节。
+name: matrix-connect binaries
+
+on:
+  push:
+    tags: ["connect-v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "matrix/connector/**"
+      - "matrix/connect_install/**"
+      - "matrix/runtime.py"
+      - "matrix/mcp_server.py"
+      - "matrix/mcp_connectors.py"
+      - "matrix/web_fetch.py"
+      - ".github/workflows/connect-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: connect-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux 在较老的 Ubuntu 上构建：uv 的 Python 本身兼容老 glibc，产物在更多发行版上能跑
+          - { os: ubuntu-22.04, asset: linux-x64, ext: tar.gz }
+          - { os: ubuntu-22.04-arm, asset: linux-arm64, ext: tar.gz }
+          - { os: macos-15, asset: macos-arm64, ext: tar.gz }
+          - { os: macos-15-intel, asset: macos-x64, ext: tar.gz }
+          - { os: windows-latest, asset: windows-x64, ext: zip }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: "3.14"
+      - name: Build
+        run: |
+          uv sync --locked --no-dev
+          uv run --no-sync --with pyinstaller==6.22.3 pyinstaller packaging/matrix-connect.spec --noconfirm
+      - name: Smoke test
+        run: |
+          exe=dist/matrix-connect/matrix-connect
+          "$exe" --help
+          # 二进制要能充当网络工具的 MCP 服务（harness 按 [sys.executable, …/mcp_server.py] 拉起它）
+          out=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | "$exe" /x/matrix/mcp_server.py)
+          echo "$out" | grep -q '"delegate"'
+          out=$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | "$exe" /x/matrix/web_fetch.py)
+          echo "$out" | grep -q '"fetch"'
+          test -f dist/matrix-connect/_internal/matrix/dsh_plugins/approval.mjs
+          if [ "${{ matrix.asset }}" = windows-x64 ]; then test -f dist/matrix-connect/matrix-connectw.exe; fi
+      - name: Package
+        run: |
+          name=matrix-connect-${{ matrix.asset }}.${{ matrix.ext }}
+          if [ "${{ matrix.ext }}" = zip ]; then
+            (cd dist && 7z a -tzip -bd "../$name" matrix-connect >/dev/null)
+          else
+            tar -C dist -czf "$name" matrix-connect
+          fi
+          if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
+          cat "$name.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matrix-connect-${{ matrix.asset }}
+          path: matrix-connect-${{ matrix.asset }}.*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/connect-v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l assets
+          gh release create "$GITHUB_REF_NAME" assets/* --repo "$GITHUB_REPOSITORY" --latest \
+            --title "matrix-connect ${GITHUB_REF_NAME#connect-v}" \
+            --notes "matrix-connect 独立程序（不需要 uv、git、Python）。在 Matrix 的「设备」页复制安装命令即可，安装脚本会按系统选对应的包。"
