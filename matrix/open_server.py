@@ -20,6 +20,7 @@ from .engine import Network, NetworkError
 from .models import FILE_LIMIT  # 上传资料的上限，与网页上传、Agent 的 publish_file 同一个
 
 SVC_TIMEOUT_S = 900          # 一次 /svc 对话最多等多久
+SVC_HEARTBEAT_S = 15         # 这么久流里没有任何事件，发一条 progress 心跳（还有谁在做、过了多久），调用方不至于以为卡住了
 
 
 class OpenProjectIn(BaseModel):
@@ -203,21 +204,28 @@ def install(app: FastAPI, network: Network) -> None:
 
         def stream():
             yield _sse("session", {"session_id": conv.id})
-            last, pos, deadline = None, seq, time.time() + SVC_TIMEOUT_S
+            last, pos, started = None, seq, time.time()
+            deadline, quiet_since, seen = started + SVC_TIMEOUT_S, started, {}
             while time.time() < deadline:
                 for ev in network.bus.wait(pos, 1.0):
                     pos = ev.seq
                     d = ev.data
+                    for p in network.svc_progress(c, conv.id, ev.type, d, seen):  # 被委托方的进展（委托、工具、中途的话）
+                        quiet_since = time.time()
+                        yield _sse("progress", p)
                     if ev.type == "run.progress" and d.get("conversation_id") == conv.id \
                             and str(d.get("context_id", "")).startswith(f"{conv.id}/"):
                         step = d.get("step") or {}
                         if step.get("kind") == "text" and str(d.get("context_id")).endswith(f"/{conv.agent_id}"):
+                            quiet_since = time.time()
                             yield _sse("delta", {"text": step.get("text", "")})
                         elif step.get("kind") == "tool":
+                            quiet_since = time.time()
                             yield _sse("tool", {"name": step.get("tool", ""), "input": {"brief": step.get("brief", "")}})
                     elif ev.type == "message.added" and d.get("conversation_id") == conv.id:
                         m = d.get("message") or {}
                         if m.get("role") == "agent":
+                            quiet_since = time.time()
                             if last is not None:  # 前一条是中途的进展（委托出去了还在等）
                                 yield _sse("delta", {"text": last + "\n\n"})
                             last = m.get("text", "")
@@ -230,6 +238,10 @@ def install(app: FastAPI, network: Network) -> None:
                             return
                 if network.bus.closed:
                     break
+                if time.time() - quiet_since >= SVC_HEARTBEAT_S:
+                    quiet_since = time.time()
+                    yield _sse("progress", {"kind": "heartbeat", "elapsed_s": int(time.time() - started),
+                                            "working": network.svc_working(c, conv.id)})
             yield _sse("error", {"message": "等太久了：这一轮还没结束，可以带着 session_id 再问一次"})
 
         return StreamingResponse(stream(), media_type="text/event-stream",

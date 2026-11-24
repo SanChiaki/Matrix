@@ -26,6 +26,11 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 from .models import APP_SCOPES, APP_TOKEN_PREFIX, AgentNode, AppGrant, ExternalApp, Project, User, new_id
 
+def _short(s: str, n: int) -> str:
+    s = " ".join(str(s or "").split())
+    return s if len(s) <= n else s[:n] + "…"
+
+
 if TYPE_CHECKING:  # pragma: no cover
     from .engine import Network
 
@@ -641,6 +646,44 @@ class AppsMixin:
                             and conv.service_id == service_id, f"session {session_id}")
             return conv
         return self.open_service_session(service_id, actor=c.principal)
+
+    def svc_progress(self: "Network", c: AppContext, conv_id: str, ev_type: str, data: dict[str, Any],
+                     seen: dict[str, str]) -> list[dict[str, Any]]:
+        """/svc 流里的委托进展：这个服务会话里的委托（含委托出去的再委托）建了、换了状态、执行方调了工具、说了话。
+        只给调用方本来就看得到的（同网页，`event_view` 按令牌代表的主体过滤：服务会话里委托的过程给调用方，不变量 29），
+        工具只给名字与一行输入摘要，不给工具输出。seen 记每个委托上次报过的状态，状态没变的 task.updated 不重复报。"""
+        if ev_type not in ("task.created", "task.updated", "run.progress"):
+            return []
+        task_id = (data.get("task") or {}).get("id") if ev_type != "run.progress" else data.get("context_id")
+        with self._lock:
+            t = self.store.tasks.get(str(task_id or ""))
+            if t is None or t.conversation_id != conv_id or self.event_view(ev_type, data, c.principal) is None:
+                return []
+            base = {"task_id": t.id, "agent": self._name(t.delegatee_id)}
+            if ev_type != "run.progress":
+                status = str(t.status)
+                if seen.get(t.id) == status:
+                    return []
+                seen[t.id] = status
+                return [{"kind": "task", **base, "from": self._name(t.delegator_id), "status": status,
+                         "mission": _short(t.delegation.mission, 200)}]
+            step = data.get("step") or {}
+            if step.get("kind") == "tool":
+                return [{"kind": "tool", **base, "tool": str(step.get("tool") or ""), "brief": str(step.get("brief") or "")}]
+            if step.get("kind") == "text" and str(step.get("text") or "").strip():
+                return [{"kind": "text", **base, "text": _short(str(step["text"]).strip(), 500)}]
+            return []
+
+    def svc_working(self: "Network", c: AppContext, conv_id: str) -> list[str]:
+        """心跳里报“谁还在做”：入口与还没交付的委托的执行方（只报调用方看得到的委托）。"""
+        from .models import TaskStatus
+        with self._lock:
+            conv = self.store.conversations.get(conv_id)
+            names = [self._name(a) for a in (conv.seats if conv else {}) if f"{conv_id}/{a}" in self._running]
+            names += [self._name(t.delegatee_id) for t in self.store.tasks.values()
+                      if t.conversation_id == conv_id and t.status in (TaskStatus.RUNNING, TaskStatus.WAITING)
+                      and self.can_see_task(t, c.principal)]
+            return list(dict.fromkeys(names))
 
     def svc_interrupt(self: "Network", c: AppContext, session_id: str) -> None:
         from .engine import NetworkError

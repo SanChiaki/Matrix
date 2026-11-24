@@ -80,7 +80,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`） |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
-| `matrix/apps.py` | 外部应用（不变量 30）：`AppsMixin` 混入 `Network`。应用登记、业务系统账号与负责人、令牌（`app_context`：认令牌、scope、限频）、开放 Agent、查 / 组 / 发（`open_*`，项目范围 `_app_project`）、调（`svc_*`）、经应用留痕 `via_app()` |
+| `matrix/apps.py` | 外部应用（不变量 30）：`AppsMixin` 混入 `Network`。应用登记、业务系统账号与负责人、令牌（`app_context`：认令牌、scope、限频）、开放 Agent、查 / 组 / 发（`open_*`，项目范围 `_app_project`）、调（`svc_*`；`svc_progress` 把服务会话里委托的进展按 `event_view` 过滤后给 `/svc` 流）、经应用留痕 `via_app()` |
 | `matrix/open_server.py` | 外部应用的接口：`/open/v1/*` 与 `/svc/*`（标准 HTTP 形状，SSE），只认 `Authorization: Bearer mat_…` |
 | `matrix/mcp_sse.py` | `/mcp/remote` 的旧版 MCP 传输（HTTP+SSE）：`GET /mcp/remote` 开流、`POST /mcp/remote/messages` 发消息，规则同 `remote_mcp`（不变量 28） |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |

@@ -131,6 +131,18 @@ data: {"session_id": "conv-88e1c57e"}
 event: tool
 data: {"name": "mcp__matrix_net__delegate", "input": {"brief": "合同审核"}}
 
+event: progress
+data: {"kind": "task", "task_id": "task-319cfb6e", "agent": "合同审核", "from": "前台", "status": "running", "mission": "看一下报销单附的合同"}
+
+event: progress
+data: {"kind": "tool", "task_id": "task-319cfb6e", "agent": "合同审核", "tool": "read_file", "brief": "公开/合同模板.md"}
+
+event: progress
+data: {"kind": "heartbeat", "elapsed_s": 32, "working": ["合同审核"]}
+
+event: progress
+data: {"kind": "task", "task_id": "task-319cfb6e", "agent": "合同审核", "from": "前台", "status": "completed", "mission": "看一下报销单附的合同"}
+
 event: done
 data: {"text": "……最终回复……"}
 ```
@@ -243,9 +255,22 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py delete
 | --- | --- | --- |
 | `session` | `{"session_id"}` | **总是第一个**。续接时带回来；它只属于你，别人（包括项目的主持人）看不到 |
 | `delta` | `{"text"}` | 入口这一轮说的话；入口把活委托出去还在等时，中途的回复也以 `delta` 送出 |
-| `tool` | `{"name", "input": {"brief"}}` | 入口或岗位在调工具：只有工具名与一行摘要 |
+| `tool` | `{"name", "input": {"brief"}}` | 入口在调工具：只有工具名与一行输入摘要，不给工具输出 |
+| `progress` | `{"kind", …}` | 被委托方的进展，见下表。只是进展：最终结果仍以 `done` 为准；不认识的 `kind` 跳过即可 |
 | `done` | `{"text"}` | 这一串做完了：最终回复。流到这里结束 |
 | `error` | `{"message"}` | 这一轮失败了，或者等了 15 分钟还没结束（带着 `session_id` 再问一次可以接着拿） |
+
+`progress` 的几种 `kind`（让调用方知道活交给谁了、还在动，不会以为卡住了）：
+
+| `kind` | 数据 | 说明 |
+| --- | --- | --- |
+| `task` | `{"task_id", "agent", "from", "status", "mission"}` | `from` 把活委托给 `agent`，或者这个委托换了状态：`running` 在做、`waiting` 执行方的电脑不在线（上线后接着做）、`in_review` 交付了等验收、`completed` 验收了、`failed` 失败了（委托方可以续接）、`rejected` 没批准。同一状态只报一次 |
+| `tool` | `{"task_id", "agent", "tool", "brief"}` | 执行方在调工具：工具名与一行输入摘要，不给工具输出 |
+| `text` | `{"task_id", "agent", "text"}` | 执行方中途说的话（最多 500 字） |
+| `heartbeat` | `{"elapsed_s", "working": [Agent 名]}` | 流里 15 秒没有任何事件时发一条：这一串开始了多少秒、还有谁在做 |
+
+委托出去的再委托也在里面（`from` 是上一层的执行方）。给到的范围和网页上调用方看这个服务会话时一样：服务会话里委托的过程本来就给调用方（不变量 29），
+所以别的会话、别人的委托不会出现。
 
 - **续接**：带上 `session_id` 就是同一个服务会话，入口记得之前说过什么。会话不设期限。
 - **一次请求等到这一串做完**：入口委托岗位时，流会一直开着，直到最终回复（最多 15 分钟）。HTTP 客户端的读超时要设得比这长。
@@ -269,6 +294,7 @@ MATRIX_URL=$MATRIX MATRIX_TOKEN=$TOKEN python examples/open-api/client.py delete
 - [ ] 建的项目在 Matrix 网页上能看到，主持人与负责人显示正确，群聊里有“（经「应用名」）”的事件
 - [ ] 发布服务时写了 `entry`、`staff`、`authority`、`scope`；需要写入时配了 `inbox` 并给了 `file.write`
 - [ ] `/svc/…/chat` 能拿到 `session`→`done`；续接能接上；中断能停下；读超时大于 15 分钟
+- [ ] 界面上用 `progress` 显示“交给谁了、在做什么”，不认识的事件与 `kind` 会跳过
 - [ ] 要用业务系统时，系统账号的连接器已经由负责人或管理员配好
 - [ ] 撤销令牌后，业务系统收到 401 并能告警
 - [ ] （上线前）反向代理确认 `/open/v1/*`、`/svc/*` 不走额外的认证层、其余路径照旧要
