@@ -68,6 +68,12 @@ RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^h
     [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
     if [ -n "$PYPI_INDEX" ]; then export UV_DEFAULT_INDEX="$PYPI_INDEX"; fi; \
     if [ -n "$IM_DRIVERS" ]; then uv pip install --no-cache $IM_DRIVERS; fi
+# 公司统一登录的驱动包（docs/login-driver-authoring.md 第五节）：同上；只用内置的 oauth2 驱动时空着
+ARG LOGIN_DRIVERS=""
+RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
+    [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
+    if [ -n "$PYPI_INDEX" ]; then export UV_DEFAULT_INDEX="$PYPI_INDEX"; fi; \
+    if [ -n "$LOGIN_DRIVERS" ]; then uv pip install --no-cache $LOGIN_DRIVERS; fi
 
 ENV MATRIX_HOST=0.0.0.0 \
     MATRIX_DATA=/data \

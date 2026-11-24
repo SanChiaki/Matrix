@@ -404,6 +404,10 @@ body.gated > .rail, body.gated > main { visibility: hidden; }
 .gate form > .muted { margin: -6px 0 0; }
 .gate form > button[type=submit] { padding: 8px 20px; }
 .gate .error:empty { display: none; }
+.gate form > button[hidden] { display: none; }
+.gate .sso { display: flex; flex-direction: column; gap: 8px; }
+.gate .sso[hidden] { display: none; }
+.gate .sso a.button { justify-content: center; padding: 8px 20px; }
 button.link { background: none; border: 0; padding: 0; color: var(--accent); font-weight: 500; font-size: inherit; }
 button.link:hover { background: none; text-decoration: underline; }
 .tab .count { margin-left: auto; min-width: 18px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--human); color: var(--on-human);

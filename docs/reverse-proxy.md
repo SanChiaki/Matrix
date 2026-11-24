@@ -17,6 +17,7 @@ Caddy、nginx、公司的网关、负载均衡都可以。下面第一节是**�
 | **WebSocket 升级**：`/api/devices/connect` | 端侧连接器（`matrix-connect`）经它出站连进来 |
 | **请求体上限不低于 100 MB** | 项目资料单个文件最多 100 MB（`models.FILE_LIMIT`），上传是一个请求体 |
 | 加了额外的认证层（basic auth、SSO 网关）时，**放行 `/mcp/remote`、`/mcp/remote/*`、`/open/v1/*`、`/svc/*`** | 外部 Agent 平台回调（不变量 28）、外部应用（不变量 30）带的是 Matrix 签的密钥 / 应用令牌，过不了你的认证层，由 Matrix 自己鉴权 |
+| 用公司账号登录（[login-driver-authoring.md](login-driver-authoring.md)）时：原样传 `Host`，`/api/auth/sso/*` 照常转发 | 发起与回调是普通的浏览器请求，不用单独加规则；回调地址按 `login.json` 的 `public_url` 拼，要和代理对外的地址一致 |
 | 加了额外的认证层时，端侧连接器也要能过 | `/api/devices/connect` 照常经过认证层；连接器要带上那一层的凭据，或者也放行这条路径（它本来就凭设备令牌鉴权） |
 
 代理和 Matrix 在同一台机器上时转到 `http://127.0.0.1:8765`；代理也跑在容器里时，让它加入 Matrix 的 compose 网络

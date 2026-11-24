@@ -648,6 +648,8 @@ class User:
     kind: str = "user"                   # user | system
     managers: list[str] = field(default_factory=list)
     app_id: str | None = None            # 系统账号属于哪个外部应用
+    # 公司账号（docs/login-driver-authoring.md）：登录入口 id → 这个人在那个身份系统里的标识。用公司账号建的账号没有密码
+    sso: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_system(self) -> bool:
