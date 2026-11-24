@@ -1,0 +1,19 @@
+{
+  "name": "expense-review",
+  "version": "1.0.0",
+  "title": "报销审核小组",
+  "description": "接待角色审核报销单，金额大或附合同时交给合同角色看条款；适合业务系统用来搭一个报销审核服务",
+  "params": [
+    {"key": "company", "label": "公司名", "example": "演示公司", "required": true}
+  ],
+  "roles": [
+    {"key": "intake", "name": "接待", "description": "接报销单：核对金额、票据与报销制度，小额直接给结论，大额或附合同的交给合同角色",
+     "capabilities": ["报销审核"], "authority": ["delegate"]},
+    {"key": "contract", "name": "合同", "description": "看报销单附的合同：服务期、金额、付款节点是否与报销内容一致，有没有风险",
+     "capabilities": ["合同审核"], "authority": []}
+  ],
+  "checkpoints": [
+    {"at": "合同审核", "kind": "accept", "role": "intake", "note": "合同角色的意见由接待验收后再回复调用方"}
+  ],
+  "files": ["files/报销制度.md"]
+}

@@ -393,7 +393,144 @@ def _team(call: ScriptCall) -> str | None:
     return "（略过）"
 
 
+# ---- 业务系统对接演示（examples/business-system）：报销系统调用 Matrix 的服务，多 Agent 协同 ----
+# 入口「财务助手」：小额自己给结论；5000 元以上的同时交给「票据核验」「预算管家」，附合同的再交给「合同审核」，
+# 合同审核看到违约条款再转给「法务顾问」（第二层委托）；每收到一份就验收，说还在等谁，都到了才给结论。
+# 法务顾问中间有一段不出声的时间，好在 /svc 流里看到心跳。“批量核对”入口自己一张张做，可以被中断。测试把时长调短。
+EXPENSE_PAUSE_S = 16.0        # 法务顾问不出声的那段：长过 /svc 的心跳间隔（15 秒）
+EXPENSE_STEP_S = 2.0          # 一步与一步之间的间隔（票据、预算、批量核对）
+POLICY = "公开/报销制度.md"
+CONTRACT = "合同/合同模板.md"
+EXPENSE_AGENTS = ("财务助手", "票据核验", "合同审核", "预算管家", "法务顾问")
+
+
+def _project_text(call: ScriptCall, rel: str) -> str:
+    f = call.cwd / "project" / rel
+    try:
+        return f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _deliveries(call: ScriptCall) -> list[tuple[str, str, str]]:
+    """这一轮送来的交付通知：验收，返回 [(谁, 任务 id, 结果第一行)]。"""
+    out = []
+    for block in call.prompt.split("## 网络通知：")[1:]:
+        m = re.match(r"(.+?) 交付了任务 (task-[0-9a-f]{8})", block)
+        if m:
+            call.tool("accept_task", task_id=m.group(2))
+            parts = block.split("\n\n")
+            report = parts[1].strip() if len(parts) > 2 else ""
+            out.append((m.group(1), m.group(2), report.splitlines()[0] if report else "已交付"))
+    return out
+
+
+def _expense_staff(call: ScriptCall, me: str, st: dict) -> str:
+    """被委托的几位：各做各的一块。"""
+    pause = lambda s: call.stopped.wait(s)  # noqa: E731 —— 被中断就提前结束
+    if me == "票据核验":
+        call.say("在校验发票：代码、号码、金额、开票方")
+        call.use("verify_invoice", {"query": "发票 1/1"}, "真伪：通过")
+        pause(EXPENSE_STEP_S)
+        call.use("match_amount", {"query": "发票金额 vs 报销金额"}, "一致")
+        return "发票 1 张，真伪校验通过，金额与报销单一致。"
+    if me == "预算管家":
+        call.say("在查部门预算")
+        call.use("query_budget", {"query": "研发部 2026 年第四季度 咨询费"}, "余额 30,000 元")
+        pause(EXPENSE_STEP_S)
+        return "研发部第四季度咨询费预算余额 30,000 元：这笔在预算内，报销后余额 18,000 元。"
+    if me == "法务顾问":
+        call.say("在看合同第 7 条违约条款")
+        call.use("read_file", {"path": CONTRACT}, _project_text(call, CONTRACT)[:200] or "（没有合同）")
+        if pause(EXPENSE_PAUSE_S):
+            return "法务意见被中断了"
+        call.use("check_clause", {"query": "违约金上限"}, "有上限 10%")
+        return "违约金为合同金额的 10%、有上限，属于常规条款，风险可控。"
+    # 合同审核：先自己核对条款，违约条款转给法务顾问，等它的意见再交付
+    done = _deliveries(call)
+    if done:
+        return "合同条款与报销内容一致（服务期、金额、付款节点）。" + "；".join(f"{w}：{r}" for w, _, r in done)
+    call.say("在核对合同条款：服务期、金额、付款节点")
+    call.use("read_file", {"path": CONTRACT}, _project_text(call, CONTRACT)[:200] or "（没有合同模板）")
+    pause(EXPENSE_STEP_S)
+    if not call.can_delegate:
+        return "合同条款与报销内容一致；第 7 条有违约金条款，建议法务再看一眼。"
+    call.say("第 7 条有违约金条款：请法务顾问看风险")
+    call.tool("delegate", agent="法务顾问", mission="看《技术咨询服务合同》第 7 条违约金条款的风险",
+              expected_outcome="风险高低与理由，一句话")
+    return "服务期、金额、付款节点与发票一致；违约条款已交给法务顾问，等它的意见。"
+
+
+def _expense(call: ScriptCall) -> str | None:
+    # 会话的第一轮提示词里有自己的名字与服务；续接的轮次只有新消息：按会话记下是谁、在哪个服务
+    key = f"expense:{call.session_id}"
+    if "服务「" in call.prompt and _name(call.prompt) in EXPENSE_AGENTS:
+        svc = m.group(1) if (m := re.search(r"服务「(.+?)」", call.prompt)) else ""
+        _SESSION.setdefault(key, {}).update(me=_name(call.prompt), service=svc)
+    st = _SESSION.get(key)
+    if st is None:
+        return None
+    me = st["me"]
+    if me != "财务助手":
+        return _expense_staff(call, me, st)
+    if st.get("service") == "差旅咨询":
+        call.use("read_file", {"path": "公开/差旅标准.md"}, "ok")
+        return "差旅标准：一线城市住宿每晚 600 元以内，其他城市 400 元；高铁二等座、飞机经济舱；出差补助每天 100 元。"
+
+    done = _deliveries(call)
+    if done:  # 被委托方交付了：验收，说还在等谁；都到了给结论
+        pending = st.setdefault("pending", {})
+        for who, tid, report in done:
+            pending.pop(tid, None)
+            st.setdefault("results", []).append((who, report))
+        if pending:
+            return f"收到{'、'.join(w for w, _, _ in done)}的结果，还在等{'、'.join(pending.values())}。"
+        claim = st.get("claim", "这张报销单")
+        return f"{claim}审核通过：票据、预算、合同都核对过，符合《报销制度》第 2 条。\n\n" + \
+            "\n".join(f"- {who}：{r}" for who, r in st.pop("results", []))
+    text = _asked(call.prompt)
+    if not text:
+        return "（没有新消息）"
+    bid = m.group(1) if (m := re.search(r"(BX-\d+)", text)) else None
+    amount = int(m.group(1).replace(",", "")) if (m := re.search(r"(\d[\d,]*)\s*元", text)) else None
+    if "批量" in text:
+        n = int(m.group(1)) if (m := re.search(r"(\d+)\s*张", text)) else 6
+        for i in range(1, n + 1):
+            call.say(f"核对第 {i}/{n} 张发票")
+            call.use("verify_invoice", {"query": f"发票 {i}"}, "真伪：通过")
+            if call.stopped.wait(EXPENSE_STEP_S):
+                return f"批量核对中断了：已核对 {i - 1} 张"
+        return f"批量核对完成：{n} 张发票都通过了真伪校验。"
+    if bid or amount:
+        st["claim"] = f"报销单 {bid or ''}（{amount or '?'} 元）".replace("  ", " ")
+        policy = _project_text(call, POLICY)
+        call.use("read_file", {"path": POLICY}, policy[:200] or "（没有报销制度）")
+        if (amount or 0) < 5000 and "合同" not in text:
+            return f"{st['claim']}在 5000 元以下，符合《报销制度》第 1 条，建议直接通过。"
+        asks = [("票据核验", f"校验{st['claim']}的发票真伪与金额", "真伪与金额是否一致，一句话"),
+                ("预算管家", f"查{st['claim']}所在部门的预算余额够不够", "余额与这笔之后的余额，一句话")]
+        if "合同" in text:
+            asks.append(("合同审核", f"审核{st['claim']}附的合同：{text}", "条款与报销内容是否一致、有没有风险：结论加理由"))
+        call.say(f"{st['claim']}超过 5000 元" + ("并附了合同" if "合同" in text else "") +
+                 f"：分头核对，交给{'、'.join(a for a, _, _ in asks)}。")
+        if not call.can_delegate:
+            return f"{st['claim']}要分头核对，但这个服务没给我委托权限：请人工审核。"
+        st["pending"], st["results"] = {}, []
+        for agent, mission, outcome in asks:  # 一次只发一个委托
+            r = call.tool("delegate", agent=agent, mission=mission, expected_outcome=outcome)
+            if m := re.search(r"任务 (task-[0-9a-f]{8})", r):
+                st["pending"][m.group(1)] = agent
+        return f"已分头交给{'、'.join(st['pending'].values())}，等它们的结果。"
+    if "为什么" in text or "依据" in text or "制度" in text:
+        policy = _project_text(call, POLICY)
+        call.use("read_file", {"path": POLICY}, policy[:200] or "（没有报销制度）")
+        return "依据《报销制度》：\n\n" + (policy or "（项目资料里还没有报销制度）")
+    return "我是报销服务：发报销单号和金额（例如“BX-1001 打车 280 元”）我来审核；也可以问报销制度。"
+
+
 def scenario_handler(call: ScriptCall) -> str:
+    if (reply := _expense(call)) is not None:
+        return reply
     if (reply := _from_release(call)) is not None:
         return reply
     if (reply := _dashboard(call)) is not None:

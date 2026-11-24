@@ -98,6 +98,15 @@ def main(argv: list[str]) -> None:
     elif cmd == "chat":
         sid, msg = argv[1], argv[2]
         for ev, data in chat(sid, msg, argv[3] if len(argv) > 3 else None):
+            if ev == "progress":  # 被委托方的进展：显示“交给谁了、在做什么”，调用方不会以为卡住了
+                k = data.get("kind")
+                line = {"task": f"→ {data.get('agent')}：{data.get('status')}（{data.get('mission')}）",
+                        "tool": f"  {data.get('agent')} 在用 {data.get('tool')} {data.get('brief', '')}",
+                        "text": f"  {data.get('agent')}：{data.get('text')}",
+                        "heartbeat": f"  …还在做：{'、'.join(data.get('working') or []) or '收尾中'}（{data.get('elapsed_s')} 秒）"}.get(k)
+                if line:  # 不认识的 kind 跳过
+                    print(line)
+                continue
             print(ev, json.dumps(data, ensure_ascii=False))
     elif cmd == "delete":
         print(json.dumps(call("DELETE", f"/open/v1/projects/{argv[1]}"), ensure_ascii=False))

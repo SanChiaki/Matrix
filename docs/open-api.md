@@ -109,8 +109,8 @@ POST   /svc/sessions/{session_id}/interrupt         中断                      
 
 就是项目服务的第二期（[project-services.md](project-services.md) 第 6 节）：标准 HTTP 形状 `/svc/agents/{service}/chat`，
 `{service}` 是服务 id。流里先是 `session`（会话 id 就是这个服务会话的对话 id，续接时带回来），之后 `delta`（入口这一轮说的话，
-以及委托出去还在等时的中途回复）、`tool`（只给工具名与一行摘要）、最后 `done`（这一串做完时的最终回复）或 `error`。
-和外部平台的标准形状一字不差：另一个 Matrix 用内置的 `standard` 驱动、`url` 填 `…/svc`、API Key 填应用令牌就能把服务接成外部平台 Agent。
+以及委托出去还在等时的中途回复）、`tool`（入口调的工具：只给工具名与一行摘要）、`progress`（被委托方的进展：委托建了 / 换了状态、执行方调的工具与中途说的话、15 秒没动静时的心跳；范围同网页上调用方看这个服务会话，`svc_progress` 按 `event_view` 过滤，不给工具输出）、最后 `done`（这一串做完时的最终回复）或 `error`。
+和外部平台的标准形状一字不差（`progress` 是标准形状里可选的事件，`standard` 驱动不认识的事件跳过）：另一个 Matrix 用内置的 `standard` 驱动、`url` 填 `…/svc`、API Key 填应用令牌就能把服务接成外部平台 Agent。
 调用方是令牌代表的主体：系统账号调用时，调用方就是这个系统账号，业务授权用系统账号自己的连接器（第 3 节）；代表一个人时是那个人。
 SSO 改造以后，系统账号还可以带上终端用户的身份，按那个用户调用（随登录改造一起定）。
 

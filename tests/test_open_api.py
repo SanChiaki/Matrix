@@ -420,3 +420,65 @@ def test_system_web_login_is_read_only(tmp_path: Path):
     assert c.get("/api/system/overview").status_code == 401
     assert TestClient(create_app(net)).post("/api/auth/login", json={"email": sysu.email, "password": "sys-pass-123"}).status_code == 400
     assert api.get(f"/svc/agents/{x.id}", headers=bearer(token)).status_code == 200
+
+
+# ================= /svc 流里被委托方的进展 =================
+def test_svc_stream_reports_delegatee_progress(tmp_path: Path, monkeypatch):
+    """不变量 29（与 30）：服务会话里委托的过程给调用方，/svc 流也一样：委托建了、换了状态、执行方调了工具（只有名字与输入摘要，
+    不给工具输出）、说了话，都以 progress 事件报出来；一段时间没动静时发心跳，写明还有谁在做。别的会话的委托不报。"""
+    import matrix.open_server as osrv
+    from tests.test_project_services import by_agent, publish, setup as svc_setup
+
+    def desk_run(call: ScriptCall) -> str:
+        if call.turn > 1:
+            return "财务算好了：3000 元"
+        call.say("先让财务算一下")
+        return call.tool("delegate", agent="财务", mission="算一下报销额", expected_outcome="金额")
+
+    def fin_run(call: ScriptCall) -> str:
+        call.say("在查报销手册")
+        call.use("read_file", {"path": "公开/手册.md"}, result="工具输出原文-不该出现在流里")
+        time.sleep(2.5)                                                     # 让流安静一会儿：该有心跳
+        return "3000 元"
+
+    monkeypatch.setattr(osrv, "SVC_HEARTBEAT_S", 0.5)
+    net, (maya, ben, ann, carl), g, desk, fin, legal = svc_setup(tmp_path, None)
+    net.runtime.handler = by_agent(net, {"前台": desk_run, "财务": fin_run})
+    app = net.create_app(maya, "报销系统", system=True, managers=["carl@x.io"])
+    sysu = net.store.users[app.system_user_id]
+    x = publish(net, g, maya, authority=["delegate"], readers=[sysu.email, "ann@x.io"])
+    _, token = net.issue_system_token(maya, app.id, ["services.call"])
+    c = TestClient(create_app(net))
+    evs = sse(c.post(f"/svc/agents/{x.id}/chat", headers=bearer(token), json={"message": "帮我算报销"}).text)
+
+    assert evs[0][0] == "session" and evs[-1] == ("done", {"text": "财务算好了：3000 元"})
+    prog = [d for e, d in evs if e == "progress"]
+    tasks = [(p["agent"], p["from"], p["status"]) for p in prog if p["kind"] == "task"]
+    assert tasks[0] == ("财务", "前台", "running") and ("财务", "前台", "completed") in tasks
+    assert len(tasks) == len(set(tasks))                                    # 状态没变不重复报
+    assert next(p for p in prog if p["kind"] == "task")["mission"] == "算一下报销额"
+    assert {"kind": "text", "task_id": prog[0]["task_id"], "agent": "财务", "text": "在查报销手册"} in prog
+    tool = next(p for p in prog if p["kind"] == "tool")
+    assert (tool["agent"], tool["tool"], tool["brief"]) == ("财务", "read_file", "公开/手册.md")
+    beats = [p for p in prog if p["kind"] == "heartbeat"]
+    assert beats and "财务" in beats[0]["working"] and beats[0]["elapsed_s"] >= 0
+    assert "工具输出原文" not in json.dumps(evs, ensure_ascii=False)
+    # 事件顺序：委托先于执行方的过程
+    kinds = [p["kind"] for p in prog if p["kind"] != "heartbeat"]
+    assert kinds.index("task") < kinds.index("tool")
+
+    # 别人的会话里的委托：不报给这个调用方
+    def fin_quick(call: ScriptCall) -> str:
+        call.use("read_file", {"path": "公开/手册.md"})
+        return "ok"
+    net.runtime.handler = by_agent(net, {"前台": desk_run, "财务": fin_quick})
+    other = net.open_service_session(x.id, actor=ann)
+    seen: dict[str, str] = {}
+    ctx = net.app_context(token, "services.call")
+    leaked = []
+    pos = net.bus.last_seq
+    net.send_message(other.id, "ann 的报销", actor=ann, background=False)
+    net.wait_quiet()
+    for ev in net.bus.wait(pos, 0.1):
+        leaked += net.svc_progress(ctx, evs[0][1]["session_id"], ev.type, ev.data, seen)
+    assert leaked == []

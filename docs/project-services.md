@@ -98,7 +98,7 @@
 
 ```
 GET  /svc/agents/{service}               名片：名称、说明
-POST /svc/agents/{service}/chat          {message, session_id?} → SSE: session → delta → done / error
+POST /svc/agents/{service}/chat          {message, session_id?} → SSE: session → delta / tool / progress → done / error
 POST /svc/sessions/{session_id}/interrupt 中断
 ```
 
