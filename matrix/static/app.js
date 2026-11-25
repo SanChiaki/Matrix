@@ -200,10 +200,10 @@ async function start() {
   document.querySelectorAll(".tab[data-view]").forEach((b) => b.addEventListener("click", () => { location.hash = b.dataset.view; }));
   setupMore();
   setupAccount();
-  $("#agent-new").addEventListener("click", () => { S.agentSel = null; renderAgentEditor(true); renderAgents(); });
+  $("#agent-new").addEventListener("click", () => { S.agentSel = null; S.agentNew = "agent"; renderAgentEditor(true); renderAgents(); });
   // 外部平台的 Agent（docs/remote-agents.md）：部署方登记了平台才出现入口
   api("/api/agent-platforms").then((ps) => { S.platforms = ps; $("#agent-remote").hidden = !ps.length; }).catch(() => { S.platforms = []; });
-  $("#agent-remote").addEventListener("click", () => { S.agentSel = null; renderRemoteNew(); renderAgents(); });
+  $("#agent-remote").addEventListener("click", () => { S.agentSel = null; S.agentNew = "remote"; renderAgentEditor(true); renderAgents(); });
   const upMine = (folder) => pickSkillPackage("/api/me/skills", folder).then(async (x) => {
     if (!x) return; S.skillSel = x.name; await loadMine(true); renderSkillsView();
   }).catch((e) => alert(e.message));
@@ -221,7 +221,7 @@ async function start() {
     if (S.devicePanel?.token && !confirm("设备授权码还没确认复制，离开后就再也看不到了。确定离开？")) return;
     S.devicePanel = "new"; renderDeviceDetail();
   });
-  $("#project-new").addEventListener("click", () => { S.projectSel = null; renderProjectsView(); renderProjectEditor(true); });
+  $("#project-new").addEventListener("click", () => { S.projectSel = null; S.projectNew = true; renderProjectsView(); renderProjectEditor(true); });
   $("#project-quick").addEventListener("click", () => { S.projectSel = null; S.newProject = true; location.hash = "projects"; });
   $("#tab-members").addEventListener("click", () => sideTab("members"));
   initTheme();
@@ -282,7 +282,7 @@ function route() {
     S.convId = hash;
     const cv = convOf(hash);
     if (inProject(cv)) {  // 项目的群聊和项目会话：项目页的“对话”标签
-      S.projectSel = cv.project_id; S.projectEdit = false; S.pendingTab = "chat";
+      S.projectSel = cv.project_id; S.projectEdit = false; S.projectNew = false; S.pendingTab = "chat";
       show("projects");
     } else show("chats");
     if (S.conv?.id !== hash) openConv(hash);
@@ -294,6 +294,7 @@ function route() {
     if (page?.[2]) S.pendingTab = decodeURIComponent(page[2]);
     S.convId = null; S.conv = null;
     S.projectSel = page ? page[1] : null; S.projectEdit = false;
+    if (page) S.projectNew = false;
     S.releaseSel = rel ? rel[1] : null;
     S.blueprintSel = bp ? bp[1] : null;
     if (!rel) S.releaseFrame = null;
@@ -772,7 +773,7 @@ function renderAgents() {
         ${!a.mine && !a.public ? '<span class="muted">共享项目里协作</span>' : a.chat_enabled ? chatBtn(`dm-${a.id}`, `和 ${a.name} 私聊`) : '<span class="muted">不开放私聊</span>'}</div>
     </div></li>`).join("") || '<li class="empty">还没有 Agent。点“新建 Agent”创建一个。</li>';
   $("#agent-list").querySelectorAll(".card-main").forEach((b) =>
-    b.addEventListener("click", () => { S.agentSel = b.dataset.id; renderAgents(); renderAgentEditor(); }));
+    b.addEventListener("click", () => { S.agentSel = b.dataset.id; S.agentNew = false; renderAgents(); renderAgentEditor(true); }));
 }
 
 function authorityBoxes(selected) {
@@ -841,9 +842,9 @@ async function renderPublicReadonly(box, a) {
 }
 
 // ---- 外部平台的 Agent（docs/remote-agents.md，不变量 28） ----
-function renderRemoteNew() {
+function renderRemoteNew(force = false) {
   const box = $("#agent-editor"), ps = S.platforms || [];
-  box.innerHTML = `<h2 class="panel-title">接入外部平台的 Agent</h2>
+  const { form: f, kept } = fillEditor(box, `<h2 class="panel-title">接入外部平台的 Agent</h2>
     <p class="muted">公司别的平台上建好的云端 Agent，接进来当成员：能被 @、接委托。它在自己的平台上跑，用它在平台上配的技能与连接器。</p>
     <form class="editor" id="remote-form">
       <div class="field"><label for="rf-platform">平台</label>
@@ -855,15 +856,15 @@ function renderRemoteNew() {
       <div class="field"><label for="rf-name">名称（可空，默认用平台上的）</label><input id="rf-name" name="name"></div>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">接入</button></div>
-    </form>`;
-  const f = $("#remote-form");
+    </form>`, "remote-form", "remote", force);
+  if (kept) return;
   f.platform.addEventListener("change", () => { $("#rf-key-label").textContent = ps.find((p) => p.id === f.platform.value)?.auth_label || "平台 API Key"; });
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
       const r = await api("/api/remote-agents", { method: "POST", body: {
         platform: f.platform.value, agent: f.agent.value.trim(), api_key: f.api_key.value, name: f.name.value.trim() } });
-      S.agentSel = r.id; await reload();
+      S.agentSel = r.id; S.agentNew = false; f.dataset.key = ""; await reload();
     } catch (err) { $(".error", f).textContent = err.message; }
   });
 }
@@ -962,16 +963,49 @@ function bindPublicSection(a) {
   }).catch(() => { box.textContent = ""; });
 }
 
-function renderAgentEditor(isNew = false) {
+// 编辑器里正在填的表单不能被重绘冲掉：后台事件（Agent 忙闲、任务、消息、断线重连）随时会让整页 render()。
+// 同一个对象的表单已经改过、或光标在输入框里，就只换表单以外的部分（标题、表单下面的各节），
+// 表单节点原样留着：值、焦点、光标位置都还在。force（用户自己点了新建 / 换选中 / 关闭）时照常重画。
+// 返回 { form, kept }：kept 为真时表单上的监听都还在，调用方不要再绑一遍。
+function fillEditor(box, html, formId, key, force = false) {
+  const old = box.querySelector(`#${formId}`);
+  const active = document.activeElement;
+  const busy = old && (old.dataset.dirty === "1" || (old.contains(active) && active.matches("input, textarea, select")));
+  if (!force && busy && old.dataset.key === key) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const fresh = tpl.content.querySelector(`#${formId}`);
+    if (fresh?.parentNode === tpl.content) {
+      const nodes = [...tpl.content.childNodes], i = nodes.indexOf(fresh);
+      [...box.childNodes].forEach((n) => { if (n !== old && !n.classList?.contains("modal-x")) n.remove(); });
+      old.before(...nodes.slice(0, i));
+      old.after(...nodes.slice(i + 1));
+      return { form: old, kept: true };
+    }
+  }
+  box.innerHTML = html;
+  const f = box.querySelector(`#${formId}`);
+  f.dataset.key = key;
+  const mark = () => { f.dataset.dirty = "1"; };
+  f.addEventListener("input", mark);
+  f.addEventListener("change", mark);
+  return { form: f, kept: false };
+}
+
+// 编辑哪个由状态决定：S.agentSel（已有的）或 S.agentNew（"agent" 新建 / "remote" 接入外部平台），
+// 不靠参数——render() 重绘时不知道用户刚才点的是“新建”。
+function renderAgentEditor(force = false) {
   if (S.devices === undefined) {  // 第一次打开时先取设备列表（用于“运行位置”）
-    api("/api/devices").then((d) => { S.devices = d; if (S.view === "agents") renderAgentEditor(isNew); })
+    api("/api/devices").then((d) => { S.devices = d; if (S.view === "agents") renderAgentEditor(); })
       .catch(() => { S.devices = []; });
   }
   const box = $("#agent-editor"), a = agent(S.agentSel);
+  if (!a && S.agentNew === "remote") { renderRemoteNew(force); return; }
+  const isNew = !a && S.agentNew === "agent";
   if (!a && !isNew) { box.innerHTML = placeholder("选择一个 Agent 编辑，或新建。"); return; }
   if (a && !a.mine) { renderAgentReadonly(box, a); return; }
   const x = a || { name: "", description: "", capabilities: [], authority: ["web.research", "connector.use"], chat_enabled: true };
-  box.innerHTML = `<h2 class="panel-title">${a ? esc(a.name) : "新建 Agent"}</h2>
+  const { form: f, kept } = fillEditor(box, `<h2 class="panel-title">${a ? esc(a.name) : "新建 Agent"}</h2>
     <p class="muted">${a ? "修改后点击保存生效。" : "定义它能做什么，以及最多能被授予哪些权限。"}</p>
     <form class="editor" id="agent-form">
       <div class="field"><label for="af-name">名称</label><input id="af-name" name="name" required minlength="2" value="${esc(x.name)}"></div>
@@ -1025,12 +1059,13 @@ function renderAgentEditor(isNew = false) {
     ${a?.remote ? remoteSection(a) : ""}
     ${a && !a.device_runtime && S.me?.assistant_id !== a.id ? publicSection(a) : ""}
     ${a && !a.public_status ? '<section class="pub-box" id="af-service-rounds" hidden></section>' : ""}
-    ${a && !a.public_status && a.owner_id === S.me?.id ? '<section class="pub-box" id="af-open-apps" hidden></section>' : ""}`;
+    ${a && !a.public_status && a.owner_id === S.me?.id ? '<section class="pub-box" id="af-open-apps" hidden></section>' : ""}`,
+    "agent-form", a ? a.id : "new", force);
   if (a && !a.public_status) renderServiceRounds(a);
   if (a && !a.public_status && a.owner_id === S.me?.id) renderOpenApps(a);
   if (a?.remote) bindRemoteSection(a);
   if (a && $("#af-public")) bindPublicSection(a);
-  const f = $("#agent-form");
+  if (kept) return;  // 表单留着没动，上面的监听都还在
   // 启用预置模型时：云侧只能选预置模型，端侧（用户自己的 harness）仍然自由填写
   const usePreset = () => !!f.model_preset && !f.device_runtime.value;
   const syncModelFields = () => {
@@ -1066,7 +1101,9 @@ function renderAgentEditor(isNew = false) {
     }
     try {
       const r = await api(a ? `/api/agents/${a.id}` : "/api/agents", { method: a ? "PATCH" : "POST", body });
-      S.agentSel = r.id; await reload();
+      S.agentSel = r.id; S.agentNew = false;
+      f.dataset.key = "";  // 保存成功：下一次重绘用服务端的新值重画
+      await reload();
     } catch (err) { $(".error", f).textContent = err.message; }
   });
   $("#af-del")?.addEventListener("click", async () => {
@@ -1178,9 +1215,9 @@ async function renderAppsView() {
 
 // ================= 项目管理 =================
 function renderProjectsView() {
-  if (S.newProject) S.projectSel = null;
+  if (S.newProject) { S.projectSel = null; S.projectNew = true; }
   renderProjects();
-  renderProjectEditor(S.newProject);
+  renderProjectEditor();
   renderProjectPage();
   if (chatShown()) renderThread();
   if (S.newProject) { S.newProject = false; $("#gf-name")?.focus(); }
@@ -1208,15 +1245,17 @@ function renderProjects() {
   renderServicesForMe();
 }
 
-function renderProjectEditor(isNew = false) {
+// 和 Agent 编辑器一样：新建 / 编辑由状态（S.projectNew、S.projectEdit）决定，正在填的表单不被重绘冲掉（见 fillEditor）
+function renderProjectEditor(force = false) {
   const box = $("#project-editor"), g = proj(S.projectSel);
+  const isNew = !g && S.projectNew;
   if (!isNew && !(g && S.projectEdit)) { box.innerHTML = placeholder("选择一个项目编辑成员，或新建。"); return; }
   if (g && !isHost(g)) { renderProjectGuest(box, g); return; }
   const x = g || { name: "", description: "", member_ids: [] };
   // 只能加入自己的 Agent；有别人的项目里别人的成员由他们自己加减（主持人可以移出）
   const mine = S.snap.agents.filter((a) => a.mine);
   const theirs = (x.member_ids || []).filter((id) => !agent(id)?.mine && !agent(id)?.public);
-  box.innerHTML = `<h2 class="panel-title">${g ? `项目配置 ${kindTag(g)}` : "新建项目"}</h2>
+  const { form: f, kept } = fillEditor(box, `<h2 class="panel-title">${g ? `项目配置 ${kindTag(g)}` : "新建项目"}</h2>
     <p class="muted">委托只能在项目成员之间进行。</p>
     <form class="editor" id="project-form">
       ${g ? "" : '<p class="hint">建好以后随时可以邀请别人：各自带上自己的 Agent，群聊和档案对所有参与者可见，委托只给两端的所有者看。</p>'}
@@ -1232,14 +1271,17 @@ function renderProjectEditor(isNew = false) {
       <div class="actions"><button type="submit">${g ? "保存" : "创建"}</button>
         ${g ? '<button type="button" class="danger" id="gf-del">删除项目</button>' : ""}</div>
     </form>
-    ${g ? '<div id="gf-people"></div>' : ""}`;
-  const f = $("#project-form");
+    ${g ? '<div id="gf-people"></div>' : ""}`, "project-form", g ? g.id : "new", force);
+  if (g) renderPeople($("#gf-people"), g);
+  if (kept) return;  // 表单留着没动，监听都还在
   f.addEventListener("submit", async (e) => {
     e.preventDefault();
     const body = { name: f.name.value.trim(), description: f.description.value.trim(),
       member_ids: [...theirs, ...[...f.querySelectorAll('[name="member"]:checked')].map((c) => c.value)] };
     try {
       const r = await api(g ? `/api/projects/${g.id}` : "/api/projects", { method: g ? "PATCH" : "POST", body });
+      S.projectNew = false;
+      f.dataset.key = "";  // 保存成功：下一次重绘用服务端的新值重画
       await reload();
       if (!g) location.hash = `project-${r.id}`;  // 新建后直接进它的项目页
     } catch (err) { $(".error", f).textContent = err.message; }
@@ -1249,7 +1291,6 @@ function renderProjectEditor(isNew = false) {
     try { await api(`/api/projects/${g.id}`, { method: "DELETE" }); location.hash = "projects"; await reload(); }
     catch (err) { $(".error", f).textContent = err.message; }
   });
-  if (g) renderPeople($("#gf-people"), g);
 }
 
 // ---- 项目页（主区域，#project-<项目>）：面包屑 + 四块（说明 / 资料 / 技能 / 连接器）+ 插件；右侧是“项目配置”（renderProjectEditor）
@@ -1347,7 +1388,7 @@ async function renderProjectPage(force = false) {
       embeds.map((x) => `<button type="button" role="tab" class="embed-tab" id="pt-embed-${esc(x.ref_id)}" data-tab="embed:${esc(x.ref_id)}"
         aria-selected="${st.tab === `embed:${x.ref_id}`}" aria-controls="pp-panel" title="外部页面：${esc(x.service)}">${ICON.link}${esc(x.label)}</button>`).join("")}</div>
     <div id="pp-panel" role="tabpanel" aria-labelledby="pt-${st.tab}"></div>`;
-  $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(); });
+  $("#pp-config", page).addEventListener("click", () => { S.projectEdit = true; renderProjectEditor(true); });
   page.querySelectorAll("[data-tab]").forEach((b) => b.addEventListener("click", () => {
     if (st.tab === "chat" && b.dataset.tab !== "chat") {  // 离开对话：地址回到项目页，收起成员面板
       S.convId = null; $(".chat-side").classList.remove("open");
@@ -4698,10 +4739,10 @@ function devConnsHtml(d) {
 const MODAL_CLOSE = {
   "net-detail": () => { S.sel = null; renderGraph(); },
   "board-detail": () => { S.reqSel = null; S.taskSel = null; renderBoard(); },
-  "agent-editor": () => { S.agentSel = null; renderAgents(); renderAgentEditor(); },
+  "agent-editor": () => { S.agentSel = null; S.agentNew = false; renderAgents(); renderAgentEditor(true); },
   "skill-editor": () => { S.skillSel = null; renderSkillsView(); },
   "conn-detail": () => { S.connSel = null; S.connPanel = null; $("#conn-detail").dataset.sig = ""; renderConnectorsView(); },
-  "project-editor": () => { S.projectEdit = false; renderProjectEditor(); },
+  "project-editor": () => { S.projectEdit = false; S.projectNew = false; renderProjectEditor(true); },
   "device-detail": () => {
     S.devicePanel = null; S.deviceSel = null;
     if (location.hash.startsWith("#pair=")) history.replaceState(null, "", "#devices");
