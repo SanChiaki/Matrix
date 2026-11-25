@@ -39,8 +39,8 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_
                      SUBSCRIPTIONS_PER_AGENT,
                      SKILLS_PER_AGENT, SKILLS_TOTAL, TOOL_AUTHORITY, AgentNode, Approval, Connection, ConnectorNeed,
                      Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, ProjectService, Proposal, Question,
-                     Release, ResourceRef,
-                     Schedule, Seat, Task, TaskStatus, UserRequest, attachment_rel, new_id, seat_id)
+                     Release, ResourceRef, SandboxRecord,
+                     Schedule, Seat, Task, TaskStatus, TERMINAL, UserRequest, attachment_rel, new_id, seat_id)
 from .protocol import (build_notice_prompt, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat, format_service_archive,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
@@ -56,14 +56,24 @@ from .vault import Vault, VaultError
 from .auth import Pairings
 from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
+from .checkpoints import (BLOB_MAX, SHA_RE, CheckpointStore, ContentStore, Uploads, pack_session, unit_rel)
+from .egress_ca import EgressCA
+from .gateway import BUDGET, PLACEHOLDER as GATEWAY_PLACEHOLDER, Gateway
+from urllib.parse import urlsplit
+from .sandboxes import (CONNECT_TIMEOUT_S, SandboxError, SandboxHost, SandboxHub, SandboxProvider, SandboxRuntime,
+                        SandboxSpec, sandbox_config)
 from .homedir import HomeMount
 from .model_catalog import CatalogConflict, ModelCatalog, llm_config
 from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, material_bytes, material_file, ApprovalBridge, ConnectorBridge, QuestionBridge, RunRequest, RunResult,
-                      RuntimeCapabilities, ToolBridge)
+                      RuntimeCapabilities, ToolBridge, adopt_dsh_session)
 from .store import Store
 from . import remote_agents as remote
 from .apps import AppsMixin
 from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage, tokens as usage_tokens
+
+HOME_FILE_MAX = 100_000_000     # 沙箱方式：私有目录里一个文件的改动最多收多少字节
+HOME_TOTAL_MAX = 500_000_000    # 一轮私有目录的改动合计
+HOME_CHANGES_MAX = 5000         # 一轮最多改多少个文件
 
 
 @dataclass
@@ -72,7 +82,7 @@ class Limits:
     max_revisions: int = 3          # 一个任务最多被退回修改几次
     max_retries: int = 3            # 一个失败任务最多被续接几次
     tool_timeout_s: float = 900     # 一次网络工具调用最长等多久（委托的运行超时与次数上限在 Agent 设置里）
-    approval_timeout_s: float = 900  # 所有者多久没审批就作废（dsh 那次调用按“取消”处理）
+    approval_timeout_s: float = 900  # 交给端侧审批桥的超时（端侧审批本身不按时间作废，只随设备断连结束；云侧不审批）
     connector_ask_timeout_s: float = 540  # 共享项目里用连接器前问所有者，最多等多久（短于连接器桥的回调超时）
     question_timeout_s: float = 3600  # Agent 提的问题最多等多久没人回答就作废（dsh 那次调用拿到“没有得到回答”）
     max_schedules: int = 20         # 每个人最多几个定时
@@ -130,6 +140,9 @@ class ExecContext:
     plugin_scope: list[str] | None = None  # 这一轮能用的插件（服务里是主持人勾的那些）；None = 项目里全部
     # 外部平台 Agent：工作目录在平台上，委托任务里也有 send_file（产物没法在交付时从工作目录拷给委托方）
     remote: bool = False
+    # 云侧沙箱方式：私有目录在控制面这边的暂存副本（材料从这里出，客户端报的改动先落在这里，轮次结束三方合并写回）
+    home_stage: Path | None = None
+    gateway_token: str = ""        # 沙箱方式（有出口网关时）：这一轮的网关令牌，轮次结束作废
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     @property
@@ -212,7 +225,10 @@ class Network(AppsMixin):
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
                  plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None,
                  fetch: FetchConfig | None = None, platforms: "remote.PlatformCatalog | None" = None,
-                 remote_driver: Callable[[str], Any] | None = None):
+                 remote_driver: Callable[[str], Any] | None = None, sandbox: SandboxProvider | None = None,
+                 sandbox_url: str | None = None, sandbox_limits: dict[str, Any] | None = None):
+        """sandbox：云侧执行面的沙箱后端（docs/cloud-runtime.md 阶段 1a，开关 MATRIX_CLOUD_SANDBOX，默认关）。
+        None = 照旧：云侧 Agent 是服务的子进程。sandbox_url：沙箱客户端连回来的地址；sandbox_limits：并发与保留期等。"""
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -262,14 +278,19 @@ class Network(AppsMixin):
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
+        self._waking = 0                   # 一轮结束后正在唤醒排队的沙箱运行（还没登记进 _running）：wait_quiet 也要等
         self._stops: dict[str, threading.Event] = {}  # 正在跑的一轮 -> 人终止它的信号（stop_run）
         self._approval_waits: dict[str, threading.Event] = {}
         self._question_waits: dict[str, threading.Event] = {}
         self._question_holders: dict[str, str] = {}  # 问题 id → 送到的委托方上下文（席位 id 或上一级任务 id），只它能答
         self._home_locks: dict[str, threading.Lock] = {}
+        # 改成每个执行单元一个 dsh 状态目录之前，云侧 dsh 的会话都在服务进程的 HOME 下（共用的 ~/.dsh）：
+        # 旧会话第一次在新方式下运行时从这里搬（_adopt_dsh_state）。测试里换成临时目录
+        self.legacy_dsh_home = Path.home()
         self._lock = self.store.lock
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="matrix-round")
         self._migrate_skill_packs()
+        self._setup_sandbox(sandbox, sandbox_url, sandbox_limits)
 
     # ================= 归属与可见性 =================
     # actor 是发起操作的用户 id；None 表示系统内部或测试，不做归属检查。
@@ -3026,6 +3047,8 @@ class Network(AppsMixin):
                 try:
                     self.run_schedules()
                     self.services.reap()
+                    if self.sandbox is not None:  # 沙箱对账、空闲停、保留期销毁；每 10 分钟清一次内容存储
+                        self.reconcile_sandboxes(gc=int(time.time() // 60) % 10 == 0)
                 except Exception as e:  # noqa: BLE001 —— 定时触发出错不能拖垮服务
                     print(f"[matrix] 定时触发出错：{e}", flush=True)
         threading.Thread(target=loop, name="matrix-schedules", daemon=True).start()
@@ -5212,7 +5235,7 @@ class Network(AppsMixin):
         deadline = time.time() + timeout
         while time.time() < deadline:
             with self._lock:
-                if not self._running:
+                if not self._running and not self._waking:
                     return
             time.sleep(0.02)
         raise TimeoutError(f"网络未在 {timeout}s 内静止：{sorted(self._running)}")
@@ -5261,10 +5284,29 @@ class Network(AppsMixin):
             if agent is not None and seat is not None and conv is not None and self.runtime_for(agent) is None:
                 self._note_offline(conv, agent)  # 不在线：收件箱保留，只提醒一次，不调度
                 return
+        full, evict = False, []
         with self._lock:
             if cid in self._running or not self._eligible(kind, cid):
                 return
-            self._running.add(cid)
+            holder = self._holder(kind, cid)
+            agent = self.store.agents.get((holder.delegatee_id or "") if isinstance(holder, Task) else holder.agent_id)
+            if self._sandboxed(agent):  # 云侧执行面：先占一个沙箱的位置，满了是等待不是失败
+                ok, evict = self._sandbox_admit(kind, cid, agent)
+                full = not ok
+                if ok and isinstance(holder, Task) and holder.status == TaskStatus.WAITING:
+                    holder.status = TaskStatus.RUNNING
+                    self.store.save()
+            if not full:
+                self._running.add(cid)
+        for unit in evict:  # 给它腾位置：停掉最久没用的空闲沙箱（目录保留）
+            with self._lock:  # 放锁之后它可能又被调度起来了：那就不停（停了会打断它刚开始的一轮）
+                rec = self.store.sandboxes.get(unit)
+                if rec is None or rec.desired != "stopped" or self._cid_of(unit) in self._running:
+                    continue
+                self.sandbox.stop(unit)
+        if full:
+            self._sandbox_full(kind, cid, agent)
+            return
         self._refresh_conv(self._conv_id_of(kind, cid))
         self._pool.submit(self._round_safe, kind, cid)
 
@@ -5292,11 +5334,21 @@ class Network(AppsMixin):
         finally:
             with self._lock:  # 判断与出队放在同一把锁里，wait_quiet 不会在两轮之间误判为静止
                 again = self._eligible(kind, cid)
+                wake = self.sandbox is not None and not again
                 if not again:
                     self._running.discard(cid)
+                if wake:  # 出队与唤醒排队的运行之间同样不算静止：先记上，唤醒把它们登记进 _running 后再减
+                    self._waking += 1
             if again:
                 self._pool.submit(self._round_safe, kind, cid)
-            self._refresh_conv(self._conv_id_of(kind, cid))
+            try:
+                self._refresh_conv(self._conv_id_of(kind, cid))
+                if wake:
+                    self._sandbox_wake()
+            finally:
+                if wake:
+                    with self._lock:
+                        self._waking -= 1
 
     def _internal_error(self, kind: str, cid: str, e: Exception) -> None:
         if kind == "seat":
@@ -5419,6 +5471,8 @@ class Network(AppsMixin):
             return rt if rt is not None and self._serves(rt, agent) else None
         if agent is not None and agent.remote:  # 外部平台：平台没在目录里时那一轮按失败说明原因（见 _remote_call）
             return self.remote_runtime
+        if self.sandbox is not None and agent is not None:
+            return self.sandbox_runtime
         return self.runtime
 
     @staticmethod
@@ -5484,8 +5538,12 @@ class Network(AppsMixin):
         seat = conv.seats[agent_id]
         project = self.store.projects.get(conv.project_id) if conv.project_id else None
         items = self._drain(seat)
-        self._flow_reset(seat)
         sid = seat_id(conv.id, agent_id)
+        if self._sandboxed(agent):
+            self._sandbox_import("seat", sid, seat, agent)
+        elif not agent.device_runtime:
+            self._adopt_dsh_state(seat, "seat", sid, self.store.root / seat.workdir)
+        self._flow_reset(seat)
         with self._lock:
             home = self._is_home(conv)
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
@@ -5555,7 +5613,8 @@ class Network(AppsMixin):
                                    archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
-                                   ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals)
+                                   ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals,
+                                   cloud=not agent.device_runtime)
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
@@ -5638,6 +5697,10 @@ class Network(AppsMixin):
             self._wait_for_device(task)
             return
         items = self._drain(task)
+        if self._sandboxed(agent):
+            self._sandbox_import("task", task.id, task, agent)
+        elif not agent.device_runtime:
+            self._adopt_dsh_state(task, "task", task.id, self.store.task_dir(task.id))
         self._flow_reset(task)
         ctx = self._task_ctx(task, agent, g)
         inbox, _ = self._render_inbox(items, ctx)
@@ -5645,7 +5708,8 @@ class Network(AppsMixin):
         home_writable = "file.write" in ctx.authority and not self._home_frozen(ctx, agent)
         mount_home = self.home_mounted(g, agent)
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
-        workdir = self.store.task_dir(task.id)
+        # 沙箱方式：任务目录在执行面里，这里只是它的逻辑路径（不在数据目录里建）
+        workdir = self.store.task_path(task.id) if self._sandboxed(agent) else self.store.task_dir(task.id)
         with self._lock:
             svc = self.store.project_services.get(ctx.svc or "")
             archive_rev = g.archive_rev + (svc.version * 1_000_000_000 if svc is not None else 0)
@@ -5657,8 +5721,9 @@ class Network(AppsMixin):
                                             home_hidden=hidden, home_mixed=mixed,
                                             home_frozen=self._others(ctx, agent),
                                             ask=self.capabilities(agent).questions,
-                                            goals=self.capabilities(agent).goals)
-            workdir = self._write_task_files(task, knowledge)
+                                            goals=self.capabilities(agent).goals, cloud=not agent.device_runtime)
+            if not self._sandboxed(agent):  # 沙箱方式：DELEGATION.json 与 shared/ 是材料（_task_materials）
+                workdir = self._write_task_files(task, knowledge)
             prompt = task.prompt + (f"\n\n{inbox}" if inbox else "")
         else:
             prompt = build_notice_prompt("\n\n".join(filter(None, [inbox, archive])))
@@ -5768,9 +5833,10 @@ class Network(AppsMixin):
     # 委托产物：执行者工作目录里自己写出来的文件，交付时快照进委托方工作目录的 deliveries/<task_id>/。
     # 只给直接委托方（不变量 7、9）；之前委托方只能越过沙箱直接读别人的任务目录（沙箱只管写不管读）。
     def _delivery_dir(self, task: Task) -> Path | None:
-        """调用方持有锁。委托方的工作目录（云侧）下的 deliveries/<task_id>/；委托方在端侧时 None。"""
+        """调用方持有锁。委托方的工作目录（云侧）下的 deliveries/<task_id>/；委托方在端侧、或在沙箱里（产物作为材料
+        下发，见 _delivery_materials）时 None。"""
         delegator = self.store.agents.get(task.delegator_id)
-        if delegator is None or delegator.device_runtime:
+        if delegator is None or delegator.device_runtime or self._sandboxed(delegator):
             return None
         if task.parent_task_id:
             return self.store.task_dir(task.parent_task_id) / DELIVERIES / task.id
@@ -5782,6 +5848,9 @@ class Network(AppsMixin):
         """调用方不持有锁。返回记进 task.result 的产物说明。"""
         if agent.device_runtime:
             return {"files": [], "files_note": "执行者在端侧：产物留在它的设备上，需要的文件请它用 publish_file 发布"}
+        delegator = self.store.agents.get(task.delegator_id)
+        if self._sandboxed(agent) and (dst is not None or self._sandboxed(delegator)):
+            return self._hand_over_checkpoint(task, dst)
         if dst is None:
             return {"files": [], "files_note": "委托方在端侧：产物没有放进它的工作目录，可在任务详情里下载"}
         files, skipped = workdir.snapshot(self.store.task_dir(task.id), dst)
@@ -5813,15 +5882,38 @@ class Network(AppsMixin):
 
     def workdir_files(self, kind: str, ref: str, actor: str | None = None) -> dict[str, Any]:
         root = self._workdir_of(kind, ref, actor)
+        unit = self._ckpt_unit(kind, ref)
+        if unit is not None:  # 沙箱方式：看的是上一轮结束时的检查点，不读执行面的磁盘
+            ck = self.checkpoints.load(unit)
+            files = [{"path": f["path"], "size": f["size"], "updated_at": ck.at, **({} if f["stored"] else {"stored": False})}
+                     for f in (ck.files if ck else [])][:workdir.MAX_FILES]
+            return {"files": files, "note": "上一轮结束时的检查点"}
         if root is None:
             return {"files": [], "note": "在端侧运行：工作目录在所有者的电脑上"}
         return {"files": workdir.listing(root)}
 
     def workdir_file(self, kind: str, ref: str, path: str, actor: str | None = None) -> Path:
+        return self.workdir_download(kind, ref, path, actor)[0]
+
+    def workdir_download(self, kind: str, ref: str, path: str, actor: str | None = None) -> tuple[Path, str]:
+        """人下载工作目录里的一个产物：（文件, 下载时的文件名）。沙箱方式读检查点；超过检查点上限、只记了清单的，
+        沙箱在时经客户端回读，不在就取不到。"""
         root = self._workdir_of(kind, ref, actor)
+        unit = self._ckpt_unit(kind, ref)
+        if unit is not None:
+            ck = self.checkpoints.load(unit)
+            item = next((f for f in (ck.files if ck else []) if f["path"] == path.strip().lstrip("/")), None)
+            self._check(item is not None, f"file {path}")
+            name = Path(item["path"]).name
+            if item["stored"] and self.content.has(item["sha"], item["size"]):
+                return self.content.path(item["sha"]), name
+            dev = self.sandbox_hub.live(unit)
+            got = dev.fetch_path(None, item["path"]) if dev is not None else None
+            self._check(got is not None and not got[1], f"file {path}（超过检查点上限，沙箱不在时取不到）")
+            return self.content.path(self.content.put_bytes(got[0])), name
         f = workdir.resolve(root, path) if root is not None else None
         self._check(f is not None, f"file {path}")
-        return f
+        return f, f.name
 
     def _wait_for_device(self, task: Task) -> None:
         """端侧不可达：任务进入等待。委托方看到它在等设备，而不是失败；不通知、不消耗重试。"""
@@ -5930,7 +6022,525 @@ class Network(AppsMixin):
                 wake.append(f"{'插件' if p.kind == 'plugin' else ''}提议 {p.name} 已{'批准' if p.status == 'approved' else '拒绝'}")
         return "\n\n".join(blocks), wake
 
+    # ================= 云侧执行面：沙箱方式（docs/cloud-runtime.md 阶段 1a） =================
+    # 开关打开时（MATRIX_CLOUD_SANDBOX），云侧 Agent 的一轮不再是服务的子进程：引擎向后端要这个执行单元（席位或委托）的沙箱，
+    # 沙箱里的客户端（端侧连接器的代码）凭一次性启动令牌连回来，这一轮经端侧那套协议派给它：材料清单 + 缓存、工具与提问回传；
+    # 轮次结束客户端交产物清单、会话包与私有目录的改动，控制面存检查点、三方合并私有目录。默认关：下面的代码都不走。
+    def _setup_sandbox(self, provider: SandboxProvider | None, url: str | None, limits: dict[str, Any] | None) -> None:
+        conf = sandbox_config()
+        conf.update(limits or {})
+        self.sandbox_limits = conf
+        self.sandbox = provider
+        self.content = ContentStore(self.store.root / "content")
+        self.checkpoints = CheckpointStore(self.store.root / "checkpoints", self.content, limit=int(conf["checkpoint_limit"]))
+        self.sandbox_hub = SandboxHub(Uploads(self.content))
+        self.gateway: Gateway | None = None
+        self.gateway_address: tuple[str, int] | None = None
+        self._run_log_lock = threading.Lock()
+        if provider is None:
+            return
+        root = Path(conf["root"]).resolve() if conf.get("root") else self.store.root / "exec"
+        if getattr(provider, "uses_gateway", False):   # 阶段 2a：沙箱到控制面与外面的全部流量都只到出口网关
+            host, _, port = str(conf.get("gateway_listen") or "127.0.0.1:0").rpartition(":")
+            core = urlsplit(self.tool_url)
+            ch, _, cp = str(conf.get("gateway_core") or f"{core.hostname or '127.0.0.1'}:{core.port or 80}").rpartition(":")
+            tls = str(conf.get("gateway_tls") or "on").lower() not in ("off", "0", "false", "no")
+            self.gateway = Gateway((ch, int(cp)), self.fetch.policy,
+                                   [m for m in str(conf.get("gateway_mirrors") or "").split(",") if m.strip()],
+                                   log_dir=self.store.root / "gateway",
+                                   # 2b：解开沙箱的 HTTPS，按方法、URL 与出网预算逐个请求放行（MATRIX_GATEWAY_TLS=off 退回 2a 的按主机隧道）
+                                   ca=EgressCA(self.store.root / "gateway" / "ca") if tls else None,
+                                   write_hosts=[w for w in str(conf.get("gateway_write_hosts") or "").split(",") if w.strip()],
+                                   budget=int(conf.get("gateway_budget") or BUDGET), on_budget=self._gateway_budget)
+            self.gateway_address = self.gateway.start(host or "127.0.0.1", int(port))
+        if self.gateway_address is not None:  # 沙箱客户端连网关（网关只把这一个端点转给核心）
+            url = f"ws://{self.gateway_address[0]}:{self.gateway_address[1]}/api/sandbox/connect"
+        provider.bind(SandboxHost(hub=self.sandbox_hub, root=root, runtime=self.runtime,
+                                  connect_url=url or self.tool_url.rsplit("/internal/", 1)[0].replace("http", "ws", 1)
+                                  + "/api/sandbox/connect",
+                                  workdir_of=self._unit_workdir, dsh_bin=getattr(self.runtime, "dsh_bin", "dsh"),
+                                  forbidden=(self.store.root, root)))
+        self.sandbox_runtime = SandboxRuntime(self.runtime, provider, self._sandbox_connect, self._run_log)
+        self.reconcile_sandboxes(grace_s=0)   # 启动时对账：上一个进程留下的沙箱结束掉，记着运行中的改成已停
+
+    def _sandboxed(self, agent: AgentNode | None) -> bool:
+        """这个 Agent 的一轮在沙箱里跑：开关打开、是云侧 Agent（外部平台 Agent 在平台上跑，不算）。"""
+        return self.sandbox is not None and agent is not None and not agent.device_runtime and not agent.remote
+
+    @staticmethod
+    def _unit(ctx: ExecContext) -> str:
+        return f"{ctx.kind}:{ctx.id}"
+
+    @staticmethod
+    def _cid_of(unit: str) -> str:
+        return unit.partition(":")[2]
+
+    def _ckpt_unit(self, kind: str, ref: str) -> str | None:
+        """人看工作目录：执行者在沙箱方式下时读它的检查点。"""
+        if self.sandbox is None:
+            return None
+        with self._lock:
+            if kind == "task":
+                t = self.store.tasks.get(ref)
+                a = self.store.agents.get(t.delegatee_id or "") if t else None
+            else:
+                a = self.store.agents.get(ref.partition("/")[2])
+        return f"{kind}:{ref}" if self._sandboxed(a) else None
+
+    def _unit_workdir(self, unit: str) -> Path:
+        """执行单元的逻辑工作目录（沙箱里看到的绝对路径）：台账里记下的那个，永远不变。"""
+        rec = self.store.sandboxes.get(unit)
+        if rec is not None:
+            return Path(rec.workdir)
+        kind, _, cid = unit.partition(":")
+        return self._logical_workdir(kind, cid)
+
+    def _logical_workdir(self, kind: str, cid: str) -> Path:
+        """调用方持有锁。和旧方式完全相同的绝对路径（docs/cloud-runtime.md 4.3）：旧单元迁过来续得上会话，回退也续得上。"""
+        if kind == "task":
+            return self.store.task_path(cid).resolve()
+        holder = self._holder("seat", cid)
+        rel = holder.workdir if isinstance(holder, Seat) else f"conversations/{cid}"
+        return (self.store.root / rel).resolve()
+
+    def _sandbox_record(self, kind: str, cid: str, agent: AgentNode) -> SandboxRecord:
+        """调用方持有锁。执行单元的台账，第一次用到时建（定下逻辑工作目录）。"""
+        unit = f"{kind}:{cid}"
+        rec = self.store.sandboxes.get(unit)
+        if rec is None:
+            rec = SandboxRecord(unit=unit, agent_id=agent.id, owner_id=agent.owner_id,
+                                workdir=str(self._logical_workdir(kind, cid)))
+            self.store.sandboxes[unit] = rec
+        return rec
+
+    def _sandbox_admit(self, kind: str, cid: str, agent: AgentNode) -> tuple[bool, list[str]]:
+        """调用方持有锁。给这个执行单元占一个沙箱的位置：（能不能跑, 要停掉腾位置的空闲沙箱）。
+        全局与每个用户各有并发上限；满了先停最久没用的空闲沙箱，没有空闲的就等（不是失败）。"""
+        rec = self._sandbox_record(kind, cid, agent)
+        now = time.time()
+        if rec.desired == "running":
+            rec.last_used = now
+            return True, []
+        live = [r for r in self.store.sandboxes.values() if r.desired == "running"]
+        mine = [r for r in live if r.owner_id == agent.owner_id]
+        pool = mine if len(mine) >= int(self.sandbox_limits["per_user"]) else \
+            live if len(live) >= int(self.sandbox_limits["max"]) else None
+        evict: list[str] = []
+        if pool is not None:
+            idle = sorted((r for r in pool if self._cid_of(r.unit) not in self._running), key=lambda r: r.last_used)
+            if not idle:
+                return False, []
+            idle[0].desired = "stopped"
+            evict.append(idle[0].unit)
+        rec.desired, rec.last_used = "running", now
+        self.store.save()
+        return True, evict
+
+    def _sandbox_full(self, kind: str, cid: str, agent: AgentNode | None) -> None:
+        """云侧执行面满了：委托回到等待（不失败、不消耗重试），席位的消息排队、给所有者留一条说明。"""
+        if kind == "task":
+            task = self.store.tasks.get(cid)
+            if task is not None:
+                self._wait_for_device(task)
+            return
+        conv = self.store.conversations.get(cid.partition("/")[0])
+        if conv is None or agent is None:
+            return
+        text = f"{agent.name}：云侧执行面现在满了（并发上限），消息已排队，有空位后处理。"
+        if any(m.role == "system" and m.text == text for m in conv.messages[-3:]):
+            return
+        self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, text=text,
+                                   audience=[agent.owner_id] if agent.owner_id else []))
+
+    def _sandbox_wake(self) -> None:
+        """一轮结束、有位置腾出来了：排队的委托与席位重新调度（满了的会再回到等待）。"""
+        with self._lock:
+            tasks = [t.id for t in self.store.tasks.values() if t.status == TaskStatus.WAITING and t.inbox
+                     and t.id not in self._running and self._sandboxed(self.store.agents.get(t.delegatee_id or ""))]
+            seats = [seat_id(c.id, a) for c in self.store.conversations.values() for a, st in c.seats.items()
+                     if st.inbox and not st.blocked and seat_id(c.id, a) not in self._running
+                     and self._sandboxed(self.store.agents.get(a))]
+        for t in tasks:
+            self._kick("task", t)
+        for sid in seats:
+            self._kick("seat", sid)
+
+    def _sandbox_connect(self, unit: str) -> DeviceRuntime:
+        """要这个执行单元的沙箱（幂等）并等它的客户端连上。沙箱不在了就新建一代：发新的启动令牌，旧的凭证随之作废。"""
+        with self._lock:
+            rec = self.store.sandboxes[unit]
+            rec.desired, rec.last_used = "running", time.time()
+        live = self.sandbox_hub.live(unit)
+        st = self.sandbox.status(unit)
+        if live is not None and st.state == "running" and live.generation == rec.generation == st.generation:
+            return live
+        with self._lock:
+            rec.generation += 1
+            gen = rec.generation
+            self.store.save()
+        print(f"[matrix] 新建 {unit} 的沙箱（第 {gen} 代）：之前 连接={'无' if live is None else live.generation} "
+              f"沙箱={st.state}/{st.generation}", file=sys.stderr, flush=True)
+        token = self.sandbox_hub.issue(unit, gen)
+        spec = SandboxSpec(unit_id=unit, owner_id=rec.owner_id, agent_id=rec.agent_id, generation=gen, boot_token=token)
+        try:
+            st = self.sandbox.ensure(spec)
+            if self.gateway is not None:   # docker 后端报得出沙箱的地址：网关据此核对请求来源
+                self.gateway.bind(unit, getattr(st, "address", "") or None)
+        except SandboxError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise SandboxError(f"TRANSPORT 沙箱起不来：{e}") from e
+        rt = self.sandbox_hub.wait(unit, gen, float(self.sandbox_limits.get("connect_timeout_s", CONNECT_TIMEOUT_S)))
+        if rt is None:
+            self.sandbox.stop(unit)
+            raise SandboxError("TRANSPORT 沙箱的客户端没有连上")
+        return rt
+
+    def _run_log(self, unit: str, ev: dict[str, Any]) -> None:
+        """dsh 的事件存在控制面这边（docs/cloud-runtime.md 9.3），不在沙箱的工作目录里。"""
+        path = self.store.root / "run-logs" / unit_rel(unit) / "dsh-events.jsonl"
+        try:
+            line = json.dumps(ev, ensure_ascii=False)
+            with self._run_log_lock:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except (OSError, TypeError, ValueError):
+            pass
+
+    def _sandbox_import(self, kind: str, cid: str, holder: Seat | Task, agent: AgentNode) -> None:
+        """执行单元第一次在沙箱方式下运行（docs/cloud-runtime.md 10.2 第 2、3 步，按需）：旧工作目录的产物与别人交来的
+        deliveries/ 进检查点，dsh 会话从阶段 0 的状态目录（或更早的共用 ~/.dsh）打成包进检查点；原目录都不删。
+        会话找不到的清掉会话 id，走“没有会话”的流程。"""
+        unit = f"{kind}:{cid}"
+        with self._lock:
+            rec = self._sandbox_record(kind, cid, agent)
+            if rec.imported:
+                return
+            old = Path(rec.workdir)
+            delivered = [t for t in self.store.tasks.values() if t.result and t.result.get("files")
+                         and "files_ckpt" not in t.result and self._delivered_to(t) == unit]
+            sid = holder.dsh_session_id
+        if old.is_dir() and (self.checkpoints.load(unit) is None or rec.exported):  # 导出回退过：原目录是新的
+            ck = self.checkpoints.import_dir(unit, old)
+            if ck.skipped:
+                print(f"[matrix] {unit} 的旧工作目录有 {len(ck.skipped)} 个文件超过检查点上限，只记了清单（原处还在）",
+                      file=sys.stderr)
+        for t in delivered:
+            src = old / DELIVERIES / t.id
+            files = []
+            for rel in workdir.outputs(src, top=False) if src.is_dir() else []:
+                sha, size = self.content.put_file(src / rel)
+                files.append({"path": rel.as_posix(), "sha": sha, "size": size})
+            with self._lock:
+                t.result["files_ckpt"] = files
+        if sid:
+            data = None
+            for home in (self.store.unit_state_dir(kind, cid), self.legacy_dsh_home):
+                try:
+                    data = pack_session(home, old, sid)
+                except OSError:
+                    data = None
+                if data:
+                    break
+            if data and len(data) <= BLOB_MAX:
+                self.checkpoints.add_session(unit, self.content.put_bytes(data), len(data), sid)
+            else:
+                with self._lock:
+                    self._new_session(holder)
+                print(f"[matrix] {unit} 的 dsh 会话 {sid} 找不到，换新会话", file=sys.stderr)
+        with self._lock:
+            rec.imported, rec.exported = True, False
+            self.store.save()
+
+    def _delivered_to(self, task: Task) -> str:
+        """调用方持有锁。委托产物交给谁：委托方的执行单元。"""
+        if task.parent_task_id:
+            return f"task:{task.parent_task_id}"
+        return f"seat:{seat_id(task.conversation_id, task.delegator_id)}"
+
+    def _hand_over_checkpoint(self, task: Task, dst: Path | None) -> dict[str, Any]:
+        """执行者在沙箱里：交付读它的检查点（不读执行面的磁盘，沙箱不在也行）。委托方也在沙箱里时，产物记进 task.result，
+        委托方下一轮作为材料放进它工作目录的 deliveries/<任务>/；委托方是旧方式时拷进它的工作目录。"""
+        ck = self.checkpoints.load(f"task:{task.id}")
+        files, total, skipped = [], 0, 0
+        for f in ck.files if ck else []:
+            if not f["stored"] or len(files) >= workdir.MAX_FILES or total + f["size"] > workdir.MAX_BYTES \
+                    or not self.content.has(f["sha"], f["size"]):
+                skipped += 1
+                continue
+            files.append({"path": f["path"], "sha": f["sha"], "size": f["size"]})
+            total += f["size"]
+        out: dict[str, Any] = {"files": [f["path"] for f in files], "files_dir": f"{DELIVERIES}/{task.id}"}
+        if dst is not None:
+            shutil.rmtree(dst, ignore_errors=True)
+            for f in files:
+                (dst / f["path"]).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(self.content.path(f["sha"]), dst / f["path"])
+        else:
+            out["files_ckpt"] = files
+        if skipped:
+            out["files_note"] = f"另有 {skipped} 个文件超出上限（{workdir.MAX_FILES} 个 / {workdir.MAX_BYTES // 1_000_000} MB）没有拷贝"
+        return out
+
+    def _sandbox_materials(self, ctx: ExecContext) -> list[Material]:
+        """沙箱方式另要下发的材料：私有目录的可挂部分、委托说明与共享知识、别人交来的产物。"""
+        out: list[Material] = []
+        if ctx.home_stage is not None:
+            home = ctx.home_stage / HOME_DIR
+            out += [material_file(f"{HOME_DIR}/{rel}", home / rel) for rel in sorted(homedir.fingerprint(home))]
+        with self._lock:
+            if ctx.kind == "task" and (t := self.store.tasks.get(ctx.id)) is not None:
+                out.append(material_bytes("DELEGATION.json", json.dumps({
+                    "task_id": t.id, "delegator": t.delegator_id, "delegatee": t.delegatee_id,
+                    "mission": t.delegation.mission, "expected_outcome": t.delegation.expected_outcome,
+                    "granted_authority": t.granted_authority, "effective_constraints": t.effective_constraints,
+                }, ensure_ascii=False, indent=2).encode()))
+                out += [material_bytes(f"shared/{_safe(k.key)}.md", f"# {k.title}\n\n{k.content}\n".encode())
+                        for k in self.store.knowledge.values() if self._can_see(ctx, k)]
+            unit = self._unit(ctx)
+            for t in self.store.tasks.values():
+                if t.result and t.result.get("files_ckpt") and self._delivered_to(t) == unit:
+                    out += [Material(path=f"{DELIVERIES}/{t.id}/{f['path']}", sha=f["sha"], size=f["size"],
+                                     file=self.content.path(f["sha"]))
+                            for f in t.result["files_ckpt"] if self.content.has(f["sha"], f["size"])]
+        return out
+
+    def _sandbox_request(self, unit: str, ctx: ExecContext, session_id: str | None, home: str | None,
+                         llm_provider: dict[str, Any] | None, llm_env: dict[str, str]) -> tuple[dict[str, Any], list[Material]]:
+        """run.request 在沙箱连接上另带的字段，和这一轮能取的检查点内容（只供恢复）。"""
+        ck = self.checkpoints.load(unit)
+        stored = [f for f in (ck.stored() if ck else []) if self.content.has(f["sha"], f["size"])]
+        sess = ck.session(session_id) if ck and session_id else None
+        blobs = [Material(path=f["path"], sha=f["sha"], size=f["size"], file=self.content.path(f["sha"])) for f in stored]
+        if sess is not None and self.content.has(sess["sha"], sess["size"]):
+            blobs.append(Material(path="", sha=sess["sha"], size=sess["size"], file=self.content.path(sess["sha"])))
+        else:
+            sess = None
+        extra: dict[str, Any] = {"checkpoint": {"id": ck.id if ck else "",
+                                                "files": [{"path": f["path"], "sha": f["sha"], "size": f["size"]} for f in stored],
+                                                "session": {k: sess[k] for k in ("sha", "size", "session_id")} if sess else None,
+                                                "limit": self.checkpoints.limit}}
+        if self.gateway is not None:   # 阶段 2a：模型经出口网关，沙箱里没有任何模型密钥
+            extra.update(self._gateway_grant(unit, ctx, llm_provider))
+        else:
+            # 没有网关的后端（测试用的内存后端）：平台供应商的密钥与服务进程环境里的 *_API_KEY 照阶段 0 的口径带上
+            keys = {k: v for k, v in os.environ.items() if k.endswith("_API_KEY") and not k.startswith(("MATRIX_", "AGENTNET_"))}
+            if keys or llm_env:
+                extra["env"] = {**keys, **llm_env}
+            if llm_provider is not None:
+                extra["llm_provider"] = llm_provider
+        policy = self.fetch.policy()
+        if policy is not None:
+            extra["fetch"] = {"allow": policy.allow_entries(), "public": policy.public,
+                              "replace_builtin": policy.replace_builtin}
+        return extra, blobs
+
+    def _gateway_grant(self, unit: str, ctx: ExecContext, llm_provider: dict[str, Any] | None) -> dict[str, Any]:
+        """给这一轮签网关令牌：dsh 的供应商地址换成网关的 /llm/<供应商>，“密钥”填令牌；真密钥留在核心进程里。
+        dsh 自带的供应商（靠服务进程环境里的密钥）在沙箱方式下不支持：不把密钥放回沙箱，这一轮明确报错。"""
+        agent = self.store.agents.get(ctx.agent_id)
+        prov = self.models.provider(llm_provider["id"]) if llm_provider else None
+        model = (self.run_model(agent) or {}).get("model") if agent is not None else None
+        if prov is None or not model:
+            raise SandboxError("PROVIDER: 沙箱方式下只支持平台配置的模型供应商（管理后台“模型”页，密钥由网络保管、经出口网关使用）；"
+                               "这个 Agent 用的是 dsh 自带的供应商，请部署方在后台把它配成平台供应商并让 Agent 选它")
+        key = self.vault.get(_provider_vault(prov.id)).get("api_key") or ""
+        with self._lock:   # 场合里有别人、或会话记过别处来源：公网请求记完整 URL（6.4 留痕加细）
+            full_url = bool(ctx.sources) or (agent is not None and self._others(ctx, agent))
+        token = self.gateway.issue(unit, list(ctx.authority), prov.id, model, prov.base_url, prov.api, key, full_url)
+        ctx.gateway_token = token
+        cfg = json.loads(json.dumps(llm_provider["config"]))
+        cfg["baseURL"] = f"http://{GATEWAY_PLACEHOLDER}/llm/{prov.id}"
+        out = {"llm_provider": {"id": prov.id, "config": cfg}, "env": {prov.key_env: token}, "gateway_token": token}
+        if self.gateway.ca is not None:   # 沙箱信任出网 CA（只有证书；私钥只在控制面）
+            out["gateway_ca"] = self.gateway.ca.pem
+        return out
+
+    def _gateway_budget(self, unit: str) -> None:
+        """这一轮的出网预算用完了：公网读已停，告诉 Agent 的所有者（6.4）。"""
+        kind, _, cid = unit.partition(":")
+        with self._lock:
+            holder = self._holder(kind, cid)
+            agent_id = holder.agent_id if isinstance(holder, Seat) else (holder.delegatee_id if holder else None)
+            agent = self.store.agents.get(agent_id or "")
+            conv_id = cid.partition("/")[0] if kind == "seat" else (holder.conversation_id if holder else "")
+            conv = self.store.conversations.get(conv_id)
+        if agent is None or conv is None:
+            return
+        self.bus.emit("gateway.budget", agent_id=agent.id, context_id=cid)
+        self._append(conv, Message(id=new_id("msg"), role="system", agent_id=agent.id, audience=[agent.owner_id] if agent.owner_id else [],
+                                   text=f"{agent.name} 这一轮发往外部网站的请求超过了出网预算，这一轮的公网读已停（防止把内容成批带出去）。"
+                                        "下一轮重新计算；常用的站点可以请部署方加进白名单。"))
+
+    def _sandbox_collect(self, unit: str, ctx: ExecContext, extra: dict[str, Any]) -> None:
+        """轮次结束客户端报来的：校验后进检查点；私有目录的改动先落进暂存副本（_run 结束时三方合并写回）。
+        这些都来自不可信的执行面：路径校验、大小上限、内容必须真的交上来了（按 sha 在内容存储里）。"""
+        if "outputs" in extra:
+            self.checkpoints.save_outputs(unit, extra["outputs"])
+        sp = extra.get("session_pack")
+        if isinstance(sp, dict) and SHA_RE.fullmatch(str(sp.get("sha", ""))) and isinstance(sp.get("size"), int) \
+                and isinstance(sp.get("session_id"), str) and sp["session_id"]:
+            self.checkpoints.add_session(unit, sp["sha"], sp["size"], sp["session_id"][:128])
+        hc = extra.get("home_changes")
+        if isinstance(hc, dict) and ctx.home_stage is not None:
+            self._apply_home_changes(ctx.home_stage / HOME_DIR, hc)
+
+    def _apply_home_changes(self, root: Path, changes: dict[str, Any]) -> None:
+        def ok(rel: Any) -> bool:
+            return isinstance(rel, str) and bool(rel) and workdir.safe_rel(rel) is not None and "\\" not in rel \
+                and not any(x in ("", ".", "..") for x in rel.split("/"))
+        base, total = root.resolve(), 0
+        for it in (changes.get("written") or [])[:HOME_CHANGES_MAX] if isinstance(changes.get("written"), list) else []:
+            if not isinstance(it, dict) or not ok(it.get("path")):
+                continue
+            sha, size = str(it.get("sha", "")), it.get("size")
+            if not isinstance(size, int) or size > HOME_FILE_MAX or total + size > HOME_TOTAL_MAX \
+                    or not self.content.has(sha, size):
+                continue
+            dest = root / it["path"]
+            if base not in dest.resolve().parents or dest.is_dir() or dest.is_symlink() or \
+                    any(p.is_symlink() for p in dest.parents if base in p.resolve().parents):
+                continue
+            total += size
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.content.path(sha), dest)
+        for rel in (changes.get("deleted") or [])[:HOME_CHANGES_MAX] if isinstance(changes.get("deleted"), list) else []:
+            if ok(rel) and (root / rel).is_file() and not (root / rel).is_symlink() \
+                    and base in (root / rel).resolve().parents:
+                (root / rel).unlink()
+
+    def _sandbox_read(self, ctx: ExecContext, rel: str) -> tuple[bytes, bool] | None:
+        """publish_file / send_file：经这一轮的沙箱客户端回读工作目录里的文件或目录（目录打成 zip）。"""
+        dev = self.sandbox_hub.live(self._unit(ctx))
+        return dev.fetch_path(ctx.id, rel) if dev is not None else None
+
+    def _unit_ended(self, unit: str) -> tuple[bool, bool]:
+        """调用方持有锁。（执行单元结束了没有, 它还在不在）：委托验收 / 被拒，对话、Agent、席位没了。"""
+        kind, _, cid = unit.partition(":")
+        if kind == "task":
+            t = self.store.tasks.get(cid)
+            return (t is None or t.status in TERMINAL), t is not None
+        conv_id, _, agent_id = cid.partition("/")
+        conv = self.store.conversations.get(conv_id)
+        alive = conv is not None and agent_id in conv.seats and agent_id in self.store.agents
+        return not alive, alive
+
+    def reconcile_sandboxes(self, now: float | None = None, grace_s: float = 60.0, gc: bool = False) -> dict[str, list[str]]:
+        """对账（docs/cloud-runtime.md 4.4）：台账以控制面为准，后端只报实际状态。
+        - 没有记录、代数过期、或不该在运行的沙箱结束掉（刚起的留宽限期）；
+        - 记录是运行中而沙箱不在：那一轮按传输错误结束（云侧委托判失败可续接，不变量 12），记录改成已停；
+        - 空闲超时的停掉（目录保留）；执行单元结束后过保留期的销毁（检查点留着，执行单元本身没了的一并删）。"""
+        if self.sandbox is None:
+            return {}
+        now = time.time() if now is None else now
+        acts: dict[str, list[str]] = {"stopped": [], "lost": [], "idle": [], "destroyed": []}
+        actual = {s.unit_id: s for s in self.sandbox.list()}
+        with self._lock:
+            recs = dict(self.store.sandboxes)
+            running = set(self._running)
+        changed = False
+        retain = float(self.sandbox_limits["retain_s"])
+        for unit, st in actual.items():
+            rec = recs.get(unit)
+            is_up = st.state == "running"
+            if is_up and (rec is None or rec.generation != st.generation or rec.desired != "running") \
+                    and now - st.started_at >= grace_s:
+                self.sandbox.stop(unit)   # 停掉，卷保留：控制面不认识的也只停不删（state.json 可能是从备份恢复的）
+                acts["stopped"].append(unit)
+                is_up = False
+            if rec is None:
+                # 控制面不认识的卷：过保留期才删。从第一次发现算起（记进 state.json，重启不重新计时），
+                # 后端报得出最近一次起动时间的，从更晚的那个算
+                with self._lock:
+                    first = self.store.sandbox_orphans.setdefault(unit, now)
+                changed = changed or first == now
+                basis = max(first, st.started_at)
+                if not is_up and now - basis > retain:
+                    print(f"[matrix] 删掉 {unit} 的沙箱卷：控制面没有这个执行单元的记录，自 "
+                          f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(basis))} 起"
+                          f"（{'最近一次起动' if basis == st.started_at else '第一次发现'}）已过保留期 {retain / 86400:g} 天",
+                          file=sys.stderr, flush=True)
+                    self.sandbox.destroy(unit)
+                    acts["destroyed"].append(unit)
+                    with self._lock:
+                        self.store.sandbox_orphans.pop(unit, None)
+                    changed = True
+        with self._lock:
+            for unit in [u for u in self.store.sandbox_orphans if u in recs or u not in actual]:
+                self.store.sandbox_orphans.pop(unit)
+                changed = True
+        for unit, rec in recs.items():
+            st = actual.get(unit)
+            up = st is not None and st.state == "running" and st.generation == rec.generation
+            cid = self._cid_of(unit)
+            if rec.desired == "running" and not up and (cid not in running or self.sandbox_hub.live(unit) is None):
+                self.sandbox_hub.detach(unit)
+                rec.desired, changed = "stopped", True
+                acts["lost"].append(unit)
+            elif rec.desired == "running" and up and cid not in running \
+                    and now - rec.last_used > float(self.sandbox_limits["idle_s"]):
+                self.sandbox.stop(unit)
+                rec.desired, changed = "stopped", True
+                acts["idle"].append(unit)
+            with self._lock:
+                ended, alive = self._unit_ended(unit)
+            if ended and rec.ended_at is None:
+                rec.ended_at, changed = now, True
+            elif not ended and rec.ended_at is not None:
+                rec.ended_at, changed = None, True
+            if rec.ended_at is not None and rec.desired != "destroyed" and cid not in running \
+                    and now - rec.ended_at > float(self.sandbox_limits["retain_s"]):
+                self.sandbox.destroy(unit)
+                rec.desired, changed = "destroyed", True
+                acts["destroyed"].append(unit)
+                if not alive:
+                    self.checkpoints.remove(unit)
+                    with self._lock:
+                        self.store.sandboxes.pop(unit, None)
+        if changed:
+            with self._lock:
+                self.store.save()
+        if gc:
+            with self._lock:
+                keep = {f["sha"] for t in self.store.tasks.values() if t.result
+                        for f in t.result.get("files_ckpt") or []}
+            self.content.gc(keep | self.checkpoints.refs())
+        return acts
+
+    def sandbox_report(self) -> dict[str, Any]:
+        """管理后台 / 冒烟检查看的：后端、能力、台账里各状态的数量。"""
+        if self.sandbox is None:
+            return {"backend": "off"}
+        with self._lock:
+            states = [r.desired for r in self.store.sandboxes.values()]
+        return {"backend": self.sandbox.name, **self.sandbox.report(),
+                "running": states.count("running"), "stopped": states.count("stopped"),
+                "limits": {k: self.sandbox_limits[k] for k in ("max", "per_user", "idle_s", "retain_s", "checkpoint_limit")}}
+
     # ================= 运行时调用 =================
+    def _adopt_dsh_state(self, holder: Seat | Task, kind: str, unit_id: str, workdir: Path) -> None:
+        """云侧执行单元第一次在“每个执行单元一个 dsh 状态目录”的方式下运行：建它的状态目录；它记着一个会话的，
+        把会话的两处文件从共用的 ~/.dsh 搬进来（docs/cloud-runtime.md 10.2 第 3 步）。搬不了（文件已不在）就清掉会话 id，
+        走现有的“没有会话”流程：委托重发完整委托说明，席位按新会话重发身份、档案与还没进会话的消息。"""
+        state = self.store.unit_state_dir(kind, unit_id)
+        if state.is_dir():
+            return
+        state.mkdir(parents=True, exist_ok=True)
+        sid = holder.dsh_session_id
+        if not sid:
+            return
+        try:
+            moved = adopt_dsh_session(self.legacy_dsh_home, state, workdir.resolve(), sid)
+        except OSError as e:
+            print(f"[matrix] 搬 dsh 会话 {sid} 失败：{e}", file=sys.stderr)
+            moved = False
+        if not moved:
+            with self._lock:
+                self._new_session(holder)
+                self.store.save()
+            print(f"[matrix] {unit_id} 的 dsh 会话 {sid} 在共用的 ~/.dsh 里找不到，换新会话", file=sys.stderr)
+
     def _run(self, ctx: ExecContext, agent: AgentNode, prompt: str, workdir: Path, holder: Seat | Task,
              timeout_s: float | None, mount_home: bool = True, hide: set[str] | frozenset[str] = frozenset()) -> RunResult:
         """跑一轮；可恢复的运行时错误（如工具参数 JSON 损坏）用同一个会话自动续接一次。"""
@@ -5962,10 +6572,17 @@ class Network(AppsMixin):
         if abilities_key != holder.abilities_seen:  # 本轮可用的连接器 / 技能变了才说一次
             prompt = f"{prompt}\n\n{note}" if note else prompt
         skill_files: list[Material] = []
+        sandboxed = self._sandboxed(agent)
         if agent.device_runtime:  # 工作目录在用户电脑上：项目文件随 run.request 下发，服务器这边不挂载
             if mount_home:
                 home = "rw" if "file.write" in ctx.authority else "ro"
             skill_files = self._skill_materials(chosen)
+        elif sandboxed:  # 云侧沙箱：和端侧一样走材料清单；私有目录由网络持有，暂存一份当材料，改动出来再三方合并
+            skill_files = self._skill_materials(chosen)
+            if mount_home:
+                ctx.home_stage = self.store.root / "home-stage" / secrets.token_hex(8)
+                before = self._mount_home(agent, ctx.home_stage, hide)
+                home = "net-rw" if "file.write" in ctx.authority and not self._home_frozen(ctx, agent) else "net-ro"
         else:
             self._mount_project_files(ctx, workdir)
             self._mount_attachments(ctx, workdir)
@@ -6002,7 +6619,14 @@ class Network(AppsMixin):
             discard(workdir / PLUGIN_MOUNT)
             if not agent.device_runtime:
                 discard(workdir / SKILLS)
-            if before is not None and self._home_frozen(ctx, agent):  # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 27）
+            if ctx.home_stage is not None:  # 沙箱方式：客户端报来的改动已经落在暂存副本里，同样三方合并写回
+                # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 27）
+                if before is not None and home == "net-rw" and not self._home_frozen(ctx, agent):
+                    conflicts = self._sync_home(agent, ctx.home_stage, before, ctx)
+                    if conflicts:
+                        self.bus.emit("home.conflict", agent_id=agent.id, context_id=ctx.id, files=conflicts)
+                shutil.rmtree(ctx.home_stage, ignore_errors=True)
+            elif before is not None and self._home_frozen(ctx, agent):  # 公共 Agent 的服务面：私有目录只读，改动一律丢弃（不变量 27）
                 shutil.rmtree(workdir / HOME_DIR, ignore_errors=True)
             elif before is not None:
                 conflicts = self._sync_home(agent, workdir, before, ctx)
@@ -6368,10 +6992,11 @@ class Network(AppsMixin):
             tools = ToolBridge(url=self.tool_url, token=token,
                                handler=lambda name, args: self.handle_tool(token, name, args),
                                timeout_s=self.limits.tool_timeout_s, names=ctx.tools)
-        # 审批通道总是挂载：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请
+        # 审批通道只给端侧：Agent 要在工作目录以外操作时（dsh 沙箱升权），向它的所有者申请。
+        # 云侧不审批（不变量 14）：工作目录以外一律不可写，dsh 没有应答者时以 unavailable 拒绝升权
         approvals = ApprovalBridge(url=self.approval_url, token=token,
                                    handler=lambda tool, reason: self.request_approval(token, tool, reason),
-                                   timeout_s=self.limits.approval_timeout_s)
+                                   timeout_s=self.limits.approval_timeout_s) if agent.device_runtime else None
         # 提问通道：运行时能把 ask_user_question 转回来时挂载（席位里问人，委托里先问委托方）
         questions = QuestionBridge(url=self.question_url, token=token,
                                    handler=lambda items: self.request_question(token, items),
@@ -6421,11 +7046,18 @@ class Network(AppsMixin):
             self._record_usage(ctx, agent, res, time.time(), offline=True)
             return res
         started = time.time()
+        sandboxed = self._sandboxed(agent)
+        unit = self._unit(ctx) if sandboxed else None
         try:
             with self._lock:
-                materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime else []
+                materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime or sandboxed else []
                 llm_provider, llm_env = self._llm_provider(agent) if not agent.remote else (None, {})
                 remote_call = self._remote_call(ctx, agent) if agent.remote else None
+            extra: dict[str, Any] = {}
+            blobs: list[Material] = []
+            if sandboxed:
+                materials += self._sandbox_materials(ctx)
+                extra, blobs = self._sandbox_request(unit, ctx, session_id, home, llm_provider, llm_env)
             res = runtime.run(RunRequest(remote=remote_call, agent_id=agent.id, context_id=ctx.id, prompt=prompt, cwd=workdir,
                                               authority=ctx.authority, session_id=session_id, tools=tools,
                                               on_event=on_event, timeout_s=timeout_s, model=self.run_model(agent),
@@ -6433,7 +7065,12 @@ class Network(AppsMixin):
                                               harness=agent.harness, cancel=cancel, connectors=connectors,
                                               local_connectors=[c.connector_id for c in conns if c.where != "cloud"],
                                               llm_provider=llm_provider, env=llm_env,
-                                              fetch=None if agent.device_runtime else self.fetch.policy()))
+                                              fetch=None if agent.device_runtime else self.fetch.policy(),
+                                              state_dir=None if agent.device_runtime or agent.remote or sandboxed
+                                              else self.store.unit_state_dir(ctx.kind, ctx.id),
+                                              unit=unit, blobs=blobs, sandbox=extra))
+            if sandboxed and res.extra:
+                self._sandbox_collect(unit, ctx, res.extra)
         except Exception as e:  # noqa: BLE001
             res = RunResult(session_id or "", "", ok=False, error=f"runtime error: {e!r}")
         finally:
@@ -6443,15 +7080,18 @@ class Network(AppsMixin):
             self._drop_staged(ctx)
             self._cancel_questions(ctx, "提问的那一轮已经结束")
             self.bus.emit("agent.updated", agent=agent.to_dict())
+            measured = self.gateway.close(ctx.gateway_token) if self.gateway is not None and ctx.gateway_token else None
+            ctx.gateway_token = ""
         if cancel is not None and cancel.is_set() and res.error_class != "stopped":
             # 人终止了这一轮：不管运行时最后报的是什么，都按终止处理（不自动续接，不当成交付）
             res = RunResult(res.session_id, res.final_text, res.tool_calls, res.usage, ok=False, error=STOPPED_ERROR)
-        self._record_usage(ctx, agent, res, started)
+        self._record_usage(ctx, agent, res, started, measured=measured)
         return res
 
     def _record_usage(self, ctx: ExecContext, agent: AgentNode, res: RunResult, started: float,
-                      offline: bool = False) -> None:
-        """用量台账记一行（管理后台只看用量：不记提示词、回复、工具参数）。记账失败不影响这一轮。"""
+                      offline: bool = False, measured: dict[str, int] | None = None) -> None:
+        """用量台账记一行（管理后台只看用量：不记提示词、回复、工具参数）。记账失败不影响这一轮。
+        measured：出口网关按实际响应记到的用量（含 dsh 每轮另发的生成标题的请求）；有它就用它，不用 dsh 自报的。"""
         with self._lock:
             conv = self.store.conversations.get(ctx.conversation_id)
             venue = ("task" if ctx.kind == "task" else "home" if ctx.home else "session" if ctx.session
@@ -6465,7 +7105,8 @@ class Network(AppsMixin):
                 "runtime": (agent.harness or "") if agent.device_runtime else self.runtime.name,
                 "model": " / ".join(x for x in (model.get("provider"), model.get("model")) if x) if model else None,
                 "ok": res.ok, "error": "device_offline" if offline else res.error_class,
-                "tools": len(res.tool_calls), "usage": dict(res.usage),
+                "tools": len(res.tool_calls), "usage": dict(measured if measured is not None else res.usage),
+                **({"usage_source": "gateway"} if measured is not None else {}),
                 **({"public": True} if ctx.service and agent.is_public else {}),  # 维护人看用量用（不变量 27）
                 **({"service": ctx.svc, "payer": "project"} if ctx.svc else {})})  # 项目服务：成本记在项目下（不变量 29）
         except OSError as e:  # 只给部署方看日志：事件会推给所有人，错误里有服务器路径
@@ -6504,17 +7145,19 @@ class Network(AppsMixin):
         except NetworkError as e:
             return str(e), True
 
-    # ================= 工作区外溢审批 =================
-    # dsh 沙箱：没有 file.write 是只读，有则只能写工作目录（和平台临时目录）。工作目录以外的写被拒后，模型可以带理由
-    # 申请升权重试同一调用一次；dsh 把申请交给审批应答者——我们挂载的插件把它转到这里，等 Agent 的所有者决定。
-    # 获批只对那一次调用生效（以 danger-full-access 运行），不是放行某个路径。读不受沙箱限制。
+    # ================= 工作区外溢审批（不变量 14） =================
+    # dsh 沙箱：没有 file.write 是只读，有则只能写工作目录（和平台临时目录）。
+    # 云侧：工作目录以外一律不可写，也不审批（docs/cloud-runtime.md 7.1）。覆盖层不插应答者；万一有申请到这里，回 unavailable、不建记录。
+    # 端侧：工作目录以外的写被拒后，模型可以带理由申请升权重试同一调用一次；dsh 把申请交给审批应答者——连接器的插件
+    # 经本机小桥与 approval.request 把它转到这里，等 Agent 的所有者决定。获批只对那一次调用生效，不是放行某个路径。
     def request_approval(self, token: str, tool: str, reason: str) -> str:
-        """返回 dsh 的结果词：allowed-once | rejected | cancelled | unavailable。阻塞到所有者决定或超时。"""
+        """返回 dsh 的结果词：allowed-once | rejected | cancelled | unavailable。端侧阻塞到所有者决定或设备断连；
+        云侧一律 unavailable。"""
         ctx = self._contexts.get(token)
         if ctx is None:
             return "unavailable"
         agent = self.store.agents.get(ctx.agent_id)
-        if agent is None:
+        if agent is None or not agent.device_runtime:
             return "unavailable"
         if ctx.service:  # 公共 Agent 服务时只在沙箱里做：没有合适的人批准它动公共环境（不变量 27）
             self.bus.emit("approval.refused", context=ctx.kind, context_id=ctx.id, agent_id=agent.id,
@@ -6536,21 +7179,15 @@ class Network(AppsMixin):
                                        text=f"{agent.name} 申请在工作目录以外操作，等 {self._email(ap.owner_id)} 批准："
                                             f"{_short(ap.reason, 200)}",
                                        audience=[ap.owner_id] if ap.owner_id else []))
-        if agent.device_runtime:  # 端侧：所有者的电脑可能不在，审批不因时间作废，只随断连结束（§5）
-            while not done.wait(5):
-                if self.runtime_for(agent) is None:
-                    with self._lock:
-                        if ap.status == "pending":
-                            ap.status, ap.note, ap.decided_at = "cancelled", "设备断连", time.time()
-                            self.store.save()
-                    self.bus.emit("approval.updated", approval=ap.to_dict())
-                    break
-        elif not done.wait(self.limits.approval_timeout_s):
-            with self._lock:
-                if ap.status == "pending":
-                    ap.status, ap.note, ap.decided_at = "cancelled", "等待超时", time.time()
-                    self.store.save()
-            self.bus.emit("approval.updated", approval=ap.to_dict())
+        # 端侧：所有者的电脑可能不在，审批不因时间作废，只随断连结束（§5）
+        while not done.wait(5):
+            if self.runtime_for(agent) is None:
+                with self._lock:
+                    if ap.status == "pending":
+                        ap.status, ap.note, ap.decided_at = "cancelled", "设备断连", time.time()
+                        self.store.save()
+                self.bus.emit("approval.updated", approval=ap.to_dict())
+                break
         with self._lock:
             self._approval_waits.pop(ap.id, None)
         return {"allowed": "allowed-once", "rejected": "rejected"}.get(ap.status, "cancelled")
@@ -6915,6 +7552,13 @@ class Network(AppsMixin):
             if content is None:
                 return f"找不到 {rel}：端侧运行时未连接，或文件不在工作目录里", True
             return "（端侧）" + publish(str(args.get("name", "")).strip() or Path(rel).name, content), False
+        if self._sandboxed(agent):  # 沙箱方式：经这一轮的沙箱客户端回读（目录打成 zip），不读执行面的磁盘
+            got = self._sandbox_read(ctx, rel)
+            if got is None:
+                return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {PROJECT_FILES}/ 与 {HOME_DIR}/）", True
+            data, zipped = got
+            name = str(args.get("name", "")).strip() or (f"{Path(rel).name}.zip" if zipped else Path(rel).name)
+            return publish(name if not zipped or name.endswith(".zip") else f"{name}.zip", data), False
         root = (self.store.root / holder.workdir) if isinstance(holder, Seat) else self.store.task_dir(ctx.id)
         src = (root / rel).resolve()
         if root.resolve() not in src.parents or not (src.is_file() or src.is_dir()):
@@ -6956,6 +7600,14 @@ class Network(AppsMixin):
             if data is None:
                 return f"找不到 {rel}：端侧运行时未连接，或不是工作目录里的文件（端侧不能发目录）", True
             name = name or Path(rel).name
+        elif self._sandboxed(agent):  # 沙箱方式：经这一轮的沙箱客户端回读（目录打成 zip）
+            got = self._sandbox_read(ctx, rel)
+            if got is None:
+                return f"找不到 {rel}：{where}", True
+            data, zipped = got
+            name = name or Path(rel).name
+            if zipped and not name.endswith(".zip"):
+                name = f"{name}.zip"
         else:
             holder = self._holder(ctx.kind, ctx.id)
             root = (self.store.root / holder.workdir).resolve()
@@ -7735,7 +8387,10 @@ class Network(AppsMixin):
         caps = self.capabilities(a)
         d["device_online"] = self.device_online(a)
         d["runtime_capabilities"] = {"name": caps.name, "placement": caps.placement,
-                                     "enforcement": {x: caps.level(x) for x in a.authority}}
+                                     "enforcement": {x: caps.level(x) for x in a.authority},
+                                     # 云侧运行有没有读隔离（docs/cloud-runtime.md 4.5）；端侧读的是所有者自己的电脑，不适用
+                                     "isolation": caps.isolation, "isolation_note": caps.isolation_note,
+                                     "approval": caps.approval}
         d["effective_authority"] = caps.effective(a.authority)
         d["model_info"] = self.model_info(a)
         d["public"] = a.is_public
@@ -8776,7 +9431,21 @@ class Network(AppsMixin):
         out["default_agents"] = default_agents
         out["unlisted"] = sorted(unlisted.values(), key=lambda r: -r["agents"])
         out["runtime_default"] = getattr(self.runtime, "default_model", lambda: None)()
+        out["isolation"] = self.cloud_isolation()
         return out
+
+    def cloud_isolation(self) -> dict[str, Any]:
+        """云侧运行有没有读隔离（管理后台显示）：{mode, active, level, note}。脚本运行时不执行 Agent 的命令，不适用。
+        沙箱方式下报后端的能力（mode=sandbox:<后端>）。"""
+        if self.sandbox is not None:
+            rep = self.sandbox.report()
+            return {"mode": f"sandbox:{self.sandbox.name}", "active": rep["isolation"] != "none",
+                    "level": rep["isolation"], "note": rep["note"], "production": bool(rep.get("production"))}
+        probe = getattr(self.runtime, "isolation", None)
+        if callable(probe):
+            return probe()
+        return {"mode": "off", "active": False, "level": "none",
+                "note": f"运行时 {self.runtime.name} 不执行 Agent 的命令（离线演练），没有外层沙箱"}
 
     def _has_provider_key(self, provider_id: str) -> bool:
         try:

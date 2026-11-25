@@ -1,0 +1,251 @@
+# 云侧执行面隔离验证
+
+回答 [docs/cloud-runtime.md](../../docs/cloud-runtime.md) 第 11 节还没答上的问题。最关键的是第一个：
+**dsh 自己的沙箱（bubblewrap）能不能在 gVisor 里运行**，它决定阶段 1 用 gVisor 还是 Kata。
+
+一条命令跑完，结果打成一个压缩包，发回来即可。全程大约 40–60 分钟，下载 2–3 GB。小机器只跑轻量模式，见第 2 节。
+
+## 1. 测什么
+
+| 步骤 | 回答的问题 | 要 gVisor | 要模型密钥 |
+| --- | --- | --- | --- |
+| `info` | 记下机器环境（内核、Docker、seccomp / AppArmor、cgroup、gVisor 版本） | 否 | 否 |
+| `build` | 按 `deploy/Dockerfile` 构建部署镜像 | 否 | 否 |
+| `t1` | **gVisor 里 dsh 的 bwrap 能否运行**；在默认安全选项、和 compose 现在放开的两项下各测一遍；能运行的话完整跑一遍 `matrix-dsh-check` | 是 | 可选 |
+| `t2` | 普通容器（runc）里：seccomp、`/proc` 遮挡各种组合下 bwrap 能否运行；阶段 0 的外层套内层能否运行 | 否 | 可选 |
+| `t3` | 重活（2 万个小文件、512 MB 大文件、git clone、pip、npm、uv sync、pytest）在 runc 与 gVisor 下能否跑通、各要多久、占多少内存 | 对比用 | 否 |
+| `t4` | 一轮 Agent 运行的内存、容器冷启动时间、10 个空闲沙箱的内存开销，runc 与 gVisor 对比 | 对比用 | 可选 |
+| `t5` | 检查点恢复：会话的两处文件与产物打成包，换一个全新的容器解包后能否续接 | 对比用 | **要** |
+| `t6` | `uv sync` 拆开计时：慢在下载还是慢在放文件；四种放法、项目与缓存放在根文件系统或卷上的各种组合；runc、gVisor 及其变体对比 | 对比用 | 否 |
+| `t7` | 并发：同时起 2、4、8、16 个执行单元（内存不够的档自动跳过），看成功数与每个占多少内存 | 对比用 | 否 |
+| `t8` | 阶段 1b 的 docker 后端：构建沙箱镜像与管理器镜像，起沙箱管理器，每个执行单元一个容器，在 `insecure-runc` 与 `runsc` 下各跑一遍完整的 `matrix-dsh-check --live --sandbox docker`（含 `restore`、`deliver`、`isolation`（内层 bwrap）、`resource-limit`） | 对比用 | **要** |
+| `t8lite` | `t8` 的轻量模式：只跑 `runsc` 一档，配额按宿主内存定，不跑 `resource-limit`（第 2 节） | **是** | **要** |
+| `pack` | 把结果打成 `isolation-results-<主机>-<时间>.tgz` | 否 | 否 |
+
+没有模型密钥时，不调真模型的部分照跑（Agent 的 bash 由一个本地假模型服务驱动），真模型那几项（回复、续接、委托、审批、提问等）跳过。
+有密钥结论更完整，审批那一项尤其需要。
+
+## 2. 机器要求
+
+- **不要用生产机，也不要在跑着其他服务的机器上跑**：要装 gVisor、改 Docker 配置、重启 Docker；`t8` 会构建镜像、起好几个容器，
+  完整模式还会故意在沙箱里把内存配额用满。2026-11-17 一台 2 核 1.8 GB、上面还跑着别的服务的测试机被 `t8` 压垮过。
+- Linux x86_64，发行版尽量和以后部署的一样。首选 **Ubuntu 22.04 / 24.04 或 Debian 12**，并保持默认的 seccomp 与 AppArmor 开着，
+  这些正是要测的；不要在 Docker Desktop、WSL 或已经关掉 seccomp 的机器上测。
+- Docker Engine 24 或以上，最好是 cgroup v2。不需要 KVM（gVisor 默认不用它）。
+- 能访问：Docker Hub、`deb.debian.org`、`deb.nodesource.com`、`registry.npmjs.org`、`pypi.org` 与 `files.pythonhosted.org`、`github.com`、
+  装 gVisor 用的 `gvisor.dev` 与 `storage.googleapis.com`；有密钥时还要 `api.deepseek.com`。
+  只有内网镜像的机器见第 6 节。
+- 跑脚本的用户能用 `docker`（在 docker 组里，或用 `sudo -E`）。
+
+分两档。`t8` / `t8lite` 开跑前会看内存总量、可用内存、CPU 数与 Docker 所在磁盘的空闲，低于下限就拒绝并说明；
+另外列出占内存最多的几个非 Docker 进程作为提醒（不阻止）。
+
+| | 完整模式（`./run.sh all`、`t8`） | 轻量模式（`./run.sh build t8lite`，或 `T8_LIGHT=1`） |
+| --- | --- | --- |
+| 建议 | 4 核、8 GB 内存、磁盘空闲 20 GB 以上 | 2 核、2 GB 内存、磁盘空闲 15 GB，机器上不跑别的 |
+| `t8` 拒绝开跑的下限 | 内存 4 GB（可用 3 GB）、2 核、磁盘空闲 15 GB | 内存 1.7 GB（可用 1.2 GB）、2 核、磁盘空闲 15 GB |
+| 跑哪几档 | `insecure-runc` 与 `runsc` 各一遍（`T8_RUNTIMES` 可改） | 只有 `runsc`；没有 runsc 直接说明并退出，不退回 runc |
+| 单个沙箱的内存配额 | 管理器按宿主定：`min(2048, 宿主内存 − 1024)`（`T8_MEMORY_MB` 可改） | 按宿主定：宿主 ≤ 4 GB 时 768 MB，再大 1024 MB（`T8_MEMORY_MB` 可改） |
+| 验证什么 | 全部检查，含 `resource-limit`（配额 + 256 MB 的内存申请、pids + 100 个进程被挡住）与 runc / gVisor 对照 | gVisor 下的 `sandbox`、`isolation`、`read-isolation`、`proc-isolation`、`net-isolation`、`key-absent`、`egress-tools`、`reply`、`resume`、`delegate`、`deliver`、`restore` |
+| 不验证什么 | — | **不验证配额（`resource-limit`）与 runc 对照**；`t1`–`t7` 也别在小机器上跑 |
+
+内存峰值（本机实测，宿主“已用”内存比开跑前多出的部分，含 dockerd 与 buildkit）：
+
+- **构建阶段**：`t8` 一个一个地构建沙箱镜像与管理器镜像，不并行。峰值约 0.85 GB，出现在沙箱镜像里 `npm install -g @deepseek-ai/dsh`
+  （616 个包）；部署镜像（`build` 一步）约 0.75 GB，管理器镜像不到 0.1 GB。限制 Node 的堆只省约 90 MB，所以没改 Dockerfile。
+  2 GB 的机器构建时要有 1.2 GB 左右的可用内存；不够就在别的机器上构建好再 `docker save` / `docker load` 过来，
+  或者设 `BUILD_ARGS` 用内网镜像源（第 6 节）。磁盘：三个镜像约 4 GB，不带缓存的构建另有约 7 GB 的构建缓存（`docker builder prune` 可清）。
+- **运行阶段**：轻量模式（`runc`、配额 768 MB）峰值约 0.45 GB（控制面容器、管理器、同时最多两个沙箱）；gVisor 下每个 dsh 多约 90 MB，
+  估计 0.6–0.7 GB。完整模式因为 `resource-limit` 要把配额用满，峰值约 1.35 GB（配额 2048 MB 时；配额越大越高）。
+
+沙箱管理器自己也会核对：单个沙箱的 `memory_mb`、`max_memory_mb` 超过“宿主内存 − 1024 MB”时拒绝启动（`t8` 会打出它的错误）；
+`matrix-dsh-check` 的 `resource-limit` 在宿主可用内存不到“配额 + 768 MB”时提醒并跳过。
+
+## 3. 准备
+
+拿到这个分支：
+
+```bash
+git clone -b claude/beautiful-hamilton-akc84f https://github.com/SanChiaki/Matrix.git
+```
+
+装 gVisor（Debian / Ubuntu，官方 apt 源；其他发行版见 <https://gvisor.dev/docs/user_guide/install/>）：
+
+```bash
+curl -fsSL https://gvisor.dev/archive.key | sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+```
+
+```bash
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] https://storage.googleapis.com/gvisor/releases release main" | sudo tee /etc/apt/sources.list.d/gvisor.list
+```
+
+```bash
+sudo apt-get update && sudo apt-get install -y runsc
+```
+
+注册为 Docker 运行时（写 `/etc/docker/daemon.json`）并重启 Docker：
+
+```bash
+sudo runsc install && sudo systemctl restart docker
+```
+
+可选，给 `t6` 用：再注册三个只差一个参数的 gVisor 变体，用来找 `uv sync` 慢在哪。参数名以 `runsc flags` 的输出为准，
+哪个注册失败就跳过哪个，脚本只跑注册成功的。每条之后都要重启 Docker（最后统一重启一次即可）：
+
+```bash
+sudo runsc install --runtime runsc-nooverlay -- --overlay2=none
+```
+
+```bash
+sudo runsc install --runtime runsc-memoverlay -- --overlay2=root:memory
+```
+
+```bash
+sudo runsc install --runtime runsc-hostnet -- --network=host
+```
+
+```bash
+sudo systemctl restart docker
+```
+
+确认装好了，应该看到 `runsc` 和 gVisor 的启动信息：
+
+```bash
+docker info --format '{{json .Runtimes}}' | grep -o runsc && docker run --rm --runtime=runsc alpine dmesg | head -3
+```
+
+## 4. 跑
+
+```bash
+cd Matrix/deploy/isolation-check
+```
+
+有 DeepSeek 密钥就先设上（只按名字传进容器，不会写进任何日志或结果）：
+
+```bash
+export DEEPSEEK_API_KEY=sk-...
+```
+
+```bash
+./run.sh all
+```
+
+只补跑 2026-11-16 新加的三步（已经跑过前四步的机器，镜像要重建一次，因为脚本变了）：
+
+```bash
+./run.sh info build t5 t6 t7 pack
+```
+
+屏幕上和 `results/summary.txt` 里会逐步出现结果，每步的完整日志在 `results/` 下。中途断了可以只跑剩下的步骤，例如 `./run.sh t3 t4 pack`。
+
+只跑阶段 1b 的 docker 后端（`t8`，要密钥；镜像会重建）：
+
+```bash
+./run.sh info build t8 pack
+```
+
+小机器（2 核 2 GB）上只跑轻量模式（只有 gVisor 一档，不跑 `resource-limit`，见第 2 节）：
+
+```bash
+./run.sh info build t8lite pack
+```
+
+`t8` 的环境变量：`T8_RUNTIMES`（跑哪几档，默认 `insecure-runc runsc`，例如只要 `runsc`）、`T8_MEMORY_MB`（写进管理器配置的
+`memory_mb` 与 `max_memory_mb`）、`T8_PIDS`（`pids` 与 `max_pids`）、`T8_ONLY`（透传给 `matrix-dsh-check --only`，例如 `reply,net-isolation`）、
+`T8_LIGHT=1`（等于 `t8lite`）。
+
+`t8` 起一个 `isochk-sandboxd` 容器（唯一挂 docker.sock）和一个 `isochk-core` 容器（部署镜像里的 matrix-dsh-check：控制面与出口网关），
+管理器给每个执行单元建一张只接这个沙箱与 `isochk-core` 的 internal 网络（地址池默认 `10.214.0.0/16`，冲突时设 `T8_SUBNET_POOL`）。
+沙箱只能经出口网关出网；控制面自己要经代理出网时，设 `T8_CORE_PROXY`（容器里连得到的代理地址，不能是宿主的 127.0.0.1）。
+跑完会删掉它建的容器、卷与网络，镜像 `matrix-sandbox:isochk`、`matrix-sandboxd:isochk` 留着（第 9 节一起删）。
+
+## 5. 发回什么
+
+最后一行会打出压缩包的路径（`isolation-results-<主机>-<时间>.tgz`），把它发回来即可。里面是 `summary.txt` 和各步日志：
+没有密钥，没有你机器上的文件，只有 `info` 一步记下的发行版、内核、Docker 版本与配置。发之前可以先看一眼 `summary.txt`。
+
+## 6. 出问题时
+
+| 现象 | 处理 |
+| --- | --- |
+| `build=FAIL`，日志里有 `429 Too Many Requests` | Docker Hub 限流，等几分钟再 `./run.sh build t1 t2 t3 t4 pack` |
+| 只有内网镜像、或要经代理出网 | 构建参数放进 `BUILD_ARGS`，写法见 [deploy/README.md](../README.md)「内网 / 无公网构建」「内网 CA」。例：`export BUILD_ARGS="--build-arg APT_MIRROR=https://mirror.corp/ --build-arg PYPI_INDEX=https://pypi.corp/simple"`。容器要经宿主上的代理出网时再加 `export DOCKER_NETWORK=host`，并在环境里设好 `HTTPS_PROXY` / `NO_PROXY`（脚本会透传） |
+| `T1=SKIPPED` | Docker 没注册 runsc，回到第 3 节最后一步确认 |
+| 真模型的某一项偶尔 ✗（比如 `approval` 报“申请批准了，但文件没写出来”） | 模型偶尔不按要求做。单项重跑 2–3 次再下结论，例如 runc 下：`docker run --rm --user matrix --cap-drop ALL --security-opt seccomp=unconfined --security-opt systempaths=unconfined -e DEEPSEEK_API_KEY matrix:isolation-check matrix-dsh-check --live --only approval`（gVisor 下加 `--runtime=runsc`） |
+| 真模型的项都报 `TRANSPORT` | 容器连不上 `api.deepseek.com`，先查网络 / 代理 |
+| `t3` 某步 `FAIL` | 先看两个运行时是不是都失败：都失败多半是网络，只在 runsc 下失败才是兼容性问题（这正是要找的） |
+
+## 7. 自己先看结果
+
+`summary.txt` 里每行前面的 `[t1-default-probe]` 之类是“步骤-运行时或安全选项-内容”。
+
+**T1（最关键）**，看 `[t1-default-probe]` 与 `[t1-compose-probe]`：
+
+| 看到的 | 含义 |
+| --- | --- |
+| `BWRAP_DSH_ARGS=ok`、`A_INNER=bwrap` | dsh 的 bwrap 能在 gVisor 里跑。`default` 组就能跑最好（不用放开任何安全选项） |
+| `BWRAP_*=FAIL`，但 `A_ok=True`、`A_INNER=not-bwrap` | bwrap 起不来，dsh 退到了别的沙箱方式。要看 `[t1-…-dshcheck]` 的 `approval`：报“没申请升权就写到了工作目录以外”说明这时 dsh 的写限制不完整 |
+| `A_ok=False` | Agent 的命令根本跑不起来 |
+| `[t1-…-dshcheck]` 全部 ✓ | dsh 的全部功能在 gVisor 里正常（`key-hidden`、`approval` 两项最重要） |
+
+**T2**：预期只有 `compose` 组的 `BWRAP_*` 是 ok（和在另一台机器上的结果一致，见第 8 节）。如果 `default` 组也 ok，说明这台机器的 Docker 默认配置就允许 bwrap，记下来。
+
+**T3**：对比 `[t3-runc-heavy]` 与 `[t3-runsc-heavy]` 每一步的秒数和 `HOST_PEAK_MEM`。只在 runsc 下 `FAIL` 的步骤是兼容性问题；
+耗时比值用来估 gVisor 的 I/O 开销（小文件、npm 最敏感）。
+
+**T4**：`[t4-<运行时>-round] HOST_PEAK_MEM` 是一轮运行（委托时同时两个 dsh）从宿主看到的内存，包括 gVisor 自己的开销；
+`COLD_START_MS` 是 5 次冷启动的毫秒数；`IDLE_10_SANDBOXES host_used_delta` 除以 10 约等于一个空闲沙箱的开销。
+
+**T5**：`RESTORE_RECALL=ok`（记得上一轮的编号）与 `RESTORE_PRODUCT=ok`（接着改了产物）都出现，就是检查点恢复可行。
+
+**T6**：每行 `UV <项目位置>/<缓存位置> <放法> <cold|warm> <ok|FAIL> <秒>`。`cold` 含下载，`warm` 是缓存已有、离线，只剩往虚拟环境里放文件。
+对比 runc 与 runsc：`cold` 慢而 `warm` 不慢，慢在网络；`warm` 也慢，慢在文件系统，再看哪种放法、哪种位置组合最快，以及哪个变体有改善。
+
+**T7**：每行 `CONC n=<个数> ok=<成功数> … per_unit=<每个占的内存> host_avail_min=<期间最低可用内存>`。
+`ok` 小于 `n` 或 `host_avail_min` 接近 0 的那一档，就是这台机器的上限。
+
+**T8（阶段 1b）**，看 `[t8-runsc]` 与 `[t8-insecure-runc]`：两档都应该全是 ✓。`runsc` 有 ✗ 而 `insecure-runc` 全过，就是 gVisor 下的兼容性问题
+（这正是要找的，把对应的 `t8-runsc.log` 一起发回来）。`isolation` 一项另核对 Agent 的命令在 dsh 的内层 bwrap 里；
+`resource-limit` 看超额内存（申请配额 + 256 MB，退出码 137 = 被内存上限结束）与进程数上限是否生效、之后别的执行单元是否照常；
+`net-isolation` 看沙箱是不是只连得到出口网关，`key-absent` 看沙箱里有没有模型密钥（这几项都由假模型驱动，结果确定）。
+`[t8-insecure-runc]` 那一行“未达到生产隔离”是预期的：runc 档只用于对比与过渡。
+轻量模式的结果在 `[t8lite-runsc]` 与 `t8lite-runsc.log`，应该全是 ✓。`t8` / `t8lite` 开头几行是宿主的内存、CPU、磁盘与占内存最多的进程；“拒绝开跑”或“管理器没起来”时照那一行的说明改（例如设小 `T8_MEMORY_MB`）。
+
+## 8. 参考：在另一台机器上的结果（runc，没有 gVisor）
+
+Ubuntu 24.04、4 核 16 GB、Docker 29（seccomp 开、cgroup v1）、没有 KVM，2026-11-11：
+
+- T2：只有 `compose` 组 bwrap 能跑；去掉 `seccomp=unconfined` 报不能建命名空间，去掉 `systempaths=unconfined` 报不能挂 `/proc`。
+  bwrap 起不来时 dsh 没有拒绝执行，退到了别的沙箱方式：工作目录外的 `/data` 写不进，但 `matrix-dsh-check` 的 `approval` 报
+  “没申请升权就写到了工作目录以外”（目标在 `/tmp` 下）。
+- `compose` 组阶段 0 外层套内层：数据目录、别人的私有目录与会话、`vault.key` 都读不到，工作目录照常可写。
+- T3（runc）：小文件 1.6 秒、大文件 0.8 秒、git clone 3.1 秒、pip 16.8 秒、npm 10.8 秒、pytest 7.6 秒，宿主看到的峰值 303 MiB。
+- T4（runc）：一轮运行宿主看到的峰值 354 MiB，冷启动 250–300 毫秒，10 个空闲容器共 18 MiB。
+- T5（runc，2026-11-16）：恢复成功；检查点包 4 个文件、约 15 KB。
+- T6（runc）：`warm` 0.05–0.2 秒（硬链接最快，拷贝 0.2 秒），项目与缓存不在同一个文件系统时 0.3–0.4 秒；`cold` 0.6–1.2 秒；虚拟环境 1504 个文件。
+- T7（runc）：2、4、8 个都全部成功，每个 253–260 MiB。
+
+gVisor 的实测结果（另一台机器，2026-11-11）记在 [docs/cloud-runtime.md](../../docs/cloud-runtime.md) 第 11 节“gVisor 实测”。
+
+## 9. 测完恢复机器
+
+```bash
+sudo runsc uninstall && sudo systemctl restart docker
+```
+
+```bash
+docker rmi matrix:isolation-check matrix-sandbox:isochk matrix-sandboxd:isochk && sudo apt-get remove -y runsc
+```
+
+## 10. 文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `run.sh` | 入口，按步骤跑并汇总（`t8` 用 `deploy/Dockerfile.sandbox` 与 `matrix-sandboxd`） |
+| `incontainer.sh` | 容器里的探针：直接起 bwrap、裸 dsh（A）与阶段 0 外层包住的 dsh（B）去读别人的东西 |
+| `probe.py` | 用假模型服务驱动 dsh 里 Agent 的 bash，执行指定命令 |
+| `outer_dsh` | 阶段 0 原型：在 dsh 外面再包一层 bwrap（复用 `matrix/sandbox.py`）。已实现为 `matrix/runtime.py` 的 `outer_argv`（`MATRIX_CLOUD_ISOLATION`），这里保留原型以便对照 |
+| `heavy.py` | 重活 |
+| `ckpt.py` | 检查点恢复：打包与解包续接 |
+| `uvprobe.py` | `uv sync` 拆开计时 |
+| `memsample.py` | 容器里按进程类别采样常驻内存 |

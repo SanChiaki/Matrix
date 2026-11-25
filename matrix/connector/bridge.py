@@ -18,10 +18,13 @@ from typing import Any, Callable
 ToolFn = Callable[[str, dict[str, Any]], tuple[str, bool]]
 ApprovalFn = Callable[[str, str], str]
 QuestionFn = Callable[[list[dict[str, Any]]], dict[str, Any]]
+ListFn = Callable[[], list[dict[str, Any]]]
 
 
 class _Handler(BaseHTTPRequestHandler):
     runs: dict[str, tuple[ToolFn | None, ApprovalFn | None, QuestionFn | None]] = {}
+    # 云端连接器（只有云侧沙箱客户端登记）：run_id → (列工具, 调用)，与 /internal/connectors/* 同形
+    connectors: dict[str, tuple[ListFn, ToolFn]] = {}
 
     def do_POST(self) -> None:  # noqa: N802 —— http.server 的接口
         length = int(self.headers.get("Content-Length") or 0)
@@ -43,6 +46,17 @@ class _Handler(BaseHTTPRequestHandler):
             if approvals is None:
                 return self._json({"outcome": "unavailable"})
             return self._json({"outcome": approvals(str(body.get("tool") or ""), str(body.get("reason") or ""))})
+        if self.path in ("/internal/connectors/list", "/internal/connectors/call"):
+            conn = self.connectors.get(token)
+            if conn is None:
+                return self._json({"text": "execution context not found", "is_error": True}, 403)
+            try:
+                if self.path.endswith("/list"):
+                    return self._json({"tools": conn[0]()})
+                text, is_error = conn[1](str(body.get("tool") or ""), dict(body.get("args") or {}))
+            except Exception as e:  # noqa: BLE001
+                return self._json({"text": f"connector error: {e}", "is_error": True})
+            return self._json({"text": text, "is_error": is_error})
         if self.path == "/internal/question":
             raw = body.get("questions")
             if questions is None or not isinstance(raw, list):
@@ -80,12 +94,16 @@ class LocalBridge:
         return f"http://{host}:{port}"
 
     def register(self, run_id: str, tools: ToolFn | None, approvals: ApprovalFn | None,
-                 questions: QuestionFn | None = None) -> None:
+                 questions: QuestionFn | None = None, connectors: tuple[ListFn, ToolFn] | None = None) -> None:
         _Handler.runs[run_id] = (tools, approvals, questions)
+        if connectors is not None:
+            _Handler.connectors[run_id] = connectors
 
     def unregister(self, run_id: str) -> None:
         _Handler.runs.pop(run_id, None)
+        _Handler.connectors.pop(run_id, None)
 
     def close(self) -> None:
         self._server.shutdown()
         _Handler.runs.clear()
+        _Handler.connectors.clear()
