@@ -18,7 +18,7 @@ from dataclasses import asdict, fields
 from .compat import current_call
 from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
-                     KnowledgeItem, Message, Project, Proposal, ProjectService, ExternalApp, AppGrant, Question, Release, ResourceRef, Schedule, Seat, Task, TaskStatus, User,
+                     KnowledgeItem, Message, Project, Proposal, ProjectService, ExternalApp, AppGrant, Question, Release, ResourceRef, SandboxRecord, Schedule, Seat, Task, TaskStatus, User,
                      UserRequest,
                      new_id, seat_id)
 
@@ -221,6 +221,9 @@ class Store:
         self.app_grants: dict[str, AppGrant] = {}     # 应用令牌（只存 sha256）
         self.im_channels: dict[str, ImChannel] = {}  # IM 机器人（个人的与部署方的）
         self.im_bindings: dict[str, ImBinding] = {}  # 人在 IM 机器人上的身份
+        self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
+        # 对账时发现、控制面没有记录的沙箱（只剩卷）：执行单元 → 第一次发现的时间。过保留期才删，计时不随重启重来
+        self.sandbox_orphans: dict[str, float] = {}
         if self.path.exists():
             self._load()
         else:
@@ -303,6 +306,16 @@ class Store:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    def task_path(self, task_id: str) -> Path:
+        """委托的工作目录路径（不建目录）：沙箱方式下这是它的逻辑路径，内容在执行面目录树里。"""
+        return self.root / "tasks" / task_id
+
+    def unit_state_dir(self, kind: str, unit_id: str) -> Path:
+        """云侧一个执行单元（席位 `<对话>/<Agent>` 或委托）自己的 dsh 状态目录：那一轮 dsh 的 HOME（会话、缓存）。
+        不在任何工作目录里，外层沙箱里只有它和工作目录可写（docs/cloud-runtime.md 第 8 节阶段 0）。不在这里建：
+        第一次在新方式下运行时才建，引擎据此判断要不要从共用的 ~/.dsh 搬旧会话。"""
+        return self.root / "dsh-state" / ("tasks" if kind == "task" else "seats") / Path(*unit_id.split("/"))
+
     # ---------- 持久化 ----------
     def save(self) -> None:
         with self.lock:
@@ -330,6 +343,8 @@ class Store:
                 "app_grants": [asdict(x) for x in self.app_grants.values()],
                 "im_channels": [x.to_dict() for x in self.im_channels.values()],
                 "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
+                **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
+                **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
             }
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -444,6 +459,10 @@ class Store:
             self.im_channels[x["id"]] = ImChannel(**_known(ImChannel, x))
         for x in raw.get("im_bindings", []):
             self.im_bindings[x["id"]] = ImBinding(**_known(ImBinding, x))
+        for x in raw.get("sandboxes", []):  # 旧数据没有：缺省为空
+            self.sandboxes[x["unit"]] = SandboxRecord(**_known(SandboxRecord, x))
+        self.sandbox_orphans = {str(k): float(v) for k, v in (raw.get("sandbox_orphans") or {}).items()
+                                if isinstance(v, (int, float))}
         self._one_trust_domain()
         self.default_assistants()
         if migrated:

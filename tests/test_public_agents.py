@@ -145,7 +145,8 @@ def test_service_face_keeps_nothing_and_shows_process_only_to_the_caller(tmp_pat
     assert "规则.md" in seen["home"][-1]                     # 公共资料挂进服务面
     assert sorted(p.name for p in net.agent_home(pub.id).iterdir()) == ["规则.md"]  # 调用方的东西不写回
     reply = dm.messages[-1]
-    assert reply.text == "按规则处理；外溢：rejected" and not net.store.approvals  # 不申请外溢、不打扰维护人
+    # 不申请外溢、不打扰维护人：云侧本来就不审批外溢（不变量 14，docs/cloud-runtime.md 7.1），服务面同样拿到 unavailable
+    assert reply.text == "按规则处理；外溢：unavailable" and not net.store.approvals
     assert reply.private_to == [ann]
     view = net.conversation_detail(dm.id, ann)
     assert next(m for m in view["messages"] if m["role"] == "agent")["steps"]

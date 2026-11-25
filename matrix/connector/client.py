@@ -23,7 +23,7 @@ import base64
 
 from .. import homedir
 from ..workdir import safe_rel
-from ..device import (APPROVAL_REQUEST, FEATURE_MATERIALS_CACHE, MATERIAL_FETCH, QUESTION_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
+from ..device import (APPROVAL_REQUEST, CONNECTOR_CALL, FEATURE_MATERIALS_CACHE, MATERIAL_FETCH, QUESTION_REQUEST, CANCEL, FILE_FETCH, HELLO, HELLO_OK, PROTOCOL, RUN_EVENT, RUN_REQUEST,
                       RUN_RESULT, TOOL_CALL, DeviceError)
 from ..models import AGENT_HOME, ATTACHMENTS, PLUGIN_MOUNT, PROJECT_FILES, RELEASES, SKILLS
 from .bridge import LocalBridge
@@ -50,8 +50,10 @@ class _Run:
         self.run_id = run_id
         self.cancel = threading.Event()
         self.workdir: Path | None = None
-        self.home: str | None = None      # run.request 的 home："rw" | "ro" | None
+        self.home: str | None = None      # run.request 的 home："rw" | "ro" | None（沙箱连接上另有 "net-rw" | "net-ro"）
         self.manifest: list[dict[str, Any]] | None = None  # run.request 的 manifest：材料清单，运行前按它从本机缓存补齐
+        self.msg: dict[str, Any] = {}     # run.request 原文（沙箱客户端读它另带的字段）
+        self.extra: dict[str, Any] = {}   # 随 run.result 另报的字段（沙箱客户端：产物清单、私有目录改动、会话包）
 
     def emit(self, event: dict[str, Any]) -> None:
         self.connector.send({"type": RUN_EVENT, "run_id": self.run_id, "event": event})
@@ -73,6 +75,20 @@ class _Run:
         if isinstance(reply.get("answers"), list):
             return {"answers": reply["answers"]}
         return {"error": str(reply.get("error") or "没有得到回答")}
+
+    def list_connectors(self) -> list[dict[str, Any]]:
+        """云端连接器的工具（只在沙箱连接上有）。"""
+        reply = self.connector.round_trip({"type": CONNECTOR_CALL, "run_id": self.run_id,
+                                           "call_id": self.connector.next_call_id(), "op": "list"})
+        return [t for t in reply.get("tools") or [] if isinstance(t, dict)]
+
+    def call_connector(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
+        reply = self.connector.round_trip({"type": CONNECTOR_CALL, "run_id": self.run_id,
+                                           "call_id": self.connector.next_call_id(), "op": "call",
+                                           "name": name, "args": args})
+        if "text" not in reply:
+            return f"连接器调用失败：{reply.get('error') or '没有回执'}", True
+        return str(reply.get("text", "")), bool(reply.get("is_error"))
 
 
 class Connector:
@@ -96,6 +112,7 @@ class Connector:
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         self._home_locks: dict[str, threading.Lock] = {}  # 同一 Agent 的并行运行：挂载与写回按 Agent 串行
+        self.server_hello: dict[str, Any] = {}  # 服务器握手消息（沙箱客户端从里面拿执行单元凭证）
 
     # ---- 生命周期 ----
     def connect(self, url: str, token: str, *, hello_timeout: float = 20.0) -> None:
@@ -112,6 +129,7 @@ class Connector:
             ws.close()
             raise DeviceError(f"握手失败：期望 {HELLO}，收到 {first.get('type')!r}")
         ws.send(json.dumps(self.hello_message(), ensure_ascii=False))
+        self.server_hello = first
         self._ws = ws
 
     def hello_message(self) -> dict[str, Any]:
@@ -141,20 +159,23 @@ class Connector:
         assert self._ws is not None
         try:
             for raw in self._ws:
-                msg = json.loads(raw)
-                t = msg.get("type")
-                if t == RUN_REQUEST:
-                    self._start(msg)
-                elif t == CANCEL:
-                    run = self._runs.get(str(msg.get("run_id", "")))
-                    if run is not None:
-                        run.cancel.set()
-                elif msg.get("type") == FILE_FETCH:
-                    self._fetch(msg)
-                elif "reply_to" in msg:      # 工具 / 审批 / 文件读取的回执
-                    self._deliver(msg)
+                self.dispatch(json.loads(raw))
         except Exception as e:  # noqa: BLE001 —— 断线
             raise DeviceError(str(e)) from e
+
+    def dispatch(self, msg: dict[str, Any]) -> None:
+        """处理服务器发来的一条消息（接收循环与内存链路共用）。"""
+        t = msg.get("type")
+        if t == RUN_REQUEST:
+            self._start(msg)
+        elif t == CANCEL:
+            run = self._runs.get(str(msg.get("run_id", "")))
+            if run is not None:
+                run.cancel.set()
+        elif t == FILE_FETCH:
+            self._fetch(msg)
+        elif "reply_to" in msg:      # 工具 / 审批 / 文件读取的回执
+            self._deliver(msg)
 
     def close(self) -> None:
         try:
@@ -232,7 +253,9 @@ class Connector:
         run_id = str(msg.get("run_id", ""))
         run = _Run(self, run_id)
         self._runs[run_id] = run
-        self.bridge.register(run_id, run.call_tool, run.ask_approval, run.ask_question)
+        run.msg = msg
+        self.bridge.register(run_id, run.call_tool, run.ask_approval, run.ask_question,
+                             *self._bridge_extra(run))
         workdir = self.workdir_of(str(msg.get("workdir_ref", "")))
         if isinstance(msg.get("manifest"), list):  # 新服务端：只给清单，运行线程里按缓存补齐（要等回执，不能占着接收循环）
             run.manifest = list(msg["manifest"])
@@ -247,19 +270,33 @@ class Connector:
             timeout_s=_limit(msg.get("timeout_s")),
             connectors=[str(x) for x in msg["connectors"] if isinstance(x, str)]
             if isinstance(msg.get("connectors"), list) else None,
-            questions=msg.get("questions") is True)
+            questions=msg.get("questions") is True, **self._spec_extra(msg))
         run.workdir = workdir
-        run.home = msg.get("home") if msg.get("home") in ("rw", "ro") else None
+        run.home = msg.get("home") if msg.get("home") in self.HOME_MODES else None
         threading.Thread(target=self._execute, args=(run, spec), daemon=True).start()
 
-    @staticmethod
-    def _clear_materials(workdir: Path) -> None:
-        """上一轮下发的只读副本先清掉（改过的也不保留）。"""
-        for top in ("group", PROJECT_FILES, ATTACHMENTS, SKILLS, RELEASES, PLUGIN_MOUNT, "materials"):  # group/：旧版下发的
-            shutil.rmtree(workdir / top, ignore_errors=True)
+    HOME_MODES = ("rw", "ro")   # 认得的 run.request.home（沙箱客户端另认 net-rw / net-ro）
 
-    @staticmethod
-    def _material_path(workdir: Path, rel: str) -> Path:
+    def _bridge_extra(self, run: _Run) -> tuple:
+        """本机桥上另登记的通道（沙箱客户端：云端连接器）。"""
+        return ()
+
+    def _spec_extra(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """run.request 里另带、要交给驱动的字段（沙箱客户端用）；端侧连接器不读。"""
+        return {}
+
+    CLEARED = ("group", PROJECT_FILES, ATTACHMENTS, SKILLS, RELEASES, PLUGIN_MOUNT, "materials")  # group/：旧版下发的
+
+    def _clear_materials(self, workdir: Path) -> None:
+        """上一轮下发的只读副本先清掉（改过的也不保留）。"""
+        for top in self.CLEARED:
+            p = workdir / top
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                p.unlink(missing_ok=True)
+
+    def _material_path(self, workdir: Path, rel: str) -> Path:
         """材料路径来自网络：只认工作目录里的相对路径，私有目录除外。"""
         if safe_rel(rel) is None or Path(rel).parts[0] == AGENT_HOME:
             raise DeviceError(f"非法的材料路径：{rel!r}")
@@ -339,13 +376,12 @@ class Connector:
             f.unlink(missing_ok=True)
             total -= size
 
-    @staticmethod
-    def _write_materials(workdir: Path, materials: list[dict[str, Any]]) -> None:
+    def _write_materials(self, workdir: Path, materials: list[dict[str, Any]]) -> None:
         """旧服务端：每轮整份下发的只读材料。先清掉上一次的，再写。路径来自网络，仍然拒绝越界。"""
-        Connector._clear_materials(workdir)
+        self._clear_materials(workdir)
         for item in materials:
             rel = str(item.get("path", ""))
-            Connector._material_path(workdir, rel)
+            self._material_path(workdir, rel)
             dest = workdir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(base64.b64decode(item.get("data") or ""))
@@ -392,6 +428,7 @@ class Connector:
 
     def _execute(self, run: _Run, spec: RunSpec) -> None:
         before = None
+        outcome = RunOutcome(ok=False, error="runtime error: 没有跑起来")
         try:
             driver = self.drivers.get(spec.harness) if spec.harness else self.driver
             if driver is None:
@@ -404,6 +441,7 @@ class Connector:
                         self._sync_materials(run, spec.workdir, run.manifest)
                     except Exception as e:  # noqa: BLE001 —— 材料没齐：不跑这一轮（Agent 会以为档案就是空的）
                         raise MaterialsError(str(e)) from e
+                self._prepare(run, spec)
                 before = self._mount_home(run, spec)
                 outcome = driver.run(spec, run, run.cancel)
         except MaterialsError as e:  # 连接断了或内容对不上：按传输错误处理，任务回到等待、上线后重来
@@ -415,11 +453,21 @@ class Connector:
                 self._unmount_home(run, spec, before)
             except Exception as e:  # noqa: BLE001 —— 写回失败不能吞掉这一轮的结果，只在本机提示
                 print(f"私有目录写回失败（{spec.agent_id}）：{e}", file=sys.stderr, flush=True)
+            try:
+                self._finish(run, spec, outcome)
+            except Exception as e:  # noqa: BLE001 —— 交检查点失败：这一轮的结果照样报，只在本机提示
+                print(f"检查点没交上去（{spec.context_id}）：{e}", file=sys.stderr, flush=True)
             self.bridge.unregister(run.run_id)
             self._runs.pop(run.run_id, None)
         self.send({"type": RUN_RESULT, "run_id": run.run_id, "session_id": outcome.session_id,
                    "final_text": outcome.final_text, "tool_calls": outcome.tool_calls,
-                   "usage": outcome.usage, "ok": outcome.ok, "error": outcome.error})
+                   "usage": outcome.usage, "ok": outcome.ok, "error": outcome.error, **run.extra})
+
+    def _prepare(self, run: _Run, spec: RunSpec) -> None:
+        """材料补齐之后、驱动运行之前（沙箱客户端：从检查点恢复产物与会话）。"""
+
+    def _finish(self, run: _Run, spec: RunSpec, outcome: RunOutcome | None) -> None:
+        """驱动运行之后（沙箱客户端：交产物清单与会话包，写进 run.extra）。"""
 
 
 def _limit(v: Any) -> float | None:

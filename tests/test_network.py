@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.channels import CHANNELS, make_net
 from matrix.engine import Limits, Network, NetworkError
 from matrix.models import MCP_PREFIX, TaskStatus
 from matrix.runtime import (ScriptCall, ScriptedRuntime, ToolBridge, build_patch_yaml, classify_error,
@@ -910,8 +911,10 @@ def test_task_waits_for_pending_proposal(tmp_path: Path):
 
 
 # ================= 私有目录与模型 =================
-def test_agent_home_persists_without_injection(tmp_path: Path):
-    """不变量 8：每个 Agent 有跨对话、跨任务持久的私有目录；网络只挂载，不读取也不注入提示词。"""
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_agent_home_persists_without_injection(tmp_path: Path, channel: str):
+    """不变量 8：每个 Agent 有跨对话、跨任务持久的私有目录；网络只挂载，不读取也不注入提示词。
+    两种通道都跑（沙箱方式：私有目录作为材料下发，改动报回来写回）。"""
     seen: list[str] = []
 
     def handler(call: ScriptCall) -> str:
@@ -920,7 +923,7 @@ def test_agent_home_persists_without_injection(tmp_path: Path):
         (home / "notes.md").write_text(f"第 {len(seen)} 次运行的笔记", encoding="utf-8")
         return "ok"
 
-    net = Network(ScriptedRuntime(handler), tmp_path)
+    net = make_net(ScriptedRuntime(handler), tmp_path, channel)
     a = net.create_agent("A", "A", ["a"], ["file.write"])
     g = net.create_project("G", "", [a.id])
     c1 = talk(net, a, None, "一")

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -14,20 +15,29 @@ import threading
 from pathlib import Path
 
 from ...models import CONNECTOR_SERVER, MCP_SERVER
-from ...runtime import (ApprovalBridge, DshRuntime, QuestionBridge, RunRequest, RuntimeCapabilities, ToolBridge, argv,
+from ...runtime import (ApprovalBridge, ConnectorBridge, DshRuntime, QuestionBridge, RunRequest, RuntimeCapabilities, ToolBridge, argv,
                         no_window)
+from ...gateway import PLACEHOLDER as GATEWAY_PLACEHOLDER
+from ...web_fetch import parse_policy
 from .base import RunOutcome, RunSpec
 
 
 class DshDriver:
     name = "dsh"
 
-    def __init__(self, dsh_bin: str = "dsh", bridge_url: str = "", profile: str = "headless"):
+    def __init__(self, dsh_bin: str = "dsh", bridge_url: str = "", profile: str = "headless",
+                 state_dir: Path | None = None):
+        """state_dir：云侧沙箱客户端里用（docs/cloud-runtime.md 阶段 1a）——这个执行单元的 dsh 状态目录当 HOME，
+        不插审批应答者（云侧不审批，不变量 14）；外面已经是沙箱，不再套 Matrix 的外层。端侧不传。"""
         self.dsh_bin = dsh_bin
         self.bridge_url = bridge_url.rstrip("/")
-        self._runtime = DshRuntime(dsh_bin, profile)
+        self.state_dir = state_dir
+        # 端侧：不套外层沙箱，审批照旧上行
+        self._runtime = DshRuntime(dsh_bin, profile, hosted=state_dir is not None, isolation="off" if state_dir else None)
 
     def capabilities(self) -> RuntimeCapabilities:
+        if self.state_dir is not None:
+            return RuntimeCapabilities.all_enforced("dsh", approval="sandbox-only", sandbox="workspace-write")
         # 与云侧同一套覆盖层与沙箱；审批经连接器上行
         return RuntimeCapabilities.all_enforced("dsh", placement="device",
                                                 approval="interactive", sandbox="workspace-write")
@@ -55,7 +65,7 @@ class DshDriver:
         return found
 
     def services(self) -> list[str]:
-        return list(self.mcp_plugins())
+        return [] if self.state_dir is not None else list(self.mcp_plugins())
 
     def run(self, spec: RunSpec, ctx, cancel: threading.Event) -> RunOutcome:
         if not self.bridge_url:
@@ -71,6 +81,8 @@ class DshDriver:
         # 电脑上的连接器：网络没允许的 MCP 服务，在覆盖层里按插件 id 关掉（只开这一轮允许的）
         disabled = [pid for name, pid in self.mcp_plugins().items() if name not in spec.connectors] \
             if spec.connectors is not None else []
+        if self.state_dir is not None:
+            return self._run_cloud(spec, ctx, cancel, tools, questions)
         req = RunRequest(agent_id=spec.agent_id, context_id=spec.context_id, prompt=spec.prompt,
                          cwd=Path(spec.workdir), authority=list(spec.authority),
                          session_id=spec.session_id, tools=tools, on_event=ctx.emit,
@@ -80,3 +92,63 @@ class DshDriver:
         res = self._runtime.run(req)
         return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,
                           usage=res.usage, ok=res.ok, error=res.error)
+
+    def _run_cloud(self, spec: RunSpec, ctx, cancel: threading.Event, tools, questions) -> RunOutcome:
+        """云侧沙箱里的一轮：模型供应商、抓取白名单、云端连接器都来自 run.request（网络算好的），没有审批应答者。"""
+        cloud = spec.cloud
+        connectors = ConnectorBridge(url=f"{self.bridge_url}/internal/connectors", token=spec.run_id,
+                                     list_tools=ctx.list_connectors, call=ctx.call_connector) \
+            if cloud.get("cloud_connectors") else None
+        fetch = None
+        if isinstance(cloud.get("fetch"), dict):
+            try:
+                fetch = parse_policy(cloud["fetch"])
+            except ValueError:
+                fetch = None
+        env = {str(k): str(v) for k, v in (cloud.get("env") or {}).items()} if isinstance(cloud.get("env"), dict) else {}
+        # Agent 的命令里 HOME（dsh 状态目录）只读，只有工作目录与 /tmp 可写：各家工具的缓存放到 /tmp（uv 写不了缓存就装不了包）
+        env.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+        env.setdefault("UV_CACHE_DIR", "/tmp/.cache/uv")
+        env.setdefault("npm_config_cache", "/tmp/.npm")
+        env.setdefault("PIP_CACHE_DIR", "/tmp/.cache/pip")
+        llm = cloud.get("llm_provider") if isinstance(cloud.get("llm_provider"), dict) else None
+        gw, token = str(cloud.get("gateway") or ""), str(cloud.get("gateway_token") or "")
+        if gw and token:
+            # 出口网关（阶段 2a）：供应商地址换成网关；Agent 的命令与 dsh 自己出网都经网关的代理（令牌认定这一轮）
+            if llm is not None:
+                llm = json.loads(json.dumps(llm).replace(GATEWAY_PLACEHOLDER, gw))
+            proxy = f"http://sbx:{token}@{gw}"
+            host = gw.rsplit(":", 1)[0]
+            env.update(HTTPS_PROXY=proxy, HTTP_PROXY=proxy, https_proxy=proxy, http_proxy=proxy,
+                       NO_PROXY=f"{host},127.0.0.1,localhost", no_proxy=f"{host},127.0.0.1,localhost",
+                       NODE_USE_ENV_PROXY="1")  # 本机小桥（网络工具、提问）在沙箱里的 127.0.0.1，不经代理
+            ca = cloud.get("gateway_ca")
+            if isinstance(ca, str) and "BEGIN CERTIFICATE" in ca and self.state_dir is not None:
+                env.update(trust_env(self.state_dir, ca))
+        req = RunRequest(agent_id=spec.agent_id, context_id=spec.context_id, prompt=spec.prompt,
+                         cwd=Path(spec.workdir), authority=list(spec.authority), session_id=spec.session_id,
+                         tools=tools, on_event=ctx.emit, timeout_s=spec.timeout_s, model=spec.model, cancel=cancel,
+                         questions=questions, connectors=connectors, fetch=fetch,
+                         llm_provider=llm,
+                         env=env, state_dir=self.state_dir, events_file=False)
+        res = self._runtime.run(req)
+        return RunOutcome(session_id=res.session_id, final_text=res.final_text, tool_calls=res.tool_calls,
+                          usage=res.usage, ok=res.ok, error=res.error)
+
+
+SYSTEM_BUNDLES = ("/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt", "/etc/ssl/cert.pem")
+
+
+def trust_env(state: Path, ca_pem: str) -> dict[str, str]:
+    """沙箱信任出网 CA（2b，网关解开 HTTPS）：系统证书库 + 出网 CA 合成一个包，交给各家工具认的环境变量
+    （Python / requests / pip / uv、curl、git 认 SSL_CERT_FILE 一类；Node 与 npm 认 NODE_EXTRA_CA_CERTS）。"""
+    d = state / ".matrix"
+    d.mkdir(parents=True, exist_ok=True)
+    ca = d / "egress-ca.pem"
+    ca.write_text(ca_pem, encoding="utf-8")
+    system = next((Path(p).read_text(encoding="utf-8", errors="replace") for p in SYSTEM_BUNDLES if Path(p).is_file()), "")
+    bundle = d / "ca-bundle.pem"
+    bundle.write_text(system.rstrip() + "\n" + ca_pem, encoding="utf-8")
+    b = str(bundle)
+    return {"SSL_CERT_FILE": b, "REQUESTS_CA_BUNDLE": b, "CURL_CA_BUNDLE": b, "GIT_SSL_CAINFO": b, "PIP_CERT": b,
+            "NODE_EXTRA_CA_CERTS": str(ca)}

@@ -1,0 +1,65 @@
+# 云侧执行面：docker 后端（docs/cloud-runtime.md 阶段 1b）。叠在 compose.yml 上用，默认部署不受影响：
+#   cp sandboxd.example.json sandboxd.json            # 按需改运行时（runsc / insecure-runc）、镜像名、配额
+#   docker compose -f compose.yml -f compose.sandbox.yml --profile build build   # 构建沙箱镜像与管理器
+#   docker compose -f compose.yml -f compose.sandbox.yml up -d
+# 回退：去掉 -f compose.sandbox.yml 再 up -d（见 README「云侧执行面：docker 后端」）。
+services:
+  matrix:
+    environment:
+      MATRIX_CLOUD_SANDBOX: docker
+      MATRIX_SANDBOXD_SOCKET: /run/matrix-sandboxd/sandboxd.sock
+      # 核心只监听内部网络上的地址（服务名 matrix 解析出来的那个）：沙箱的网络接到这个容器上以后也连不到核心
+      MATRIX_HOST: matrix
+      # 出口网关（阶段 2a）：沙箱唯一连得到的地方。管理器把这个容器接到每个执行单元自己的 internal 网络上
+      MATRIX_GATEWAY_LISTEN: 0.0.0.0:8766
+      MATRIX_GATEWAY_MIRRORS: ${MATRIX_GATEWAY_MIRRORS:-}
+    volumes:
+      - sandboxd-run:/run/matrix-sandboxd      # 只有这个目录通向管理器；docker.sock 不挂进来
+    # Matrix 不再跑 dsh：不用再放开 seccomp 与 /proc 遮挡（compose.yml 里那两项是给容器里的 bwrap 的）
+    security_opt: !override
+      - no-new-privileges
+    # 容器名固定：管理器按它把网关接到执行单元的网络上（sandboxd.json 的 gateway_container）
+    container_name: matrix-core
+    depends_on: [sandboxd]
+
+  # 沙箱管理器：唯一挂 docker.sock 的服务（docker.sock 等于宿主 root）。不对外监听，只在共享卷里开一个 Unix socket
+  sandboxd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sandbox
+      target: sandboxd
+      args: &sandbox_args
+        APT_MIRROR: ${MATRIX_APT_MIRROR:-}
+        NPM_REGISTRY: ${MATRIX_NPM_REGISTRY:-}
+        PYPI_INDEX: ${MATRIX_PYPI_INDEX:-}
+        NODE_TARBALL: ${MATRIX_NODE_TARBALL:-}
+    image: matrix-sandboxd:local
+    restart: unless-stopped
+    # socket 0660、属组是 matrix 服务的用户组（gid 1000）：只有它连得上。管理器进程加进这个组，改属组不需要 CHOWN 特权
+    command: ["matrix-sandboxd", "--socket-mode", "660", "--socket-group", "1000"]
+    group_add: ["1000"]
+    environment:
+      MATRIX_SANDBOXD_CONFIG: /etc/matrix/sandboxd.json
+      DOCKER_CONFIG: /tmp/.docker
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandboxd-run:/run/matrix-sandboxd
+      - ./sandboxd.json:/etc/matrix/sandboxd.json:ro
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges]
+    network_mode: none                         # 它自己不联网：只经 docker.sock 与共享卷里的 socket
+
+  # 只用来构建沙箱镜像（不运行）：管理器按 sandboxd.json 的 image 起沙箱容器
+  sandbox-image:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.sandbox
+      target: sandbox
+      args: *sandbox_args
+    image: matrix-sandbox:local
+    profiles: [build]
+
+volumes:
+  sandboxd-run:

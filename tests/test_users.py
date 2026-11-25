@@ -10,8 +10,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.channels import CHANNELS, make_net
 from matrix import auth
-from matrix.engine import Limits, Network, NetworkError
+from matrix.engine import Network, NetworkError
 from matrix.models import TaskStatus
 from matrix.runtime import ApprovalBridge, ScriptCall, ScriptedRuntime, build_patch_yaml
 from matrix.server import create_app
@@ -206,7 +207,8 @@ def test_event_stream_filtered_per_user(tmp_path: Path):
     assert leaked == []
 
 
-# ================= 工作区外溢审批 =================
+# ================= 工作区外溢审批（不变量 14） =================
+# 云侧：工作目录以外一律不可写，也不审批（申请被拒、不产生审批记录）。端侧：申请照旧转给 Agent 的所有者，逐次批准。
 def _escalating(outcome: dict[str, str]):
     def handler(call: ScriptCall) -> str:
         outcome["result"] = call.escalate("写 ~/outside/x.txt：用户要求放到工作目录外")
@@ -227,14 +229,71 @@ def _decide_when_pending(net: Network, allow: bool, actor: str | None) -> thread
     return th
 
 
-@pytest.mark.parametrize("allow,expected", [(True, "allowed-once"), (False, "rejected")])
-def test_outside_workspace_needs_owner_approval(tmp_path: Path, allow: bool, expected: str):
-    """不变量 14：联合项目里 bob @ alice 的 Agent，它申请在工作目录外操作：申请发给 Agent 的所有者，不是 @ 它的人；
-    申请理由只给所有者看。"""
+def _on_device(net: Network, agent, handler) -> ScriptedRuntime:
+    """把 Agent 放到所有者的电脑上：端侧运行时用一个脚本运行时代替（不区分 harness，总是提供）。"""
+    rt = ScriptedRuntime(handler)
+    agent.device_runtime = "dev-1"
+    net.register_runtime("dev-1", rt)
+    return rt
+
+
+def test_cloud_outside_workspace_is_refused_without_approval(tmp_path: Path):
+    """不变量 14（云侧）：联合项目里 bob @ alice 的云侧 Agent，它申请在工作目录外操作：没有审批通道，申请被拒（unavailable），
+    不产生审批记录，群聊里也没有“申请在工作目录以外操作”。"""
     out: dict[str, str] = {}
     net = Network(ScriptedRuntime(_escalating(out)), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     pub = net.create_agent("Pub", "p", [], ["file.write"], actor=alice)
+    g, chat = joint(net, bob, "alice@x.io", alice)
+    net.send_message(chat.id, "@Pub 写到外面", background=False, actor=bob)
+    assert out["result"] == "unavailable"
+    assert net.runtime.calls[-1]._req.approvals is None  # 运行时这一轮根本没有审批通道（dsh 覆盖层里没有应答者）
+    assert net.store.approvals == {} and net.pending_approvals(alice) == []
+    texts = [m["text"] for m in net.conversation_detail(chat.id, alice)["messages"]]
+    assert not any("申请在工作目录以外操作" in t for t in texts)
+    assert pub.id in g.member_ids
+
+
+def test_cloud_approval_endpoint_refuses_without_record(tmp_path: Path):
+    """不变量 14（云侧）：/internal/approval 对云侧执行上下文一律回 unavailable、不建记录（覆盖层万一带上了应答者也批不了）。"""
+    from matrix.engine import ExecContext
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice = users(net, "alice@x.io")[0]
+    a = net.create_agent("A", "a", [], ["file.write"], actor=alice)
+    dm = net.direct_chat(a.id, actor=alice)
+    net._contexts["tok"] = ExecContext(kind="seat", id=f"{dm.id}/{a.id}", agent_id=a.id, conversation_id=dm.id,
+                                       project_id=None, authority=["file.write"], constraints=[], depth=0, chain=[a.id])
+    c = client(net, "alice@x.io")
+    r = c.post("/internal/approval", json={"token": "tok", "tool": "bash", "reason": "写 /etc/hosts"})
+    assert r.status_code == 200 and r.json()["outcome"] == "unavailable"
+    assert net.store.approvals == {}
+    assert net.request_approval("bad-token", "bash", "x") == "unavailable"
+
+
+def test_cloud_prompt_says_no_approval_device_prompt_keeps_it(tmp_path: Path):
+    """不变量 14：云侧提示词写明只能写工作目录、产物放工作目录、不要申请升权；端侧照旧说申请交给所有者审批。"""
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice = users(net, "alice@x.io")[0]
+    cloud = net.create_agent("Cloud", "c", [], ["file.write"], actor=alice)
+    local = net.create_agent("Local", "l", [], ["file.write"], actor=alice)
+    rt = _on_device(net, local, lambda call: "ok")
+    net.send_message(net.direct_chat(cloud.id, actor=alice).id, "hi", background=False, actor=alice)
+    net.send_message(net.direct_chat(local.id, actor=alice).id, "hi", background=False, actor=alice)
+    cloud_prompt, device_prompt = net.runtime.calls[-1].prompt, rt.calls[-1].prompt
+    assert "不要申请升权" in cloud_prompt and "产物都放在工作目录里" in cloud_prompt
+    assert "所有者审批" not in cloud_prompt
+    assert "申请会交给你的所有者审批" in device_prompt and "不要申请升权" not in device_prompt
+
+
+@pytest.mark.parametrize("allow,expected", [(True, "allowed-once"), (False, "rejected")])
+def test_device_outside_workspace_needs_owner_approval(tmp_path: Path, allow: bool, expected: str):
+    """不变量 14（端侧）：联合项目里 bob @ alice 的端侧 Agent，它申请在工作目录外操作：申请发给 Agent 的所有者，不是 @ 它的人；
+    申请理由只给所有者看。"""
+    out: dict[str, str] = {}
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    pub = net.create_agent("Pub", "p", [], ["file.write"], actor=alice)
+    _on_device(net, pub, _escalating(out))
     g, chat = joint(net, bob, "alice@x.io", alice)
     assert pub.id in g.member_ids  # 第一个 Agent 是助理：人进项目时自动加入
     th = _decide_when_pending(net, allow, alice)
@@ -252,21 +311,23 @@ def test_outside_workspace_needs_owner_approval(tmp_path: Path, allow: bool, exp
     assert not net.event_visible("approval.updated", {"approval": ap.to_dict()}, bob)
 
 
-def test_approval_rules(tmp_path: Path):
+def test_device_approval_rules(tmp_path: Path):
+    """不变量 14（端侧）：只批一次，别人批不了。"""
     out: dict[str, str] = {}
-    net = Network(ScriptedRuntime(_escalating(out)), tmp_path, Limits(approval_timeout_s=0.3), seed=False)
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
+    _on_device(net, a, _escalating(out))
     dm = net.direct_chat(a.id, actor=alice)
-    net.send_message(dm.id, "go", background=False, actor=alice)  # 没人审批：超时作废
-    assert out["result"] == "cancelled"
+    th = _decide_when_pending(net, False, alice)
+    net.send_message(dm.id, "go", background=False, actor=alice)
+    th.join(5)
+    assert out["result"] == "rejected"
     ap = next(iter(net.store.approvals.values()))
-    assert ap.status == "cancelled" and "超时" in ap.note
-    with pytest.raises(NetworkError, match="已经作废"):
+    with pytest.raises(NetworkError, match="已经"):
         net.decide_approval(ap.id, True, actor=alice)
     with pytest.raises(NetworkError, match="unknown approval"):
         net.decide_approval(ap.id, True, actor=bob)
-    assert net.request_approval("bad-token", "bash", "x") == "unavailable"
 
 
 def test_patch_mounts_approval_plugin():
@@ -278,11 +339,34 @@ def test_patch_mounts_approval_plugin():
     assert APPROVAL_PLUGIN.exists() and "approval/request" in APPROVAL_PLUGIN.read_text(encoding="utf-8")
 
 
-def test_approval_endpoint_and_api(tmp_path: Path):
+def test_cloud_dsh_overlay_has_no_approval_answerer(tmp_path: Path):
+    """不变量 14：云侧 dsh 的覆盖层不插审批应答者（即使请求里带着审批通道），dsh 没有应答者时以 unavailable 拒绝升权；
+    端侧驱动（hosted=False）照旧插入。能力报告里云侧是 sandbox-only。"""
+    from matrix.runtime import DshRuntime, RunRequest
+    from tests.test_connector import fake_bin
+    fake = fake_bin(tmp_path, "fake-dsh",   # 只记录覆盖层，不真的跑模型
+                    "import pathlib\np=sys.argv[sys.argv.index('--patch')+1]\n"
+                    "pathlib.Path(p).with_name('seen.yml').write_text(pathlib.Path(p).read_text(encoding='utf-8'), encoding='utf-8')\n"
+                    "print(json.dumps({'type':'final','text':'ok'}))\n")
+    bridge = ApprovalBridge(url="http://127.0.0.1:1/internal/approval", token="t", handler=lambda t, r: "rejected")
+    for hosted in (True, False):
+        cwd = tmp_path / f"w-{hosted}"
+        rt = DshRuntime(fake, hosted=hosted, isolation="off")
+        res = rt.run(RunRequest(agent_id="a", context_id="c", prompt="hi", cwd=cwd, authority=["file.write"],
+                                approvals=bridge))
+        assert res.ok, res.error
+        assert ("id: matrix-approval" in (cwd / "seen.yml").read_text(encoding="utf-8")) is (not hosted)
+    assert DshRuntime(fake, isolation="off").capabilities().approval == "sandbox-only"
+    assert DshRuntime(fake, hosted=False).capabilities().approval == "interactive"
+
+
+def test_device_approval_endpoint_and_api(tmp_path: Path):
+    """不变量 14（端侧）：审批卡只给所有者，别人批不了（404）。"""
     out: dict[str, str] = {}
-    net = Network(ScriptedRuntime(_escalating(out)), tmp_path, seed=False)
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)
+    _on_device(net, a, _escalating(out))
     g, chat = joint(net, alice, "bob@x.io", bob, [a.id])
     ca, cb = client(net, "alice@x.io"), client(net, "bob@x.io")
     cb.post(f"/api/conversations/{chat.id}/messages", json={"text": "@A go"})
@@ -365,8 +449,10 @@ def test_ledger_in_joint_group_hides_other_work(tmp_path: Path):
     assert "内部收购组" not in p and "alice@x.io）" not in p.split("你同时还在处理")[1]
 
 
-def test_home_merge_keeps_both_on_conflict(tmp_path: Path):
-    """不变量 15：两次并行运行改同一个私有文件：后写回的那份另存为冲突副本，不覆盖先写回的。"""
+@pytest.mark.parametrize("channel", CHANNELS)
+def test_home_merge_keeps_both_on_conflict(tmp_path: Path, channel: str):
+    """不变量 15：两次并行运行改同一个私有文件：后写回的那份另存为冲突副本，不覆盖先写回的。
+    两种通道都跑：沙箱方式下私有目录由网络持有，客户端只报改动，合并语义不变。"""
     gate = threading.Barrier(2, timeout=5)
 
     def handler(call: ScriptCall) -> str:
@@ -377,7 +463,7 @@ def test_home_merge_keeps_both_on_conflict(tmp_path: Path):
             time.sleep(0.1)  # 让私聊那次先写回
         return "ok"
 
-    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    net = make_net(ScriptedRuntime(handler), tmp_path, channel, seed=False)
     alice, = users(net, "alice@x.io")
     a = net.create_agent("A", "a", [], ["file.write"], actor=alice)
     g = net.create_project("G", "", [a.id], actor=alice)

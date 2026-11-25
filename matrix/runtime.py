@@ -2,6 +2,8 @@
 
 - DshRuntime：以 DeepSeek Harness headless 为标准运行时。
   权限通过 `--patch` 覆盖层强制执行（禁用对应工具插件 + 沙箱模式）；
+  云侧（hosted）每个执行单元一个 dsh 状态目录当 HOME，外面再包一层 bwrap 做读隔离（MATRIX_CLOUD_ISOLATION，
+  docs/cloud-runtime.md 第 8 节阶段 0），不插审批应答者（不变量 14：云侧工作目录以外一律不可写、也不审批）；
   需要网络工具时，用 `insert` 挂载 dsh-mcp-client，连接 matrix/mcp_server.py（stdio MCP）；
   有云端连接器时再挂一个，连接 matrix/mcp_connectors.py（由网络代调用，凭证不进运行时）；
   部署方配了抓取白名单时，有 web.research 的再挂 matrix/web_fetch.py，并关掉 dsh 自带的 web_fetch。
@@ -26,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import compat, sandbox
 from .mcp_server import TOOLS as NETWORK_TOOLS
 from .models import AGENT_HOME, AUTHORITIES, CONNECTOR_PREFIX, CONNECTOR_SERVER, FETCH_SERVER, LIST_TOOLS, MCP_PREFIX, MCP_SERVER, SKILLS
 from .web_fetch import DEADLINE_S, FetchPolicy
@@ -231,6 +234,18 @@ class RunRequest:
     env: dict[str, str] = field(default_factory=dict, repr=False)
     # 外部平台 Agent（docs/remote-agents.md）：remote_agents.RemoteCall —— 平台、平台上的 Agent、发起会话的请求头（含凭证，不打印）
     remote: Any = field(default=None, repr=False)
+    # 云侧 dsh：这个执行单元（席位或委托）自己的 dsh 状态目录，当这一轮 dsh 的 HOME；不在任何工作目录里。
+    # 外层沙箱里只有它和工作目录可写。None = 沿用进程的 HOME（端侧驱动、测试）
+    state_dir: Path | None = None
+    # 云侧沙箱方式（docs/cloud-runtime.md 第 5 节，阶段 1a）：这一轮属于哪个执行单元（seat:<对话>/<Agent> | task:<任务>）；
+    # None = 不是沙箱方式。只给沙箱运行时与它的连接用
+    unit: str | None = None
+    # 沙箱方式：这一轮另外能取的内容（检查点里的产物与会话包），只供恢复，不当材料写进工作目录
+    blobs: list[Material] = field(default_factory=list)
+    # 沙箱方式：run.request 里另带的字段（checkpoint 等），由引擎算好
+    sandbox: dict[str, Any] = field(default_factory=dict)
+    # dsh 的事件是否写进工作目录的 dsh-events.jsonl；沙箱里不写（事件经连接回到控制面，存在控制面那边）
+    events_file: bool = True
 
 
 # 运行时错误分类（参照 Raft daemon 的 runtimeErrorDeliveryPolicy）：
@@ -243,6 +258,8 @@ ERROR_CLASSES: dict[str, tuple[str, bool]] = {
     "TRANSPORT": ("provider_connection", False),
     "SERVER": ("provider_server", False),
     "STOPPED": ("stopped", False),  # 人终止了这一轮：不自动续接，等人决定
+    "ISOLATION": ("isolation_unavailable", False),  # 部署方要求云侧有读隔离而这台机器做不到：拒绝运行，等部署方处理
+    "CAPACITY": ("sandbox_capacity", False),  # 云侧执行面满了：委托回到等待，席位排队（不是失败）
 }
 
 
@@ -297,6 +314,8 @@ class RunResult:
     usage: dict[str, int] = field(default_factory=dict)
     ok: bool = True
     error: str | None = None
+    # 沙箱方式：客户端在 run.result 里另报的（产物清单、私有目录改动、会话包），由引擎校验后进检查点
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def error_class(self) -> str | None:
@@ -328,6 +347,10 @@ class RuntimeCapabilities:
     skills: str = "native"
     questions: bool = False                         # 运行中能否向人 / 委托方提问（ask_user_question 转给网络）
     goals: bool = False                             # 有没有长期目标工具（dsh 的 create_goal）：网络据此在同一会话里续跑
+    # 云侧运行的读隔离：none = Agent 的命令读得到服务器上的其他文件；sandbox = 外层沙箱里只有这个执行单元的东西
+    # （docs/cloud-runtime.md 4.5；阶段 0 是 bwrap，以后 gVisor 也是 sandbox，microVM 是 vm）。端侧不适用，记 none
+    isolation: str = "none"
+    isolation_note: str = ""                        # 给人看的一句说明：用的什么、为什么没有
 
     @classmethod
     def all_enforced(cls, name: str, **kw: Any) -> "RuntimeCapabilities":
@@ -507,26 +530,162 @@ def _clip(v: Any, n: int) -> Any:
     return v
 
 
+# ---------------- 云侧：执行单元的 dsh 状态目录与外层沙箱（docs/cloud-runtime.md 第 8 节阶段 0） ----------------
+ISOLATION_MODES = ("required", "preferred", "off")
+DEFAULT_ISOLATION = "preferred"   # 阶段 0 的默认：有外层沙箱就用，没有照旧跑并告警（阶段 1 起改成 required，9.1）
+# 环境变量里指向 CA 证书的：外层沙箱里要读得到（内网 CA、出网代理的 CA），只挂那一个文件或目录
+CA_ENV = ("NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "PIP_CERT",
+          "GIT_SSL_CAINFO")
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def isolation_mode(value: str | None = None) -> tuple[str, str]:
+    """部署方开关 MATRIX_CLOUD_ISOLATION（required / preferred / off，默认 preferred）：返回（档位, 说明）。
+    写错了按 required 处理，不悄悄放开。"""
+    raw = value if value is not None else (compat.env("CLOUD_ISOLATION") or DEFAULT_ISOLATION)
+    v = raw.strip().lower()
+    if v in ISOLATION_MODES:
+        return v, ""
+    return "required", f"MATRIX_CLOUD_ISOLATION 的值 {raw!r} 认不出（只认 required / preferred / off），按 required 处理"
+
+
+def install_root(exe: str | None) -> Path | None:
+    """一个程序的安装位置（只读挂进外层沙箱）：npm 装的取路径上的第一个 node_modules，在 bin/ 下的取上一级，
+    系统目录（/usr 等，整块挂着）里的不用另挂。位置因部署而异（镜像里在 /usr 下，本机常在 /opt），按实际解析。"""
+    if not exe:
+        return None
+    real = Path(os.path.realpath(exe))
+    if sandbox._under_system_dir(str(real)):
+        return None
+    parts = real.parts
+    if "node_modules" in parts:
+        return Path(*parts[:parts.index("node_modules") + 1])
+    return real.parent.parent if real.parent.name == "bin" else real.parent
+
+
+def _within(parent: Path, child: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def outer_ro(dsh: str, env: dict[str, str]) -> list[Path]:
+    """外层沙箱里只读的东西（系统目录之外）：Python 环境与 Matrix 代码（网络工具的 MCP 服务、dsh 插件）、
+    dsh 与 node 的安装位置、环境变量指向的 CA 证书。"""
+    path = env.get("PATH")
+    dirs: list[Path] = [*sandbox.python_dirs(), Path(__file__).resolve().parent]
+    for exe in (dsh, shutil.which("node", path=path)):
+        root = install_root(exe)
+        if root is not None:
+            dirs.append(root)
+    dirs += [Path(env[k]) for k in CA_ENV if env.get(k) and os.path.exists(env[k])]
+    return list(dict.fromkeys(dirs))
+
+
+def outer_argv(cmd: list[str], *, cwd: Path, state: Path, ro: list[Path]) -> list[str]:
+    """把一轮 dsh 包进外层 bwrap：可写的只有这个执行单元的工作目录（挂在原来的绝对路径上，dsh 的会话绑死了它）
+    和它自己的 dsh 状态目录；共享网络（回调 /internal/*、调模型）；新的 PID / 挂载 / IPC 命名空间。
+    只读目录里包含工作目录或状态目录的一律不挂：那会把整个数据目录带进来。"""
+    safe = [p for p in ro if not _within(p, cwd) and not _within(p, state)]
+    return sandbox.wrap(cmd, ro=safe, rw=[cwd, state], network=True, nested=True)
+
+
+def dsh_session_dirname(cwd: Path) -> str:
+    """dsh 存会话的目录名：工作目录的绝对路径，/ 换成 -，前后各加 --（如 /data/c/a → --data-c-a--，Linux 上实测）。
+    云侧只在 Linux 上跑；别的系统上的写法没核对过（反斜杠、盘符的冒号也换成 -），对不上时按会话 id 找。"""
+    return "--" + re.sub(r"[/\\:]", "-", cwd.as_posix().lstrip("/")) + "--"
+
+
+def dsh_session_files(home: Path, cwd: Path, session_id: str) -> tuple[Path | None, Path]:
+    """一个 dsh 会话在某个 HOME 下的两处文件：（会话目录或 None, 索引文件）。"""
+    sessions = home / ".dsh" / "sessions"
+    index = home / ".dsh" / "storages" / "session_projcache" / "sessions" / f"{session_id}.json"
+    if not _SESSION_ID.match(session_id):
+        return None, index
+    d = sessions / dsh_session_dirname(cwd) / session_id
+    if not d.is_dir():  # 目录名的写法以 dsh 为准：换了写法时按会话 id 找（会话 id 全局唯一）
+        found = [x for x in sessions.glob(f"*/{session_id}") if x.is_dir()] if sessions.is_dir() else []
+        d = found[0] if len(found) == 1 else None
+    return d, index
+
+
+def adopt_dsh_session(legacy_home: Path, home: Path, cwd: Path, session_id: str) -> bool:
+    """旧会话迁移（docs/cloud-runtime.md 10.2 第 3 步）：把会话的两处文件从共用的 HOME 拷进执行单元自己的 HOME
+    （会话目录去掉 session.lock；索引原样）。原处不删：回退到共用 HOME 时还能续接。已经在新 HOME 里时直接成功；
+    原处没有这个会话时返回 False，由引擎清掉会话 id、走“没有会话”的流程。前提是工作目录的绝对路径不变。"""
+    have, _ = dsh_session_files(home, cwd, session_id)
+    if have is not None:
+        return True
+    src, index = dsh_session_files(legacy_home, cwd, session_id)
+    if src is None:
+        return False
+    dest = home / ".dsh" / "sessions" / src.parent.name / session_id
+    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("session.lock"), dirs_exist_ok=True)
+    if index.is_file():
+        new_index = home / ".dsh" / "storages" / "session_projcache" / "sessions" / index.name
+        new_index.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(index, new_index)
+    return True
+
+
 class DshRuntime:
     name = "dsh"
 
-    def capabilities(self) -> RuntimeCapabilities:
-        """dsh 的权限由 --patch 覆盖层禁用插件 + 沙箱强制执行；审批经 dsh 插件转给网络。"""
-        return RuntimeCapabilities.all_enforced("dsh", approval="interactive", sandbox="workspace-write")
-
-    def __init__(self, dsh_bin: str = "dsh", profile: str = "headless"):
+    def __init__(self, dsh_bin: str = "dsh", profile: str = "headless", hosted: bool = True,
+                 isolation: str | None = None):
+        """hosted：云侧（Matrix 服务起的 dsh）。端侧驱动传 False：不套外层沙箱、照旧插审批应答者。
+        isolation：外层沙箱的档位，None = 读 MATRIX_CLOUD_ISOLATION。"""
         self.dsh_bin = dsh_bin
         self.profile = profile
+        self.hosted = hosted
+        self.isolation_mode, self._mode_note = isolation_mode(isolation) if hosted else ("off", "")
         self._default_model: dict[str, str] | None = None
 
+    def isolation(self) -> dict[str, Any]:
+        """云侧运行有没有读隔离：{mode, active, level, note}。active = 每一轮都会套上外层沙箱；
+        mode=required 而 active 为假时云侧运行一律拒绝。端侧驱动不适用。"""
+        if not self.hosted:
+            return {"mode": "off", "active": False, "level": "none", "note": "端侧：Agent 读的是所有者自己的电脑"}
+        mode = self.isolation_mode
+        if mode == "off":
+            ok, why = False, "部署方关掉了（MATRIX_CLOUD_ISOLATION=off）"
+        else:
+            ok, why = sandbox.available("nested")
+        if ok:
+            note = "外层 bubblewrap：Agent 的命令只看得到这个执行单元的工作目录与 dsh 状态，数据目录的其余部分不存在"
+            if sandbox._is_root():
+                note += "（服务以 root 运行：特权只在沙箱自己的用户命名空间里）"
+        elif mode == "required":
+            note = f"部署方要求读隔离（MATRIX_CLOUD_ISOLATION=required），但外层沙箱不可用：{why}。云侧运行一律拒绝"
+        else:
+            note = f"没有读隔离：{why}。Agent 的命令读得到服务器上的其他文件（数据目录、别人的会话）"
+        if self._mode_note:
+            note = f"{self._mode_note}。{note}"
+        return {"mode": mode, "active": ok, "level": "sandbox" if ok else "none", "note": note}
+
+    def capabilities(self) -> RuntimeCapabilities:
+        """dsh 的权限由 --patch 覆盖层禁用插件 + 沙箱强制执行。云侧不审批（不变量 14）：工作目录以外一律写不进；
+        端侧驱动的审批经连接器上行（它自己报能力，见 connector/drivers/dsh.py）。"""
+        if not self.hosted:
+            return RuntimeCapabilities.all_enforced("dsh", approval="interactive", sandbox="workspace-write")
+        iso = self.isolation()
+        return RuntimeCapabilities.all_enforced("dsh", approval="sandbox-only", sandbox="workspace-write",
+                                                isolation=iso["level"], isolation_note=iso["note"])
+
     def default_model(self) -> dict[str, str] | None:
-        """没给 Agent 配模型时 dsh 实际用哪个：读一次组合后的配置（profile 层也算进去）。"""
+        """没给 Agent 配模型时 dsh 实际用哪个：读一次组合后的配置（profile 层也算进去）。
+        云侧用一个空的 HOME 读：执行单元的 dsh 不再读共用 ~/.dsh 里的配置。"""
         if self._default_model is None:
             self._default_model = {}
+            import tempfile
             try:
-                out = subprocess.run(argv([self.dsh_bin, self.profile, "--dump-config"]), capture_output=True, text=True,
-                                     encoding="utf-8", errors="replace", timeout=30,
-                                     creationflags=no_window()).stdout
+                with tempfile.TemporaryDirectory(prefix="matrix-dsh-home-") as home:
+                    env = dict(os.environ, HOME=home) if self.hosted else None
+                    out = subprocess.run(argv([self.dsh_bin, self.profile, "--dump-config"]), capture_output=True,
+                                         text=True, encoding="utf-8", errors="replace", timeout=30, env=env,
+                                         stdin=subprocess.DEVNULL, creationflags=no_window()).stdout
                 block = out.split("- id: agent-default-model", 1)[1].split("\n- ", 1)[0]
                 for key, dst in (("provider", "provider"), ("model", "model"), ("reasoningEffort", "reasoning_effort")):
                     m = re.search(rf"^\s+{key}: ['\"]?([^'\"\n]+)", block, re.M)
@@ -548,13 +707,29 @@ class DshRuntime:
         patch_path = req.cwd / ".dsh-authority.yml"
         skill_dirs = [str((req.cwd / SKILLS).resolve()), str((req.cwd / AGENT_HOME / SKILLS).resolve())]
         connectors = req.connectors if "connector.use" in req.authority else None
-        patch_path.write_text(build_patch_yaml(req.authority, req.tools, req.model, req.approvals, skill_dirs=skill_dirs,
+        approvals = None if self.hosted else req.approvals  # 云侧不插审批应答者：dsh 以 unavailable 拒绝升权（不变量 14）
+        patch_path.write_text(build_patch_yaml(req.authority, req.tools, req.model, approvals, skill_dirs=skill_dirs,
                                                connectors=connectors, extra_disabled=req.disabled_plugins,
                                                questions=req.questions,
                                                llm_provider=req.llm_provider, fetch=req.fetch),
                               encoding="utf-8")
         env = dict(os.environ, **req.env, DSH_PERMISSION_MODE=permission_mode(req.authority))
         cmd = self.command(req, patch_path)
+        preexec: Callable[[], None] | None = None
+        if self.hosted:
+            iso = self.isolation()
+            if req.state_dir is not None:  # 这个执行单元自己的 dsh 状态：共用的 ~/.dsh 不再给云侧运行用
+                req.state_dir.mkdir(parents=True, exist_ok=True)
+                env["HOME"] = str(req.state_dir)
+            if iso["active"] and req.state_dir is not None:
+                exe = shutil.which(cmd[0], path=env.get("PATH")) or cmd[0]
+                cmd = outer_argv([exe, *cmd[1:]], cwd=req.cwd.resolve(), state=req.state_dir.resolve(),
+                                 ro=outer_ro(exe, env))
+                env["TMPDIR"] = "/tmp"  # dsh 起 bash 前要在 $TMPDIR 下建临时目录：必须是外层里可写的那个
+                preexec = sandbox.dsh_limits
+            elif self.isolation_mode == "required":
+                why = iso["note"] if not iso["active"] else "这一轮没有执行单元的状态目录"
+                return RunResult(req.session_id or "", "", ok=False, error=f"ISOLATION: {why}")
 
         tool_calls: list[dict[str, Any]] = []
         usage: dict[str, int] = {}
@@ -566,7 +741,7 @@ class DshRuntime:
         proc = subprocess.Popen(
             argv(cmd), cwd=req.cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1,
-            creationflags=no_window(),
+            creationflags=no_window(), preexec_fn=preexec,
         )
 
         def drain_stderr() -> None:
@@ -583,7 +758,8 @@ class DshRuntime:
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(req.prompt)
             proc.stdin.close()
-            with open(req.cwd / "dsh-events.jsonl", "a", encoding="utf-8") as log:
+            with (open(req.cwd / "dsh-events.jsonl", "a", encoding="utf-8") if req.events_file
+                  else open(os.devnull, "w", encoding="utf-8")) as log:
                 for line in proc.stdout:
                     line = line.strip()
                     if not line:
