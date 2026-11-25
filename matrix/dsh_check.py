@@ -619,7 +619,7 @@ def _scenarios(live: Live) -> list[tuple[str, Callable[[], tuple[str, str]]]]:
         att = [a for m in live.chat.messages if m.role == "agent" for a in m.attachments if a["name"] == "smoke-file.txt"]
         if not att:
             return FAIL, f"没有附上文件：{text[:120]!r}"
-        data = (live.net.store.attachment_dir(live.chat.id) / att[-1]["sha"]).read_text(encoding="utf-8")
+        data = live.net._attachment_path(live.chat.id, att[-1]["sha"]).read_text(encoding="utf-8")
         return (OK, "send_file 回读工作目录里的文件") if code in data else (FAIL, f"附件内容不对：{data[:80]!r}")
 
     def deliver() -> tuple[str, str]:
