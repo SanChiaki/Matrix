@@ -1,7 +1,8 @@
 """用户与登录：邮箱 + 密码（scrypt，仅标准库），或公司账号（`sso_login`，身份由 matrix/login 的驱动认定）；
-登录令牌存在 state.json 里，经 HttpOnly cookie 传递。
+登录令牌经 HttpOnly cookie 传递，状态里只存它的 sha256（docs/control-plane.md 第 8 节，阶段 C0 的一部分）：
+状态文件或备份泄露不等于会话泄露。闲置 `SESSION_IDLE_S` 或登录满 `SESSION_MAX_S` 就过期；令牌在退出登录时作废。
 
-这是最简实现：没有邮箱验证、令牌过期轮换；令牌在退出登录时作废。忘了密码由管理员发一条一次性的重置链接
+还没有：邮箱验证、CSRF 令牌、登录限流（见 docs/reference/security.md 第一条）。忘了密码由管理员发一条一次性的重置链接
 （`issue_reset` / `reset_password`），用户自己设新密码，管理员看不到新密码。
 """
 
@@ -21,6 +22,9 @@ from .store import Store
 COOKIE = "matrix_session"
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1, "dklen": 32}
+SESSION_IDLE_S = 7 * 24 * 3600     # 闲置这么久没用就过期
+SESSION_MAX_S = 30 * 24 * 3600     # 登录满这么久一律过期（和 cookie 的 max_age 一致），要重新登录
+SESSION_TOUCH_S = 3600             # “最近用过”最多每小时记一次：每个请求都记会让每个请求都保存一次状态
 
 
 class AuthError(ValueError):
@@ -74,17 +78,44 @@ def login(store: Store, email: str, password: str) -> tuple[User, str]:
     return user, token
 
 
+def session_hash(token: str) -> str:
+    """登录令牌 → 状态里的键。令牌本身只在 cookie 里。"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def session_expired(s: dict[str, Any], now: float) -> bool:
+    created = float(s.get("created_at") or 0)
+    seen = float(s.get("last_seen") or created)
+    return now - created > SESSION_MAX_S or now - seen > SESSION_IDLE_S
+
+
 def logout(store: Store, token: str | None) -> None:
     with store.lock:
-        if token and store.sessions.pop(token, None) is not None:
+        if token and store.sessions.pop(session_hash(token), None) is not None:
             store.save()
 
 
 def user_of(store: Store, token: str | None) -> User | None:
+    """cookie 里的令牌 → 用户。过期的顺手删掉；还有效的每小时最多记一次“最近用过”。"""
     if not token:
         return None
-    s = store.sessions.get(token)
-    u = store.users.get(s["user_id"]) if s else None
+    h, now = session_hash(token), time.time()
+    s = store.sessions.get(h)
+    if s is None:
+        return None
+    if session_expired(s, now) or now - float(s.get("last_seen") or 0) > SESSION_TOUCH_S:
+        with store.lock:
+            s = store.sessions.get(h)
+            if s is None:
+                return None
+            if session_expired(s, now):
+                del store.sessions[h]
+                store.save()
+                return None
+            if now - float(s.get("last_seen") or 0) > SESSION_TOUCH_S:
+                s["last_seen"] = now
+                store.save()
+    u = store.users.get(s["user_id"])
     return u if u is not None and _may_sign_in(store, u) else None
 
 
@@ -353,7 +384,9 @@ def _email(store: Store, user_id: str) -> str:
 
 
 def _new_session(store: Store, user_id: str) -> str:
-    """调用方持有锁。"""
-    token = secrets.token_urlsafe(32)
-    store.sessions[token] = {"user_id": user_id, "created_at": time.time()}
+    """调用方持有锁。返回令牌明文（只进 cookie），状态里只记它的 sha256。顺手清掉已经过期的登录。"""
+    token, now = secrets.token_urlsafe(32), time.time()
+    for h in [h for h, s in store.sessions.items() if session_expired(s, now)]:
+        del store.sessions[h]
+    store.sessions[session_hash(token)] = {"user_id": user_id, "created_at": now, "last_seen": now}
     return token

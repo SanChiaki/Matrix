@@ -773,8 +773,12 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
     app.state.im = im
     app.state.login = logins
 
+    # 对外只经 HTTPS 的反向代理时，部署方设 MATRIX_COOKIE_SECURE=on：cookie 带 Secure，浏览器不会经明文 HTTP 发它
+    secure_cookie = (compat.env("COOKIE_SECURE") or "").strip().lower() in ("1", "on", "true", "yes")
+
     def set_cookie(resp: Response, token: str) -> None:
-        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30, path="/")
+        resp.set_cookie(auth.COOKIE, token, httponly=True, samesite="lax", max_age=auth.SESSION_MAX_S, path="/",
+                        secure=secure_cookie)
 
     @app.get("/")
     def index() -> FileResponse:

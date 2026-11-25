@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -162,6 +164,7 @@ def _merge_groups(raw: dict[str, Any], root: Path) -> tuple[dict[str, Any], dict
     return raw, notes
 
 
+SHA_HEX = re.compile(r"[0-9a-f]{64}")
 SLOW_SAVE_S = 1.0   # 一次保存超过这么久就在标准错误里提醒（M2：先看得见，再换存储）
 
 
@@ -308,7 +311,7 @@ class Store:
         self.knowledge: dict[str, KnowledgeItem] = {}
         self.proposals: dict[str, Proposal] = {}
         self.users: dict[str, User] = {}
-        self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌 → {user_id, created_at}
+        self.sessions: dict[str, dict[str, Any]] = {}   # 登录令牌的 sha256 → {user_id, created_at, last_seen}
         self.resets: dict[str, dict[str, Any]] = {}     # 重置密码令牌的 sha256 → {user_id, by, created_at, expires_at}
         self.approvals: dict[str, Approval] = {}
         self.questions: dict[str, Question] = {}  # Agent 在运行中提的问题（等人或委托方回答）
@@ -555,7 +558,7 @@ class Store:
             self.proposals[p["id"]] = Proposal(**_known(Proposal, p))
         for u in raw.get("users", []):
             self.users[u["id"]] = User(**_known(User, u))
-        self.sessions = {t: s for t, s in (raw.get("sessions") or {}).items() if s.get("user_id") in self.users}
+        self.sessions = _hashed_sessions(raw.get("sessions") or {}, self.users)
         now = time.time()
         self.resets = {h: r for h, r in (raw.get("password_resets") or {}).items()
                        if r.get("user_id") in self.users and float(r.get("expires_at") or 0) > now}
@@ -697,6 +700,20 @@ class Store:
 
     def projects_of(self, agent_id: str) -> list[Project]:
         return [p for p in self.projects.values() if agent_id in p.member_ids]
+
+
+def _hashed_sessions(raw: dict[str, Any], users: dict[str, User]) -> dict[str, dict[str, Any]]:
+    """登录会话按令牌的 sha256 存（auth.session_hash）。旧版本以明文令牌作键：换成哈希，用户不掉线；
+    旧记录没有“最近用过”，记成现在，免得升级当天闲置超过 7 天的人全被登出（最长 30 天照样从登录那天算）。"""
+    now, out = time.time(), {}
+    for key, s in raw.items():
+        if not isinstance(s, dict) or s.get("user_id") not in users:
+            continue
+        if SHA_HEX.fullmatch(key):
+            out[key] = s
+        else:
+            out[hashlib.sha256(key.encode()).hexdigest()] = {**s, "last_seen": s.get("last_seen") or now}
+    return out
 
 
 def _connector_panel(p: dict[str, Any]) -> None:
