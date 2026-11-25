@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
 import time
@@ -64,6 +65,20 @@ class NoCacheStaticFiles(StaticFiles):
         resp = super().file_response(*args, **kwargs)
         resp.headers["Cache-Control"] = "no-cache"
         return resp
+
+
+def prometheus_text(m: dict[str, Any]) -> str:
+    """存储指标 → Prometheus 文本格式（M2）。耗时按 summary 给：分位数、总和、次数。"""
+    lines = [f'matrix_store_info{{backend="{m.get("backend", "")}"}} 1',
+             "# TYPE matrix_store_bytes gauge", f"matrix_store_bytes {m.get('bytes', 0)}"]
+    for name, key, what in (("matrix_store_save_seconds", "save", "一次保存在锁内的耗时"),
+                            ("matrix_lock_wait_seconds", "lock_wait", "等全局锁的时间（只计真的等了的）")):
+        t = m.get(key) or {}
+        lines += [f"# HELP {name} {what}", f"# TYPE {name} summary",
+                  f'{name}{{quantile="0.5"}} {t.get("p50_s", 0)}', f'{name}{{quantile="0.99"}} {t.get("p99_s", 0)}',
+                  f"{name}_sum {t.get('total_s', 0)}", f"{name}_count {t.get('count', 0)}",
+                  f"# TYPE {name}_max gauge", f"{name}_max {t.get('max_s', 0)}"]
+    return "\n".join(lines) + "\n"
 
 
 def resume_seq(since: int, last_event_id: str | None, last_seq: int) -> int:
@@ -872,6 +887,27 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
     @app.get("/api/admin/usage")
     def admin_usage(user: Me, days: int = Query(30, ge=1, le=90)) -> dict:
         return network.admin_usage(user.id, days)
+
+    @app.get("/api/admin/storage")
+    def admin_storage(user: Me) -> dict:
+        """存储的指标（只有数字，不含内容）：每次保存的耗时、等锁的时间、状态有多大。"""
+        if not network.is_admin(user.id):
+            raise HTTPException(404, "unknown admin")
+        return network.store.metrics()
+
+    @app.get("/metrics")
+    def prometheus_metrics(request: Request) -> PlainTextResponse:
+        """Prometheus 格式的同一组指标。管理员登录可看；抓取程序用部署方设的 MATRIX_METRICS_TOKEN（Bearer）。
+        两样都没有时按不存在处理。"""
+        want = compat.env("METRICS_TOKEN")
+        got = request.headers.get("authorization", "")
+        ok = bool(want) and secrets.compare_digest(got.encode(), f"Bearer {want}".encode())
+        if not ok:
+            u = auth.user_of(store, request.cookies.get(auth.COOKIE))
+            ok = u is not None and network.is_admin(u.id)
+        if not ok:
+            raise HTTPException(404, "Not Found")
+        return PlainTextResponse(prometheus_text(network.store.metrics()), media_type="text/plain; version=0.0.4")
 
     @app.post("/api/admin/users/{user_id}/reset")
     def admin_reset_password(user_id: str, user: Me) -> dict:
