@@ -108,6 +108,23 @@ def test_basic_access_runs_on_the_platform_and_keeps_secrets_out(env: Env):
     assert API_KEY not in evs
 
 
+def test_upgrade_keeps_the_platform_session_and_builds_no_dsh_state(env: Env):
+    """升级到每个执行单元一个 dsh 状态目录（docs/cloud-runtime.md 阶段 0）时，外部平台 Agent 的平台会话 id
+    不能被当成共用 ~/.dsh 里的旧 dsh 会话去搬：找不到就会被清掉，平台会话断一次。它也不建 dsh 状态目录。"""
+    import shutil
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "第一句", actor=maya, background=False)
+    sid = dm.seats[a.id].dsh_session_id
+    assert sid
+    shutil.rmtree(net.store.root / "dsh-state", ignore_errors=True)   # 升级前的数据：还没有 dsh-state/
+    net.send_message(dm.id, "第二句", actor=maya, background=False)
+    assert dm.seats[a.id].dsh_session_id == sid and len(env.demo.sessions[sid]) == 2   # 续接同一个平台会话
+    assert not net.store.unit_state_dir("seat", f"{dm.id}/{a.id}").exists()
+
+
 def test_full_access_callbacks_land_in_the_matrix_round(env: Env):
     """不变量 28：配了 Matrix 的 MCP 后，平台的回调凭密钥 + 会话 id 落到 Matrix 发起的那一轮，权限照网络算；
     接上之后委托由网络强制。"""

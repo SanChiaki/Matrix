@@ -5541,7 +5541,7 @@ class Network(AppsMixin):
         sid = seat_id(conv.id, agent_id)
         if self._sandboxed(agent):
             self._sandbox_import("seat", sid, seat, agent)
-        elif not agent.device_runtime:
+        elif not agent.device_runtime and not agent.remote:  # 外部平台 Agent 的会话 id 是平台会话，不是 dsh 的
             self._adopt_dsh_state(seat, "seat", sid, self.store.root / seat.workdir)
         self._flow_reset(seat)
         with self._lock:
@@ -5699,7 +5699,7 @@ class Network(AppsMixin):
         items = self._drain(task)
         if self._sandboxed(agent):
             self._sandbox_import("task", task.id, task, agent)
-        elif not agent.device_runtime:
+        elif not agent.device_runtime and not agent.remote:  # 外部平台 Agent 的会话 id 是平台会话，不是 dsh 的
             self._adopt_dsh_state(task, "task", task.id, self.store.task_dir(task.id))
         self._flow_reset(task)
         ctx = self._task_ctx(task, agent, g)
