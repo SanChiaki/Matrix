@@ -359,6 +359,9 @@ class Project:
         return {**asdict(self), "shared": self.shared, "kind": "joint" if self.shared else "internal"}
 
 
+MESSAGE_EDITS = [0]   # 建好之后又被改过的消息累计次数（见 Message.__setattr__）
+
+
 @dataclass
 class Message:
     id: str
@@ -381,6 +384,19 @@ class Message:
     about: str | None = None             # event：说的是哪份资料 / 哪个技能（`file:<路径>`、`skill:<名字>`）；
                                          # 那一项不在某个 Agent 的可见范围里时，这条不送给它（不变量 26）
     ts: float = field(default_factory=time.time)
+
+    # 改动计数（不是字段，不进 to_dict / asdict）：数据库存储只重写计数变了的消息（M7，store.DbBackend）；
+    # 建好之后再改的，另把全局的 MESSAGE_EDITS 加一，没有人改过旧消息时保存连逐条比计数都省了。
+    # 所以改消息一律整体赋值（m.claimed_by = …），不要原地改它的列表（m.attachments.append(…) 记不上）
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "_ready", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        d = self.__dict__
+        object.__setattr__(self, "_rev", d.get("_rev", 0) + 1)
+        if d.get("_ready"):
+            MESSAGE_EDITS[0] += 1
 
 
 @dataclass

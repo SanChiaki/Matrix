@@ -226,9 +226,11 @@ class Network(AppsMixin):
                  plugins: pluginfs.PluginCatalog | None = None, admins: Iterable[str] | None = None,
                  fetch: FetchConfig | None = None, platforms: "remote.PlatformCatalog | None" = None,
                  remote_driver: Callable[[str], Any] | None = None, sandbox: SandboxProvider | None = None,
-                 sandbox_url: str | None = None, sandbox_limits: dict[str, Any] | None = None):
+                 sandbox_url: str | None = None, sandbox_limits: dict[str, Any] | None = None,
+                 store_url: str | None = None):
         """sandbox：云侧执行面的沙箱后端（docs/cloud-runtime.md 阶段 1a，开关 MATRIX_CLOUD_SANDBOX，默认关）。
-        None = 照旧：云侧 Agent 是服务的子进程。sandbox_url：沙箱客户端连回来的地址；sandbox_limits：并发与保留期等。"""
+        None = 照旧：云侧 Agent 是服务的子进程。sandbox_url：沙箱客户端连回来的地址；sandbox_limits：并发与保留期等。
+        store_url：状态存在哪（None = 读 MATRIX_STORE，没设就是 state.json；docs/reference/storage.md）。"""
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
@@ -236,7 +238,7 @@ class Network(AppsMixin):
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"
         self.question_url = tool_url.rsplit("/", 1)[0] + "/question"
-        self.store = Store(data_dir, seed=seed)
+        self.store = Store(data_dir, seed=seed, url=store_url)
         shutil.rmtree(self.store.root / "staging", ignore_errors=True)  # 暂存文件只属于某一轮：重启时那些轮都已结束
         # 外部平台 Agent（docs/remote-agents.md，不变量 28）：部署方的平台目录；MCP 回调按（Agent, 平台会话 id）落到哪一轮
         self.platforms = platforms or remote.PlatformCatalog(self.store.root / "agent-platforms.json")
@@ -275,6 +277,8 @@ class Network(AppsMixin):
         self._app_hits: dict[str, list[float]] = {}       # 应用令牌限频（不变量 30）
         self._frame_key = secrets.token_bytes(32)
         self.bus = EventBus()
+        if getattr(self.store.backend, "events", None) is not None:  # 数据库存储：事件落库，重启后网页续得上（M7）
+            self.bus.attach(self.store.backend.events)
         self._contexts: dict[str, ExecContext] = {}
         self._live: dict[str, list[dict[str, Any]]] = {}  # 运行中的执行上下文 id → 过程（不持久化）
         self._running: set[str] = set()   # 正在跑一轮的执行上下文 id
@@ -5323,15 +5327,20 @@ class Network(AppsMixin):
                                    audience=[agent.owner_id] if agent.owner_id else []))
 
     def _round_safe(self, kind: str, cid: str) -> None:
+        run_state = "failed"
+        holder = self.store.tasks.get(cid) if kind == "task" else None
+        rid = self.store.run_started(kind, cid, holder.delegatee_id if holder else cid.partition("/")[2])
         try:
             if kind == "seat":
                 conv_id, _, agent_id = cid.partition("/")
                 self._seat_round(self.store.conversations[conv_id], agent_id)
             else:
                 self._task_round(self.store.tasks[cid])
+            run_state = "done"
         except Exception as e:  # noqa: BLE001 —— 引擎缺陷也要落到对话或任务里
             self._internal_error(kind, cid, e)
         finally:
+            self.store.run_ended(rid, run_state)
             with self._lock:  # 判断与出队放在同一把锁里，wait_quiet 不会在两轮之间误判为静止
                 again = self._eligible(kind, cid)
                 wake = self.sandbox is not None and not again

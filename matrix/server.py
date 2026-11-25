@@ -2204,7 +2204,7 @@ class MatrixServer(uvicorn.Server):
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
                   admins: str | None = None, fetch: str | None = None, platforms: str | None = None,
-                  sandbox: str | None = None, host: str = "127.0.0.1") -> Network:
+                  sandbox: str | None = None, host: str = "127.0.0.1", store: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
     admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
@@ -2221,12 +2221,19 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
                    sandbox=provider_named(sandbox if sandbox is not None else sandbox_config()["backend"]),
                    sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect",
                    # 出口网关把沙箱连接转给核心：核心监听在哪就连哪（容器里核心只监听内部网络的地址，沙箱网络上没有它）
-                   sandbox_limits={"gateway_core": f"{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"})
+                   sandbox_limits={"gateway_core": f"{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"},
+                   store_url=store)
 
 
 def main() -> None:
     from . import utf8_stdio
     utf8_stdio()
+    if sys.argv[1:2] == ["migrate"] and sys.argv[2:3] and sys.argv[2] in ("state", "verify"):
+        from .storage_cli import main as storage_main   # 存储迁移（docs/reference/storage.md）
+        storage_main(sys.argv[2], sys.argv[3:])
+    if sys.argv[1:2] and sys.argv[1] in ("export-state", "backup-db"):
+        from .storage_cli import main as storage_main
+        storage_main(sys.argv[1], sys.argv[2:])
     if sys.argv[1:2] == ["migrate"]:   # matrix migrate workdirs | export | purge-legacy（docs/cloud-runtime.md 第 10 节）
         from .migrate import main as migrate_main
         migrate_main(sys.argv[2:])
@@ -2252,6 +2259,9 @@ def main() -> None:
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
     p.add_argument("--host", default=compat.env("HOST", "127.0.0.1"))
+    p.add_argument("--store", default=None,
+                   help="状态存在哪：json（state.json）/ sqlite（<data>/matrix.db）/ sqlite:<路径> / postgresql://…；"
+                        "默认读 MATRIX_STORE，没有就是 json。库是空的而有 state.json 时首次启动自动导入（docs/reference/storage.md）")
     p.add_argument("--sandbox", default=None, choices=["off", "local", "docker"],
                    help="云侧执行面：local = 每个执行单元一个本机子进程沙箱（外层 bwrap）；docker = 每个执行单元一个容器，"
                         "经沙箱管理器 matrix-sandboxd（MATRIX_SANDBOXD_SOCKET）；默认读 MATRIX_CLOUD_SANDBOX，没有就 off")
@@ -2260,11 +2270,13 @@ def main() -> None:
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,
-                            platforms=args.platforms, sandbox=args.sandbox, host=args.host)
+                            platforms=args.platforms, sandbox=args.sandbox, host=args.host, store=args.store)
     if network.sandbox is not None:
         rep = network.sandbox_report()
         print(f"[matrix] 云侧执行面：{rep['backend']} 后端（{rep['note']}）")
     print(f"Matrix → http://127.0.0.1:{args.port}  (runtime={network.runtime.name}, data={args.data})")
+    st = network.store.metrics()
+    print(f"状态存储：{st['backend']}（{st['path']}，从 {network.store.loaded_from or '全新'} 读入）")
     if args.runtime == "dsh" and shutil.which(args.dsh_bin) is None:  # 不然启动正常，到第一轮才 FileNotFoundError
         print(f"[matrix] 警告：找不到 dsh（--dsh-bin {args.dsh_bin}，PATH={os.environ.get('PATH', '')}）："
               f"云侧 Agent 每一轮都会失败。装好 dsh 或用 --dsh-bin 指到它，再跑 matrix-dsh-check 确认", file=sys.stderr)
@@ -2299,7 +2311,10 @@ def main() -> None:
     # 超了 uvicorn 会直接断开这条连接
     config = uvicorn.Config(create_app(network, im, login), host=args.host, port=args.port, log_level="warning",
                             timeout_graceful_shutdown=3, ws_max_size=FILE_LIMIT * 4 // 3 + 1_000_000)
-    MatrixServer(config, network).run()
+    try:
+        MatrixServer(config, network).run()
+    finally:
+        network.store.close()   # 数据库存储：事件落完、关连接
 
 
 if __name__ == "__main__":

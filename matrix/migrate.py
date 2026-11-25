@@ -170,8 +170,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--yes", action="store_true", help="purge-legacy：真的删（不带只列出会删什么）")
     args = p.parse_args(argv)
     data = Path(args.data or compat.data_dir()).resolve()
-    if not (data / "state.json").is_file():
-        raise SystemExit(f"{data} 里没有 state.json")
+    from . import db as dbmod
+    if not (data / "state.json").is_file() and not dbmod.resolve_url(compat.env("STORE"), data):
+        raise SystemExit(f"{data} 里没有 state.json（状态在数据库里时设好 MATRIX_STORE）")
     net = Network(ScriptedRuntime(lambda call: ""), data, seed=False)   # 不跑任何一轮，只读写状态与检查点
     if args.action == "workdirs":
         workdirs(net).show("建检查点")

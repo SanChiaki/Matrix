@@ -19,8 +19,10 @@ from typing import Any
 
 from dataclasses import asdict, fields
 
+from . import compat
+from . import db as dbmod
 from .compat import current_call
-from .models import (BRIEF_LIMIT, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
+from .models import (BRIEF_LIMIT, MESSAGE_EDITS, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
                      KnowledgeItem, Message, Project, Proposal, ProjectService, ExternalApp, AppGrant, Question, Release, ResourceRef, SandboxRecord, Schedule, Seat, Task, TaskStatus, User,
                      UserRequest,
@@ -295,15 +297,19 @@ SEED_PROJECT = {
 
 
 class Store:
-    def __init__(self, root: Path, seed: bool = True):
-        """seed：全新的数据目录是否预置种子 Agent 与研究项目（测试、离线演练用；服务默认不预置，由用户自己创建）。"""
+    def __init__(self, root: Path, seed: bool = True, url: str | None = None):
+        """seed：全新的数据目录是否预置种子 Agent 与研究项目（测试、离线演练用；服务默认不预置，由用户自己创建）。
+        url：状态存在哪（M7）：None = 读 MATRIX_STORE，没设就是 state.json；`sqlite` / `postgresql://…` 见 db.resolve_url。"""
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = root / "state.json"
         self.backup = root / "state.json.bak"   # 上一次保存的样子（M2）：state.json 读不了时从它启动
         self.lock = TimedRLock()
         self.save_timings = Timings()           # 每次保存在锁内花的时间（管理后台“存储”与 /metrics）
-        self.loaded_from = ""                   # 启动时从哪里读的状态：state.json / state.json.bak / ""（全新）
+        self.loaded_from = ""                   # 启动时从哪里读的状态：state.json / state.json.bak / 数据库 / ""（全新）
+        spec = url if url is not None else compat.env("STORE")
+        db_url = dbmod.resolve_url(spec, root)
+        self.backend: JsonBackend | DbBackend = DbBackend(db_url, self) if db_url else JsonBackend(self)
         self.agents: dict[str, AgentNode] = {}
         self.projects: dict[str, Project] = {}
         self.conversations: dict[str, Conversation] = {}
@@ -330,10 +336,12 @@ class Store:
         self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
         # 对账时发现、控制面没有记录的沙箱（只剩卷）：执行单元 → 第一次发现的时间。过保留期才删，计时不随重启重来
         self.sandbox_orphans: dict[str, float] = {}
-        found = self._read_source()
+        found = self.backend.read()
         if found is not None:
             self._load(*found)
+            self.backend.after_load()
         else:
+            self.backend.after_load()
             if seed:
                 self._seed()
             self.save()
@@ -425,6 +433,12 @@ class Store:
 
     # ---------- 持久化 ----------
     def _read_source(self) -> tuple[dict[str, Any], Path] | None:
+        if not self.path.exists() and not self.backup.exists() and self.path.with_name("state.json.imported").exists():
+            raise RuntimeError(f"{self.root} 里的状态已经导进了数据库（只剩 state.json.imported）：要用数据库就设 MATRIX_STORE；"
+                               "要回到 state.json，先用 matrix export-state 导出")
+        return self._read_json()
+
+    def _read_json(self) -> tuple[dict[str, Any], Path] | None:
         """启动时读哪份文件（M2）。state.json 读得了就用它；读不了（空、半截、不是 JSON）或者不在而 .bak 在，
         就用 .bak 并在标准错误里报警，坏掉的那份改名留下（state.json.corrupt-<时间>）给人看，不覆盖。都没有就是全新的。"""
         if self.path.exists():
@@ -444,54 +458,70 @@ class Store:
             return None
         return json.loads(self.backup.read_text(encoding="utf-8")), self.backup
 
+    def snapshot(self) -> dict[str, Any]:
+        """全部状态，state.json 的样子（JSON 存储整份写它；数据库存储导出 export-state 也是它）。调用方持有锁。"""
+        return {
+            "agents": [a.persist() for a in self.agents.values()],
+            "projects": [p.to_dict() for p in self.projects.values()],
+            "conversations": [c.to_dict() for c in self.conversations.values()],  # 含收件箱
+            "tasks": [t.to_dict(full=True) for t in self.tasks.values()],
+            "knowledge": [k.to_dict(content=True) for k in self.knowledge.values()],
+            "proposals": [p.to_dict() for p in self.proposals.values()],
+            "users": [asdict(u) for u in self.users.values()],
+            "sessions": self.sessions,
+            "password_resets": self.resets,
+            "approvals": [a.to_dict() for a in self.approvals.values()],
+            "questions": [q.to_dict() for q in self.questions.values()],
+            "requests": [r.to_dict() for r in self.requests.values()],
+            "devices": [asdict(d) for d in self.devices.values()],
+            "connections": [asdict(c) for c in self.connections.values()],
+            "drafts": [d.to_dict() for d in self.drafts.values()],
+            "held": [h.to_dict() for h in self.held.values()],
+            "schedules": [x.to_dict() for x in self.schedules.values()],
+            "releases": [r.to_dict() for r in self.releases.values()],
+            "project_services": [x.to_dict() for x in self.project_services.values()],
+            "apps": [x.to_dict() for x in self.apps.values()],
+            "app_grants": [asdict(x) for x in self.app_grants.values()],
+            "im_channels": [x.to_dict() for x in self.im_channels.values()],
+            "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
+            **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
+            **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
+        }
+
     def save(self) -> None:
         t0 = time.perf_counter()
         with self.lock:
             t1 = time.perf_counter()
-            data = {
-                "agents": [a.persist() for a in self.agents.values()],
-                "projects": [p.to_dict() for p in self.projects.values()],
-                "conversations": [c.to_dict() for c in self.conversations.values()],  # 含收件箱
-                "tasks": [t.to_dict(full=True) for t in self.tasks.values()],
-                "knowledge": [k.to_dict(content=True) for k in self.knowledge.values()],
-                "proposals": [p.to_dict() for p in self.proposals.values()],
-                "users": [asdict(u) for u in self.users.values()],
-                "sessions": self.sessions,
-                "password_resets": self.resets,
-                "approvals": [a.to_dict() for a in self.approvals.values()],
-                "questions": [q.to_dict() for q in self.questions.values()],
-                "requests": [r.to_dict() for r in self.requests.values()],
-                "devices": [asdict(d) for d in self.devices.values()],
-                "connections": [asdict(c) for c in self.connections.values()],
-                "drafts": [d.to_dict() for d in self.drafts.values()],
-                "held": [h.to_dict() for h in self.held.values()],
-                "schedules": [x.to_dict() for x in self.schedules.values()],
-                "releases": [r.to_dict() for r in self.releases.values()],
-                "project_services": [x.to_dict() for x in self.project_services.values()],
-                "apps": [x.to_dict() for x in self.apps.values()],
-                "app_grants": [asdict(x) for x in self.app_grants.values()],
-                "im_channels": [x.to_dict() for x in self.im_channels.values()],
-                "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
-                **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
-                **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
-            }
-            write_durable(self.path, json.dumps(data, ensure_ascii=False, indent=1), backup=self.backup)
+            self.backend.save()
             spent = time.perf_counter() - t1
         self.save_timings.add(spent)
         if spent > SLOW_SAVE_S:
             print(f"[matrix] 保存状态用了 {spent:.2f} 秒（锁内，期间所有请求都在等）；"
-                  f"等锁 {t1 - t0:.2f} 秒。状态大了就该换数据库存储（docs/control-plane.md）", file=sys.stderr)
+                  f"等锁 {t1 - t0:.2f} 秒。状态大了就该换数据库存储（docs/reference/storage.md）", file=sys.stderr)
 
     def metrics(self) -> dict[str, Any]:
-        """存储的两个指标（M2）：每次保存在锁内的耗时，以及任何人等这把锁的时间。不含任何内容。"""
-        size = self.path.stat().st_size if self.path.exists() else 0
-        return {"backend": "json", "path": self.path.name, "bytes": size, "loaded_from": self.loaded_from,
+        """存储的指标：每次保存在锁内的耗时，以及任何人等这把锁的时间（M2），加上后端自己的（大小、写了多少行）。不含任何内容。"""
+        return {**self.backend.metrics(), "loaded_from": self.loaded_from,
                 "save": self.save_timings.snapshot(), "lock_wait": self.lock.waits.snapshot()}
 
-    def _load(self, raw: dict[str, Any], source: Path) -> None:
-        self.loaded_from = source.name
+    def run_started(self, kind: str, unit: str, agent_id: str | None) -> str:
+        """一轮运行开始（数据库存储记进 run 表；state.json 存储不记）。返回这一轮的编号。"""
+        rid = new_id("run")
+        self.backend.run_started(rid, kind, unit, agent_id)
+        return rid
+
+    def run_ended(self, rid: str, state: str = "done") -> None:
+        self.backend.run_ended(rid, state)
+
+    def close(self) -> None:
+        """停服务时：数据库存储关掉连接（事件先落完）。"""
+        with self.lock:
+            self.backend.close()
+
+    def _load(self, raw: dict[str, Any], source: Path | None, name: str = "") -> None:
+        self.loaded_from = name or (source.name if source is not None else "")
         notes: dict[str, str] = {}
-        migrated = "groups" in raw  # 旧版：群组 + 项目两层
+        migrated = "groups" in raw and source is not None  # 旧版：群组 + 项目两层（数据库里不会有）
         if migrated:
             backup = self.root / "state.v1.json"
             if not backup.exists():
@@ -735,3 +765,309 @@ def _connector_panel(p: dict[str, Any]) -> None:
             ref.note = f"{ref.note}；{n.purpose}" if ref.note else n.purpose
     p["connector_needs"] = keep
 
+
+
+# ================= 存储后端（M7，docs/reference/storage.md） =================
+def _plain(v: Any) -> Any:
+    if hasattr(v, "__dataclass_fields__"):
+        return asdict(v)
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_plain(x) for x in v]
+    return v
+
+
+def _conv_row(c: Conversation) -> dict[str, Any]:
+    """对话的元数据（不含消息：消息单独成表，只追加）。和 Conversation.to_dict() 去掉 messages 一样。"""
+    return {f.name: _plain(getattr(c, f.name)) for f in fields(c) if f.name != "messages"}
+
+
+# 数据库里的实体：kind（= state.json 里的键）、Store 上的属性、怎么序列化（和 Store.snapshot 一致）。
+# 新增一类状态时这里也要加：test_db_kinds_cover_snapshot 会在 snapshot 有、这里没有时变红
+ENTITY_KINDS: list[tuple[str, str, Any]] = [
+    ("agents", "agents", lambda a: a.persist()),
+    ("projects", "projects", lambda x: x.to_dict()),
+    ("conversations", "conversations", _conv_row),
+    ("tasks", "tasks", lambda t: t.to_dict(full=True)),
+    ("knowledge", "knowledge", lambda k: k.to_dict(content=True)),
+    ("proposals", "proposals", lambda x: x.to_dict()),
+    ("users", "users", asdict),
+    ("approvals", "approvals", lambda x: x.to_dict()),
+    ("questions", "questions", lambda x: x.to_dict()),
+    ("requests", "requests", lambda x: x.to_dict()),
+    ("devices", "devices", asdict),
+    ("connections", "connections", asdict),
+    ("drafts", "drafts", lambda x: x.to_dict()),
+    ("held", "held", lambda x: x.to_dict()),
+    ("schedules", "schedules", lambda x: x.to_dict()),
+    ("releases", "releases", lambda x: x.to_dict()),
+    ("project_services", "project_services", lambda x: x.to_dict()),
+    ("apps", "apps", lambda x: x.to_dict()),
+    ("app_grants", "app_grants", asdict),
+    ("im_channels", "im_channels", lambda x: x.to_dict()),
+    ("im_bindings", "im_bindings", lambda x: x.to_dict()),
+    ("sandboxes", "sandboxes", lambda x: x.to_dict()),
+]
+# 本身就是 键 → 值 的字典（state.json 里也是字典）
+DICT_KINDS: list[tuple[str, str]] = [("sessions", "sessions"), ("password_resets", "resets"),
+                                     ("sandbox_orphans", "sandbox_orphans")]
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+
+
+class JsonBackend:
+    """整份写 state.json（默认；M2 的写法见 write_durable）。"""
+
+    name = "json"
+
+    def __init__(self, store: Store):
+        self.store = store
+
+    def read(self) -> tuple[dict[str, Any], Path] | None:
+        return self.store._read_source()
+
+    def after_load(self) -> None:
+        pass
+
+    def save(self) -> None:
+        s = self.store
+        write_durable(s.path, json.dumps(s.snapshot(), ensure_ascii=False, indent=1), backup=s.backup)
+
+    def metrics(self) -> dict[str, Any]:
+        p = self.store.path
+        return {"backend": "json", "path": p.name, "bytes": p.stat().st_size if p.exists() else 0}
+
+    def run_started(self, rid: str, kind: str, unit: str, agent_id: str | None) -> None:
+        pass
+
+    def run_ended(self, rid: str, state: str) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+class DbBackend:
+    """SQLite / PostgreSQL（M7）：对象图仍全量在内存（引擎靠一把锁保证跨对象的不变量），保存时只写变了的行，
+    一次保存一个事务。
+
+    - 实体：每次保存把每个对象序列化、算哈希，和上次落库的比，只写变了的；删掉的对象删行。
+    - 消息：不序列化没变的。每条消息带改动计数（`Message._rev`），只重写计数变了的、追加新的；对话的消息列表被整体换掉
+      （清空对话）时整段重写。
+    - 第一次用：库是空的而数据目录里有 state.json（或 .bak），就整份导入（走 Store._load，旧数据的兼容照用），
+      然后把它们改名成 `*.imported` 留作备份。库里有数据、同时又出现了 state.json（比如回退后又升级）一律拒绝启动，
+      由人决定用哪份（`matrix migrate state --replace`）。
+    """
+
+    def __init__(self, url: str, store: Store):
+        self.url = url
+        self.store = store
+        self.db = dbmod.Database(url)
+        self.db.init_schema()
+        self.name = self.db.dialect
+        self._rows: dict[tuple[str, str], bytes] = {}   # 落库的实体 → 哈希
+        self._msgs: dict[str, list[str]] = {}           # 对话 → 落库的消息 id（按序号）
+        self._revs: dict[str, int] = {}                 # 消息 id → 落库时的改动计数
+        self._importing = False
+        self._edits_seen = -1                           # 上次保存时的 models.MESSAGE_EDITS：没变就不逐条比改动计数
+        self.last_rows = 0                               # 上一次保存写了多少行（指标）
+        self.interrupted = 0                             # 启动时发现的、上次没结束的轮次数
+        self.import_report: dict[str, Any] | None = None
+        self.events: dbmod.EventLog | None = None
+
+    # ---- 读 ----
+    def read(self) -> tuple[dict[str, Any], Path | None, str] | None:
+        s = self.store
+        has_json = s.path.exists() or s.backup.exists()
+        if self.db.is_empty():
+            if not has_json:
+                return None
+            raw, src = s._read_json() or ({}, s.path)
+            self._importing = True
+            return raw, src, src.name
+        if has_json:
+            raise RuntimeError(
+                f"数据库 {dbmod.describe(self.url)} 里已经有数据，数据目录里又有 {s.path.name}（或 .bak）。不知道该用哪份：\n"
+                f"  用数据库：把 {s.path.name}、{s.backup.name} 挪出数据目录；\n"
+                f"  用 state.json（比如回退期间又写过）：matrix migrate state --replace（清空库后重新导入）")
+        return self._assemble(), None, dbmod.describe(self.url)
+
+    def _assemble(self) -> dict[str, Any]:
+        """库 → state.json 的样子，交给 Store._load（旧数据兼容照用）。顺便记下每一行的哈希，下次保存只写变了的。"""
+        raw: dict[str, Any] = {k: [] for k, _, _ in ENTITY_KINDS}
+        raw.update({k: {} for k, _ in DICT_KINDS})
+        dict_kinds = {k for k, _ in DICT_KINDS}
+        convs: dict[str, dict[str, Any]] = {}
+        for kind, key, text in self.db.query("SELECT kind, id, data FROM entity"):
+            data = json.loads(text)
+            self._rows[(kind, key)] = _digest(text)
+            if kind in dict_kinds:
+                raw[kind][key] = data
+            elif kind in raw:
+                raw[kind].append(data)
+                if kind == "conversations":
+                    convs[key] = data
+        for cid, _seq, mid, text in self.db.query(
+                "SELECT conversation_id, seq, id, data FROM message ORDER BY conversation_id, seq"):
+            c = convs.get(cid)
+            if c is not None:
+                c.setdefault("messages", []).append(json.loads(text))
+            self._msgs.setdefault(cid, []).append(mid)
+        return raw
+
+    def after_load(self) -> None:
+        s = self.store
+        now = time.time()
+        with self.db.transaction():  # 上次没结束的轮次：随重启结束（不变量 12）
+            got = self.db.query("SELECT COUNT(*) FROM run WHERE state = 'running'")
+            self.interrupted = int(got[0][0]) if got else 0
+            self.db.execute("UPDATE run SET state = 'interrupted', ended_at = ? WHERE state = 'running'", (now,))
+        if self._importing:
+            self.save(full=True)
+            self.import_report = reconcile(s.snapshot(), self.db)
+            for p in (s.path, s.backup):
+                if p.exists():
+                    os.replace(p, p.with_name(p.name + ".imported"))
+            _fsync_dir(s.root)
+            self._importing = False
+            print(f"[matrix] 已把 state.json 导入数据库 {dbmod.describe(self.url)}："
+                  f"{self.import_report['summary']}；原文件改名为 state.json.imported 留作备份", file=sys.stderr)
+        else:
+            for cid, ids in self._msgs.items():
+                conv = s.conversations.get(cid)
+                if conv is None:
+                    continue
+                for m, mid in zip(conv.messages, ids):
+                    if m.id == mid:
+                        self._revs[mid] = m.__dict__.get("_rev", 0)
+        self.events = dbmod.EventLog(self.url)
+
+    # ---- 写 ----
+    def save(self, full: bool = False) -> None:
+        """调用方持有锁。full：不管哈希，全部重写（导入时）。"""
+        s, now = self.store, time.time()
+        upserts: list[tuple[str, str, str, float]] = []
+        hashes: dict[tuple[str, str], bytes] = {}
+        seen: set[tuple[str, str]] = set()
+        for kind, attr, ser in ENTITY_KINDS:
+            for key, obj in getattr(s, attr).items():
+                text = dbmod.dumps(ser(obj))
+                k, h = (kind, key), _digest(text)
+                seen.add(k)
+                if full or self._rows.get(k) != h:
+                    upserts.append((kind, key, text, now))
+                    hashes[k] = h
+        for kind, attr in DICT_KINDS:
+            for key, val in getattr(s, attr).items():
+                text = dbmod.dumps(val)
+                k, h = (kind, key), _digest(text)
+                seen.add(k)
+                if full or self._rows.get(k) != h:
+                    upserts.append((kind, key, text, now))
+                    hashes[k] = h
+        gone = [k for k in self._rows if k not in seen]
+        msg_rows: list[tuple[str, int, str, str]] = []
+        rewrite: list[str] = []
+        edits = MESSAGE_EDITS[0]
+        scan = full or edits != self._edits_seen
+        new_ids: dict[str, list[str]] = {}
+        new_revs: dict[str, int] = {}
+        for cid, conv in s.conversations.items():
+            msgs, old = conv.messages, self._msgs.get(cid, [])
+            n = len(old)
+            same_prefix = not full and n <= len(msgs) and (n == 0 or (msgs[0].id == old[0] and msgs[n - 1].id == old[-1]))
+            start = 0
+            if not same_prefix:
+                if n:
+                    rewrite.append(cid)
+            elif scan:
+                for i in range(n):
+                    m = msgs[i]
+                    rev = m.__dict__.get("_rev", 0)
+                    if self._revs.get(m.id) != rev:
+                        msg_rows.append((cid, i, m.id, dbmod.dumps(asdict(m))))
+                        new_revs[m.id] = rev
+            if same_prefix:
+                start = n
+            for i in range(start, len(msgs)):
+                m = msgs[i]
+                msg_rows.append((cid, i, m.id, dbmod.dumps(asdict(m))))
+                new_revs[m.id] = m.__dict__.get("_rev", 0)
+            if len(msgs) != n or not same_prefix:
+                new_ids[cid] = [m.id for m in msgs]
+        dropped = [cid for cid in self._msgs if cid not in s.conversations]
+        if not (upserts or gone or msg_rows or rewrite or dropped):
+            self.last_rows = 0
+            self._edits_seen = edits
+            return
+        with self.db.transaction():
+            self.db.executemany("INSERT INTO entity (kind, id, data, updated_at) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT (kind, id) DO UPDATE SET data = excluded.data, "
+                                "updated_at = excluded.updated_at", upserts)
+            self.db.executemany("DELETE FROM entity WHERE kind = ? AND id = ?", gone)
+            self.db.executemany("DELETE FROM message WHERE conversation_id = ?", [(c,) for c in rewrite + dropped])
+            self.db.executemany("INSERT INTO message (conversation_id, seq, id, data) VALUES (?, ?, ?, ?) "
+                                "ON CONFLICT (conversation_id, seq) DO UPDATE SET id = excluded.id, data = excluded.data",
+                                msg_rows)
+        # 事务落下了才更新记忆：失败时下一次保存会重写同样的行
+        self._rows.update(hashes)
+        for k in gone:
+            self._rows.pop(k, None)
+        for cid in dropped:
+            for mid in self._msgs.pop(cid, []):
+                self._revs.pop(mid, None)
+        self._msgs.update(new_ids)
+        self._revs.update(new_revs)
+        self._edits_seen = edits
+        self.last_rows = len(upserts) + len(gone) + len(msg_rows)
+
+    def wipe(self) -> None:
+        """清空全部表（matrix migrate state --replace）。"""
+        with self.db.transaction():
+            for t in ("entity", "message", "event", "run"):
+                self.db.execute(f"DELETE FROM {t}")
+        self._rows.clear()
+        self._msgs.clear()
+        self._revs.clear()
+
+    def metrics(self) -> dict[str, Any]:
+        return {"backend": self.name, "path": dbmod.describe(self.url), "bytes": self.db.size_bytes(),
+                "last_save_rows": self.last_rows, "interrupted_runs_at_start": self.interrupted}
+
+    def run_started(self, rid: str, kind: str, unit: str, agent_id: str | None) -> None:
+        self.db.execute("INSERT INTO run (id, kind, unit, agent_id, started_at, state) VALUES (?, ?, ?, ?, ?, 'running')",
+                        (rid, kind, unit, agent_id, time.time()))
+
+    def run_ended(self, rid: str, state: str) -> None:
+        self.db.execute("UPDATE run SET state = ?, ended_at = ? WHERE id = ?", (state, time.time(), rid))
+
+    def close(self) -> None:
+        if self.events is not None:
+            self.events.close()
+            self.events = None
+        self.db.close()
+
+
+def reconcile(state: dict[str, Any], db: dbmod.Database) -> dict[str, Any]:
+    """对账（M7）：state（Store.snapshot() 的样子）和库里的每类实体数、每个对话的消息数是否完全一致。"""
+    counts: dict[str, list[int]] = {}
+    for kind, *_ in ENTITY_KINDS:
+        counts[kind] = [len(state.get(kind) or []), 0]
+    for kind, _ in DICT_KINDS:
+        counts[kind] = [len(state.get(kind) or {}), 0]
+    for kind, n in db.query("SELECT kind, COUNT(*) FROM entity GROUP BY kind"):
+        counts.setdefault(kind, [0, 0])[1] = int(n)
+    want = {c["id"]: len(c.get("messages") or []) for c in state.get("conversations") or []}
+    got = {str(c): int(n) for c, n in db.query("SELECT conversation_id, COUNT(*) FROM message GROUP BY conversation_id")}
+    bad_msgs = sorted(c for c in set(want) | set(got) if want.get(c, 0) != got.get(c, 0))
+    bad_kinds = sorted(k for k, (a, b) in counts.items() if a != b)
+    total = sum(want.values())
+    return {"ok": not bad_msgs and not bad_kinds, "kinds": {k: {"state": a, "db": b} for k, (a, b) in counts.items()},
+            "messages": {"state": total, "db": sum(got.values())}, "conversations_mismatched": bad_msgs,
+            "kinds_mismatched": bad_kinds,
+            "summary": (f"{sum(a for a, _ in counts.values())} 个对象、{total} 条消息，"
+                        + ("和原文件完全一致" if not bad_msgs and not bad_kinds else
+                           f"不一致：{'、'.join(bad_kinds) or ''} {len(bad_msgs)} 个对话的消息数"))}
