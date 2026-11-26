@@ -302,6 +302,8 @@ class Project:
     description: str
     member_ids: list[str]
     owner_id: str | None = None          # 主持人（建项目的人）
+    # 项目会话的默认回答成员（项目里的一个 Agent，主持人定）：开会话时没指定就用它；它离开项目时清空
+    default_agent_id: str | None = None
     participants: list[str] = field(default_factory=list)  # 除主持人以外、已接受邀请的用户
     invited: list[str] = field(default_factory=list)       # 已邀请、尚未接受的用户
     brief: str = ""                      # 纲要：目标、范围、成功标准、当前阶段，每轮推送给所有成员

@@ -305,7 +305,9 @@ curl -H "X-Matrix-Key: $EXPENSE_MATRIX_KEY" -H "X-Matrix-User: 8f3a2c01" -H "X-M
 
 规则：对到用户的规则和公司账号登录一样（`auth.sso_user`，已有同邮箱的账号默认不绑）；第一次来的人自动建账号、有助理；
 不发 Matrix 自己的登录 cookie；管理后台（`/api/admin/*`）不认；密钥不对、没写用户、认不出人一律 401。
-反向代理要把这三个请求头原样传给 Matrix。
+反向代理要把这三个请求头原样传给 Matrix。`X-Matrix-User` 最多 200 个字符。
+
+能调哪些接口、怎么照着接项目会话：[api-for-business-systems.md](api-for-business-systems.md)、[integration-project-sessions.md](integration-project-sessions.md)。
 
 ### 要接受的
 

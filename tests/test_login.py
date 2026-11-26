@@ -350,7 +350,7 @@ def test_several_api_auth_providers_need_to_be_named(tmp_path: Path):
 
 
 def key_setup(tmp_path: Path, monkeypatch, keys: list[dict], providers: list[dict] | None = None):
-    monkeypatch.setenv("EXPENSE_MATRIX_KEY", "k" * 40)
+    monkeypatch.setenv("EXPENSE_MATRIX_KEY", "k" * 40 + "\n")   # 从文件读进环境变量时常带着换行：不该因此对不上
     monkeypatch.setenv("EXPENSE_MATRIX_KEY_NEXT", "n" * 40)
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path / "data", seed=False)
     path = tmp_path / "login.json"
@@ -379,6 +379,7 @@ def test_backend_calls_api_with_a_shared_key(tmp_path: Path, monkeypatch):
     assert net.store.projects[g["id"]].owner_id == me["id"]
     assert c.get("/api/me", headers=as_("x" * 40, "E1001")).status_code == 401           # 密钥不对
     assert c.get("/api/me", headers={"X-Matrix-Key": "k" * 40}).status_code == 401        # 没说是谁
+    assert c.get("/api/me", headers=as_("k" * 40, "E" * 201)).status_code == 401          # 标识长得离谱
     assert c.get("/api/admin/usage", headers=as_("k" * 40, "E1001")).status_code == 403
     # 已有同邮箱的账号默认不绑（和公司账号登录一样）
     auth.register(net.store, "li@corp.example", "password-123")

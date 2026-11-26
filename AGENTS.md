@@ -61,6 +61,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 控制面的生产级方案（设计，未实现）：状态进数据库、重启不打断运行、备机接管、按租户分片、登录加固 | [docs/control-plane.md](docs/control-plane.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
 | 用公司账号登录（单点登录）：`login.json`、内置 OAuth2 驱动、登录驱动接口、身份怎么对到用户；外部系统带着用户凭据直接调 `/api/*`（`api_auth`、`verify`，第八节）；临时方案：业务后端凭共享密钥替用户调（`api_keys`，第九节） | [docs/login-driver-authoring.md](docs/login-driver-authoring.md)，样板 `examples/login-driver/`（改了驱动接口、`login.json` 字段要同步改这两处） |
+| 业务系统接入：怎么鉴权、`/api/*` 里可以依赖的稳定子集、事件流；照着接“建项目 + 定默认 Agent + 项目会话” | [docs/api-for-business-systems.md](docs/api-for-business-systems.md)、[docs/integration-project-sessions.md](docs/integration-project-sessions.md)（改了表里的接口、字段、状态码要同步改这两处） |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md)；部署见 [deploy/README.md](deploy/README.md)（只管 Matrix 一个容器），对外暴露（反向代理的要求、Caddy 示例）见 [docs/reverse-proxy.md](docs/reverse-proxy.md) |
 | 管理后台：用量台账（只看用量不看内容）、云侧模型目录、给用户发重置密码链接 | [docs/reference/admin.md](docs/reference/admin.md) |
 | 前端样式：颜色、字号、间距、圆角、通用部件，插件页面的样式 | [docs/design-system.md](docs/design-system.md)，变量在 `matrix/static/tokens.css`，样式指南页 `/static/ui.html`；`tests/test_design.py` 检查迁移过的文件不写死颜色 |

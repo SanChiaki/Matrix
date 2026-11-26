@@ -11,9 +11,11 @@
   `_bring_assistant` 才把它加进成员并在群聊记一条事件；助理和别的成员一样能移出。换助理不动已有项目。
 - **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是没 @ 时默认回答的成员，可以为空）：
   `POST /api/projects/<id>/sessions` 新建，不需要助理（`{title?, agent?, join?}`：`agent` 是默认成员，按 id 或名字，要是项目成员；
-  不给时用已经在项目里的助理，没有就为空；`join: <助理 id>` 先把自己的助理带进项目再当默认成员）。
+  不给时用项目的默认回答成员，再没有用已经在项目里的助理，都没有就为空；`join: <助理 id>` 先把自己的助理带进项目再当默认成员）。
+  **项目的默认回答成员**（`Project.default_agent_id`）：主持人在 `POST /api/projects` 的 `default_agent` 里定（要在 `member_ids` 里，按 id 或名字），
+  `PATCH /api/projects/<id>` 的 `default_agent` 换（`null` = 不设）；只影响之后新开的会话，它离开项目时清空。
   这个人已有还没发过消息、默认成员相同的会话时沿用它，侧栏也只列出发过消息的会话），`GET` 列出自己的，
-  `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）。只有它的人看得到（不变量 18）；
+  `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）、换默认成员（`agent`，`null` = 不要默认成员）。只有它的人看得到（不变量 18）；
   人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；默认成员不在项目里了，没 @ 的消息只留在会话里。
 - 会话席位和群聊席位一样：能 @ 项目里的任何 Agent（`_members` / `resolve_mentions`），没 @ 的交给默认成员；
   能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
