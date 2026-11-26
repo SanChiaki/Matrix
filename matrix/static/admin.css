@@ -121,7 +121,3 @@ dialog.pl-file pre { max-height: 60vh; overflow: auto; background: var(--bg); pa
 #im .table-wrap { margin-top: 16px; }
 #im-driver-errors:empty { display: none; }
 #pf-compat { font-family: var(--font-mono); font-size: var(--fs-md); }
-
-/* 业务系统账号的只读页面（/system，不变量 30）：沿用管理后台的版式，会话消息沿用主界面的 .msg */
-.sys-messages { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-direction: column; gap: 20px; }
-.sys-messages .att { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; font-size: var(--fs-sm); }

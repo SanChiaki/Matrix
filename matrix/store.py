@@ -24,7 +24,7 @@ from . import db as dbmod
 from .compat import current_call
 from .models import (BRIEF_LIMIT, MESSAGE_EDITS, AgentNode, Approval, BriefSuggestion, Connection, ConnectorNeed, Conversation,
                      Decision, Delegation, Device, Draft, Held, ImBinding, ImChannel,
-                     KnowledgeItem, Message, Project, Proposal, ProjectService, ExternalApp, AppGrant, Question, Release, ResourceRef, SandboxRecord, Schedule, Seat, Task, TaskStatus, User,
+                     KnowledgeItem, Message, Project, Proposal, ProjectService, Question, Release, ResourceRef, SandboxRecord, Schedule, Seat, Task, TaskStatus, User,
                      UserRequest,
                      new_id, seat_id)
 
@@ -329,8 +329,6 @@ class Store:
         self.schedules: dict[str, Schedule] = {}  # 主人的定时（到点唤醒自己 Agent 的私聊）
         self.releases: dict[str, Release] = {}    # 项目发出去的发布物（不变量 23）
         self.project_services: dict[str, ProjectService] = {}  # 项目服务（不变量 29）
-        self.apps: dict[str, ExternalApp] = {}        # 外部应用（不变量 30）
-        self.app_grants: dict[str, AppGrant] = {}     # 应用令牌（只存 sha256）
         self.im_channels: dict[str, ImChannel] = {}  # IM 机器人（个人的与部署方的）
         self.im_bindings: dict[str, ImBinding] = {}  # 人在 IM 机器人上的身份
         self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
@@ -483,8 +481,6 @@ class Store:
             "schedules": [x.to_dict() for x in self.schedules.values()],
             "releases": [r.to_dict() for r in self.releases.values()],
             "project_services": [x.to_dict() for x in self.project_services.values()],
-            "apps": [x.to_dict() for x in self.apps.values()],
-            "app_grants": [asdict(x) for x in self.app_grants.values()],
             "im_channels": [x.to_dict() for x in self.im_channels.values()],
             "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
             **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
@@ -531,6 +527,10 @@ class Store:
             if not backup.exists():
                 shutil.copy2(source, backup)
             raw, notes = _merge_groups(raw, self.root)
+        if _drop_external_apps(raw):  # 外部应用移除之前的数据（不变量 30 已撤销）
+            if source is not None and not (backup := self.root / "state.pre-apps.json").exists():
+                shutil.copy2(source, backup)
+            migrated = True
         for a in raw.get("agents", []):
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
             if "connections" not in a and a.get("device_runtime"):
@@ -623,10 +623,6 @@ class Store:
             self.releases[r["id"]] = Release(**_known(Release, r))
         for x in raw.get("project_services", []):  # 旧数据没有：缺省为空
             self.project_services[x["id"]] = ProjectService(**_known(ProjectService, x))
-        for x in raw.get("apps", []):
-            self.apps[x["id"]] = ExternalApp(**_known(ExternalApp, x))
-        for x in raw.get("app_grants", []):
-            self.app_grants[x["id"]] = AppGrant(**_known(AppGrant, x))
         for x in raw.get("im_channels", []):  # 旧数据没有：缺省为空
             self.im_channels[x["id"]] = ImChannel(**_known(ImChannel, x))
         for x in raw.get("im_bindings", []):
@@ -738,6 +734,39 @@ class Store:
         return [p for p in self.projects.values() if agent_id in p.member_ids]
 
 
+def _drop_external_apps(raw: dict[str, Any]) -> bool:
+    """外部应用移除之前的数据：外部应用与应用令牌丢弃；业务系统账号（kind = "system"）删掉，它们主持的项目转给
+    第一个还在的负责人（没有负责人时给第一个参与者、再不行给登记应用的管理员），其余负责人留作参与者。
+    它们留下的会话与连接器（含保管库里的凭证）由 Network 启动时清（engine._drop_orphans）。有要改的返回 True。"""
+    users = raw.get("users") or []
+    sys_users = {u["id"]: u for u in users if u.get("kind") == "system"}
+    creators = {a["id"]: a.get("created_by") or "" for a in raw.get("apps") or [] if "id" in a}
+    changed = bool(sys_users or raw.pop("apps", None) or raw.pop("app_grants", None)
+                   or any(p.get("via_app") for p in raw.get("projects", [])))
+    raw.pop("apps", None)
+    raw.pop("app_grants", None)
+    alive = {u["id"] for u in users if u["id"] not in sys_users}
+    for p in raw.get("projects", []):
+        sysu = sys_users.get(p.get("owner_id") or "")
+        if sysu is None:
+            p["participants"] = [x for x in p.get("participants") or [] if x not in sys_users]
+            continue
+        heirs = [x for x in [*(sysu.get("managers") or []), *(p.get("participants") or []),
+                             creators.get(sysu.get("app_id") or "", "")] if x in alive]
+        owner = heirs[0] if heirs else None
+        p["owner_id"] = owner
+        p["participants"] = list(dict.fromkeys(x for x in [*(sysu.get("managers") or []), *(p.get("participants") or [])]
+                                               if x in alive and x != owner))
+        p["invited"] = [x for x in p.get("invited") or [] if x != owner and x not in sys_users]
+        for c in raw.get("conversations", []):
+            if c.get("kind") == "project" and c.get("project_id") == p["id"]:
+                c["owner_id"] = owner
+    for p in raw.get("projects", []):
+        p.pop("via_app", None)
+    raw["users"] = [u for u in users if u["id"] not in sys_users]
+    return changed
+
+
 def _hashed_sessions(raw: dict[str, Any], users: dict[str, User]) -> dict[str, dict[str, Any]]:
     """登录会话按令牌的 sha256 存（auth.session_hash）。旧版本以明文令牌作键：换成哈希，用户不掉线；
     旧记录没有“最近用过”，记成现在，免得升级当天闲置超过 7 天的人全被登出（最长 30 天照样从登录那天算）。"""
@@ -809,8 +838,6 @@ ENTITY_KINDS: list[tuple[str, str, Any]] = [
     ("schedules", "schedules", lambda x: x.to_dict()),
     ("releases", "releases", lambda x: x.to_dict()),
     ("project_services", "project_services", lambda x: x.to_dict()),
-    ("apps", "apps", lambda x: x.to_dict()),
-    ("app_grants", "app_grants", asdict),
     ("im_channels", "im_channels", lambda x: x.to_dict()),
     ("im_bindings", "im_bindings", lambda x: x.to_dict()),
     ("sandboxes", "sandboxes", lambda x: x.to_dict()),

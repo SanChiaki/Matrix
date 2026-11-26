@@ -10,7 +10,7 @@
 
 - `public_url`：用户在浏览器里打开 Matrix 用的地址。回调地址是 `<public_url>/api/auth/sso/<id>/callback`，要在身份系统那边登记。
   不写时按请求里的地址拼（只适合本机试）。
-- `password_login`：false = 有可用的入口时关掉邮箱密码的注册与登录，只留管理员与业务系统账号（应急与只读页面）。
+- `password_login`：false = 有可用的入口时关掉邮箱密码的注册与登录，只留管理员（应急）。
 - `providers[].id`：2–32 位小写字母、数字、`-`、`_`，字母开头。定了就不要改：用户的绑定按它记。
 - `auto_create`（默认 true）：第一次用公司账号登录的人自动建 Matrix 账号。false = 只让已经有账号的人登录。
 - `link_by_email`（默认 false）：公司账号的邮箱和一个已有的 Matrix 账号相同时，把两者当成同一个人。

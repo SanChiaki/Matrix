@@ -24,8 +24,8 @@
     GET  {url}/agents/{agent}                 -> {"name": ..., "description": ...}
     POST {url}/agents/{agent}/chat            {"message": ..., "session_id": null | "..."}
          -> text/event-stream：event: session {"session_id"} 必须最先；delta {"text"}；tool {"name", "input"}；
-            done {"text"}（最终回复）；error {"message"}；可选 progress {"kind", ...}（被委托方的进展与心跳，
-            Matrix 的 /svc 会发，见 docs/open-api-integration.md；作为调用方，这里不认识的事件一律跳过）
+            done {"text"}（最终回复）；error {"message"}；可选 progress {"kind", ...}（被委托方的进展与心跳；
+            作为调用方，这里不认识的事件一律跳过）
     POST {url}/sessions/{session_id}/interrupt
 """
 
