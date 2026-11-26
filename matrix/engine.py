@@ -54,7 +54,7 @@ from . import blobs as blobmod, compat
 from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
-from .auth import Pairings
+from .auth import Enrollments, Pairings
 from .workdir import DELIVERIES, discard
 from .device import DeviceRuntime
 from .checkpoints import (BLOB_MAX, SHA_RE, CheckpointStore, ContentStore, Uploads, pack_session, unit_rel)
@@ -234,6 +234,7 @@ class Network:
         self.runtime = runtime
         self._runtimes: dict[str, AgentRuntime] = {}  # 端侧运行时：连接器握手后注册（见 device.py）
         self.pairings = Pairings()  # 等待批准的设备码配对（只在内存里）
+        self.enrollments = Enrollments()  # 没用过的一次性配对令牌（只在内存里）
         self.limits = limits or Limits()
         self.tool_url = tool_url
         self.approval_url = tool_url.rsplit("/", 1)[0] + "/approval"

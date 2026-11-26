@@ -62,3 +62,18 @@ def pair(server: str, *, name: str = "", hostname: str = "", harnesses: list[str
             raise PairingError("配对码已过期，请重新运行 setup")
         sleep(interval)
     raise PairingError("配对码已过期，请重新运行 setup")
+
+
+def enroll(server: str, code: str, *, name: str = "", hostname: str = "", harnesses: list[str] | None = None,
+           post: Post = http_post, workroot: str | None = None) -> Config:
+    """凭一次性配对令牌直接换设备令牌（docs/device-runtimes.md 第 2.8 节），不用人在网页里批准。"""
+    base = normalize_server(server)
+    r = post(f"{base}/api/devices/enroll/redeem",
+             {"code": code.strip(), "name": name, "hostname": hostname, "harnesses": list(harnesses or [])})
+    if r.get("status") != "approved" or not r.get("token"):
+        raise PairingError("服务器没有给出设备令牌")
+    conf = Config(server=base, token=str(r["token"]), device_id=str(r.get("device_id") or ""),
+                  device_name=str(r.get("device_name") or name), email=str(r.get("email") or ""))
+    if workroot:
+        conf.workroot = workroot
+    return conf

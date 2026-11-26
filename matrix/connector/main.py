@@ -29,7 +29,9 @@ import socket
 import sys
 import time
 import webbrowser
+from importlib.metadata import entry_points
 from pathlib import Path
+from typing import Any
 
 from ..device import DeviceError
 from . import config as cfg
@@ -63,10 +65,42 @@ def run_bundled_script(argv: list[str]) -> bool:
     return True
 
 # 顺序即默认优先级：第一个检测到的是这台设备的默认 harness
-DRIVERS = {"claude-code": ClaudeDriver, "codex": CodexDriver, "dsh": DshDriver}
+BUILTIN_DRIVERS = {"claude-code": ClaudeDriver, "codex": CodexDriver, "dsh": DshDriver}
+DRIVER_GROUP = "matrix.connect_drivers"
+
+
+def load_drivers() -> tuple[dict[str, Any], dict[str, str]]:
+    """内置驱动，加上装在同一个环境里、经 entry point「matrix.connect_drivers」注册的外部驱动
+    （docs/device-driver-authoring.md）。外部驱动排在内置的前面：装了它，它就是这台设备的默认 harness。
+    返回（名字 -> 驱动类，加载失败的 entry point -> 原因）；加载失败的跳过，不影响连接器启动。"""
+    external: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    try:
+        eps = list(entry_points(group=DRIVER_GROUP))
+    except Exception as e:  # noqa: BLE001
+        return dict(BUILTIN_DRIVERS), {"*": f"{type(e).__name__}: {e}"}
+    for ep in eps:
+        try:
+            cls = ep.load()
+        except Exception as e:  # noqa: BLE001 —— 外部包写错了
+            errors[ep.name] = f"{type(e).__name__}: {e}"
+            continue
+        name = getattr(cls, "name", None)
+        if not isinstance(cls, type) or not isinstance(name, str) or not name:
+            errors[ep.name] = "不是带 name 的驱动类（见 matrix.connector.drivers.base.Driver）"
+        elif name in BUILTIN_DRIVERS or name in external:
+            errors[ep.name] = f"驱动名「{name}」重名"
+        else:
+            external[name] = cls
+    return {**external, **BUILTIN_DRIVERS}, errors
+
+
+DRIVERS, DRIVER_ERRORS = load_drivers()
 
 def build_driver(name: str, *, bridge_url: str = "", bin_path: str | None = None) -> Driver:
     cls = DRIVERS[name]
+    if name not in BUILTIN_DRIVERS:  # 外部驱动：约定的构造参数（docs/device-driver-authoring.md）
+        return cls(bin_path=bin_path, bridge_url=bridge_url)
     if name == "dsh":
         return cls(bin_path or "dsh", bridge_url)  # type: ignore[call-arg]
     if name == "claude-code":
@@ -162,6 +196,8 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(f"后台服务：{'已安装 ' + str(unit) if unit and unit.exists() else '未安装'}")
     if unit and unit.exists() and service.runs_from(_exe()) is False:
         print("  后台服务跑的不是这份安装（升级前的旧版本？）：运行 matrix-connect install 重新装一次")
+    for ep, why in DRIVER_ERRORS.items():
+        print(f"外部驱动 {ep} 没加载上：{why}")
     print(f"配置：{path}")
 
 def _exe() -> str:
@@ -203,8 +239,12 @@ def cmd_setup(args: argparse.Namespace) -> None:
                 pass
 
     try:
-        conf = pairing.pair(args.server, name=name, hostname=host, harnesses=found, show=show,
-                            workroot=args.workroot)
+        if args.code:  # 一次性配对令牌（业务系统替你签的）：直接换设备令牌，不用在浏览器里批准
+            conf = pairing.enroll(args.server, args.code, name=name, hostname=host, harnesses=found,
+                                  workroot=args.workroot)
+        else:
+            conf = pairing.pair(args.server, name=name, hostname=host, harnesses=found, show=show,
+                                workroot=args.workroot)
     except (pairing.PairingError, ValueError) as e:
         print(f"配对失败：{e}", file=sys.stderr)
         raise SystemExit(1) from e
@@ -267,6 +307,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--workroot", default=None, help="本机工作目录根（默认 ~/.matrix）")
     s.add_argument("--no-service", action="store_true", help="不装后台服务")
     s.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    s.add_argument("--code", default="", help="一次性配对令牌（POST /api/devices/enroll 签发）：直接配对，不用在浏览器里批准")
     s.add_argument("--config", **conf_opt)
     s.set_defaults(func=cmd_setup)
 

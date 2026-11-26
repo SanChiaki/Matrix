@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -43,6 +44,24 @@ HARNESSES: dict[str, str] = {
     "codex": "Codex",
     "dsh": "dsh",
 }
+HARNESS_ID = re.compile(r"^[a-z][a-z0-9_-]{1,39}$")
+
+
+def add_harnesses(spec: str | None) -> list[str]:
+    """部署方追加自定义 harness（外部驱动，docs/device-driver-authoring.md）：`id=显示名,id2`，显示名可省。
+    内置的不能覆盖；返回新加的 id。名字不合法抛 ValueError。"""
+    added: list[str] = []
+    for item in (spec or "").split(","):
+        hid, _, label = item.strip().partition("=")
+        hid = hid.strip()
+        if not hid:
+            continue
+        if not HARNESS_ID.match(hid):
+            raise ValueError(f"harness 名「{hid}」要是 2–40 位小写字母、数字、-、_，字母开头")
+        if hid not in HARNESSES:
+            HARNESSES[hid] = (label.strip() or hid)[:40]
+            added.append(hid)
+    return added
 
 MCP_SERVER = "matrix_net"  # 网络工具的 MCP 服务名；不叫 matrix，免得和用户自己配的同名服务（如 matrix.org）撞上
 MCP_PREFIX = f"mcp__{MCP_SERVER}__"
