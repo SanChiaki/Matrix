@@ -11,6 +11,8 @@ import uuid
 
 
 def main() -> None:
+    for stream in (sys.stdin, sys.stdout, sys.stderr):  # 和驱动约定用 UTF-8：Windows 上管道默认是本地代码页
+        stream.reconfigure(encoding="utf-8")
     if sys.argv[1:2] != ["run"]:
         print("用法：demo-agent run --workdir <目录>", file=sys.stderr)
         raise SystemExit(2)

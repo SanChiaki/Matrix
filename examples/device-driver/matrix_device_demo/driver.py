@@ -11,6 +11,7 @@
         {"type": "tool", "name": "..."}          它用了一个自己的工具（只用于展示）
         {"type": "done", "text": "最终答复", "session_id": "..."}
       退出码非 0 = 失败，标准错误里是原因
+      编码一律 UTF-8（Windows 上管道默认是本地代码页，Agent 那边要显式设成 UTF-8）
 """
 
 from __future__ import annotations
