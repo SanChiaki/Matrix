@@ -57,11 +57,13 @@ WORKDIR /app
 COPY --chown=matrix:matrix pyproject.toml uv.lock ./
 COPY --chown=matrix:matrix matrix ./matrix
 USER matrix
+# --extra postgres：状态存进 PostgreSQL 时要的 psycopg（MATRIX_STORE=postgresql://…，docs/reference/storage.md）；用不到也只多几 MB。
 # 换了 PyPI 源就不能 --frozen：frozen 直接用 uv.lock 里写死的 files.pythonhosted.org 地址，不看 index。
 # 不 frozen 时从配置的源重新解析，已锁定的版本优先。
 RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
     [ -n "$UV_INSECURE_HOST" ] || unset UV_INSECURE_HOST; \
-    if [ -n "$PYPI_INDEX" ]; then UV_DEFAULT_INDEX="$PYPI_INDEX" uv sync --no-dev; else uv sync --frozen --no-dev; fi
+    if [ -n "$PYPI_INDEX" ]; then UV_DEFAULT_INDEX="$PYPI_INDEX" uv sync --no-dev --extra postgres; \
+    else uv sync --frozen --no-dev --extra postgres; fi
 # 企业内部 IM 的驱动包（docs/im-driver-authoring.md 第五节）：pip 安装参数，多个用空格隔开；空着不装
 ARG IM_DRIVERS=""
 RUN set -eu; export UV_INSECURE_HOST=$(printf '%s' "$PYPI_INDEX" | sed -nE 's#^http://([^/@]*@)?([^/]*).*#\2#p'); \
