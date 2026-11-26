@@ -72,150 +72,707 @@ curl https://matrix.corp.example/api/me \
 | 413 | 附件太大（单个 20 MB） | |
 | 422 | 请求体字段不对（缺字段、超长） | 改请求 |
 
-## 三、稳定子集
+## 三、接口清单（稳定子集）
 
-下面这些是业务系统接入时用得到、我们会尽量保持不变的接口。**不在表里的 `/api/*`（插件、模板、发布、连接器、设备、IM、管理后台等）是给
+下面这些是业务系统接入时用得到、我们会尽量保持不变的接口。**不在这里的 `/api/*`（插件、模板、发布、连接器、设备、IM、管理后台等）是给
 Matrix 自己的网页用的，会随版本变，不建议依赖**；确实要用时先和 Matrix 的维护者确认。
 
-### 1. 我是谁、我能看到什么
-
-| 接口 | 说明 |
+| 分组 | 接口 |
 |---|---|
-| `GET /api/me` | 这个用户：`id`、`email`、`assistant_id`（他的助理）、`admin` |
-| `GET /api/network` | 这个用户看得到的全部：`agents`、`projects`、`conversations`（摘要，不含消息）、`invitations`（等他接受的邀请）、`approvals` / `questions`（等他处理的）、`seq`（事件流当前序号）。数据多时较大，不要轮询它，用事件流 |
+| [用户](#1-用户) | `GET /api/me`、`GET /api/network` |
+| [Agent](#2-agent) | `POST /api/agents`、`PATCH /api/agents/{agent_id}`、`DELETE /api/agents/{agent_id}`、`GET /api/models`、`GET /api/public-agents` |
+| [项目](#3-项目) | `POST /api/projects`、`GET /api/projects/{project_id}`、`PATCH /api/projects/{project_id}`、`DELETE /api/projects/{project_id}`、`POST /api/projects/{project_id}/members`、`DELETE /api/projects/{project_id}/members/{agent_id}` |
+| [参与者](#4-参与者邀请与接受) | `POST /api/projects/{project_id}/invitations`、`POST /api/projects/{project_id}/invitation`、`POST /api/projects/{project_id}/leave`、`DELETE /api/projects/{project_id}/participants/{user_id}` |
+| [项目会话](#5-项目会话) | `POST /api/projects/{project_id}/sessions`、`GET /api/projects/{project_id}/sessions`、`PATCH /api/sessions/{conv_id}`、`DELETE /api/conversations/{conv_id}` |
+| [消息](#6-消息与附件) | `POST /api/conversations/{conv_id}/messages`、`GET /api/conversations/{conv_id}`、`POST /api/conversations/{conv_id}/attachments`、`GET /api/conversations/{conv_id}/attachments/{sha}`、`POST /api/conversations/{conv_id}/seats/{agent_id}/stop`、`POST /api/questions/{question_id}` |
+| [事件流](#7-事件流sse) | `GET /api/events` |
+
+**每个接口都要带的请求头**（下面各节不再重复）：
+
+| 请求头 | 必填 | 说明 |
+|---|---|---|
+| `X-Matrix-Key` | 是 | 业务系统的密钥 |
+| `X-Matrix-User` | 是 | 替谁调：他在公司里唯一、不会变的 user_id |
+| `X-Matrix-User-Email` | 建议每次都带 | 他的邮箱；没账号时靠它建 |
+| `Content-Type: application/json` | 有请求体时 | 上传附件例外，见那一节 |
+
+**每个接口都可能返回的错误**（下面各节只列它自己特有的）：401（没认出是谁，见第一节）、404（路径里的 id 不存在或这个用户看不到）、
+422（请求体字段不对）。
+
+表里的“必填”一栏：**是** = 必须给；**否** = 可以不给，括号里是不给时的取值。类型后面的 `?` 表示可以是 `null`。
+
+### 0. 返回里的对象
+
+几个对象在很多接口里出现，先集中写。只列业务系统用得到的字段；返回里还有别的字段（给 Matrix 网页用的），忽略即可。
+
+#### 用户对象
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 用户 id（`user-…`） |
+| `email` | string | Matrix 里记的邮箱（小写） |
+| `assistant_id` | string? | 他的助理（一个 Agent）的 id |
+
+#### Agent 对象
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | Agent id（`agent-…`） |
+| `name` | string | 名字，全站唯一；会话里 `@名字` 就是它 |
+| `description` | string | 设定：写进它每一轮的提示词 |
+| `capabilities` | string[] | 擅长什么（短语，存成小写） |
+| `authority` | string[] | 权限上限，取值见 `POST /api/agents` |
+| `effective_authority` | string[] | 实际生效的权限（它运行的地方做不到的会被去掉） |
+| `chat_enabled` | boolean | 能不能和它私聊 |
+| `model_preset` | string? | 选的预置模型 id；`null` = 默认模型 |
+| `timeout_s` | integer? | 每轮运行超时（秒）；`null` = 不限制 |
+| `max_delegations` | integer? | 每次被 @ 最多委托几次；`null` = 不限制 |
+| `owner_id` | string | 所有者的用户 id |
+| `owner_email` | string | 所有者的邮箱 |
+| `mine` | boolean | 这次请求替的这个用户能不能改它 |
+| `public` | boolean | 是不是公共 Agent |
+| `status` | string | `idle` 空闲 / `busy` 正在运行 |
+| `created_at` | number | 创建时间 |
+
+#### 项目对象
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 项目 id（`prj-…`） |
+| `name` | string | 名字 |
+| `description` | string | 描述 |
+| `member_ids` | string[] | 项目里的 Agent id |
+| `default_agent_id` | string? | 项目会话的默认回答成员；`null` = 没设 |
+| `owner_id` | string | 主持人的用户 id |
+| `participants` | string[] | 别的参与者的用户 id（不含主持人） |
+| `invited` | string[] | 已邀请、还没接受的用户 id（**只有主持人拿得到**） |
+| `shared` | boolean | 有没有别人（有参与者或待接受的邀请） |
+| `created_at` | number | 创建时间 |
+
+**项目详情**（`GET /api/projects/{project_id}`、邀请与移出参与者的返回）在项目对象之上多这些：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `is_host` | boolean | 这个用户是不是主持人 |
+| `host` | string | 主持人的邮箱 |
+| `participant_emails` | object | `{用户 id: 邮箱}`，主持人和所有参与者 |
+| `invited_emails` | object | `{用户 id: 邮箱}`，还没接受的；不是主持人时为 `{}` |
+
+#### 会话对象（摘要）
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 会话 id（`conv-…`） |
+| `kind` | string | `session` 项目会话（另有 `project` 群聊、`dm` 私聊，本文不涉及） |
+| `project_id` | string | 所在项目 |
+| `agent_id` | string? | 这个会话的默认回答成员；`null` = 没有 |
+| `title` | string | 标题 |
+| `owner_id` | string | 开会话的用户 id |
+| `status` | string | `idle` 空闲 / `thinking` 有 Agent 在回答 / `waiting` 在等它委托出去的工作 |
+| `archived` | boolean | 已归档（只读） |
+| `blocked` | boolean | 有 Agent 上一轮失败了、还没接着做 |
+| `message_count` | integer | 这个用户看得到的消息数 |
+| `last_message` | string | 最后一条消息的前 120 个字符 |
+| `created_at` / `updated_at` | number | 创建、最近变动的时间 |
+
+#### 消息对象
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 消息 id（`msg-…`） |
+| `role` | string | `user` 人发的；`agent` Agent 的回答；`system` 某个 Agent 这一轮的通知（失败、被打断）；`event` 事件（成员变动等） |
+| `text` | string | 正文（Markdown） |
+| `agent_id` | string? | `agent` / `system`：哪个 Agent |
+| `user_id` | string? | `user`：哪个用户发的 |
+| `mentions` | string[] | `user`：这条消息实际交给了哪些 Agent |
+| `attachments` | 附件说明[] | 带的文件（人传的、Agent 发的） |
+| `steps` | object[] | `agent`：这一轮的过程（中间文本、工具调用）；只有这个 Agent 的所有者拿得到，别人是 `[]` |
+| `task_ids` | string[] | `agent`：这一轮里它发起的委托 |
+| `answers` | string? | `user`：这条消息回答了哪个提问（提问 id） |
+| `ts` | number | 时间 |
+
+#### 附件说明
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `sha` | string | 内容的 sha256（64 位十六进制），也是下载时用的 id |
+| `name` | string | 文件名 |
+| `size` | integer | 字节数 |
+| `mime` | string | 类型 |
+
+#### 提问对象
+
+Agent 运行中向人提的一批问题（它停下来等回答）。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 提问 id |
+| `agent_id` / `agent_name` | string | 谁问的 |
+| `conversation_id` | string | 在哪个对话里 |
+| `target_user_id` | string? | 等谁回答 |
+| `items` | object[] | 一批问题：`{id, question, header?, detail?, options: [{label, description?}], multi_select}` |
+| `status` | string | `pending` 等回答 / `answered` / `cancelled` |
+| `answers` | object[] | 已有的回答：`{id, selected: [选项的 label], custom?}` |
+| `created_at` | number | 提问时间 |
+
+### 1. 用户
+
+#### `GET /api/me`：这次请求替的是谁
+
+没有参数。第一次替某个人调用任何接口时 Matrix 会给他建账号；常用这个接口来“确保这个人有账号”。
+
+**返回** 200：用户对象，另有
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agent_count` | integer | 他有几个 Agent |
+| `home_id` | string? | 他和助理的私聊的会话 id |
+| `admin` | boolean | 是不是 Matrix 管理员 |
+
+```bash
+curl $MATRIX/api/me -H "X-Matrix-Key: $KEY" -H "X-Matrix-User: 8f3a2c01" -H "X-Matrix-User-Email: wang@corp.example"
+```
+
+```json
+{"id": "user-64f8ac13", "email": "wang@corp.example", "assistant_id": "agent-e4b6ad73",
+ "agent_count": 1, "home_id": "conv-f4f7b721", "admin": false}
+```
+
+#### `GET /api/network`：这个用户看得到的全部
+
+没有参数。数据多时返回较大，**不要轮询它**，用事件流。
+
+**返回** 200：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `agents` | Agent 对象[] | 他能用的 Agent（自己的、公共的）和他所在项目里的 Agent |
+| `projects` | 项目对象[] | 他所在的项目（主持的、参与的）；每项另有 `is_host`、`host_email` |
+| `conversations` | 会话对象[] | 他看得到的对话（摘要，不含消息），最近的在前 |
+| `invitations` | object[] | 等他接受的邀请：`{project_id, name, description, host}`（`host` 是主持人的邮箱） |
+| `questions` | 提问对象[] | 等他回答的提问 |
+| `seq` | integer | 事件流当前的序号（可以当 `GET /api/events?since=` 的起点） |
 
 ### 2. Agent
 
 Agent 属于创建它的用户（所有者），只有所有者能改、能删；别人的 Agent 按不存在处理（404）。
 
-| 接口 | 说明 |
-|---|---|
-| `POST /api/agents` | 新建。`{name, description, capabilities?, authority?, chat_enabled?, model_preset?, timeout_s?, max_delegations?}` |
-| `PATCH /api/agents/{agent_id}` | 修改，只给要改的字段 |
-| `DELETE /api/agents/{agent_id}` | 删除（有进行中的工作时 409） |
-| `GET /api/models` | 云侧可选的预置模型（`models`，每个有 `id`）；`active` 为 false 时没有启用模型目录 |
-| `GET /api/public-agents` | 所有人都能用的公共 Agent（可以拉进任何项目） |
+#### `POST /api/agents`：新建 Agent
 
-字段：
+**请求体**
 
-| 字段 | 说明 |
-|---|---|
-| `name` | 2–80 个字符，**全站唯一**（重名 409）。会话里 `@名字` 就是它 |
-| `description` | 2–2000 个字符。写进它每一轮的提示词：它是谁、负责什么、怎么做，等于它的“设定” |
-| `capabilities` | 最多 10 个短语，给人和别的 Agent 看它擅长什么 |
-| `authority` | 权限上限，取值：`web.research`（查公开信息）、`file.write`（在工作目录里写文件）、`shell.exec`（执行命令）、`delegate`（委托项目里别的成员）、`connector.use`（用所有者授权的连接器）。不给就都没有：只能对话 |
-| `chat_enabled` | 能不能和它私聊，默认 true |
-| `model_preset` | 预置模型的 id（`GET /api/models`）；不给用默认模型 |
-| `timeout_s` / `max_delegations` | 每轮运行超时（秒）、每次被 @ 最多委托几次；不给不限制 |
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，2–80 个字符 | 是 | 名字，**全站唯一** |
+| `description` | string，2–2000 个字符 | 是 | 设定：它是谁、负责什么、怎么做 |
+| `capabilities` | string[]，最多 10 个 | 否（`[]`） | 擅长什么 |
+| `authority` | string[] | 否（`[]`：只能对话） | 权限上限，取值：`web.research` 查公开信息；`file.write` 在工作目录里写文件；`shell.exec` 执行命令；`delegate` 委托项目里别的成员；`connector.use` 用所有者授权的连接器 |
+| `chat_enabled` | boolean | 否（`true`） | 能不能和它私聊 |
+| `model_preset` | string? | 否（`null`：默认模型） | 预置模型的 id，取自 `GET /api/models` |
+| `timeout_s` | integer?，≥1 | 否（`null`：不限制） | 每轮运行超时（秒） |
+| `max_delegations` | integer?，≥1 | 否（`null`：不限制） | 每次被 @ 最多委托几次 |
 
-返回的 Agent 对象里常用的：`id`、`name`、`description`、`authority`、`owner_id`、`owner_email`、`mine`（是不是这个用户能改的）、
-`status`（`idle` / 工作中）、`public`。
+**返回** 200：Agent 对象。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
+|---|---|---|
+| 409 | `Agent 名称已存在：…` | 重名 |
+| 409 | `未知权限：…` | `authority` 里有不认识的值 |
+| 409 | `没有配置预置模型` 等 | `model_preset` 不可用 |
+| 422 | | 缺 `name` / `description`、长度不对 |
+
+```bash
+curl -X POST $MATRIX/api/agents $AUTH -H "Content-Type: application/json" -d '{
+  "name": "报销助手", "description": "你负责回答公司报销制度的问题。", "authority": ["web.research"]}'
+```
+
+```json
+{"id": "agent-b5b043fe", "name": "报销助手", "description": "你负责回答公司报销制度的问题。",
+ "capabilities": [], "authority": ["web.research"], "effective_authority": ["web.research"],
+ "chat_enabled": true, "model_preset": null, "timeout_s": null, "max_delegations": null,
+ "owner_id": "user-64f8ac13", "owner_email": "wang@corp.example", "mine": true, "public": false,
+ "status": "idle", "created_at": 1795677856.23}
+```
+
+（示例里的 `$AUTH` 是上面那三个鉴权请求头，下同。返回只摘了本文列出的字段。）
+
+#### `PATCH /api/agents/{agent_id}`：修改 Agent
+
+只有所有者（或它的维护人）能改。改了以后它在所有项目和私聊里都跟着变，下一轮回答生效。
+
+**路径参数**：`agent_id` Agent id。
+
+**请求体**：只给要改的字段，没给的不动。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string，2–80 | 新名字（全站唯一） |
+| `description` | string，2–2000 | 新设定 |
+| `capabilities` | string[] | 整份替换 |
+| `authority` | string[] | 整份替换 |
+| `chat_enabled` | boolean | |
+| `model_preset` | string? | 换预置模型；`null` = 改回默认模型 |
+| `timeout_s` | integer? | `null` = 改回不限制 |
+| `max_delegations` | integer? | `null` = 改回不限制 |
+
+**返回** 200：改完的 Agent 对象。
+
+**错误**：404（不是你的 Agent）；409（重名、未知权限、预置模型不可用）。
+
+```bash
+curl -X PATCH $MATRIX/api/agents/agent-b5b043fe $AUTH -H "Content-Type: application/json" \
+  -d '{"description": "你负责回答公司报销制度的问题。2026 年起差旅标准按新制度执行。"}'
+```
+
+#### `DELETE /api/agents/{agent_id}`：删除 Agent
+
+只有所有者能删。它会从所在的所有项目里移出。
+
+**返回** 200：`{"ok": true}`。
+
+**错误**：404（不是你的）；409 `Agent 正在运行，不能删除`。
+
+#### `GET /api/models`：可选的预置模型
+
+**返回** 200：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `active` | boolean | 部署方有没有启用模型目录；`false` 时不用传 `model_preset` |
+| `default` | string? | 默认的预置模型 id |
+| `models` | object[] | 每个预置模型：`{id, label, description, …}`；`id` 就是 `model_preset` 要填的 |
+
+#### `GET /api/public-agents`：公共 Agent 目录
+
+管理员批准过、所有人都能用的 Agent，可以拉进任何项目。
+
+**返回** 200：数组，每项
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | Agent id |
+| `name` / `description` | string | 名字、负责什么 |
+| `capabilities` | string[] | |
+| `chat_enabled` | boolean | |
+| `maintainers` | string[] | 维护人的邮箱 |
+| `connectors` | object[] | 它要用的连接器：`{id, name, ready}`（`ready` = 这个用户连上了没有） |
 
 ### 3. 项目
 
 建项目的人是**主持人**。项目成员是 Agent；每个人只能把**自己的** Agent（或公共 Agent）加进项目。
 
-| 接口 | 谁能做 | 说明 |
+#### `POST /api/projects`：建项目
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，1–80 | 是 | 项目名 |
+| `description` | string，≤500 | 否（`""`） | 描述 |
+| `member_ids` | string[] | 否（`[]`） | 项目里的 Agent：只能是这个用户自己的，或公共 Agent |
+| `default_agent` | string? | 否（`null`：不设） | 项目会话的默认回答成员：`member_ids` 里的一个，给 id 或名字 |
+
+**返回** 200：项目对象（`default_agent_id` 是认定后的 Agent id）。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
 |---|---|---|
-| `POST /api/projects` | 任何人 | `{name, description?, member_ids?, default_agent?}` |
-| `GET /api/projects/{project_id}` | 项目里的人 | 详情：成员、默认回答成员、参与者、档案等 |
-| `PATCH /api/projects/{project_id}` | 见右 | `{name?, description?, default_agent?}` 只有主持人；`member_ids?`（整份替换）按下面两行的规则 |
-| `POST /api/projects/{project_id}/members` | 项目里的人 | `{agent_id}`：把自己的 Agent 或公共 Agent 加进来 |
-| `DELETE /api/projects/{project_id}/members/{agent_id}` | 主持人，或那个 Agent 的所有者 | 移出成员 |
-| `DELETE /api/projects/{project_id}` | 主持人 | 删除（有进行中的对话时 409） |
+| 404 | `unknown agent …` | `member_ids` 里有不存在的、或不是这个用户能用的 Agent |
+| 409 | `… 不是项目「…」的成员` | `default_agent` 不在 `member_ids` 里 |
 
-`default_agent`（**项目会话的默认回答成员**）：项目里的一个 Agent，按 id 或名字给。在这个项目里开会话时没另外指定，
-没 @ 任何人的消息就交给它。只有主持人能定；要是项目成员（不是就 409）；`PATCH` 时传 `null` 是不设；
-换了只影响**之后新开**的会话；它被移出项目时自动清空。返回的项目对象里是 `default_agent_id`。
+```bash
+curl -X POST $MATRIX/api/projects $AUTH -H "Content-Type: application/json" -d '{
+  "name": "报销咨询", "member_ids": ["agent-b5b043fe", "agent-25b39643"], "default_agent": "agent-b5b043fe"}'
+```
 
-返回的项目对象里常用的：`id`、`name`、`description`、`member_ids`、`default_agent_id`、`owner_id`（主持人）、
-`participants`（别的参与者的用户 id）、`shared`（有没有别人）。
+```json
+{"id": "prj-2ed74cc5", "name": "报销咨询", "description": "",
+ "member_ids": ["agent-b5b043fe", "agent-25b39643"], "default_agent_id": "agent-b5b043fe",
+ "owner_id": "user-64f8ac13", "participants": [], "invited": [], "shared": false, "created_at": 1795677856.24}
+```
+
+#### `GET /api/projects/{project_id}`：项目详情
+
+项目里的人（主持人、参与者）能看。
+
+**返回** 200：项目详情（见“返回里的对象”）。
+
+#### `PATCH /api/projects/{project_id}`：改项目、换默认回答成员
+
+**请求体**：只给要改的字段。
+
+| 字段 | 类型 | 谁能改 | 说明 |
+|---|---|---|---|
+| `name` | string，1–80 | 主持人 | 改名 |
+| `description` | string，≤500 | 主持人 | 改描述 |
+| `default_agent` | string? | 主持人 | 换默认回答成员（项目里的 Agent，id 或名字）；`null` = 不设。**只影响之后新开的会话** |
+| `member_ids` | string[] | 见说明 | 成员列表**整份替换**：新加的要是这个用户自己的或公共 Agent；去掉的要是这个用户的 Agent，或这个用户是主持人。一般用下面两个成员接口更省事 |
+
+`member_ids` 和 `default_agent` 一起给时，先改成员再认默认回答成员。默认回答成员被移出项目时自动清空（变 `null`），不会悄悄换成别人。
+
+**返回** 200：改完的项目对象。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
+|---|---|---|
+| 409 | `只有主持人能这样做` | 参与者改 `name` / `description` / `default_agent` |
+| 409 | `… 不是项目「…」的成员` | `default_agent` 不是项目成员 |
+| 409 | `… 不是你的 Agent，只有它的所有者或主持人能把它移出` | `member_ids` 里去掉了别人的 Agent |
+
+```bash
+curl -X PATCH $MATRIX/api/projects/prj-2ed74cc5 $AUTH -H "Content-Type: application/json" \
+  -d '{"default_agent": "agent-25b39643"}'
+# → {..., "default_agent_id": "agent-25b39643"}
+```
+
+#### `DELETE /api/projects/{project_id}`：删除项目
+
+只有主持人能删。
+
+**返回** 200：`{"ok": true}`。
+
+**错误**：409 `项目内有进行中的对话，不能删除`；409 `只有主持人能这样做`。
+
+#### `POST /api/projects/{project_id}/members`：加成员
+
+项目里的人把自己的 Agent 或公共 Agent 加进来。
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `agent_id` | string | 是 | 要加的 Agent |
+
+**返回** 200：项目对象。
+
+**错误**：404 `unknown agent …`（不存在或不是这个用户能用的）；409 `… 已经在项目里`。
+
+#### `DELETE /api/projects/{project_id}/members/{agent_id}`：移出成员
+
+主持人能移出任何成员；参与者只能移出自己的 Agent。移出的是默认回答成员时，项目的 `default_agent_id` 变 `null`。
+
+**返回** 200：项目对象。
+
+**错误**：409 `… 不在项目里`；409 `… 不是你的 Agent，只有它的所有者或主持人能把它移出`。
 
 ### 4. 参与者：邀请与接受
 
-别的用户要用这个项目，由**主持人逐个邀请**，对方接受后成为参与者（没有“自行加入”）。
+别的用户要用这个项目，由**主持人逐个邀请**，对方接受后成为参与者（没有“自行加入”、没有批量邀请）。
 
-| 接口 | 谁能做 | 说明 |
+#### `POST /api/projects/{project_id}/invitations`：邀请（主持人）
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `email` | string，3–200 | 是 | 被邀请的人在 Matrix 里的邮箱。**他要已经有账号**（替他调过一次任意接口就有） |
+
+**返回** 200：项目详情（`invited` 里多了他）。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
 |---|---|---|
-| `POST /api/projects/{project_id}/invitations` | 主持人 | `{email}`：对方要已经有 Matrix 账号（否则 409“没有用户”） |
-| `POST /api/projects/{project_id}/invitation` | 被邀请的人 | `{accept: true \| false}` |
-| `POST /api/projects/{project_id}/leave` | 参与者 | 退出（他的 Agent 一并移出，他的会话变只读） |
-| `DELETE /api/projects/{project_id}/participants/{user_id}` | 主持人 | 移出参与者，或撤回还没接受的邀请 |
+| 409 | `只有主持人能这样做` | 调用的人是参与者，不是主持人（不在项目里的人是 404） |
+| 409 | `没有用户 …` | 这个邮箱还没有 Matrix 账号 |
+| 409 | `已经邀请过 …` | 已邀请、对方还没接受：可以当成功处理 |
+| 409 | `… 已经是参与者` | 可以当成功处理 |
 
-等某个人接受的邀请在他的 `GET /api/network` 的 `invitations` 里（`project_id`、`name`、`host`）。
+#### `POST /api/projects/{project_id}/invitation`：接受或拒绝（被邀请的人）
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `accept` | boolean | 是 | `true` 接受，`false` 拒绝 |
+
+**返回** 200：接受时是项目详情；拒绝时是 `{"ok": true}`。
+
+**错误**：404 `unknown invitation …`（没有等这个人接受的邀请：没邀请过、已经处理过、被撤回了）。
+
+等某个人接受的邀请在他的 `GET /api/network` 的 `invitations` 里，或订阅事件 `project.invited`。
+
+#### `POST /api/projects/{project_id}/leave`：退出（参与者）
+
+没有请求体。他的 Agent 一并移出项目，他在这个项目里的会话变成只读。
+
+**返回** 200：`{"ok": true}`。
+
+**错误**：409 `主持人不能退出；不再需要这个项目可以删除它`。
+
+#### `DELETE /api/projects/{project_id}/participants/{user_id}`：移出参与者、撤回邀请（主持人）
+
+**路径参数**：`user_id` 要移出的参与者，或还没接受邀请的那个人的用户 id。
+
+**返回** 200：项目详情。
+
+**错误**：409 `只有主持人能这样做`；409 `不是这个项目的参与者`（那个人不是参与者、也没有被邀请）。
 
 ### 5. 项目会话
 
 项目会话是**一个人**在项目里的私下对话：只有开它的人看得到，带项目上下文，能 @ 项目里的任何 Agent。一个人在一个项目里可以开很多个。
 
-| 接口 | 说明 |
-|---|---|
-| `POST /api/projects/{project_id}/sessions` | 开会话。`{title?, agent?}`：`agent` 是这个会话的默认回答成员（项目里的 Agent，id 或名字）；不给就用项目的 `default_agent`，项目也没定时用这个人已在项目里的助理，都没有就没有默认成员 |
-| `GET /api/projects/{project_id}/sessions` | 这个人在项目里的会话（摘要），最近的在前 |
-| `PATCH /api/sessions/{conv_id}` | `{title?, archived?, agent?}`：改名、归档 / 恢复、换默认回答成员（`agent: null` = 不要默认成员） |
-| `DELETE /api/conversations/{conv_id}` | 删除（只能删已归档的） |
+#### `POST /api/projects/{project_id}/sessions`：开会话
 
-注意：这个人在项目里已经有一个**还没发过消息**、默认成员相同的会话时，`POST` 返回的是那一个，不新建。
+项目里的人（主持人、参与者）都能开。
 
-会话对象（摘要）：`id`、`kind`（`session`）、`project_id`、`agent_id`（默认回答成员，可以是 null）、`title`、`owner_id`、
-`status`（`idle` 空闲 / `thinking` 有 Agent 在回答 / `waiting` 在等委托出去的工作）、`archived`、`message_count`、`last_message`、`updated_at`。
+**请求体**（可以是 `{}`）
 
-### 6. 消息
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `title` | string，≤120 | 否（`"新会话"`，发第一条消息后按内容自动起） | 标题 |
+| `agent` | string? | 否 | 这个会话的默认回答成员：项目里的一个 Agent，给 id 或名字。不给时依次取：项目的 `default_agent_id` → 这个用户已在项目里的助理 → 没有（`null`） |
 
-| 接口 | 说明 |
-|---|---|
-| `POST /api/conversations/{conv_id}/messages` | 发消息。`{text, mentions?, attachments?}`，返回这条消息（`id`、`mentions` 是实际交给了谁） |
-| `GET /api/conversations/{conv_id}` | 会话详情：摘要字段 + `messages`（全部消息）、`members`（能 @ 的 Agent id）、`running`（正在回答的 Agent id）、`questions`（等这个人回答的提问） |
-| `POST /api/conversations/{conv_id}/attachments?name=<文件名>` | 上传附件：请求体就是文件内容，类型取 `Content-Type`；返回 `{sha, name, size, mime}`，发消息时放进 `attachments` |
-| `GET /api/conversations/{conv_id}/attachments/{sha}` | 下载附件（人传的、Agent 发的都在这） |
-| `POST /api/conversations/{conv_id}/seats/{agent_id}/stop` | 打断这个 Agent 正在跑的一轮（只有 Agent 的所有者能） |
-| `POST /api/questions/{question_id}` | 回答 Agent 运行中向这个人提的问题：`{answers: [{id, selected?, custom?}], decline?}`。也可以直接在会话里回一条消息（只 @ 它或不 @） |
+注意：这个用户在项目里已经有一个**还没发过消息**、默认成员相同、没归档的会话时，返回的是那一个，不新建。
 
-交给谁：`text` 里写 `@名字`，或在 `mentions` 里给 Agent id（两者可以并用，可以同时 @ 几个）；都没有时交给会话的默认回答成员；
-没有默认成员时消息只留在会话里，没人回答。`mentions` 里有不是项目成员的 id 时 409。
+**返回** 200：会话对象（`agent_id` 是认定后的默认回答成员）。
 
-发消息的接口**立刻返回**，Agent 的回答是异步的：经事件流（下一节）收，或轮询 `GET /api/conversations/{conv_id}` 直到 `status` 回到 `idle`。
+**错误**：409 `… 不是项目「…」的成员`（`agent` 不在项目里）。
 
-消息对象：
+```bash
+curl -X POST $MATRIX/api/projects/prj-2ed74cc5/sessions $AUTH -H "Content-Type: application/json" -d '{"title": "差旅报销"}'
+```
 
-| 字段 | 说明 |
-|---|---|
-| `id`、`ts` | |
-| `role` | `user` 人发的；`agent` Agent 的回答；`system` 某个 Agent 这一轮的通知（比如失败、被打断）；`event` 事件（成员变动等） |
-| `text` | 正文（Markdown） |
-| `agent_id` | `agent` / `system`：哪个 Agent |
-| `user_id` | `user`：哪个用户 |
-| `mentions` | `user`：交给了哪些 Agent |
-| `attachments` | `[{sha, name, size, mime}]` |
-| `steps` | `agent`：这一轮的过程（中间文本、工具调用）；只有这个 Agent 的所有者拿得到，别人是空的 |
+```json
+{"id": "conv-fdfe42ba", "kind": "session", "project_id": "prj-2ed74cc5", "agent_id": "agent-b5b043fe",
+ "title": "差旅报销", "owner_id": "user-05730ea0", "status": "idle", "archived": false, "blocked": false,
+ "message_count": 0, "last_message": "", "created_at": 1795677856.26, "updated_at": 1795677856.26}
+```
+
+#### `GET /api/projects/{project_id}/sessions`：我在这个项目里的会话
+
+**返回** 200：会话对象数组（含已归档的），最近变动的在前。只有这个用户自己的。
+
+#### `PATCH /api/sessions/{conv_id}`：改名、归档、换默认回答成员
+
+只有会话的主人能调。
+
+**请求体**：只给要改的字段。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `title` | string，≤120 | 改名 |
+| `archived` | boolean | `true` 归档（变只读）；`false` 恢复 |
+| `agent` | string? | 换这个会话的默认回答成员（项目里的 Agent，id 或名字）；`null` = 不要默认成员。只管之后没 @ 的消息交给谁 |
+
+**返回** 200：改完的会话对象。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
+|---|---|---|
+| 409 | `… 不是项目「…」的成员` | `agent` 不在项目里 |
+| 409 | `会话进行中或还有进行中的委托，不能归档` | |
+| 409 | `你已不在这个项目里，会话只读` | 已退出 / 被移出项目的人恢复会话、换默认成员 |
+
+```bash
+curl -X PATCH $MATRIX/api/sessions/conv-fdfe42ba $AUTH -H "Content-Type: application/json" -d '{"agent": "审核员"}'
+# → {..., "agent_id": "agent-25b39643"}
+```
+
+#### `DELETE /api/conversations/{conv_id}`：删除会话
+
+只能删**已归档**的。
+
+**返回** 200：`{"ok": true}`。
+
+**错误**：409（还没归档）。
+
+### 6. 消息与附件
+
+#### `POST /api/conversations/{conv_id}/messages`：发消息
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `text` | string，≤8000 | 有附件时可以是 `""` | 正文。里面的 `@名字` 会被认成 @ 那个成员 |
+| `mentions` | string[]，最多 20 | 否（`[]`） | 明确交给哪些成员（Agent id）；和正文里的 `@名字` 取并集 |
+| `attachments` | object[]，最多 10 | 否（`[]`） | 先上传得到的附件：`{sha, name, mime?}`（把上传接口的返回原样放进来即可） |
+
+交给谁：正文里 @ 到的 + `mentions` 里的；都没有时交给会话的默认回答成员（`agent_id`）；没有默认成员时消息只留在会话里，没人回答。
+
+**返回** 200：**立刻返回**这条消息，Agent 的回答是异步的。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 消息 id |
+| `role` | string | `user` |
+| `text` | string | 正文 |
+| `mentions` | string[] | 实际交给了哪些 Agent；`[]` = 没人接 |
+| `attachments` | 附件说明[] | |
+| `ts` | number | 时间 |
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
+|---|---|---|
+| 409 | `… 不是项目「…」的成员` | `mentions` 里有不是项目成员的 id |
+| 409 | `这个对话已归档…，只读` | 会话已归档 |
+| 409 | `你已不在这个项目里，会话只读` | |
+| 409 | `附件 … 不存在：先上传到这个对话` | `attachments` 里的 `sha` 没在这个对话上传过 |
+| 422 | `消息不能为空` | `text` 是空白且没有附件 |
+
+```bash
+curl -X POST $MATRIX/api/conversations/conv-fdfe42ba/messages $AUTH -H "Content-Type: application/json" \
+  -d '{"text": "出差的打车费怎么报？"}'
+```
+
+```json
+{"id": "msg-0b850190", "role": "user", "text": "出差的打车费怎么报？",
+ "mentions": ["agent-b5b043fe"], "attachments": [], "ts": 1795677856.27}
+```
+
+收回答：订阅事件流（第 7 节）等 `message.added`，或轮询下面的详情接口直到 `status` 回到 `idle`。
+同一个 Agent 还在回答上一条时再发，新消息排在后面接着答，不会丢。
+
+#### `GET /api/conversations/{conv_id}`：会话详情（含全部消息）
+
+**返回** 200：会话对象的全部字段，另有
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `messages` | 消息对象[] | 这个用户看得到的全部消息，按时间先后 |
+| `members` | string[] | 这个会话里能 @ 的 Agent id（默认回答成员排第一） |
+| `running` | string[] | 这一刻正在回答的 Agent id |
+| `questions` | 提问对象[] | 这个会话里等这个用户回答的提问；每项另有 `can_answer` |
+| `senders` | object | `{用户 id: 邮箱}`：消息里出现过的发送人 |
+
+```json
+{"id": "conv-fdfe42ba", "kind": "session", "project_id": "prj-2ed74cc5", "agent_id": "agent-b5b043fe",
+ "title": "出差的打车费怎么报？", "status": "idle", "archived": false,
+ "members": ["agent-b5b043fe", "agent-25b39643"], "running": [], "questions": [],
+ "messages": [
+   {"id": "msg-0b850190", "role": "user", "text": "出差的打车费怎么报？", "user_id": "user-05730ea0",
+    "agent_id": null, "mentions": ["agent-b5b043fe"], "attachments": [], "steps": [], "ts": 1795677856.27},
+   {"id": "msg-4f84b8b6", "role": "agent", "text": "打车费凭发票和行程单报销……", "user_id": null,
+    "agent_id": "agent-b5b043fe", "mentions": [], "attachments": [], "steps": [], "ts": 1795677861.02}
+ ]}
+```
+
+#### `POST /api/conversations/{conv_id}/attachments`：上传附件
+
+先上传，再把返回放进消息的 `attachments`。
+
+**查询参数**
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，1–200 | 是 | 文件名（要 URL 编码） |
+
+**请求头**：`Content-Type` 写文件的类型（如 `application/pdf`），会记成附件的 `mime`。
+
+**请求体**：文件内容本身（不是 JSON、不是 multipart）。单个最多 20 MB。
+
+**返回** 200：附件说明 `{sha, name, size, mime}`。
+
+**错误**：413 `附件超过上限 20 MB`；409（会话已归档、超出存储配额）。
+
+```bash
+curl -X POST "$MATRIX/api/conversations/conv-fdfe42ba/attachments?name=invoice.pdf" $AUTH \
+  -H "Content-Type: application/pdf" --data-binary @invoice.pdf
+```
+
+```json
+{"sha": "fc022288f3e49d09353987de1c32fc1427bd2a8b3657a340e86efb8e34efe003",
+ "name": "invoice.pdf", "size": 48213, "mime": "application/pdf"}
+```
+
+#### `GET /api/conversations/{conv_id}/attachments/{sha}`：下载附件
+
+人传的、Agent 发回来的文件都从这里取（`sha` 来自消息的 `attachments`）。
+
+**返回** 200：文件内容；`Content-Type` 是附件的 `mime`，`Content-Disposition: attachment; filename="…"`。
+
+**错误**：404（这个对话里没有这个附件，或看不到这个对话）。
+
+#### `POST /api/conversations/{conv_id}/seats/{agent_id}/stop`：打断 Agent 正在跑的一轮
+
+只有这个 Agent 的所有者能调（终端用户打断不了别人的 Agent）。没有请求体。
+
+**返回** 200：`{"ok": true}`；会话里会多一条 `role=system` 的消息说明这一轮被终止。
+
+**错误**：409 `只有这个 Agent 的所有者能终止它的运行`；404（它这时没有在这个会话里运行）。
+
+#### `POST /api/questions/{question_id}`：回答 Agent 的提问
+
+Agent 运行中向人提了问题（提问对象，`status=pending`）时，它停下来等。**最简单的回答方式是直接在会话里发一条消息**
+（不 @ 任何人，或只 @ 它）：那条消息就算回答。要按选项回答时用这个接口。
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `answers` | object[]，最多 20 | 否（`[]`） | 每个问题一项，见下 |
+| `decline` | boolean | 否（`false`） | `true` = 不回答：Agent 拿到“没有得到回答”，自己决定怎么继续 |
+| `note` | string，≤500 | 否 | 不回答时的说明 |
+
+`answers` 的每一项：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `id` | string | 是 | 问题的 id（提问对象 `items[].id`） |
+| `selected` | string[] | 否 | 选中的选项（`items[].options[].label`） |
+| `custom` | string，≤4000 | 否 | 自己写的回答 |
+
+**返回** 200：提问对象（`status` 变成 `answered` 或 `cancelled`）。
+
+**错误**：404（不是交给这个人的提问）；409 `这个问题已经回答过了` / `…作废了`。
 
 ### 7. 事件流（SSE）
 
-`GET /api/events?since=<seq>`：一条长连接，`text/event-stream`，只推这个用户看得到的事件。每条：
+#### `GET /api/events`：订阅这个用户看得到的事件
+
+一条长连接，`text/event-stream`。
+
+**查询参数**
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `since` | integer | 否（`0`：从服务还留着的最早一条开始补） | 从这个序号之后开始推。断线重连时填最后收到的 `seq`；只想要新的，先取 `GET /api/network` 的 `seq` |
+
+**请求头**：也认标准的 `Last-Event-ID`（有它时优先于 `since`）。
+
+**返回** 200：事件一条一条到，每条：
 
 ```
 id: 132
 data: {"seq": 132, "type": "message.added", "ts": 1795677856.27, "data": {"conversation_id": "conv-…", "message": {…}}}
 ```
 
-- 每个用户一条连接（请求头里替谁，收到的就是谁的事件）。断了重连时带 `since=<最后收到的 seq>` 或 `Last-Event-ID`，中间的会补发。
-- 15 秒没有事件时发一行注释（`: keepalive`）保活；代理不要缓冲这条路径。
-- 服务重启后序号从头计：重连后收到的 `seq` 比手里的小是正常的，以对话详情为准对一次。
-- 起点可以取 `GET /api/network` 返回的 `seq`。
-
-业务系统用得到的事件：
-
-| `type` | `data` | 说明 |
+| 字段 | 类型 | 说明 |
 |---|---|---|
-| `message.added` | `conversation_id`、`message` | 对话里多了一条消息：`role=agent` 的就是 Agent 的回答 |
-| `conversation.updated` | `conversation`（摘要） | 状态、标题、默认成员等变了：`status` 回到 `idle` 表示这一轮结束 |
-| `run.progress` | `context_id`（`<conv_id>/<agent_id>`）等 | Agent 运行中的过程；只给它的所有者，用来显示“正在做什么”，可以不管 |
-| `project.updated` | `project` | 项目的成员、默认回答成员、参与者变了 |
-| `project.invited` | `project_id`、`user_id`、`invitation` | 这个人收到了邀请 |
-| `question.updated` | `question` | Agent 向这个人提了问题，或问题已经回答 |
-| `agent.updated` | `agent` | Agent 的资料或状态变了 |
+| `seq` | integer | 序号，递增 |
+| `type` | string | 事件类型，见下表 |
+| `ts` | number | 时间 |
+| `data` | object | 随类型而定 |
 
-别的事件类型忽略即可。回答不是逐字流式的：一轮结束时整条到（过程在 `run.progress` 里）。
+- 每个用户一条连接（请求头里替谁，收到的就是谁的事件）。
+- 15 秒没有事件时发一行注释（`: keepalive`）保活；代理不要缓冲这条路径。
+- 服务重启后序号从头计：重连后收到的 `seq` 比手里的小是正常的，以 `GET /api/conversations/{conv_id}` 对一次。
+- 回答不是逐字流式的：一轮结束时整条到。
+
+业务系统用得到的事件（别的类型忽略即可）：
+
+| `type` | `data` 的字段 | 说明 |
+|---|---|---|
+| `message.added` | `conversation_id`、`message`（消息对象） | 对话里多了一条消息；`message.role == "agent"` 就是 Agent 的回答 |
+| `conversation.updated` | `conversation`（会话对象） | 状态、标题、默认成员等变了；`status` 回到 `idle` 表示这一轮结束 |
+| `conversation.deleted` | `conversation_id` | 会话被删了 |
+| `run.progress` | `context_id`（`<conv_id>/<agent_id>`）、`agent_id` 等 | Agent 运行中的过程；只给它的所有者，用来显示“正在做什么”，可以不管 |
+| `project.updated` | `project`（项目对象） | 项目的成员、默认回答成员、参与者变了 |
+| `project.invited` | `project_id`、`user_id`、`invitation` | 这个人收到了邀请 |
+| `project.deleted` | `project_id` | 项目被删了 |
+| `question.updated` | `question`（提问对象） | Agent 向这个人提了问题，或问题已经回答 / 作废 |
+| `agent.updated` | `agent`（Agent 对象） | Agent 的资料或状态变了 |
+
+```bash
+curl -N "$MATRIX/api/events?since=131" $AUTH
+```
 
 ## 四、要知道的限制
 
