@@ -613,6 +613,8 @@ def current_user(request: Request) -> User:
 def _api_caller(request: Request) -> User | None:
     """外部系统带着用户凭据的请求 → 那个用户；没带凭据返回 None。只认请求头：浏览器不会自己带上它，
     同一主域名下别的页面伪造不了（所以不直接读浏览器带来的共享 cookie）。管理后台不认这种凭据。"""
+    if request.headers.get("x-matrix-key") is not None:
+        return _key_caller(request)
     head = request.headers.get("authorization", "")
     if not head[:7].lower() == "bearer ":
         return None
@@ -631,6 +633,32 @@ def _api_caller(request: Request) -> User | None:
         raise HTTPException(401, f"凭据没有通过核实：{e}") from e
     if created:
         network.ensure_assistant(user.id)  # 和公司账号登录一样：第一次来就有账号和助理
+    return user
+
+
+def _key_caller(request: Request) -> User:
+    """业务系统的后端凭共享密钥替一个用户调接口（login.json 的 api_keys，临时方案）：`X-Matrix-Key` 对上了，
+    就信 `X-Matrix-User` 说的是谁（公司里唯一、不会变的 user_id），按 bind_as 下的绑定对到 Matrix 用户；
+    第一次来的人要带 `X-Matrix-User-Email` 建账号。管理后台不认。"""
+    logins: LoginService = request.app.state.login
+    k = logins.api_key(request.headers.get("x-matrix-key", ""))
+    if k is None:
+        raise HTTPException(401, "密钥不对，或这里没有开放用密钥调用接口")
+    route = getattr(request.scope.get("route"), "path", "") or request.url.path
+    if route.startswith("/api/admin"):
+        raise HTTPException(403, "管理后台只能在网页上登录后使用")
+    subject = request.headers.get("x-matrix-user", "").strip()
+    if not subject:
+        raise HTTPException(401, "请求头 X-Matrix-User 要写明是哪个用户（他在身份系统里的标识）")
+    network = request.app.state.network
+    try:
+        user, created = auth.sso_user(network.store, k.bind_as, subject, request.headers.get("x-matrix-user-email", ""),
+                                      auto_create=k.auto_create, link_by_email=k.link_by_email,
+                                      allow_domains=k.allow_domains)
+    except auth.AuthError as e:
+        raise HTTPException(401, f"认不出这个用户：{e}") from e
+    if created:
+        network.ensure_assistant(user.id)
     return user
 
 

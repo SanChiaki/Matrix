@@ -19,6 +19,13 @@
 - `api_auth`（默认 false）：外部系统的后端可以带着这个身份系统的用户凭据（共享登录 cookie 的值、访问令牌）直接调 `/api/*`，
   请求头 `Authorization: Bearer <凭据>`（开了不止一个入口时再带 `X-Matrix-Login: <入口 id>`）。驱动要实现 `verify`。
   这次请求等同那个用户本人；`/api/admin/*` 不认这种凭据。
+- `api_keys`（临时方案，默认没有）：业务系统的后端凭共享密钥、替一个用户调 `/api/*`，不经身份系统核实（见下面与
+  docs/login-driver-authoring.md 第九节）。每项 `{"id": "expense", "name": "报销系统", "keys": ["${EXPENSE_MATRIX_KEY}"],
+  "bind_as": "corp", "auto_create": true, "link_by_email": false, "allow_domains": [...]}`：
+  `keys` 可以写几个（轮换时新旧并存，旧的删掉即作废），每个至少 32 个字符，只能经 `${…KEY…}` 环境变量写；
+  请求头 `X-Matrix-Key: <密钥>`、`X-Matrix-User: <这个人在公司里唯一、不会变的 user_id>`，再带上 `X-Matrix-User-Email`（每次都带即可：没绑定时用它建账号，绑定后忽略）。
+  身份按 `bind_as`（默认是这一项的 id）下的标识绑定到 Matrix 用户，规则和公司账号登录一样（auth.sso_user）；
+  `bind_as` 写成公司账号登录入口的 id，两边就是同一份绑定。`/api/admin/*` 不认。
 - `config` 里的字符串可以写 `${环境变量}`：密钥放在环境变量（`deploy/.env`）里，不要直接写进文件。变量名里要带 `KEY`：
   服务进程的环境会传给云侧的 dsh，dsh 按名字不把这类变量交给 Agent 的命令（docs/reference/security.md）。
 
@@ -54,6 +61,21 @@ VERIFY_FAIL_TTL_S = 10    # 核实不过也缓存一会儿：同一个坏凭据�
 MAX_VERIFIED = 10_000
 PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 _ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+@dataclass(frozen=True)
+class ApiKey:
+    """业务系统的后端凭共享密钥替用户调接口（login.json 的 api_keys，临时方案）。只存密钥的 sha256。"""
+    id: str
+    name: str
+    key_shas: tuple[str, ...]
+    bind_as: str                         # 用户标识绑定在哪个名字下（User.sso 的键）；和登录入口同名时共用绑定
+    auto_create: bool = True
+    link_by_email: bool = False
+    allow_domains: tuple[str, ...] = ()
+
+
+MIN_KEY_LEN = 32
 
 
 @dataclass(frozen=True)
@@ -100,6 +122,7 @@ class LoginService:
         self._lock = threading.Lock()
         self._mtime: float | None = None
         self._providers: list[Provider] = []
+        self._api_keys: list[ApiKey] = []
         self._public_url = ""
         self._password_login = True
         self._flows: dict[str, dict[str, Any]] = {}      # 浏览器的一次性 cookie -> 这次登录
@@ -110,6 +133,7 @@ class LoginService:
         """调用方持有锁。按修改时间热加载；整份读不了时沿用上一份，某个入口不对只跳过它。"""
         if self.path is None or not self.path.is_file():
             self._providers, self._public_url, self._password_login, self._mtime, self.errors = [], "", True, None, {}
+            self._api_keys = []
             return
         m = self.path.stat().st_mtime
         if m == self._mtime:
@@ -119,6 +143,8 @@ class LoginService:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict) or not isinstance(raw.get("providers", []), list):
                 raise LoginError('要是 {"providers": [...]}')
+            if not isinstance(raw.get("api_keys", []), list):
+                raise LoginError("api_keys 要是数组")
             public_url = str(raw.get("public_url") or "").rstrip("/")
             if public_url and not re.match(r"^https?://[^/\s]+(/\S*)?$", public_url):
                 raise LoginError("public_url 要是 http(s) 地址")
@@ -136,9 +162,16 @@ class LoginService:
                 errors[pid or f"#{i + 1}"] = str(e)
             except Exception as e:  # 外部驱动的构造函数写错了：跳过这个入口，不拖垮服务
                 errors[pid or f"#{i + 1}"] = f"{type(e).__name__}: {e}"
+        keys: list[ApiKey] = []
+        for i, k in enumerate(raw.get("api_keys", [])):
+            kid = str(k.get("id", "")) if isinstance(k, dict) else ""
+            try:
+                keys.append(_api_key(k, kid, {x.id for x in keys}))
+            except LoginError as e:
+                errors[f"api_keys:{kid or i + 1}"] = str(e)
         for pid, why in errors.items():
             print(f"[matrix] 登录入口 {pid} 没有启用：{why}", file=sys.stderr)
-        self._providers, self._public_url, self.errors = providers, public_url, errors
+        self._providers, self._public_url, self.errors, self._api_keys = providers, public_url, errors, keys
         self._password_login = raw.get("password_login", True) is not False
 
     def _provider(self, p: Any, pid: str, taken: set[str]) -> Provider:
@@ -255,6 +288,20 @@ class LoginService:
         self._remember(key, t + VERIFY_OK_TTL_S, ident)
         return p, ident
 
+    # ---- 业务系统凭共享密钥替用户调接口（api_keys，临时方案） ----
+    def api_key(self, key: str) -> ApiKey | None:
+        """请求头里的密钥 → 是哪个业务系统；对不上返回 None。逐个按 sha256 常数时间比较。"""
+        sha = hashlib.sha256(key.strip().encode()).hexdigest()
+        with self._lock:
+            self._load()
+            keys = list(self._api_keys)
+        hit = None
+        for k in keys:
+            for s in k.key_shas:
+                if hmac.compare_digest(s, sha):
+                    hit = k
+        return hit
+
     def _remember(self, key: tuple[str, str], until: float, value: Identity | str) -> None:
         with self._lock:
             if len(self._verified) >= MAX_VERIFIED:
@@ -263,6 +310,35 @@ class LoginService:
                 if len(self._verified) >= MAX_VERIFIED:
                     self._verified.clear()
             self._verified[key] = (until, value)
+
+
+def _api_key(k: Any, kid: str, taken: set[str]) -> ApiKey:
+    if not isinstance(k, dict):
+        raise LoginError("每项要是一个对象")
+    if not PROVIDER_ID.match(kid):
+        raise LoginError("id 要是 2–32 位小写字母、数字、-、_，字母开头")
+    if kid in taken:
+        raise LoginError("id 重复")
+    raw = k.get("keys")
+    if not isinstance(raw, list) or not raw:
+        raise LoginError("keys 要是非空数组")
+    shas = []
+    for x in raw:
+        if not isinstance(x, str) or not _ENV.fullmatch(x.strip()):
+            raise LoginError("keys 里每个密钥都要写成 ${环境变量}，不要把密钥直接写进文件")
+        v = _expand(x.strip())
+        if len(v) < MIN_KEY_LEN:
+            raise LoginError(f"密钥至少 {MIN_KEY_LEN} 个字符（比如 openssl rand -hex 32）")
+        shas.append(hashlib.sha256(v.encode()).hexdigest())
+    bind_as = str(k.get("bind_as") or kid)
+    if not PROVIDER_ID.match(bind_as):
+        raise LoginError("bind_as 要是 2–32 位小写字母、数字、-、_，字母开头")
+    domains = k.get("allow_domains") or []
+    if not isinstance(domains, list):
+        raise LoginError("allow_domains 要是数组")
+    return ApiKey(id=kid, name=str(k.get("name") or kid)[:40], key_shas=tuple(shas), bind_as=bind_as,
+                  auto_create=k.get("auto_create", True) is not False, link_by_email=k.get("link_by_email") is True,
+                  allow_domains=tuple(str(d).strip().lower().lstrip("@") for d in domains if str(d).strip()))
 
 
 def _guard(p: Provider, call: Callable[[], Any]) -> Any:

@@ -349,6 +349,74 @@ def test_several_api_auth_providers_need_to_be_named(tmp_path: Path):
     assert c.get("/api/me", headers=bearer("s-u1001", **{"X-Matrix-Login": "nope"})).status_code == 401
 
 
+def key_setup(tmp_path: Path, monkeypatch, keys: list[dict], providers: list[dict] | None = None):
+    monkeypatch.setenv("EXPENSE_MATRIX_KEY", "k" * 40)
+    monkeypatch.setenv("EXPENSE_MATRIX_KEY_NEXT", "n" * 40)
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path / "data", seed=False)
+    path = tmp_path / "login.json"
+    path.write_text(json.dumps({"providers": providers or [], "api_keys": keys}), encoding="utf-8")
+    login = LoginService(path, drivers={"fake": FakeDriver})
+    return net, login, path, TestClient(create_app(net, login=login))
+
+
+def test_backend_calls_api_with_a_shared_key(tmp_path: Path, monkeypatch):
+    """临时方案 api_keys：密钥对上就信 X-Matrix-User 说的是谁（公司内唯一的 user_id），按 bind_as 绑到 Matrix 用户，等同那个用户本人；
+    没账号时靠邮箱建，之后只认 user_id（每次都带邮箱也行，带了不同的邮箱也是同一个人、邮箱不变）；新旧密钥都能用（轮换），删掉的立即作废；管理后台不认；没配就没有这条路。"""
+    entry = {"id": "expense", "name": "报销系统", "keys": ["${EXPENSE_MATRIX_KEY}", "${EXPENSE_MATRIX_KEY_NEXT}"]}
+    net, login, path, c = key_setup(tmp_path, monkeypatch, [entry])
+    as_ = lambda key, who, **h: {"X-Matrix-Key": key, "X-Matrix-User": who, **h}
+    assert c.get("/api/me", headers=as_("k" * 40, "E1001")).status_code == 401          # 第一次来没给邮箱：建不了
+    r = c.get("/api/me", headers=as_("k" * 40, "E1001", **{"X-Matrix-User-Email": "Wang@Corp.example"}))
+    assert r.status_code == 200, r.text
+    me = r.json()
+    assert me["email"] == "wang@corp.example" and me["agent_count"] == 1 and not c.cookies
+    assert net.store.users[me["id"]].sso == {"expense": "E1001"}
+    assert c.get("/api/me", headers=as_("n" * 40, "E1001")).json()["id"] == me["id"]     # 新密钥、只给 user_id
+    # 业务方每次都带邮箱也没事：绑定后不看它，带了别的邮箱也不改、不换人
+    r = c.get("/api/me", headers=as_("k" * 40, "E1001", **{"X-Matrix-User-Email": "wang.new@corp.example"}))
+    assert r.json()["id"] == me["id"] and r.json()["email"] == "wang@corp.example"
+    g = c.post("/api/projects", json={"name": "报销"}, headers=as_("k" * 40, "E1001")).json()
+    assert net.store.projects[g["id"]].owner_id == me["id"]
+    assert c.get("/api/me", headers=as_("x" * 40, "E1001")).status_code == 401           # 密钥不对
+    assert c.get("/api/me", headers={"X-Matrix-Key": "k" * 40}).status_code == 401        # 没说是谁
+    assert c.get("/api/admin/usage", headers=as_("k" * 40, "E1001")).status_code == 403
+    # 已有同邮箱的账号默认不绑（和公司账号登录一样）
+    auth.register(net.store, "li@corp.example", "password-123")
+    r = c.get("/api/me", headers=as_("k" * 40, "E2002", **{"X-Matrix-User-Email": "li@corp.example"}))
+    assert r.status_code == 401 and "已经有账号" in r.json()["detail"]
+    # 轮换：去掉旧密钥立即作废
+    path.write_text(json.dumps({"api_keys": [{**entry, "keys": ["${EXPENSE_MATRIX_KEY_NEXT}"]}]}), encoding="utf-8")
+    import os
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 5))
+    assert c.get("/api/me", headers=as_("k" * 40, "E1001")).status_code == 401
+    assert c.get("/api/me", headers=as_("n" * 40, "E1001")).status_code == 200
+    # 没配 api_keys：这条路不存在
+    path.write_text(json.dumps({"providers": []}), encoding="utf-8")
+    os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 10))
+    assert c.get("/api/me", headers=as_("n" * 40, "E1001")).status_code == 401
+
+
+def test_shared_key_shares_bindings_with_company_login(tmp_path: Path, monkeypatch):
+    """bind_as 写成公司账号登录入口的 id：经密钥来的人和用公司账号登录的人是同一个 Matrix 用户。"""
+    net, login, _, c = key_setup(tmp_path, monkeypatch, [{"id": "expense", "keys": ["${EXPENSE_MATRIX_KEY}"], "bind_as": "corp"}],
+                                 [{"id": "corp", "driver": "fake"}])
+    b = browser(net, login)
+    assert sign_in(b, "u7").status_code in (302, 303, 307)
+    mine = b.get("/api/me").json()
+    got = c.get("/api/me", headers={"X-Matrix-Key": "k" * 40, "X-Matrix-User": "u7"}).json()
+    assert got["id"] == mine["id"]
+
+
+def test_shared_key_config_is_checked(tmp_path: Path, monkeypatch):
+    """密钥只能经 ${…KEY…} 环境变量写、至少 32 个字符；写错的那一项不启用，原因记下来，别的照常。"""
+    monkeypatch.setenv("SHORT_KEY", "short")
+    bad = [{"id": "plain", "keys": ["k" * 40]}, {"id": "short", "keys": ["${SHORT_KEY}"]},
+           {"id": "ok", "keys": ["${EXPENSE_MATRIX_KEY}"]}]
+    _, login, _, _ = key_setup(tmp_path, monkeypatch, bad)
+    assert login.api_key("k" * 40).id == "ok"
+    assert "环境变量" in login.errors["api_keys:plain"] and "32" in login.errors["api_keys:short"]
+
+
 def test_builtin_and_template_drivers_pass_the_structure_check():
     """内置驱动在册；一致性检查能认出没写全的驱动（外部驱动包在自己的测试里跑 assert_driver）。"""
     drivers, errors = load_drivers()

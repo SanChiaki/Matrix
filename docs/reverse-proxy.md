@@ -13,7 +13,7 @@ Caddy、nginx、公司的网关、负载均衡都可以。下面第一节是**�
 | **对外只给 HTTPS** | Matrix 自己只说 HTTP，登录 cookie 和令牌不能明文过公网 |
 | **`/internal/*` 对外一律拒绝**（如返回 404） | 这些是容器里 dsh、MCP 服务回调用的（`/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*`），Matrix 只凭执行上下文令牌识别，不看来源地址，挡在外面是代理的事 |
 | **SSE 不缓冲**：`/api/events` | 缓冲了网页收不到实时事件 |
-| **原样传 `Authorization` 请求头** | 和 Matrix 用同一套登录的业务系统带着用户凭据调 `/api/*`（`login.json` 的 `api_auth`，[login-driver-authoring.md](login-driver-authoring.md) 第八节）；代理吞掉它或拿它做自己的认证，Matrix 就认不出人 |
+| **原样传 `Authorization` 请求头** | 和 Matrix 用同一套登录的业务系统带着用户凭据调 `/api/*`（`login.json` 的 `api_auth`，[login-driver-authoring.md](login-driver-authoring.md) 第八节）；代理吞掉它或拿它做自己的认证，Matrix 就认不出人。临时方案（`api_keys`，第九节）用的 `X-Matrix-Key`、`X-Matrix-User`、`X-Matrix-User-Email` 也要原样传 |
 | **WebSocket 升级**：`/api/devices/connect` | 端侧连接器（`matrix-connect`）经它出站连进来 |
 | **请求体上限不低于 100 MB** | 项目资料单个文件最多 100 MB（`models.FILE_LIMIT`），上传是一个请求体 |
 | 加了额外的认证层（basic auth、SSO 网关）时，**放行 `/mcp/remote`、`/mcp/remote/*`** | 外部 Agent 平台回调（不变量 28）带的是 Matrix 签的密钥，过不了你的认证层，由 Matrix 自己鉴权。业务系统的后端带着用户凭据调 `/api/*` 时也用 `Authorization` 请求头，basic auth 会占用它：开了 `api_auth` 就不要再在前面加 basic auth |
