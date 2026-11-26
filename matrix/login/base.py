@@ -63,3 +63,16 @@ class Driver:
         """回调的查询参数 → 是谁。在这里向身份系统核实（换令牌、验票据），核实不了抛 LoginError。
         只信从身份系统直接拿到的结果，不信浏览器带来的用户信息。"""
         raise NotImplementedError
+
+    def verify(self, credential: str) -> Identity:
+        """可选：外部系统的后端转来的用户凭据（主域名下共享的登录 cookie 的值、访问令牌……）→ 是谁。
+
+        部署方在 login.json 的入口上写 `"api_auth": true` 才会用到它：外部系统带着用户的凭据调 Matrix 的 /api/*，
+        这次请求就等同那个用户本人（docs/login-driver-authoring.md 第八节）。在这里向身份系统核实，核实不了抛 LoginError；
+        不要只解析凭据里自称的用户。结果由 Matrix 按凭据的哈希短暂缓存，驱动不用自己缓存。"""
+        raise NotImplementedError
+
+    @classmethod
+    def can_verify(cls) -> bool:
+        """这个驱动实现了 verify 没有。"""
+        return cls.verify is not Driver.verify

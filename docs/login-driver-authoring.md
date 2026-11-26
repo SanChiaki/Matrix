@@ -159,6 +159,7 @@ class AcmeDriver(Driver):
     def __init__(self, config): ...                      # 只校验配置，不连网；不对就抛 LoginError
     def authorize_url(self, flow: Flow) -> str: ...      # 浏览器要跳去的登录地址
     def identify(self, flow: Flow, params: dict[str, str]) -> Identity: ...   # 回调的查询参数 → 是谁
+    def verify(self, credential: str) -> Identity: ...  # 可选：外部系统的后端转来的用户凭据 → 是谁（第八节）
 ```
 
 - `config`：`login.json` 里这个入口的 `config`，`${环境变量}` 已经换成值。
@@ -219,9 +220,48 @@ DEMO_SSO_KEY=demo-secret uv run --with-editable examples/login-driver matrix --r
 
 ## 七、还没做的
 
-- **外部系统带着终端用户的身份调用**（[project-services.md](project-services.md) 第三期、[open-api.md](open-api.md) 第 4 期）：
-  登录驱动现在只回答“浏览器回调带回来的是谁”。之后给驱动加一个“外部系统转来的凭据是谁”的方法，`/svc`、`/open/v1` 用它认终端用户。
 - 已登录的人在设置里自己绑定 / 解绑公司账号；业务系统账号的负责人用自己的身份切换查看（现在仍是共用的只读密码）。
 - 离职回收：身份系统里停用的人，Matrix 里已有的登录、设备令牌、他签的应用令牌不会自动失效。
 - 登录令牌过期、CSRF 令牌、登录限流（见 [reference/security.md](reference/security.md)）。
 - 只能 POST 回调的协议（SAML）。
+- 写操作的档案日志还不区分“网页上做的”与“外部系统带着凭据做的”（第八节）。
+
+## 八、外部系统带着用户凭据调接口
+
+和 Matrix 用同一套统一登录的业务系统，可以在自己的后端带着**用户的凭据**直接调 Matrix 网页在用的那套 `/api/*`：
+这次请求就等同那个用户本人，能做的就是他在网页上能做的，看到的也只是他看得到的。不需要另外登记应用、签令牌。
+
+```
+GET /api/me
+Authorization: Bearer <用户的凭据>
+X-Matrix-Login: corp            ← 只在 login.json 里不止一个入口打开了 api_auth 时要
+```
+
+凭据是什么由身份系统定：主域名下各系统共享的登录 cookie 的值、OAuth2 的访问令牌、票据……驱动的 `verify` 负责向身份系统核实它。
+
+### 打开
+
+1. 驱动实现 `verify(credential) -> Identity`：向身份系统核实（调它的校验接口，或按它给的公钥验签），核实不了抛 `LoginError`。
+   **不要只解析凭据里自称的用户**。内置的 `oauth2` 驱动已经实现了：拿访问令牌调 `userinfo_url`（要配它）。
+   样板 `examples/login-driver` 实现的是共享登录 cookie：拿 cookie 的值问演示 SSO 的 `/session`。
+2. `login.json` 里那个入口写 `"api_auth": true`。驱动没有 `verify` 时这个入口不启用，原因打在服务日志里。
+3. 业务系统的后端从用户的请求里取出凭据（如共享 cookie 的值），放进 `Authorization: Bearer …` 转给 Matrix。
+
+### 规则（驱动不用管）
+
+- **只认请求头，不直接读浏览器带来的共享 cookie。** 共享 cookie 设在主域名上，同一主域名下任何子域名的页面都能让浏览器带着它
+  请求 Matrix，`SameSite` 挡不住同站的伪造请求；请求头只有后端加得上。Matrix 自己的登录 cookie 照旧优先。
+- 对到 Matrix 用户的规则和公司账号登录一样（第二节）：先按绑定的标识，再按 `auto_create`、`link_by_email`、`allow_domains`。
+  第一次来的人自动建账号、有助理。不发 Matrix 自己的登录 cookie。
+- 核实结果按 (入口, 凭据的 sha256) 缓存：通过的 60 秒、不通过的 10 秒。用户在身份系统那边退出后，最多一分钟内 Matrix 也不认了。
+  内存里不留凭据明文。
+- 管理后台（`/api/admin/*`）不认这种凭据，只能在网页上登录后用。
+- 核实不过返回 401，消息是驱动的 `LoginError`；驱动里没预料到的异常只记类型。
+- 事件流 `/api/events` 同样认这个请求头：后端发了消息以后，订阅它拿 Agent 的回复。
+- 反向代理要把 `Authorization` 请求头原样传给 Matrix。
+
+### 要接受的
+
+- 拿得到用户凭据的系统能以他的身份做他能做的一切（包括删他主持的项目、用他的连接器授权），没有按系统收窄的范围。
+  所以只给可信的、和 Matrix 用同一套登录的内部系统用；要收窄就在网络层限定能连到 Matrix 的来源。
+- `/api/*` 原本只给 Matrix 自己的网页用，接口变化时对接方要跟着改。

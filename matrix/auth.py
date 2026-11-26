@@ -144,18 +144,30 @@ def close_web_login(store: Store, user_id: str) -> None:
 def sso_login(store: Store, provider: str, subject: str, email: str, *, auto_create: bool = True,
               link_by_email: bool = False, allow_domains: tuple[str, ...] = ()) -> tuple[User, str, bool]:
     """身份系统认定的人（登录入口 provider 下的 subject）→ Matrix 用户，并登录；返回 (用户, 登录令牌, 是否新建)。
+    对人的规则在 sso_user。"""
+    with store.lock:
+        user, created = sso_user(store, provider, subject, email, auto_create=auto_create,
+                                 link_by_email=link_by_email, allow_domains=allow_domains)
+        token = _new_session(store, user.id)
+        store.save()
+    return user, token, created
+
+
+def sso_user(store: Store, provider: str, subject: str, email: str, *, auto_create: bool = True,
+             link_by_email: bool = False, allow_domains: tuple[str, ...] = ()) -> tuple[User, bool]:
+    """身份系统认定的人 → Matrix 用户（不登录）；返回 (用户, 是否新建)。公司账号登录与外部系统带着用户凭据调接口共用。
 
     先按绑定找（入口 + 标识）；没绑定过的按邮箱：邮箱没人用就新建（auto_create），已有账号的只有部署方打开
     link_by_email 才绑上去，否则拒绝（不然谁能在身份系统里填上别人的邮箱，谁就能进别人的账号）。
-    绑定以后只认标识：身份系统里改了邮箱，Matrix 里的邮箱不跟着变。业务系统账号不能这样登录。
+    绑定以后只认标识：身份系统里改了邮箱，Matrix 里的邮箱不跟着变。业务系统账号不能这样认。
     """
     subject, email = str(subject).strip(), normalize_email(email)
-    if not subject or not EMAIL_RE.match(email):
-        raise AuthError("公司账号没有给出可用的邮箱")
     with store.lock:
-        user = next((u for u in store.users.values() if u.sso.get(provider) == subject), None)
+        user = next((u for u in store.users.values() if u.sso.get(provider) == subject), None) if subject else None
         created = False
         if user is None:
+            if not subject or not EMAIL_RE.match(email):
+                raise AuthError("公司账号没有给出可用的邮箱")
             if allow_domains and email.rsplit("@", 1)[1] not in allow_domains:
                 raise AuthError("这个邮箱域名不能登录这里")
             user = next((u for u in store.users.values() if u.email == email), None)
@@ -172,11 +184,10 @@ def sso_login(store: Store, provider: str, subject: str, email: str, *, auto_cre
                 if first:
                     store.claim_orphans(user.id)
                 created = True
+            store.save()
         if user.is_system:
             raise AuthError("业务系统账号不能用公司账号登录")
-        token = _new_session(store, user.id)
-        store.save()
-    return user, token, created
+    return user, created
 
 
 # ---- 管理员重置密码：一次性链接，用户自己设新密码 ----

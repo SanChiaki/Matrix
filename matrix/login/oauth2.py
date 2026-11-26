@@ -102,11 +102,22 @@ class OAuth2Driver(Driver):
             access = _pick(tok, self.fields["access_token"])
             if not access:
                 raise LoginError(f"换令牌的响应里没有 {self.fields['access_token']}")
-            if self.userinfo_auth == "query":
-                url = f"{self.userinfo}{'&' if '?' in self.userinfo else '?'}{urlencode({'access_token': access})}"
-                info = self._call(url, "取用户信息", {})
-            else:
-                info = self._call(self.userinfo, "取用户信息", {"Authorization": f"Bearer {access}"})
+            info = self._userinfo(access)
+        return self._identity(info)
+
+    def verify(self, credential: str) -> Identity:
+        """外部系统转来的访问令牌：拿它取用户信息，取得到就是这个人。要配 userinfo_url。"""
+        if not self.userinfo:
+            raise LoginError("没有配 userinfo_url，核实不了外部系统转来的令牌")
+        return self._identity(self._userinfo(credential))
+
+    def _userinfo(self, access: str) -> dict[str, Any]:
+        if self.userinfo_auth == "query":
+            url = f"{self.userinfo}{'&' if '?' in self.userinfo else '?'}{urlencode({'access_token': access})}"
+            return self._call(url, "取用户信息", {})
+        return self._call(self.userinfo, "取用户信息", {"Authorization": f"Bearer {access}"})
+
+    def _identity(self, info: dict[str, Any]) -> Identity:
         subject, email = _pick(info, self.fields["subject"]), _pick(info, self.fields["email"])
         if not subject:
             raise LoginError(f"用户信息里没有 {self.fields['subject']}（fields.subject 要指到不会变的用户标识）")

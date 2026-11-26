@@ -62,7 +62,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 存储：`state.json` 怎么写（fsync、`.bak`、读不了时退到上一份）、数据库存储（`MATRIX_STORE`：SQLite / PostgreSQL，增量保存、消息与事件与轮次分表、首次启动自动导入、`export-state` 回退）、附件进内容存储（`MATRIX_BLOBS`：本机 / S3，全站去重、双读、配额）、保存耗时与等锁时间的指标（`/api/admin/storage`、`/metrics`） | [docs/reference/storage.md](docs/reference/storage.md) |
 | 控制面的生产级方案（设计，未实现）：状态进数据库、重启不打断运行、备机接管、按租户分片、登录加固 | [docs/control-plane.md](docs/control-plane.md) |
 | 任何会改变引擎行为的改动 | [docs/reference/invariants.md](docs/reference/invariants.md) 里相关条目的全文 |
-| 用公司账号登录（单点登录）：`login.json`、内置 OAuth2 驱动、登录驱动接口、身份怎么对到用户 | [docs/login-driver-authoring.md](docs/login-driver-authoring.md)，样板 `examples/login-driver/`（改了驱动接口、`login.json` 字段要同步改这两处） |
+| 用公司账号登录（单点登录）：`login.json`、内置 OAuth2 驱动、登录驱动接口、身份怎么对到用户；外部系统带着用户凭据直接调 `/api/*`（`api_auth`、`verify`，第八节） | [docs/login-driver-authoring.md](docs/login-driver-authoring.md)，样板 `examples/login-driver/`（改了驱动接口、`login.json` 字段要同步改这两处） |
 | 登录、`/internal/*`、沙箱、文件下载、部署 | [docs/reference/security.md](docs/reference/security.md)；部署见 [deploy/README.md](deploy/README.md)（只管 Matrix 一个容器），对外暴露（反向代理的要求、Caddy 示例）见 [docs/reverse-proxy.md](docs/reverse-proxy.md) |
 | 管理后台：用量台账（只看用量不看内容）、云侧模型目录、给用户发重置密码链接 | [docs/reference/admin.md](docs/reference/admin.md) |
 | 前端样式：颜色、字号、间距、圆角、通用部件，插件页面的样式 | [docs/design-system.md](docs/design-system.md)，变量在 `matrix/static/tokens.css`，样式指南页 `/static/ui.html`；`tests/test_design.py` 检查迁移过的文件不写死颜色 |
@@ -78,7 +78,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/mcp_server.py` | 仅标准库的 stdio MCP 服务，`TOOLS` 是网络工具 schema 的唯一定义，回调 `/internal/tools` |
 | `matrix/server.py` | FastAPI：登录、REST（按用户过滤）、看板 `/api/board`、SSE 事件流 `/api/events`、静态页面、运行时回调 `/internal/tools` 与 `/internal/approval` |
 | `matrix/auth.py` | 用户注册 / 登录 / 退出（scrypt，仅标准库；登录令牌只存 sha256、闲置 7 天 / 最长 30 天过期）；第一个注册的用户接管已有数据；管理员签发的一次性重置密码链接；公司账号对到 Matrix 用户（`sso_login`：按入口 + 标识绑定） |
-| `matrix/login/` | 用公司账号登录：`base.py` 驱动接口（`authorize_url` / `identify`）、`registry.py` 内置驱动 + entry point `matrix.login_drivers`、`service.py`（部署方的 `login.json`，热加载；进行中的登录：只认发起的浏览器、核对 state、一次性）、`oauth2.py` 通用 OAuth2 授权码驱动、`testing.py` 驱动一致性检查。接口在 `server.py` 的 `/api/auth/sso/{入口}/start` 与 `/callback` |
+| `matrix/login/` | 用公司账号登录：`base.py` 驱动接口（`authorize_url` / `identify`，可选 `verify`：外部系统转来的用户凭据）、`registry.py` 内置驱动 + entry point `matrix.login_drivers`、`service.py`（部署方的 `login.json`，热加载；进行中的登录：只认发起的浏览器、核对 state、一次性）、`oauth2.py` 通用 OAuth2 授权码驱动、`testing.py` 驱动一致性检查。接口在 `server.py` 的 `/api/auth/sso/{入口}/start` 与 `/callback`；带着用户凭据的请求由 `server._api_caller` 认（`LoginService.verify`，按凭据哈希短暂缓存） |
 | `matrix/dsh_plugins/approval.mjs` | dsh 审批应答者（只给端侧驱动；云侧不审批）：沙箱升权申请转给网络，由 Agent 所有者决定 |
 | `matrix/dsh_plugins/jobs.mjs` | dsh 后台任务守护：Agent 要收尾时还有后台任务在跑，追加一条消息让它先收完或结束（headless 退出会结束它们） |
 | `matrix/dsh_plugins/questions.mjs` | dsh 提问应答者：`ask_user_question` 的问题转给网络（席位里问人，委托里先问委托方），阻塞到有回答；没回答时报错，不当成同意 |
@@ -244,7 +244,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌；状态里的登录令牌只存 sha256（`auth.session_hash`），不要改回明文作键。
-- 公司账号登录：一次登录只认发起它的浏览器（一次性 cookie + state），不要放宽；邮箱撞上已有账号默认不绑（`link_by_email` 由部署方打开），不要改成默认绑；身份系统的地址与密钥只来自部署方的 `login.json`（密钥经名字带 `KEY` 的环境变量），不要做成用户可填。
+- 公司账号登录：一次登录只认发起它的浏览器（一次性 cookie + state），不要放宽；外部系统带着用户凭据调接口（`api_auth`）只认 `Authorization` 请求头、只经驱动的 `verify` 向身份系统核实，不要改成直接读浏览器带来的共享 cookie、不要信凭据里自称的用户，`/api/admin/*` 不认它；邮箱撞上已有账号默认不绑（`link_by_email` 由部署方打开），不要改成默认绑；身份系统的地址与密钥只来自部署方的 `login.json`（密钥经名字带 `KEY` 的环境变量），不要做成用户可填。
 - 业务系统账号的网页登录只读：`server.SYSTEM_WEB_ROUTES` 只放 `/api/me` 与 `/api/system/*` 的 GET，不要把别的接口加进去。
 - `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准（端侧）、提问应答者替人作答；云侧覆盖层不插审批应答者、`/internal/approval` 对云侧一律 `unavailable`（不变量 14）；覆盖层要一直关掉 dsh 的默认技能根。
