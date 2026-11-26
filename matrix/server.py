@@ -356,17 +356,6 @@ class DeviceIn(BaseModel):
     name: str = Field("", max_length=80)
 
 
-class PairIn(BaseModel):
-    """连接器的配对申请（不需要登录）。字段只用于在批准页展示，超长截断。"""
-    name: str = ""
-    hostname: str = ""
-    harnesses: list[str] = Field(default_factory=list, max_length=16)
-
-
-class PairPollIn(BaseModel):
-    device_code: str = Field("", max_length=200)
-
-
 class EnrollAgentIn(BaseModel):
     """兑换时建好、绑到这台设备上的 Agent（字段同 AgentIn，设备由兑换决定）。"""
     name: str = Field(min_length=2, max_length=80)
@@ -377,6 +366,18 @@ class EnrollAgentIn(BaseModel):
     harness: str | None = Field(None, max_length=40)  # 设备上的哪个 harness；None = 设备默认
     timeout_s: int | None = Field(None, ge=1)
     max_delegations: int | None = Field(None, ge=1)
+
+
+class PairIn(BaseModel):
+    """连接器的配对申请（不需要登录）。字段只用于在批准页展示，超长截断。"""
+    name: str = ""
+    hostname: str = ""
+    harnesses: list[str] = Field(default_factory=list, max_length=16)
+    agent: EnrollAgentIn | None = None   # 批准时顺带建好的 Agent（一键创建）
+
+
+class PairPollIn(BaseModel):
+    device_code: str = Field("", max_length=200)
 
 
 class EnrollIn(BaseModel):
@@ -391,6 +392,7 @@ class RedeemIn(BaseModel):
     name: str = ""
     hostname: str = ""
     harnesses: list[str] = Field(default_factory=list, max_length=16)
+    agent: EnrollAgentIn | None = None   # 签令牌时没指定 Agent 时，用设备这边说的
 
 
 class NoteIn(BaseModel):
@@ -1909,7 +1911,11 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
     def pair_start(body: PairIn) -> dict:
         harnesses = list(dict.fromkeys(h for h in body.harnesses if h in HARNESSES))
         try:
-            p = pairings.start(body.name.strip()[:80], body.hostname.strip()[:80], harnesses)
+            agent = body.agent.model_dump() if body.agent else None
+            if agent and agent["harness"] and agent["harness"] not in harnesses:
+                why = "这台设备上没有它" if agent["harness"] in HARNESSES else "服务器不认得它（MATRIX_HARNESSES）"
+                raise HTTPException(400, f"Agent 要绑的 harness {agent['harness']}：{why}")
+            p = pairings.start(body.name.strip()[:80], body.hostname.strip()[:80], harnesses, agent)
         except auth.PairingLimit as e:
             raise HTTPException(429, str(e)) from e
         return {**p, "verify_path": f"/#pair={p['user_code']}"}
@@ -1924,9 +1930,21 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
 
     @app.post("/api/devices/pair/{code}/approve")
     def pair_approve(code: str, body: DeviceIn, user: Me) -> dict:
-        _pairing(code, user)  # 统一 404 / 429
+        spec = _pairing(code, user)[1].get("agent")  # 统一 404 / 429
         dev = pairings.approve(store, code, user.id, body.name)
-        return {**dev.public(), "online": False}
+        agent_id = _bound_agent(spec, dev.id, user.id)
+        return {**dev.public(), "online": False, "agent_id": agent_id}
+
+    def _bound_agent(spec: dict | None, device_id: str, user_id: str) -> str | None:
+        """一键创建：配对成功时把规格里的 Agent 建好、绑到这台设备上，所有者是批准 / 签令牌的人。
+        建不成就吊销刚签的设备，不留下一台没有 Agent 的半成品。"""
+        if not spec:
+            return None
+        try:
+            return network.create_agent(**spec, device_runtime=device_id, actor=user_id).id
+        except NetworkError:
+            auth.revoke_device(store, device_id, user_id)
+            raise
 
     @app.post("/api/devices/pair/{code}/deny")
     def pair_deny(code: str, user: Me) -> dict:
@@ -1955,7 +1973,7 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
         except auth.AuthError as err:
             raise HTTPException(404, str(err)) from err
         harnesses = list(dict.fromkeys(h for h in body.harnesses if h in HARNESSES))
-        spec = e["agent"]
+        spec = e["agent"] or (body.agent.model_dump() if body.agent else None)  # 签令牌的人指定的优先
         want = (spec or {}).get("harness")
         if want and harnesses and want not in harnesses:
             enrollments.put_back(e)  # 设备上没装这个 harness：令牌留着，装好后再兑换
@@ -1964,14 +1982,11 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
         with store.lock:
             dev.hostname, dev.harnesses = body.hostname.strip()[:80], harnesses
             store.save()
-        agent_id = None
-        if spec:
-            try:
-                agent_id = network.create_agent(**spec, device_runtime=dev.id, actor=e["user_id"]).id
-            except NetworkError:
-                auth.revoke_device(store, dev.id, e["user_id"])  # 不留下一台没有 Agent 的半成品设备
-                enrollments.put_back(e)
-                raise
+        try:
+            agent_id = _bound_agent(spec, dev.id, e["user_id"])
+        except NetworkError:
+            enrollments.put_back(e)
+            raise
         return {"status": "approved", "token": token, "device_id": dev.id, "device_name": dev.name,
                 "email": auth.email_of(store, e["user_id"]), "agent_id": agent_id}
 

@@ -151,3 +151,63 @@ def test_external_drivers_are_loaded(monkeypatch):
     monkeypatch.setattr(connect_main, "DRIVERS", drivers)
     d = connect_main.build_driver("biz-agent", bridge_url="http://127.0.0.1:1", bin_path="/opt/biz")
     assert isinstance(d, BizDriver) and d.bin_path == "/opt/biz" and d.bridge_url == "http://127.0.0.1:1"
+
+
+# ================= 一键创建：设备码配对时带上 Agent =================
+def test_pairing_with_agent_creates_it_on_approval(tmp_path):
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    p = anon.post("/api/devices/pair", json={"name": "pc", "hostname": "pc-01", "harnesses": ["codex"],
+                                             "agent": AGENT}).json()
+    alice = client(net, "alice@x.io")
+    seen = alice.get(f"/api/devices/pair/{p['user_code']}").json()
+    assert seen["agent"] == {"name": "业务助手", "description": AGENT["description"], "harness": "codex"}
+    dev = alice.post(f"/api/devices/pair/{p['user_code']}/approve", json={}).json()
+    agent = net.store.agents[dev["agent_id"]]
+    assert agent.device_runtime == dev["id"] and agent.harness == "codex"
+    assert agent.owner_id == net.store.devices[dev["id"]].user_id
+    assert anon.post("/api/devices/pair/poll", json={"device_code": p["device_code"]}).json()["status"] == "approved"
+
+
+def test_pairing_agent_harness_must_be_on_the_device(tmp_path):
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    r = anon.post("/api/devices/pair", json={"harnesses": ["claude-code"], "agent": AGENT})
+    assert r.status_code == 400 and "codex" in r.json()["detail"]
+
+
+def test_denied_pairing_creates_no_agent(tmp_path):
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    p = anon.post("/api/devices/pair", json={"harnesses": ["codex"], "agent": AGENT}).json()
+    alice = client(net, "alice@x.io")
+    before = len(net.store.agents)
+    alice.post(f"/api/devices/pair/{p['user_code']}/deny", json={})
+    assert len(net.store.agents) == before
+
+
+def test_redeem_uses_device_agent_when_issuer_gave_none(tmp_path):
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    alice = client(net, "alice@x.io")
+    code = alice.post("/api/devices/enroll", json={}).json()["code"]
+    got = redeem(anon, code, agent={**AGENT, "name": "设备说的"}).json()
+    assert net.store.agents[got["agent_id"]].name == "设备说的"
+    code = alice.post("/api/devices/enroll", json={"agent": AGENT}).json()["code"]
+    got = redeem(anon, code, agent={**AGENT, "name": "设备说的"}).json()
+    assert net.store.agents[got["agent_id"]].name == "业务助手"   # 签令牌的人指定的优先
+
+
+def test_setup_agent_flag(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_pair(server, **kw):
+        seen.update(kw)
+        from matrix.connector.config import Config
+        return Config(server="http://x", token="t", device_name="pc", email="a@x.io")
+
+    monkeypatch.setattr(pairing, "pair", fake_pair)
+    monkeypatch.setattr(connect_main, "detect_drivers", lambda *a, **k: [])
+    connect_main.main(["setup", "http://x", "--name", "pc", "--no-service", "--no-browser",
+                       "--config", str(tmp_path / "c.json"), "--agent", "业务助手", "--agent-harness", "codex"])
+    assert seen["agent"] == {"name": "业务助手", "description": "业务助手（pc）", "harness": "codex"}

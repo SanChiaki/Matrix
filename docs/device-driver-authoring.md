@@ -1,30 +1,45 @@
-# 接业务系统自己的设备端 Agent：一键连接与外部驱动
+# 接业务系统自己的设备端 Agent：连接、一键创建 Agent 与外部驱动
 
-给要把自家的设备端 Agent（装在用户电脑上的程序）接进 Matrix 的业务系统：写驱动的人、业务系统后端、部署方。
-做完之后，用户在业务系统里点一下“连接到 Matrix”，他电脑上的连接器就配好对、连上来，Matrix 里多一个绑在这台电脑上的 Agent，
-全程不用输配对码，也不用去 Matrix 网页里建 Agent。
+给要把自家的设备端 Agent（装在用户电脑上的桌面软件）接进 Matrix 的业务系统：写驱动的人、部署方、业务系统后端。
+做完之后，用户电脑上的连接器连上 Matrix，Matrix 里同时多一个绑在这台电脑上的 Agent，不用再去 Matrix 网页里建。
 
-- 仓库里的是通用的部分：一次性配对令牌（第二节）、外部驱动的接口与加载（第三、四节）、把驱动打进独立程序（第五节）。
-  你们 Agent 的驱动留在内网，不进这个仓库。
+- 仓库里的是通用的部分：配对时一键创建 Agent（第一节）、一次性配对令牌（第二节，可选）、外部驱动的接口与加载（第三、四节）、
+  把驱动打进独立程序（第五节）。你们 Agent 的驱动留在内网，不进这个仓库。
 - 样板：[examples/device-driver](../examples/device-driver)（一个虚构的 `demo-agent` 命令的驱动，带一个假 Agent 和测试）。
-- 设备侧的整体设计见 [device-runtimes.md](device-runtimes.md)（第 2.5 节设备码配对、第 2.8 节一次性令牌、第 3 节能力与权限）。
-  改了驱动接口（`matrix/connector/drivers/base.py`）、外部驱动的加载约定或打包方式，要同步改这份文档与样板。
+- 设备侧的整体设计见 [device-runtimes.md](device-runtimes.md)（第 2.5 节设备码配对、第 2.8 节一键创建与一次性令牌、第 3 节能力与权限）。
+  改了驱动接口（`matrix/connector/drivers/base.py`）、外部驱动的加载约定、配对参数或打包方式，要同步改这份文档与样板。
 
-## 一、整体流程
+## 一、连接并一键创建 Agent
 
-```
-业务系统前端        业务系统后端                     Matrix                      用户电脑
-  点“连接” ──→  POST /api/devices/enroll  ──→  签一次性令牌（10 分钟、单次）
-                (X-Matrix-Key + X-Matrix-User)  ←── {code}
-                把 code 交给自家的设备端程序（它自己的通道）  ─────────────→  matrix-connect setup <服务器> --code <code>
-                                                POST /api/devices/enroll/redeem  ←──  {code, hostname, harnesses}
-                                                建设备 + 绑在它上面的 Agent  ──→  设备令牌（只交付这一次）
-                                                /api/devices/connect（WebSocket）←──  连接器照常连上、一直在线
+设备不知道用户是谁，所以“这台电脑归谁”仍由用户在已登录的 Matrix 网页里批准一次（设备码配对，device-runtimes.md 第 2.5 节）。
+其余的都可以由你们的桌面端 Agent 自己完成：给它一个技能或一段提示词，让它在本机跑
+
+```bash
+matrix-connect setup https://matrix.corp.example --agent "报销助手" --agent-harness biz-agent \
+    --agent-description "在这台电脑上处理报销单据"
 ```
 
-Matrix 给 Agent 派活时，连接器把这一轮交给**驱动**，驱动调起你们的 Agent、把它的输出报告回来。驱动就是第三节要写的东西。
+- 连接器申请配对，自动在浏览器里打开批准页；用户点“批准”。批准页上会写明这次会同时建好哪个 Agent。
+- 批准的同时，Matrix 建好设备和这个 Agent：所有者是批准的人，绑在这台电脑、`--agent-harness` 指定的驱动上
+  （不写 = 这台设备的默认，装了外部驱动时就是它）。连接器随后装成后台服务、连上来。
+- `--agent-harness` 指定的驱动这台电脑上没检测到时，申请直接失败并说明原因，不会建出绑不上的 Agent。
+- 只配对、不建 Agent：不写 `--agent`。已经配对过的电脑重跑 `setup` 会配对成一台新设备，升级用 `matrix-connect install`。
 
-## 二、一次性配对令牌
+给桌面端 Agent 的提示词可以这样写（按你们的地址和名字改）：
+
+```text
+帮用户把这台电脑连接到 Matrix：
+1. 运行 `matrix-connect status`。如果已经显示服务器 https://matrix.corp.example 和设备名，说明已经连过，告诉用户即可，不要重新配对。
+2. 没装 matrix-connect 时，按系统运行安装命令（Matrix 设备页上有；或 curl -fsSL https://matrix.corp.example/connect/install.sh | sh -s -- https://matrix.corp.example）。
+3. 运行 `matrix-connect setup https://matrix.corp.example --agent "报销助手" --agent-harness biz-agent`。
+4. 告诉用户：浏览器里会打开 Matrix 的批准页，核对配对码与终端里显示的一致后点“批准”。
+5. 命令显示“已配对”“已建好 Agent”后告诉用户完成了；失败时把输出原文告诉用户。
+```
+
+批准一次是有意保留的：配对码证明的是“正在批准的人就是这台电脑前的人”。
+如果业务系统能把一次性令牌安全地交到这台电脑上（例如桌面端自己登录了业务系统，向业务后端要），可以用第二节省掉这一步。
+
+## 二、一次性配对令牌（可选：连批准都省掉）
 
 ### 签令牌（业务系统后端）
 
@@ -165,7 +180,7 @@ uv run --with-editable examples/device-driver matrix-connect run
 
 ## 七、验收
 
-- [ ] 业务系统里点“连接”，用户电脑上不用输任何东西；设备页出现这台电脑，harness 里有你们的驱动，在线。
+- [ ] 桌面端 Agent 按提示词跑完 `setup --agent …`，用户只在批准页点一次“批准”（批准页写明了要建的 Agent）；设备页出现这台电脑，harness 里有你们的驱动，在线。
 - [ ] 自动建的 Agent 所有者是这个用户、绑在这台设备和你们的 harness 上；和它说话能得到你们 Agent 的回复，过程边跑边显示。
 - [ ] 第二轮能续接上一轮的会话（`session_id`）。
 - [ ] 人在 Matrix 里终止、超过 Agent 的超时，你们的 Agent 进程被结束。

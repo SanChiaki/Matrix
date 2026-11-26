@@ -238,19 +238,26 @@ def cmd_setup(args: argparse.Namespace) -> None:
             except Exception:  # noqa: BLE001 —— 没有浏览器（SSH 等）：人自己打开
                 pass
 
+    agent = None
+    if args.agent:  # 一键创建：配对成功时顺带建好这个 Agent，绑到这台电脑上
+        agent = {"name": args.agent, "description": args.agent_description or f"{args.agent}（{name}）"}
+        if args.agent_harness:
+            agent["harness"] = args.agent_harness
     try:
         if args.code:  # 一次性配对令牌（业务系统替你签的）：直接换设备令牌，不用在浏览器里批准
             conf = pairing.enroll(args.server, args.code, name=name, hostname=host, harnesses=found,
-                                  workroot=args.workroot)
+                                  workroot=args.workroot, agent=agent)
         else:
             conf = pairing.pair(args.server, name=name, hostname=host, harnesses=found, show=show,
-                                workroot=args.workroot)
+                                workroot=args.workroot, agent=agent)
     except (pairing.PairingError, ValueError) as e:
         print(f"配对失败：{e}", file=sys.stderr)
         raise SystemExit(1) from e
     conf.drivers = list(args.driver or [])
     cfg.save(conf, path)
     print(f"已配对：{conf.device_name} → {conf.email}（{'、'.join(found) or '暂无 harness'}）")
+    if agent:
+        print(f"已建好 Agent「{agent['name']}」，绑在这台电脑上")
     if args.no_service:
         print("运行：matrix-connect run")
         return
@@ -308,6 +315,9 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--no-service", action="store_true", help="不装后台服务")
     s.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
     s.add_argument("--code", default="", help="一次性配对令牌（POST /api/devices/enroll 签发）：直接配对，不用在浏览器里批准")
+    s.add_argument("--agent", default="", help="一键创建：配对成功时顺带建一个这个名字的 Agent，绑到这台电脑上")
+    s.add_argument("--agent-description", default="", help="这个 Agent 的简介（默认“<名字>（<设备名>）”）")
+    s.add_argument("--agent-harness", default="", help="这个 Agent 用本机的哪个 harness（默认这台设备的默认 harness）")
     s.add_argument("--config", **conf_opt)
     s.set_defaults(func=cmd_setup)
 

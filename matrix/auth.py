@@ -300,7 +300,9 @@ class Pairings:
         for k in [k for k, p in self._by_device.items() if p["expires_at"] <= t]:
             del self._by_device[k]
 
-    def start(self, name: str, hostname: str, harnesses: list[str]) -> dict[str, Any]:
+    def start(self, name: str, hostname: str, harnesses: list[str],
+              agent: dict[str, Any] | None = None) -> dict[str, Any]:
+        """`agent`：批准时顺带建好、绑到这台设备上的 Agent（一键创建，docs/device-runtimes.md 第 2.8 节）。"""
         with self._lock:
             self._sweep()
             if sum(p["status"] == "pending" for p in self._by_device.values()) >= PAIR_MAX_PENDING:
@@ -309,7 +311,8 @@ class Pairings:
             device_code = secrets.token_urlsafe(32)
             self._by_device[device_code] = {
                 "user_code": user_code, "status": "pending", "expires_at": self.now() + PAIR_TTL_S,
-                "name": name, "hostname": hostname, "harnesses": harnesses, "created_at": self.now()}
+                "name": name, "hostname": hostname, "harnesses": harnesses, "agent": agent,
+                "created_at": self.now()}
         return {"device_code": device_code, "user_code": display_user_code(user_code),
                 "expires_in": PAIR_TTL_S, "interval": PAIR_INTERVAL_S}
 
@@ -332,7 +335,8 @@ class Pairings:
     def view(self, p: dict[str, Any]) -> dict[str, Any]:
         """批准页看到的内容：不含 device_code。"""
         return {"user_code": display_user_code(p["user_code"]), "name": p["name"], "hostname": p["hostname"],
-                "harnesses": list(p["harnesses"]), "created_at": p["created_at"], "expires_at": p["expires_at"]}
+                "harnesses": list(p["harnesses"]), "created_at": p["created_at"], "expires_at": p["expires_at"],
+                "agent": ({k: p["agent"].get(k) for k in ("name", "description", "harness")} if p.get("agent") else None)}
 
     def approve(self, store: Store, user_code: str, user_id: str, name: str = "") -> Device:
         device_code, p = self.lookup(user_code, user_id)

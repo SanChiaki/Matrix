@@ -56,7 +56,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账**、云侧外层沙箱（`MATRIX_CLOUD_ISOLATION`）与执行单元的 dsh 状态目录 | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
-| 业务系统自己的设备端 Agent 一键连接：一次性配对令牌（`/api/devices/enroll`、`setup --code`）、外部驱动（entry point `matrix.connect_drivers`、`MATRIX_HARNESSES`）、把驱动打进独立程序 | [docs/device-driver-authoring.md](docs/device-driver-authoring.md)，样板 `examples/device-driver/`（改了驱动接口、加载约定、打包方式要同步改这两处） |
+| 业务系统自己的设备端 Agent 接入：配对时一键创建 Agent（`setup --agent`）、一次性配对令牌（`/api/devices/enroll`、`setup --code`）、外部驱动（entry point `matrix.connect_drivers`、`MATRIX_HARNESSES`）、把驱动打进独立程序 | [docs/device-driver-authoring.md](docs/device-driver-authoring.md)，样板 `examples/device-driver/`（改了驱动接口、加载约定、打包方式要同步改这两处） |
 | 云侧执行面的生产级方案（阶段 0 单机止血已实现；阶段 1a 沙箱方式已实现、默认关（`MATRIX_CLOUD_SANDBOX`）；其余是设计）：每个执行单元一个沙箱、沙箱即托管设备、出口网关、分阶段与验收检查 | [docs/cloud-runtime.md](docs/cloud-runtime.md)；验证工具包 [deploy/isolation-check/](deploy/isolation-check/README.md) |
 | 存储：`state.json` 怎么写（fsync、`.bak`、读不了时退到上一份）、数据库存储（`MATRIX_STORE`：SQLite / PostgreSQL，增量保存、消息与事件与轮次分表、首次启动自动导入、`export-state` 回退）、附件进内容存储（`MATRIX_BLOBS`：本机 / S3，全站去重、双读、配额）、保存耗时与等锁时间的指标（`/api/admin/storage`、`/metrics`） | [docs/reference/storage.md](docs/reference/storage.md) |
 | 控制面的生产级方案（设计，未实现）：状态进数据库、重启不打断运行、备机接管、按租户分片、登录加固 | [docs/control-plane.md](docs/control-plane.md) |
@@ -165,6 +165,7 @@ uv run matrix migrate state|verify / export-state / backup-db --store sqlite   #
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
 uv run matrix-connect setup http://127.0.0.1:8765 --code <令牌> --no-service   # 凭一次性配对令牌直接配对（POST /api/devices/enroll 签发）
+uv run matrix-connect setup http://127.0.0.1:8765 --agent 报销助手 --no-service   # 配对时一键创建一个绑在这台电脑上的 Agent
 uv run matrix-connect run                                        # 前台运行已配对的连接器
 uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 手动令牌（备用）
 ```
