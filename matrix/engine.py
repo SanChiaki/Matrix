@@ -135,6 +135,9 @@ class ExecContext:
     # principal 为 None 表示普通情形：为 Agent 的所有者做
     service: bool = False
     principal: str | None = None
+    # 项目会话里被 @ 的别人的 Agent（不变量 18）：没有读项目现状的工具与摘要（那是按会话主人的可见性读的），
+    # 写下的东西按“只有所有者在场”记来源，和项目会话里会话主人自己的 Agent 一样
+    guest: bool = False
     callers: list[str] = field(default_factory=list)
     # 项目服务（docs/project-services.md，不变量 29）：这一轮属于哪个服务。档案只读圈定范围、只写收件目录，改档案的工具不给
     svc: str | None = None
@@ -3691,32 +3694,39 @@ class Network(AppsMixin):
         return a
 
     def create_session(self, project_id: str, title: str = "", actor: str | None = None,
-                       join: str | None = None) -> Conversation:
-        """开一个项目会话。这个人在项目里已有一个还没发过消息的会话（同一个助理、没归档）时沿用它，
-        不再新建：没发消息的会话不进侧栏，反复点“新会话”不该攒下一串空会话。
-        助理不会自己进项目（不变量 18）：还不在项目里时先问（NeedsConfirm，digest 是助理 id），
-        带着 join=那个 id 再来一次才把它加进来；这期间换了助理就再问一次。"""
+                       join: str | None = None, agent: str | None = None) -> Conversation:
+        """开一个项目会话：一个人在项目里的私下对话，不需要助理（不变量 18）。会话里 @ 谁谁接；
+        agent 是没 @ 时默认回答的成员（项目里的一个 Agent，按 id 或名字），不给时用这个人的助理（它已经在项目里时），
+        否则没有默认成员：没 @ 的消息只留在会话里。助理不会因此进项目；join=助理 id 是人明确要把助理带进来再开会话。
+        这个人在项目里已有一个还没发过消息、默认成员相同的会话（没归档）时沿用它，不再新建：
+        没发消息的会话不进侧栏，反复点“新会话”不该攒下一串空会话。"""
         with self._lock:
             g = self.visible_project(project_id, actor)
             user = actor if actor is not None else g.owner_id
             a = self.assistant_of(user)
-            if a is None:
-                raise NetworkError("你还没有助理：先创建一个 Agent，或指定一个作为助理")
-            joined = a.id not in g.member_ids
-            if joined and actor is not None and join != a.id:  # actor=None 是网络自己调（不用问）
-                raise NeedsConfirm(f"你的助理「{a.name}」还不在项目里：加入后才能开会话", [
-                    f"把「{a.name}」加入项目「{g.name}」：成员列表和群聊里都看得到它，群聊里能被 @",
-                    "项目会话只有你看得到，没 @ 任何人时由它回答",
-                    "不想要时可以把它移出项目，之后它的会话不能再发消息"], a.id)
-            if joined:
-                self._bring_assistant(g, user)
+            joined = False
+            if join is not None:
+                if a is None or join != a.id:
+                    raise NetworkError("只能把你现在的助理带进项目")
+                joined = a.id not in g.member_ids
+                if joined:
+                    self._bring_assistant(g, user)
+            if agent:
+                found = self.store.agents.get(agent) or self.store.agent_by_name(agent)
+                if found is None or found.id not in g.member_ids:
+                    raise NetworkError(f"{agent} 不是项目「{g.name}」的成员")
+                default = found.id
+            elif join is not None and a is not None:
+                default = a.id
+            else:
+                default = a.id if a is not None and a.id in g.member_ids else None
             empty = next((c for c in self.store.conversations.values() if c.kind == "session" and c.project_id == g.id
-                          and c.owner_id == user and c.agent_id == a.id and not c.archived and not c.messages), None)
+                          and c.owner_id == user and c.agent_id == default and not c.archived and not c.messages), None)
             if empty is not None:
                 conv = empty
                 conv.title = title.strip()[:120] or conv.title
             else:
-                conv = Conversation(id=new_id("conv"), kind="session", project_id=g.id, agent_id=a.id,
+                conv = Conversation(id=new_id("conv"), kind="session", project_id=g.id, agent_id=default,
                                     title=title.strip()[:120] or DEFAULT_SESSION_TITLE, owner_id=user)
                 self.store.conversations[conv.id] = conv
             self.store.save()
@@ -4919,18 +4929,20 @@ class Network(AppsMixin):
         self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
         return conv
 
-    def service_rounds(self, agent_id: str, actor: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
-        """个人 Agent 的所有者看它在项目服务里的那几轮（不变量 29：照常看得到过程）：交给它的消息、它的回复与过程。
-        只有经过它的部分，不是整个服务会话；会话本身仍只属于调用方。公共 Agent 的维护人在服务面只看用量（不变量 27）。"""
+    def guest_rounds(self, agent_id: str, actor: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+        """个人 Agent 的所有者看它在别人的会话里的那几轮：别人的项目会话里 @ 它（不变量 18）、项目服务里当入口或岗位
+        （不变量 29）。交给它的消息、它的回复与过程；只有经过它的部分，不是整个会话，会话本身仍只属于开它的人。
+        公共 Agent 的维护人在服务面只看用量（不变量 27）。"""
         with self._lock:
             a = self.owned_agent(agent_id, actor)
             if a.is_public:
                 return []
             out = []
-            convs = sorted((c for c in self.store.conversations.values() if c.kind == "service" and a.id in c.seats),
-                           key=lambda c: -c.updated_at)[:max(1, min(int(limit), 100))]
+            convs = sorted((c for c in self.store.conversations.values() if a.id in c.seats and (
+                c.kind == "service" or (c.kind == "session" and c.owner_id != a.owner_id))),
+                key=lambda c: -c.updated_at)[:max(1, min(int(limit), 100))]
             for c in convs:
-                x = self.store.project_services.get(c.service_id or "")
+                x = self.store.project_services.get(c.service_id or "") if c.kind == "service" else None
                 g = self.store.projects.get(c.project_id or "")
                 msgs = [m for m in c.messages if (m.role == "user" and a.id in m.mentions)
                         or (m.role in ("agent", "system") and m.agent_id == a.id)]
@@ -4938,14 +4950,17 @@ class Network(AppsMixin):
                 for m in msgs[-40:]:
                     d = _msg(m)
                     if m.private_to and actor is not None and actor not in m.private_to:
-                        d["steps"] = []  # 改之前的回复只给了调用方：过程没有记给所有者
+                        d["steps"] = []  # 过程只记给了别人：不给
                     d.pop("audience", None)
                     d.pop("private_to", None)
                     view.append(d)
-                out.append({"conversation_id": c.id, "service": x.title if x else c.title,
+                out.append({"conversation_id": c.id, "kind": c.kind,
+                            "service": x.title if x else c.title, "title": x.title if x else c.title,
                             "project_name": g.name if g else "", "caller": self._email(c.owner_id),
                             "updated_at": c.updated_at, "archived": c.archived, "messages": view})
             return out
+
+    service_rounds = guest_rounds
 
     def service_usage(self, project_id: str, service_id: str, days: int = 30, actor: str | None = None) -> dict[str, Any]:
         """主持人看服务的用量：多少轮、成没成、工具调用、token，按调用方汇总。不给内容（不变量 29）。"""
@@ -5063,10 +5078,9 @@ class Network(AppsMixin):
             if any(a.id == mid for a in members) and mid not in found:
                 found.append(mid)
             elif not any(a.id == mid for a in members):
-                raise NetworkError(f"{self._name(mid)} 不是项目「{g.name if g else ''}」的成员"
-                                   + ("里你的 Agent（项目会话只有你看得到，别人的 Agent 请在群聊里 @）" if conv.kind == "session" else ""))
-        if conv.kind == "session" and not found:
-            return [conv.agent_id] if conv.agent_id else []
+                raise NetworkError(f"{self._name(mid)} 不是项目「{g.name if g else ''}」的成员")
+        if conv.kind == "session" and not found:  # 没 @ 任何人：交给默认成员（还在项目里时），没有就只留在会话里
+            return [conv.agent_id] if conv.agent_id and any(a.id == conv.agent_id for a in members) else []
         return found
 
     def send_message(self, conv_id: str, text: str, mentions: list[str] | None = None,
@@ -5090,8 +5104,8 @@ class Network(AppsMixin):
                     raise NetworkError(f"{peer.name} 已不再对你开放")
             if conv.kind == "session":
                 g = self.store.projects.get(conv.project_id or "")
-                if g is None or conv.agent_id not in g.member_ids:
-                    raise NetworkError("这个会话的助理已不在项目里：新开一个会话")
+                if g is None or (actor is not None and actor not in g.people):
+                    raise NetworkError("你已不在这个项目里，会话只读")
             if conv.kind == "service":
                 self._service_ready(conv, actor)
             targets = self.resolve_mentions(conv, text, mentions)
@@ -5724,7 +5738,9 @@ class Network(AppsMixin):
             home = self._is_home(conv)
         ctx = ExecContext(kind="seat", id=sid, agent_id=agent.id, conversation_id=conv.id,
                           project_id=project.id if project else None, authority=self._effective(agent, agent.authority)[0],
-                          constraints=[], depth=0, chain=[agent.id], session=conv.kind == "session",
+                          constraints=[], depth=0, chain=[agent.id],
+                          session=conv.kind == "session" and agent.owner_id == conv.owner_id,
+                          guest=conv.kind == "session" and agent.owner_id != conv.owner_id,
                           plugins=self._plugin_tools_on(project), services=self._services_on(project), home=home)
         with self._lock:
             upto = len(conv.messages)
@@ -5755,7 +5771,7 @@ class Network(AppsMixin):
             if svc is not None:  # 服务的配置换了版本也要重推（版本放在高位，和档案版本合成一个数）
                 archive_rev += svc.version * 1_000_000_000
             archive = self._archive_text(project, agent.id, svc) if project and seat.archive_seen != archive_rev else ""
-            state = self._session_state(project, conv.owner_id) if project and conv.kind == "session" else ""
+            state = self._session_state(project, conv.owner_id) if project and ctx.session else ""
             joint_state = ""
             if home:  # 助理对话：跨项目总览，联合项目单独一块
                 state, joint_state = self._home_state(conv.owner_id)
@@ -5790,7 +5806,8 @@ class Network(AppsMixin):
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
                                    home_hidden=hidden, home_mixed=mixed, home_frozen=self._others(ctx, agent),
                                    ask=self.capabilities(agent).questions, goals=self.capabilities(agent).goals,
-                                   cloud=not agent.device_runtime)
+                                   cloud=not agent.device_runtime,
+                                   session_owner=self._email(conv.owner_id) if ctx.guest else "")
         res = self._run(ctx, agent, prompt, self.store.root / seat.workdir, seat, agent.timeout_s,
                         mount_home=mount_home, hide=set(hidden))
         steps = self._live.pop(sid, [])
@@ -6907,8 +6924,9 @@ class Network(AppsMixin):
 
     @staticmethod
     def _venue(ctx: ExecContext) -> str:
-        """这一轮写下的东西属于哪个场合：项目群聊与项目里的任务是项目；私聊、项目会话、助理对话只有所有者。"""
-        return flow.ME if ctx.session or ctx.home or not ctx.project_id else ctx.project_id
+        """这一轮写下的东西属于哪个场合：项目群聊与项目里的任务是项目；私聊、项目会话（包括被 @ 进别人会话的）、
+        助理对话只有所有者。"""
+        return flow.ME if ctx.session or ctx.guest or ctx.home or not ctx.project_id else ctx.project_id
 
     def _reach(self, ctx: ExecContext, agent: AgentNode) -> set[str]:
         """这一轮的输出能到达的人：在项目里（群聊、任务、项目会话都能写档案、能委托）是项目的全部参与者。
@@ -7010,9 +7028,11 @@ class Network(AppsMixin):
         return format_note(rel, where, mixed, text[:NOTE_LIMIT], len(text) > NOTE_LIMIT)
 
     def _conv_audience(self, conv: Conversation, agent: AgentNode) -> set[str]:
-        """一条回复会被谁看到：项目群聊是项目的全部参与者；私聊、项目会话、助理对话只有所有者。"""
+        """一条回复会被谁看到：项目群聊是项目的全部参与者；项目会话是会话主人（加上 Agent 的所有者：经过它的那几轮他看得到）；
+        私聊、助理对话只有所有者。"""
         g = self.store.projects.get(conv.project_id or "") if conv.kind == "project" else None
-        return (set(g.people) if g is not None else set()) | self._owner_set(agent)
+        mine = {conv.owner_id} if conv.kind == "session" and conv.owner_id else set()
+        return (set(g.people) if g is not None else set()) | mine | self._owner_set(agent)
 
     def _hold(self, kind: str, ctx: ExecContext, agent: AgentNode, text: str, over: list[str], audience: set[str],
               extra: dict[str, Any] | None = None) -> Held:
@@ -9890,15 +9910,13 @@ class Network(AppsMixin):
         return d
 
     def _members(self, conv: Conversation) -> list[str]:
-        """调用方持有锁。可以 @ 的成员：群聊是项目成员；私聊是对方；项目会话是助理加上会话主人自己在项目里的
-        其他 Agent（会话只属于它的人，不变量 18：别人的 Agent 不进来，要找它们去群聊）。"""
+        """调用方持有锁。可以 @ 的成员：群聊与项目会话是项目里的全部 Agent（项目会话的默认成员排第一）；私聊是对方。"""
         if conv.kind in ("dm", "service"):
             return [conv.agent_id] if conv.agent_id else []
         g = self.store.projects.get(conv.project_id or "")
         ids = [m for m in (g.member_ids if g else []) if m in self.store.agents]
-        if conv.kind == "session":
-            mine = [m for m in ids if m != conv.agent_id and self.can_use_agent(self.store.agents[m], conv.owner_id)]
-            return ([conv.agent_id] if conv.agent_id else []) + mine
+        if conv.kind == "session" and conv.agent_id in ids:
+            return [conv.agent_id] + [m for m in ids if m != conv.agent_id]
         return ids
 
     def task_detail(self, task_id: str, actor: str | None = None) -> dict[str, Any]:

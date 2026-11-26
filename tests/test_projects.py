@@ -85,38 +85,57 @@ def test_assistant_joins_only_when_asked(tmp_path: Path):
     assert net.store.users[alice].assistant_id == a.id
 
 
-def test_session_asks_before_bringing_the_assistant(tmp_path: Path):
-    """不变量 18：项目里没有助理时，开项目会话先问（NeedsConfirm，digest 是助理 id），确认后才加入并在群聊里记事件；
-    确认期间换了助理就再问一次；没有助理的人开不了会话。"""
-    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+def test_session_needs_no_assistant(tmp_path: Path):
+    """不变量 18：项目会话不需要助理。开会话不动项目成员；默认成员是已经在项目里的助理，或开会话时选的成员，
+    都没有时 @ 谁谁接、没 @ 的消息只留在会话里；明确带上助理（join）才把它加进项目并在群聊里记事件。"""
+    runs: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        runs.append(call.agent_id)
+        return "收到"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
-    with pytest.raises(NetworkError, match="还没有助理"):
-        net.create_session(net.create_project("空", "", [], actor=bob).id, actor=bob)
-    a = net.create_agent("A", "a", [], [], actor=alice)
-    b = net.create_agent("B", "b", [], [], actor=alice)
-    p = net.create_project("P", "", [], actor=alice)
-    with pytest.raises(NeedsConfirm) as e:
-        net.create_session(p.id, "了解进度", actor=alice)
-    assert e.value.digest == a.id and a.id not in p.member_ids
-    net.set_assistant(b.id, actor=alice)
-    with pytest.raises(NeedsConfirm):  # 带回的是旧助理：再问
-        net.create_session(p.id, "了解进度", actor=alice, join=a.id)
-    net.set_assistant(a.id, actor=alice)
-    s = net.create_session(p.id, "了解进度", actor=alice, join=a.id)
-    assert (s.kind, s.project_id, s.agent_id, s.owner_id, s.title) == ("session", p.id, a.id, alice, "了解进度")
-    assert p.member_ids == [a.id]
+    empty = net.create_session(net.create_project("空", "", [], actor=bob).id, actor=bob)  # 一个 Agent 都没有也能开
+    assert empty.agent_id is None
+    a = net.create_agent("A", "a", [], [], actor=alice)                 # alice 的助理，不在项目里
+    w = net.create_agent("Writer", "w", [], [], actor=alice)
+    p = net.create_project("P", "", [w.id], actor=alice)
+    s = net.create_session(p.id, "了解进度", actor=alice)
+    assert (s.kind, s.project_id, s.agent_id, s.owner_id, s.title) == ("session", p.id, None, alice, "了解进度")
+    assert p.member_ids == [w.id]                                         # 助理没有被带进来
+    net.send_message(s.id, "大家好", actor=alice, background=False)       # 没 @、没有默认成员：只留在会话里
+    assert runs == [] and s.messages[-1].text == "大家好"
+    net.send_message(s.id, "@Writer 写个提纲", actor=alice, background=False)
+    assert runs == [w.id]
+    # 开会话时选默认成员
+    s2 = net.create_session(p.id, actor=alice, agent="Writer")
+    assert s2.agent_id == w.id and s2.id != s.id
+    assert net.create_session(p.id, actor=alice, agent=w.id).id == s2.id  # 同一个默认成员的空会话：沿用
+    with pytest.raises(NetworkError, match="不是项目"):
+        net.create_session(p.id, actor=alice, agent="A")
+    # 明确带上助理
+    with pytest.raises(NetworkError, match="助理"):
+        net.create_session(p.id, actor=alice, join=w.id)
+    s3 = net.create_session(p.id, actor=alice, join=a.id)
+    assert s3.agent_id == a.id and a.id in p.member_ids
     chat = net.project_chat(p.id, actor=alice)
     assert any(m.role == "event" and m.text == "A 加入了项目（alice@x.io 的助理）" for m in chat.messages)
-    assert net.create_session(p.id, actor=alice).id == s.id  # 已经在了：不再问，沿用空会话
-    assert [x["id"] for x in net.sessions(p.id, actor=alice)] == [s.id]
-    net.update_session(s.id, title="细节", archived=True, actor=alice)
+    assert net.create_session(p.id, actor=alice).agent_id == a.id       # 助理已经在项目里：默认就是它
+    net.send_message(s3.id, "在吗", actor=alice, background=False)
+    assert runs[-1] == a.id
+    # 归档与恢复
+    net.update_session(s3.id, title="细节", archived=True, actor=alice)
     with pytest.raises(NetworkError, match="已归档"):
-        net.send_message(s.id, "还在吗", actor=alice)
-    net.update_session(s.id, archived=False, actor=alice)
-    assert net.store.conversations[s.id].title == "细节"
+        net.send_message(s3.id, "还在吗", actor=alice)
+    net.update_session(s3.id, archived=False, actor=alice)
+    assert net.store.conversations[s3.id].title == "细节"
+    # 默认成员移出项目：会话照样能用，没 @ 的只留在会话里
     net.remove_member(p.id, a.id, actor=alice)
-    with pytest.raises(NetworkError, match="已不在项目里"):
-        net.send_message(s.id, "还在吗", actor=alice)
+    n = len(runs)
+    net.send_message(s3.id, "还在吗", actor=alice, background=False)
+    assert len(runs) == n
+    net.send_message(s3.id, "@Writer 你在吗", actor=alice, background=False)
+    assert runs[-1] == w.id
 
 
 def _session_handler(out: dict):
@@ -207,32 +226,43 @@ def test_session_private_and_reads_by_owner_visibility(tmp_path: Path):
     assert net.store.conversations[s.id].archived
 
 
-def test_session_mentions_own_agents_only(tmp_path: Path):
-    """不变量 18：项目会话里能 @ 会话主人自己在项目里的 Agent，被 @ 的直接接手、没 @ 时交给助理；
-    别人的 Agent 不能 @（会话只属于它的人），会话的成员列表里也没有它们。"""
-    runs: list[tuple[str, str]] = []
+def test_session_mentions_any_member_as_a_guest(tmp_path: Path):
+    """不变量 18：项目会话里能 @ 项目里的任何 Agent。别人的 Agent 被 @ 进来时是客人：没有读项目现状的工具与摘要，
+    提示词写明会话属于谁；它的所有者看不到会话，只在 guest_rounds 里看到经过它的那几轮；会话主人自己的 Agent 不算。"""
+    runs: list[tuple[str, str, list[str]]] = []
 
     def handler(call: ScriptCall) -> str:
-        runs.append((call.agent_id, call.prompt))
+        runs.append((call.agent_id, call.prompt, list(call.tool_names)))
         return "收到"
     net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
     alice, bob = users(net, "alice@x.io", "bob@x.io")
     a = net.create_agent("A", "a", [], [], actor=alice)            # alice 的助理
     w = net.create_agent("Writer", "w", [], [], actor=alice)
     b = net.create_agent("B", "b", [], [], actor=bob)             # bob 的助理，接受邀请时进项目
-    g, _ = joint(net, alice, "bob@x.io", bob, members=[w.id])
+    g, _ = joint(net, alice, "bob@x.io", bob, members=[w.id, a.id])
     s = net.create_session(g.id, actor=alice)
-    assert net.conversation_detail(s.id, actor=alice)["members"] == [a.id, w.id]
+    assert s.agent_id == a.id
+    members = net.conversation_detail(s.id, actor=alice)["members"]
+    assert members[0] == a.id and set(members) == {a.id, w.id, b.id}
     net.send_message(s.id, "@Writer 写个提纲", actor=alice, background=False)
-    assert [r[0] for r in runs] == [w.id]
-    assert "项目会话" in runs[0][1] and "（@ 你）" in runs[0][1] and "默认由所有者的助理回应" in runs[0][1]
+    assert runs[-1][0] == w.id and "（@ 你）" in runs[-1][1] and "所有者 @ 你时由你接手" in runs[-1][1]
+    assert any(t.endswith("read_chat") for t in runs[-1][2])        # 会话主人自己的 Agent：有读项目现状的工具
     net.send_message(s.id, "提纲怎么样", actor=alice, background=False)
-    assert runs[-1][0] == a.id and "写个提纲" in runs[-1][1] and "收到" in runs[-1][1]
-    net.send_message(s.id, "@B 你看看", actor=alice, background=False)  # 别人的 Agent：不算 @，交给助理
-    assert runs[-1][0] == a.id and b.id not in s.seats
-    with pytest.raises(NetworkError, match="别人的 Agent 请在群聊里 @"):
-        net.send_message(s.id, "你看看", mentions=[b.id], actor=alice)
-
+    assert runs[-1][0] == a.id and "没 @ 任何人的消息由你回答" in runs[-1][1]
+    net.send_message(s.id, "@B 你看看报销规则", actor=alice, background=False)
+    who, prompt, tools = runs[-1]
+    assert who == b.id and "这个会话属于 alice@x.io" in prompt and "项目现状" not in prompt
+    assert not any(t.endswith("read_chat") or t.endswith("read_request") for t in tools)
+    assert s.messages[-1].agent_id == b.id and s.messages[-1].text == "收到"
+    # 会话仍只属于 alice；bob 只看得到经过 B 的那几轮
+    with pytest.raises(NetworkError, match="unknown conversation"):
+        net.conversation_detail(s.id, actor=bob)
+    rounds = net.guest_rounds(b.id, actor=bob)
+    assert len(rounds) == 1 and rounds[0]["kind"] == "session" and rounds[0]["caller"] == "alice@x.io"
+    assert [m["text"] for m in rounds[0]["messages"]] == ["@B 你看看报销规则", "收到"]
+    assert net.guest_rounds(w.id, actor=alice) == []                 # 自己的会话里自己的 Agent：不算客人
+    with pytest.raises(NetworkError):
+        net.guest_rounds(b.id, actor=alice)
 
 def test_new_session_reuses_the_empty_one(tmp_path: Path):
     """没发过消息的会话不进侧栏：再点“新会话”沿用它，不攒空会话；发过消息、归档了的才另开。"""

@@ -296,6 +296,13 @@ def test_backend_calls_api_as_the_user(tmp_path: Path):
     # 第二个人只看得到自己的
     assert c.get(f"/api/projects/{g['id']}", headers=bearer("s-u1001")).status_code == 200
     assert c.get(f"/api/projects/{g['id']}", headers=bearer("s-u1002")).status_code == 404
+    # 业务系统用的就是项目会话：开会话（不需要助理）、@ 成员发消息
+    helper = net.create_agent("报销助手", "答报销问题", [], [], actor=me["id"])
+    net.add_member(g["id"], helper.id, actor=me["id"])
+    sess = c.post(f"/api/projects/{g['id']}/sessions", json={"agent": "报销助手"}, headers=bearer("s-u1001"))
+    assert sess.status_code == 200 and sess.json()["agent_id"] == helper.id
+    r = c.post(f"/api/conversations/{sess.json()['id']}/messages", json={"text": "差旅能报多少？"}, headers=bearer("s-u1001"))
+    assert r.status_code == 200, r.text
     # 已有同邮箱的账号、没开 link_by_email：不绑
     auth.register(net.store, "u1003@corp.example", "password-123")
     r = c.get("/api/me", headers=bearer("s-u1003"))

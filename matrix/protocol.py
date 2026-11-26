@@ -385,9 +385,10 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
                       home: bool = True, joint: bool = False, plugins: bool = False, services: bool = False,
                       assistant_home: bool = False, home_hidden: list[str] = (), home_mixed: list[str] = (),
                       home_frozen: bool = False, ask: bool = False, goals: bool = False, service: Any = None,
-                      cloud: bool = False) -> str:
+                      cloud: bool = False, session_owner: str = "") -> str:
     """对话里一个席位的一轮。first：席位会话的第一轮，带上身份、权限与协作规则；之后续接同一会话，
-    只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。"""
+    只送上次运行之后对话里的新消息和网络通知。assistant_home：所有者和自己助理的私聊（助理对话）。
+    session_owner：被 @ 进别人的项目会话时，那个会话属于谁（空 = 会话主人就是自己的所有者）。"""
     body = "\n\n".join(filter(None, [archive, transcript, notices])) or "（没有新消息。）"
     if not first:
         return body
@@ -403,15 +404,25 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
             "- 拿到任务后自己判断：能自己做就自己做；需要别的能力就在项目里找合适的成员委托。",
             "- 你的回复会作为你的发言出现在群聊里，人和之后被 @ 的成员都能看到。",
         ]
-    elif conv.kind == "session" and project is not None:
-        who = (f"你是你的所有者在项目「{project.name}」里的助理。这是你和所有者的一个项目会话"
-               if agent.id == conv.agent_id else
-               f"你在你的所有者在项目「{project.name}」里的一个项目会话里，会话里默认由所有者的助理回应；所有者 @ 你时由你接手")
+    elif conv.kind == "session" and project is not None and session_owner:
         setting = [
-            f"{who}：只有所有者看得到，项目里的其他人和别人的 Agent 看不到这里的对话。这是一个长期会话：后续消息会在同一会话里继续。",
+            f"你在项目「{project.name}」的一个项目会话里：这个会话属于 {session_owner}（项目的参与者），是他在项目里的私下对话。"
+            "他在会话里 @ 了你。会话里的对话只有他看得到；你的所有者看得到经过你的那几轮。这是一个长期会话：后续消息会在同一会话里继续。",
+            "- 你代表你的所有者在帮他：他的要求可以做，但不要透露你的所有者在别处的工作、资料或私有目录。",
+            "- 标有“@ 你”的才是你要处理的；没 @ 你的消息是会话里的背景。",
+            "- 你能做的和群聊里一样：自己做，或委托项目成员。记录决定、发布文件、建议修改纲要会在群聊里留一条事件，"
+            "项目里的人都看得到。",
+        ]
+    elif conv.kind == "session" and project is not None:
+        who = (f"这是你的所有者在项目「{project.name}」里的一个项目会话，没 @ 任何人的消息由你回答"
+               if agent.id == conv.agent_id else
+               f"你在你的所有者在项目「{project.name}」里的一个项目会话里，所有者 @ 你时由你接手")
+        setting = [
+            f"{who}：只有所有者看得到，项目里的其他人看不到这里的对话（被所有者 @ 进来的别人的 Agent 的所有者，"
+            "只看得到经过那个 Agent 的几轮）。这是一个长期会话：后续消息会在同一会话里继续。",
             *([people] if people else []),
-            "- 所有者在这里了解项目的细节、想清楚问题、让你代办。项目的公开记录在群聊里：会话里不必复述群聊。",
-            "- 所有者可以在会话里 @ 自己的其他 Agent 直接交给它；没 @ 任何人的消息交给助理。标有“@ 你”的才是你要处理的。",
+            "- 所有者在这里了解项目的细节、想清楚问题、让 Agent 代办。项目的公开记录在群聊里：会话里不必复述群聊。",
+            "- 所有者可以在会话里 @ 项目里的任何 Agent 直接交给它。标有“@ 你”的才是你要处理的。",
             "- 你能做的和群聊里一样：自己做，或委托项目成员。记录决定、发布文件、建议修改纲要会在群聊里留一条事件，"
             "项目里的人都看得到。",
         ]
@@ -446,7 +457,7 @@ def build_seat_prompt(agent: AgentNode, conv: Conversation, project: Project | N
         parts += _network_tools(project, can_delegate, plugins, services)
     if project is not None and conv.kind == "service":
         parts += _network_tools(project, can_delegate, plugins, services, service=True)
-    if project is not None and conv.kind == "session":
+    if project is not None and conv.kind == "session" and not session_owner:
         parts += ["", "## 读项目现状（只读，按你的所有者在这个项目里能看到的范围）",
                   *(f"- `{MCP_PREFIX}{name}`：{TOOL_GUIDE[name]}" for name in SESSION_TOOLS),
                   "- 每轮会带上项目现状的摘要（有变化时）；更早或更细的内容用上面的工具读，不要凭印象回答。"]

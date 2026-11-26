@@ -509,7 +509,8 @@ class ProjectPatch(BaseModel):
 
 class SessionIn(BaseModel):
     title: str = Field("", max_length=120)
-    join: str | None = Field(None, max_length=100)   # 确认把助理加入项目：带回 409 给的 digest（助理 id）
+    agent: str | None = Field(None, max_length=100)  # 没 @ 时默认回答的成员（项目里的 Agent）；不给 = 已在项目里的助理，或没有
+    join: str | None = Field(None, max_length=100)   # 先把自己的助理带进项目（助理 id），它当默认成员
 
 
 class SessionPatch(BaseModel):
@@ -1725,9 +1726,10 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
         with network.store.lock:
             return network.conversation_view(conv, user.id)
 
-    @app.get("/api/agents/{agent_id}/service-rounds")
-    def service_rounds(agent_id: str, user: Me) -> list[dict]:
-        return network.service_rounds(agent_id, actor=user.id)
+    @app.get("/api/agents/{agent_id}/guest-rounds")
+    def guest_rounds(agent_id: str, user: Me) -> list[dict]:
+        """我的 Agent 在别人的会话里（别人的项目会话里被 @、项目服务里）的那几轮。"""
+        return network.guest_rounds(agent_id, actor=user.id)
 
     @app.get("/api/projects/{project_id}/services")
     def project_services(project_id: str, user: Me) -> list[dict]:
@@ -1780,7 +1782,8 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
 
     @app.post("/api/projects/{project_id}/sessions")
     def create_session(project_id: str, body: SessionIn, user: Me) -> dict:
-        return network.create_session(project_id, body.title, actor=user.id, join=body.join).to_dict(full=False)
+        return network.create_session(project_id, body.title, actor=user.id, join=body.join,
+                                      agent=body.agent).to_dict(full=False)
 
     @app.patch("/api/sessions/{conv_id}")
     def update_session(conv_id: str, body: SessionPatch, user: Me) -> dict:
