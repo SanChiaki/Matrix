@@ -266,3 +266,50 @@ X-Matrix-Login: corp            ← 只在 login.json 里不止一个入口打�
 - 内置的 `oauth2` 驱动核实访问令牌时只问 `userinfo_url`，不看令牌是签给哪个应用的：同一个身份系统签给**任何**应用的令牌都认。
   身份系统里有不可信的第三方应用时不要对它打开 `api_auth`，改用自己写的驱动在 `verify` 里核对令牌的受众。
 - `/api/*` 原本只给 Matrix 自己的网页用，接口变化时对接方要跟着改。
+
+## 九、临时方案：业务系统凭共享密钥替用户调接口
+
+共享 cookie 还接不上（第八节的驱动没写好）时，先用这个：业务系统的后端和 Matrix 共用一把密钥，请求里直接说是哪个用户。
+Matrix 不向身份系统核实这个人：**密钥对上，就信后端说的是谁**。以后接好第八节，把 `api_keys` 那一项删掉即可。
+
+`login.json`：
+
+```json
+{"api_keys": [
+  {"id": "expense", "name": "报销系统",
+   "keys": ["${EXPENSE_MATRIX_KEY}"],
+   "bind_as": "corp",
+   "auto_create": true, "link_by_email": false, "allow_domains": ["corp.example"]}
+]}
+```
+
+- 默认没有这一段，就没有这条路。每个业务系统一项，`id` 的规则和登录入口一样。
+- `keys`：每个都要写成 `${环境变量}`（变量名带 `KEY`，见第二节），至少 32 个字符（`openssl rand -hex 32`）；Matrix 只留 sha256。
+  轮换：先加新的（新旧并存），业务系统换上新的以后删掉旧的，改了文件就生效。
+- `bind_as`：用户标识绑定在哪个名字下（默认是这一项的 `id`）。写成公司账号登录入口的 id（如 `corp`），
+  经密钥来的人和用公司账号登录的人就是同一个 Matrix 用户；以后换成第八节也不会多出重复账号。
+- `auto_create` / `link_by_email` / `allow_domains`：和登录入口的同名字段一样（第二节）。
+
+请求头：
+
+| 请求头 | 写什么 |
+|---|---|
+| `X-Matrix-Key` | 密钥 |
+| `X-Matrix-User` | 这个人在公司里唯一、不会变的 user_id：绑定只认它。不要用工号、邮箱这类会换的 |
+| `X-Matrix-User-Email` | 邮箱。只有第一次来、要建账号时需要（Matrix 账号要有邮箱，邀请按它）；已绑定的人不看它，邮箱换了也不影响是谁 |
+
+```bash
+curl -H "X-Matrix-Key: $EXPENSE_MATRIX_KEY" -H "X-Matrix-User: 8f3a2c01" -H "X-Matrix-User-Email: wang@corp.example" \
+     https://matrix.corp.example/api/me
+```
+
+规则：对到用户的规则和公司账号登录一样（`auth.sso_user`，已有同邮箱的账号默认不绑）；第一次来的人自动建账号、有助理；
+不发 Matrix 自己的登录 cookie；管理后台（`/api/admin/*`）不认；密钥不对、没写用户、认不出人一律 401。
+反向代理要把这三个请求头原样传给 Matrix。
+
+### 要接受的
+
+- 拿到密钥的系统能以**任何**用户的身份做他能做的一切：Matrix 分不出后端说的是不是真的。密钥只放在业务系统的后端，
+  不进浏览器、不进前端代码、不进日志；限定只有业务系统的服务器能连到 Matrix（网络层）。
+- 用户在身份系统里停用了，经密钥照样能以他的身份调用，直到管理员处理。
+- 这是临时方案：第八节接好以后删掉 `api_keys`。

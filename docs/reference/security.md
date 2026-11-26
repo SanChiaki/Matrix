@@ -28,6 +28,7 @@
   - 出错的原因带在 `/#login_error=` 后面回到登录页（不进服务器日志）；驱动里没预料到的异常只记类型，不把消息给浏览器。
   - `password_login: false` 关掉邮箱密码的注册与登录，只留管理员；只在有可用入口时生效。
   - 外部系统带着用户凭据调 `/api/*`（`login.json` 的 `api_auth`，默认关；`server._api_caller`、`LoginService.verify`）：只认 `Authorization: Bearer` 请求头、不读浏览器带来的共享 cookie（同一主域名下的页面能伪造带 cookie 的请求），经驱动的 `verify` 向身份系统核实，结果按凭据哈希缓存 60 秒（不通过的 10 秒），不留明文；等同用户本人，`/api/admin/*` 不认。见 [login-driver-authoring.md](../login-driver-authoring.md) 第八节。
+  - 临时方案：业务系统凭共享密钥替用户调 `/api/*`（`login.json` 的 `api_keys`，默认没有；`server._key_caller`、`LoginService.api_key`）：密钥只能经 `${…KEY…}` 环境变量写、至少 32 个字符、只留 sha256、常数时间比较，可以几个并存（轮换）；`X-Matrix-User` 是身份系统里的标识，按 `bind_as` 走 `auth.sso_user`；`/api/admin/*` 不认。**已知风险（接受）**：Matrix 不核实后端说的是谁，拿到密钥就能以任何用户的身份操作；接受理由：临时方案，只给内部可信系统的后端，网络层限定来源；复查时机：第八节的驱动接好时删掉 `api_keys`。见 [login-driver-authoring.md](../login-driver-authoring.md) 第九节。
   - **已知风险（接受）**：身份系统里停用的人，Matrix 里已有的登录与设备令牌不会自动失效（登录令牌本来也不过期）；
     接受理由：和现在的密码登录一样，停用靠管理员处理；复查时机：做登录令牌过期，或有了停用用户的功能时。
     内置 OAuth2 驱动不验 `id_token`：用户信息是服务器凭刚换到的令牌直接向身份系统取的，不经过浏览器。
