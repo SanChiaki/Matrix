@@ -3,7 +3,11 @@
 > 入口见 [AGENTS.md](../../AGENTS.md)，那里只列红线。
 
 - `/api/*` 要求登录（邮箱 + 密码，或部署方配的公司账号，`auth.py`，HttpOnly + SameSite=Lax cookie），按用户做归属与可见性检查。
-  这仍是最简实现：没有 HTTPS、CSRF 令牌、登录限流、令牌过期、邮箱验证。补齐的设计见 [control-plane.md](../control-plane.md) 第 8 节（未实现）。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
+  登录令牌只在 cookie 里，状态里只存它的 sha256（`auth.session_hash`），状态文件或备份泄露不等于会话泄露；闲置 7 天
+  （`auth.SESSION_IDLE_S`）或登录满 30 天（`SESSION_MAX_S`）过期，“最近用过”每小时最多记一次；部署方对外只经 HTTPS 时设
+  `MATRIX_COOKIE_SECURE=on`，cookie 带 `Secure`。旧版本以明文作键的登录，升级后启动时换成哈希，用户不掉线；
+  **回退到旧版本后所有人要重新登录一次**（旧版本认不出哈希）。测试：`tests/test_sessions.py`。
+  还没有：CSRF 令牌、登录限流、邮箱验证，补齐的设计见 [control-plane.md](../control-plane.md) 第 8 节。服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
   Docker 部署里容器内监听 0.0.0.0，但 compose 只发布到宿主机的 `127.0.0.1`；对外经部署方的反向代理，
   它负责 HTTPS 并挡住 `/internal/*`（Matrix 只凭令牌、不看来源地址），要求见 [reverse-proxy.md](../reverse-proxy.md)。
 - 密码只存 scrypt 哈希；不要在日志、事件或 API 返回里带出密码、哈希、登录令牌。`/api/users` 只返回 id 与邮箱。
