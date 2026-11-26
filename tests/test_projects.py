@@ -334,3 +334,51 @@ def test_sessions_api(tmp_path: Path):
     assert ca.put("/api/me/assistant", json={"agent_id": b.id}).status_code == 404
     assert ca.put("/api/me/assistant", json={"agent_id": a2.id}).json()["assistant_id"] == a2.id
     assert ca.get("/api/me").json()["assistant_id"] == a2.id
+
+
+def test_project_default_agent(tmp_path: Path):
+    """项目的默认回答成员：建项目时定、主持人能换；开会话没指定就用它（排在已在项目里的助理前面）；
+    已开的会话各记各的、能单独换；它离开项目就清空。"""
+    runs: list[str] = []
+
+    def handler(call: ScriptCall) -> str:
+        runs.append(call.agent_id)
+        return "收到"
+    net = Network(ScriptedRuntime(handler), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    a = net.create_agent("A", "a", [], [], actor=alice)                 # alice 的助理
+    w = net.create_agent("Writer", "w", [], [], actor=alice)
+    r = net.create_agent("Reviewer", "r", [], [], actor=alice)
+    with pytest.raises(NetworkError, match="不是项目"):
+        net.create_project("P", "", [w.id], actor=alice, default_agent=r.id)
+    ca, cb = client(net, "alice@x.io"), client(net, "bob@x.io")
+    p = ca.post("/api/projects", json={"name": "P", "member_ids": [a.id, w.id, r.id], "default_agent": "Writer"}).json()
+    assert p["default_agent_id"] == w.id
+    s = ca.post(f"/api/projects/{p['id']}/sessions", json={}).json()
+    assert s["agent_id"] == w.id                                          # 不是助理 A
+    assert ca.post(f"/api/conversations/{s['id']}/messages", json={"text": "写个提纲"}).status_code == 200
+    net.wait_quiet()
+    assert runs == [w.id]
+    # 换项目的默认：只影响新开的会话
+    assert ca.patch(f"/api/projects/{p['id']}", json={"default_agent": r.id}).json()["default_agent_id"] == r.id
+    assert net.store.conversations[s["id"]].agent_id == w.id
+    assert ca.post(f"/api/projects/{p['id']}/sessions", json={}).json()["agent_id"] == r.id
+    assert ca.patch(f"/api/projects/{p['id']}", json={"default_agent": "nobody"}).status_code == 409
+    # 换已开的会话的默认成员；null = 不要默认成员；只改标题不动它
+    assert ca.patch(f"/api/sessions/{s['id']}", json={"agent": "Reviewer"}).json()["agent_id"] == r.id
+    ca.post(f"/api/conversations/{s['id']}/messages", json={"text": "看一下"})
+    net.wait_quiet()
+    assert runs[-1] == r.id
+    assert ca.patch(f"/api/sessions/{s['id']}", json={"title": "改名"}).json()["agent_id"] == r.id
+    assert ca.patch(f"/api/sessions/{s['id']}", json={"agent": None}).json()["agent_id"] is None
+    assert ca.patch(f"/api/sessions/{s['id']}", json={"agent": "nobody"}).status_code == 409
+    # 只有主持人能换项目的默认
+    net.invite(p["id"], "bob@x.io", actor=alice)
+    net.respond_invitation(p["id"], True, actor=bob)
+    assert cb.patch(f"/api/projects/{p['id']}", json={"default_agent": w.id}).status_code in (404, 409)
+    assert cb.post(f"/api/projects/{p['id']}/sessions", json={}).json()["agent_id"] == r.id   # 参与者开会话也用它
+    # 默认成员离开项目：清空；null 也能清
+    assert ca.delete(f"/api/projects/{p['id']}/members/{r.id}").json()["default_agent_id"] is None
+    assert ca.post(f"/api/projects/{p['id']}/sessions", json={"title": "新"}).json()["agent_id"] == a.id  # 退回已在项目里的助理
+    ca.patch(f"/api/projects/{p['id']}", json={"default_agent": w.id})
+    assert ca.patch(f"/api/projects/{p['id']}", json={"default_agent": None}).json()["default_agent_id"] is None

@@ -326,7 +326,7 @@ def _api_key(k: Any, kid: str, taken: set[str]) -> ApiKey:
     for x in raw:
         if not isinstance(x, str) or not _ENV.fullmatch(x.strip()):
             raise LoginError("keys 里每个密钥都要写成 ${环境变量}，不要把密钥直接写进文件")
-        v = _expand(x.strip())
+        v = _expand(x.strip()).strip()   # 请求头两端的空白 HTTP 会去掉：环境变量尾巴上的换行不去掉就永远对不上
         if len(v) < MIN_KEY_LEN:
             raise LoginError(f"密钥至少 {MIN_KEY_LEN} 个字符（比如 openssl rand -hex 32）")
         shas.append(hashlib.sha256(v.encode()).hexdigest())

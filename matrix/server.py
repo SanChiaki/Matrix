@@ -375,6 +375,7 @@ class ProjectIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: str = Field("", max_length=500)
     member_ids: list[str] = Field(default_factory=list)
+    default_agent: str | None = Field(None, max_length=100)  # 项目会话的默认回答成员（member_ids 里的一个，id 或名字）
 
 
 class ReviewIn(BaseModel):
@@ -443,6 +444,7 @@ class ProjectPatch(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=80)
     description: str | None = Field(None, max_length=500)
     member_ids: list[str] | None = None
+    default_agent: str | None = Field(None, max_length=100)  # 换项目会话的默认回答成员；显式传 null = 不设
 
 
 class SessionIn(BaseModel):
@@ -454,6 +456,7 @@ class SessionIn(BaseModel):
 class SessionPatch(BaseModel):
     title: str | None = Field(None, max_length=120)
     archived: bool | None = None
+    agent: str | None = Field(None, max_length=100)  # 换这个会话的默认回答成员（项目里的 Agent）；显式传 null = 不要默认成员
 
 
 class AssistantIn(BaseModel):
@@ -650,6 +653,8 @@ def _key_caller(request: Request) -> User:
     subject = request.headers.get("x-matrix-user", "").strip()
     if not subject:
         raise HTTPException(401, "请求头 X-Matrix-User 要写明是哪个用户（他在身份系统里的标识）")
+    if len(subject) > 200:   # 标识会存进状态里：不收离谱的长度
+        raise HTTPException(401, "请求头 X-Matrix-User 太长（最多 200 个字符）")
     network = request.app.state.network
     try:
         user, created = auth.sso_user(network.store, k.bind_as, subject, request.headers.get("x-matrix-user-email", ""),
@@ -1613,7 +1618,8 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
 
     @app.patch("/api/sessions/{conv_id}")
     def update_session(conv_id: str, body: SessionPatch, user: Me) -> dict:
-        return network.update_session(conv_id, body.title, body.archived, actor=user.id).to_dict(full=False)
+        extra = {"agent": body.agent} if "agent" in body.model_fields_set else {}
+        return network.update_session(conv_id, body.title, body.archived, actor=user.id, **extra).to_dict(full=False)
 
     # ---- 助理对话：起草的消息（只有主人能发、能丢）与主人的定时 ----
     @app.post("/api/drafts/{draft_id}/send")

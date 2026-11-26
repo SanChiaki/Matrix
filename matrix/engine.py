@@ -219,6 +219,9 @@ class NeedsConfirm(NetworkError):
         self.items, self.digest = items, digest
 
 
+KEEP: Any = object()   # 可选参数的“没给”：和显式传 None（清空）区分开
+
+
 class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
@@ -659,10 +662,21 @@ class Network:
             self.callable_agent(m, actor)  # 只能加入自己的 Agent，或公共 Agent（不变量 27）
         return list(dict.fromkeys(member_ids))
 
-    def create_project(self, name: str, description: str, member_ids: list[str], actor: str | None = None) -> Project:
+    def _member_ref(self, g: Project, ref: str) -> str:
+        """调用方持有锁。按 id 或名字找项目里的一个成员，返回它的 id；不是成员就报错。"""
+        found = self.store.agents.get(ref) or self.store.agent_by_name(ref)
+        if found is None or found.id not in g.member_ids:
+            raise NetworkError(f"{ref} 不是项目「{g.name}」的成员")
+        return found.id
+
+    def create_project(self, name: str, description: str, member_ids: list[str], actor: str | None = None,
+                       default_agent: str | None = None) -> Project:
+        """default_agent：项目会话的默认回答成员（member_ids 里的一个，按 id 或名字）。"""
         with self._lock:
             g = Project(id=new_id("prj"), name=name.strip(), description=description.strip(),
                         member_ids=self._check_members(member_ids, actor), owner_id=actor)
+            if default_agent:
+                g.default_agent_id = self._member_ref(g, default_agent)
             self.store.projects[g.id] = g
             conv = self._project_chat(g)  # 助理不跟着进来：开项目会话时才问（不变量 18）
             self.store.save()
@@ -671,11 +685,14 @@ class Network:
         return g
 
     def update_project(self, project_id: str, name: str | None = None, description: str | None = None,
-                       member_ids: list[str] | None = None, actor: str | None = None) -> Project:
-        """改名、描述只有主持人能做；成员列表的增减按 add_member / remove_member 的规则逐个检查。"""
+                       member_ids: list[str] | None = None, actor: str | None = None,
+                       default_agent: str | None = KEEP) -> Project:
+        """改名、描述、默认回答成员只有主持人能做；成员列表的增减按 add_member / remove_member 的规则逐个检查。
+        default_agent：换项目会话的默认回答成员（改完成员列表以后还在项目里的一个，按 id 或名字）；None = 不设。
+        只影响之后新开的会话，已开的会话各自记着自己的默认成员（update_session 能换）。"""
         with self._lock:
             g = self.visible_project(project_id, actor)
-            if (name is not None and name.strip() != g.name) or description is not None:
+            if (name is not None and name.strip() != g.name) or description is not None or default_agent is not KEEP:
                 self.hosted_project(project_id, actor)
             if member_ids is not None:
                 new = list(dict.fromkeys(member_ids))
@@ -686,6 +703,10 @@ class Network:
                     self._check_removable(g, m, actor)
                 self._member_events(g, added, removed)
                 g.member_ids = new
+                if g.default_agent_id not in new:  # 默认回答成员离开了项目：清空，不悄悄换成别人
+                    g.default_agent_id = None
+            if default_agent is not KEEP:
+                g.default_agent_id = self._member_ref(g, default_agent) if default_agent else None
             if name is not None and name.strip() != g.name:
                 g.name = name.strip()
                 self._project_chat(g).title = g.name
@@ -1277,6 +1298,8 @@ class Network:
     def _project_dict(self, g: Project, actor: str | None) -> dict[str, Any]:
         """调用方持有锁。共享项目里各人对自己连接器的授权、信息流授权，只给 Agent 的所有者看。"""
         d = g.to_dict()
+        if d.get("default_agent_id") not in g.member_ids:  # 默认回答成员已不在项目里（被删、随所有者离开）：当作没设
+            d["default_agent_id"] = None
         for meta in d.get("plugins", {}).values():  # 回调令牌的哈希不出网络
             for st in meta.get("triggers", {}).values():
                 st["has_hook"] = bool(st.pop("hook_hash", None))
@@ -3659,12 +3682,11 @@ class Network:
                 if joined:
                     self._bring_assistant(g, user)
             if agent:
-                found = self.store.agents.get(agent) or self.store.agent_by_name(agent)
-                if found is None or found.id not in g.member_ids:
-                    raise NetworkError(f"{agent} 不是项目「{g.name}」的成员")
-                default = found.id
+                default = self._member_ref(g, agent)
             elif join is not None and a is not None:
                 default = a.id
+            elif g.default_agent_id in g.member_ids:  # 主持人给项目定的默认回答成员
+                default = g.default_agent_id
             else:
                 default = a.id if a is not None and a.id in g.member_ids else None
             empty = next((c for c in self.store.conversations.values() if c.kind == "session" and c.project_id == g.id
@@ -3692,11 +3714,18 @@ class Network:
             return [self.conversation_view(c, actor) for c in sorted(mine, key=lambda c: -c.updated_at)]
 
     def update_session(self, conv_id: str, title: str | None = None, archived: bool | None = None,
-                       actor: str | None = None) -> Conversation:
+                       actor: str | None = None, agent: str | None = KEEP) -> Conversation:
+        """agent：换这个会话的默认回答成员（项目里的一个 Agent，按 id 或名字）；None = 不要默认成员。
+        只管之后没 @ 的消息交给谁，已经在跑的轮次不受影响。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
             if conv.kind != "session":
                 raise NetworkError("只有项目会话能改名、归档")
+            if agent is not KEEP:
+                g = self.store.projects.get(conv.project_id or "")
+                if g is None or (actor is not None and actor not in g.people):
+                    raise NetworkError("你已不在这个项目里，会话只读")
+                conv.agent_id = self._member_ref(g, agent) if agent else None
             if title is not None and title.strip():
                 conv.title = title.strip()[:120]
             if archived is not None and archived != conv.archived:
