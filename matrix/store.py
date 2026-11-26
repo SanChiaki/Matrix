@@ -8,8 +8,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -160,6 +162,104 @@ def _merge_groups(raw: dict[str, Any], root: Path) -> tuple[dict[str, Any], dict
     return raw, notes
 
 
+SLOW_SAVE_S = 1.0   # 一次保存超过这么久就在标准错误里提醒（M2：先看得见，再换存储）
+
+
+class Timings:
+    """一类耗时的统计：次数、总和、最大、最近一次，以及最近 1000 次用来算分位数。只在内存里，重启清零。"""
+
+    def __init__(self, keep: int = 1000) -> None:
+        self.count = 0
+        self.total = 0.0
+        self.max = 0.0
+        self.last = 0.0
+        self._recent: deque[float] = deque(maxlen=keep)
+        self._mu = threading.Lock()
+
+    def add(self, seconds: float) -> None:
+        with self._mu:
+            self.count += 1
+            self.total += seconds
+            self.last = seconds
+            self.max = max(self.max, seconds)
+            self._recent.append(seconds)
+
+    def snapshot(self) -> dict[str, float]:
+        with self._mu:
+            recent = sorted(self._recent)
+            count, total, mx, last = self.count, self.total, self.max, self.last
+
+        def q(p: float) -> float:
+            return recent[min(len(recent) - 1, int(p * len(recent)))] if recent else 0.0
+
+        return {"count": count, "total_s": round(total, 6), "max_s": round(mx, 6), "last_s": round(last, 6),
+                "p50_s": round(q(0.5), 6), "p99_s": round(q(0.99), 6)}
+
+
+class TimedRLock:
+    """可重入锁，另记“等了多久才拿到”（只在拿不到、真的要等时计时，没有争用时只多一次非阻塞尝试）。
+    引擎与存储共用这一把（engine.py 的 self._lock），所以它的等待时间就是“全网停住”的时间（docs/control-plane.md）。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.waits = Timings()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        if self._lock.acquire(False):
+            return True
+        if not blocking:
+            return False
+        t0 = time.perf_counter()
+        got = self._lock.acquire(True, timeout)
+        self.waits.add(time.perf_counter() - t0)
+        return got
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exc: object) -> None:
+        self._lock.release()
+
+
+def _fsync_dir(d: Path) -> None:
+    """让目录项（改名）也落盘。Windows 打不开目录，跳过（NTFS 的改名本身有日志）。"""
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_durable(path: Path, text: str, backup: Path | None = None) -> None:
+    """写一个状态文件，断电、被杀都不会留下空文件或半个文件（M2）：写临时文件 → fsync → 把旧的留成 backup →
+    改名替换 → fsync 目录。backup 用硬链接留（任何时刻 path 都在）；文件系统不支持硬链接时退成改名
+    （中间有一瞬只有 backup，读的一方会退到它，见 Store.__init__）。"""
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    if backup is not None and path.exists():
+        link = backup.with_name(backup.name + ".tmp")
+        try:
+            link.unlink(missing_ok=True)
+            os.link(path, link)
+            os.replace(link, backup)
+        except OSError:
+            link.unlink(missing_ok=True)
+            os.replace(path, backup)
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
 SEED_AGENTS: list[dict[str, Any]] = [
     {"name": "Product Strategy Agent",
      "description": "产品机会负责人：理解目标、判断需要哪些能力、在项目内委托成员、整合结论并给出建议。",
@@ -197,7 +297,10 @@ class Store:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = root / "state.json"
-        self.lock = threading.RLock()
+        self.backup = root / "state.json.bak"   # 上一次保存的样子（M2）：state.json 读不了时从它启动
+        self.lock = TimedRLock()
+        self.save_timings = Timings()           # 每次保存在锁内花的时间（管理后台“存储”与 /metrics）
+        self.loaded_from = ""                   # 启动时从哪里读的状态：state.json / state.json.bak / ""（全新）
         self.agents: dict[str, AgentNode] = {}
         self.projects: dict[str, Project] = {}
         self.conversations: dict[str, Conversation] = {}
@@ -224,8 +327,9 @@ class Store:
         self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
         # 对账时发现、控制面没有记录的沙箱（只剩卷）：执行单元 → 第一次发现的时间。过保留期才删，计时不随重启重来
         self.sandbox_orphans: dict[str, float] = {}
-        if self.path.exists():
-            self._load()
+        found = self._read_source()
+        if found is not None:
+            self._load(*found)
         else:
             if seed:
                 self._seed()
@@ -317,8 +421,30 @@ class Store:
         return self.root / "dsh-state" / ("tasks" if kind == "task" else "seats") / Path(*unit_id.split("/"))
 
     # ---------- 持久化 ----------
+    def _read_source(self) -> tuple[dict[str, Any], Path] | None:
+        """启动时读哪份文件（M2）。state.json 读得了就用它；读不了（空、半截、不是 JSON）或者不在而 .bak 在，
+        就用 .bak 并在标准错误里报警，坏掉的那份改名留下（state.json.corrupt-<时间>）给人看，不覆盖。都没有就是全新的。"""
+        if self.path.exists():
+            try:
+                return json.loads(self.path.read_text(encoding="utf-8")), self.path
+            except (OSError, ValueError) as e:
+                if not self.backup.exists():
+                    raise RuntimeError(f"{self.path} 读不了（{e}），也没有 {self.backup.name}：从备份恢复后再启动") from e
+                bad = self.path.with_name(f"state.json.corrupt-{int(time.time())}")
+                os.replace(self.path, bad)
+                print(f"[matrix] 警告：{self.path} 读不了（{e}），已改名为 {bad.name}；"
+                      f"改从 {self.backup.name}（上一次保存的状态）启动，最后一次保存的改动可能丢了", file=sys.stderr)
+        elif self.backup.exists():
+            print(f"[matrix] 警告：没有 {self.path.name}，只有 {self.backup.name}（上次保存到一半被打断）：从它启动",
+                  file=sys.stderr)
+        else:
+            return None
+        return json.loads(self.backup.read_text(encoding="utf-8")), self.backup
+
     def save(self) -> None:
+        t0 = time.perf_counter()
         with self.lock:
+            t1 = time.perf_counter()
             data = {
                 "agents": [a.persist() for a in self.agents.values()],
                 "projects": [p.to_dict() for p in self.projects.values()],
@@ -346,18 +472,27 @@ class Store:
                 **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
                 **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
             }
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-            os.replace(tmp, self.path)
+            write_durable(self.path, json.dumps(data, ensure_ascii=False, indent=1), backup=self.backup)
+            spent = time.perf_counter() - t1
+        self.save_timings.add(spent)
+        if spent > SLOW_SAVE_S:
+            print(f"[matrix] 保存状态用了 {spent:.2f} 秒（锁内，期间所有请求都在等）；"
+                  f"等锁 {t1 - t0:.2f} 秒。状态大了就该换数据库存储（docs/control-plane.md）", file=sys.stderr)
 
-    def _load(self) -> None:
-        raw = json.loads(self.path.read_text(encoding="utf-8"))
+    def metrics(self) -> dict[str, Any]:
+        """存储的两个指标（M2）：每次保存在锁内的耗时，以及任何人等这把锁的时间。不含任何内容。"""
+        size = self.path.stat().st_size if self.path.exists() else 0
+        return {"backend": "json", "path": self.path.name, "bytes": size, "loaded_from": self.loaded_from,
+                "save": self.save_timings.snapshot(), "lock_wait": self.lock.waits.snapshot()}
+
+    def _load(self, raw: dict[str, Any], source: Path) -> None:
+        self.loaded_from = source.name
         notes: dict[str, str] = {}
         migrated = "groups" in raw  # 旧版：群组 + 项目两层
         if migrated:
             backup = self.root / "state.v1.json"
             if not backup.exists():
-                shutil.copy2(self.path, backup)
+                shutil.copy2(source, backup)
             raw, notes = _merge_groups(raw, self.root)
         for a in raw.get("agents", []):
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
