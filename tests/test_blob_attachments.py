@@ -174,3 +174,57 @@ def test_s3_backend_end_to_end(tmp_path: Path, s3: blobmod.S3Blobs, monkeypatch:
     f, _ = net.attachment_file(chat, meta["sha"], actor=uid)
     assert f.read_bytes() == b"in s3" and f.is_relative_to(s3.cache.root), "下载经 Matrix：从本机读缓存给"
     assert hashlib.sha256(f.read_bytes()).hexdigest() == meta["sha"]
+
+
+def test_gc_does_not_delete_content_being_reuploaded(tmp_path: Path, local_blobs: None, monkeypatch: pytest.MonkeyPatch):
+    """一份等着回收的旧内容又被人上传（put_file 看到已有就不再写）：从放字节到记上引用之间回收不能删它，
+    不然会留下“有引用、字节不在”。"""
+    net = _net(tmp_path)
+    uid, _, chat = _chat(net)
+    keep = net.upload_attachment(chat, "keep.txt", b"keep", "", actor=uid)
+    net.send_message(chat, "x", attachments=[keep], background=False, actor=uid)
+    orphan = net.upload_attachment(chat, "old.txt", b"old content", "", actor=uid)
+    with net.store.lock:
+        net._prune_attachments(chat)   # 传了没发：引用没了，字节还在
+    old = time.time() - blobmod.GC_GRACE_S - 60
+    os.utime(net.blobs.path(orphan["sha"]), (old, old))
+    put, ran = net.blobs.put_file, []
+
+    def put_then_gc(src: Path, sha: str | None = None) -> tuple[str, int]:
+        out = put(src, sha)
+        ran.append(net.gc_blobs())   # 回收正好在“字节放好、引用还没记”的当口跑
+        return out
+    monkeypatch.setattr(net.blobs, "put_file", put_then_gc)
+    again = net.upload_attachment(chat, "old.txt", b"old content", "", actor=uid)
+    assert ran == [0] and net.blobs.has(again["sha"]) and again["sha"] in net.store.attachment_refs[chat]
+    assert not net._storing
+    monkeypatch.undo()
+    with net.store.lock:
+        net._prune_attachments(chat)
+    assert net.gc_blobs() == 1, "真的没人要了才删"
+
+
+def test_gc_refuses_when_state_has_no_refs_at_all(tmp_path: Path, local_blobs: None):
+    """状态里一条引用都没有（多半是接错了库或数据目录）时不回收：不然空状态配上已有的内容存储，一小时内全删。"""
+    net = _net(tmp_path)
+    uid, _, chat = _chat(net)
+    meta = net.upload_attachment(chat, "a.txt", b"precious", "", actor=uid)
+    old = time.time() - blobmod.GC_GRACE_S - 60
+    os.utime(net.blobs.path(meta["sha"]), (old, old))
+    with net.store.lock:
+        net.store.attachment_refs.clear()
+    assert net.gc_blobs() == 0 and net.blobs.has(meta["sha"])
+
+
+def test_s3_down_fails_the_upload_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    net = _net(tmp_path)
+    net.blobs = blobmod.S3Blobs(f"http://127.0.0.1:{port}", "bkt", "", "AK", "SK", "us-east-1", tmp_path / "cache", timeout=2)
+    uid, _, chat = _chat(net)
+    with pytest.raises(NetworkError, match="附件没存上"):
+        net.upload_attachment(chat, "a.txt", b"x", "", actor=uid)
+    assert chat not in net.store.attachment_refs and not net._storing, "没存上就不记引用"
+    assert not list((tmp_path / "tmp" / "uploads").iterdir())

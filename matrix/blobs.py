@@ -15,6 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import http.client
 import os
 import re
 import shutil
@@ -204,7 +205,12 @@ class S3Blobs:
         extra = {"content-length": str(size)} if size is not None else {}
         headers = sigv4_headers(method, url, self.region, self.access_key, self.secret_key, payload_sha, extra=extra)
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
-        return urllib.request.urlopen(req, timeout=self.timeout)  # 地址只来自部署方的配置
+        try:
+            return urllib.request.urlopen(req, timeout=self.timeout)  # 地址只来自部署方的配置
+        except urllib.error.HTTPError:
+            raise   # 状态码由调用方分辨（404 = 没有）
+        except (OSError, http.client.HTTPException) as e:   # 连不上、超时、连接中断：统一成 BlobError，调用方只认它
+            raise BlobError(f"连不上对象存储（{method}）：{e}") from e
 
     def has(self, sha: str) -> bool:
         try:
@@ -222,14 +228,15 @@ class S3Blobs:
         tmp = self.cache.root / ".incoming" / uuid.uuid4().hex
         tmp.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with self._req("GET", self._url(self._key(sha))) as r, tmp.open("wb") as f:
-                shutil.copyfileobj(r, f, 1 << 20)
-        except urllib.error.HTTPError as e:
-            tmp.unlink(missing_ok=True)
-            if e.code == 404:
-                return None
-            raise BlobError(f"对象存储 GET 失败：{e.code}") from e
-        try:
+            try:
+                with self._req("GET", self._url(self._key(sha))) as r, tmp.open("wb") as f:
+                    shutil.copyfileobj(r, f, 1 << 20)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return None
+                raise BlobError(f"对象存储 GET 失败：{e.code}") from e
+            except (OSError, http.client.HTTPException) as e:   # 下到一半断了
+                raise BlobError(f"对象存储 GET 中断：{e}") from e
             self.cache.put_file(tmp, sha)   # 校验 sha：对象存储里的内容被改过就不认
         finally:
             tmp.unlink(missing_ok=True)
@@ -240,8 +247,11 @@ class S3Blobs:
         if sha is not None and got != sha:
             raise BlobError(f"内容和 sha 对不上：{src}")
         if not self.has(got):
-            with src.open("rb") as f, self._req("PUT", self._url(self._key(got)), body=f, payload_sha=got, size=size):
-                pass
+            try:
+                with src.open("rb") as f, self._req("PUT", self._url(self._key(got)), body=f, payload_sha=got, size=size):
+                    pass
+            except urllib.error.HTTPError as e:
+                raise BlobError(f"对象存储 PUT 失败：{e.code}") from e
         return got, size
 
     def delete(self, sha: str) -> None:
@@ -259,8 +269,13 @@ class S3Blobs:
         while True:
             q = urllib.parse.urlencode({"list-type": "2", "prefix": self.prefix,
                                         **({"continuation-token": token} if token else {})})
-            with self._req("GET", self._url(query=q)) as r:
-                root = ET.fromstring(r.read())
+            try:
+                with self._req("GET", self._url(query=q)) as r:
+                    root = ET.fromstring(r.read())
+            except urllib.error.HTTPError as e:
+                raise BlobError(f"对象存储列目录失败：{e.code}") from e
+            except (OSError, http.client.HTTPException, ET.ParseError) as e:
+                raise BlobError(f"对象存储列目录失败：{e}") from e
             for c in root.iter(f"{ns}Contents"):
                 key = c.findtext(f"{ns}Key") or ""
                 name = key.rsplit("/", 1)[-1]

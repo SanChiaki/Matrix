@@ -96,27 +96,44 @@ class Database:
         else:
             self.dialect = "postgresql"
             self.path = None
-            try:
-                import psycopg  # noqa: PLC0415 —— 可选依赖，只有用 PostgreSQL 时才要
-            except ImportError as e:
-                raise DatabaseError("用 PostgreSQL 要装 psycopg：uv sync --extra postgres（部署镜像里已带）") from e
-            try:
-                self._conn = psycopg.connect(url, autocommit=True)
-            except Exception as e:  # noqa: BLE001 —— 连不上时给出去掉密码的地址
-                raise DatabaseError(f"连不上数据库 {describe(url)}：{e}") from e
+            self._conn = self._connect_pg()
         self._depth = 0
+
+    def _connect_pg(self) -> Any:
+        try:
+            import psycopg  # noqa: PLC0415 —— 可选依赖，只有用 PostgreSQL 时才要
+        except ImportError as e:
+            raise DatabaseError("用 PostgreSQL 要装 psycopg：uv sync --extra postgres（部署镜像里已带）") from e
+        try:
+            return psycopg.connect(self.url, autocommit=True)
+        except Exception as e:  # noqa: BLE001 —— 连不上时给出去掉密码的地址
+            raise DatabaseError(f"连不上数据库 {describe(self.url)}：{e}") from e
+
+    def lost(self) -> bool:
+        """PostgreSQL 的连接断了（库重启、切换、网络抖动）。SQLite 没有这回事。"""
+        return self.dialect == "postgresql" and bool(self._conn.closed or self._conn.broken)
+
+    def _ensure(self) -> None:
+        """调用方持有 _mu。连接断了就重连，不然断一次之后每次保存都失败，只能重启服务（期间的改动全丢）。
+        事务中途不重连：那个事务已经没了，由开事务的一方整个重做（DbBackend.save）。"""
+        if self._depth == 0 and self.lost():
+            with contextlib.suppress(Exception):
+                self._conn.close()
+            self._conn = self._connect_pg()
 
     def _sql(self, sql: str) -> str:
         return sql.replace("?", "%s") if self.dialect == "postgresql" else sql
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         with self._mu:
+            self._ensure()
             self._conn.execute(self._sql(sql), tuple(params))
 
     def executemany(self, sql: str, rows: list[Sequence[Any]]) -> None:
         if not rows:
             return
         with self._mu:
+            self._ensure()
             if self.dialect == "sqlite":
                 self._conn.executemany(sql, rows)
             else:
@@ -125,6 +142,7 @@ class Database:
 
     def query(self, sql: str, params: Sequence[Any] = ()) -> list[tuple[Any, ...]]:
         with self._mu:
+            self._ensure()
             cur = self._conn.execute(self._sql(sql), tuple(params))
             return list(cur.fetchall())
 
@@ -139,6 +157,7 @@ class Database:
                 finally:
                     self._depth -= 1
                 return
+            self._ensure()
             self._depth = 1
             try:
                 if self.dialect == "sqlite":
