@@ -111,7 +111,7 @@ networks:
 
 	# WebSocket（/api/devices/connect）的升级 reverse_proxy 自动处理；Caddy 默认不限请求体大小
 	reverse_proxy matrix:8765 {
-		# SSE（/api/events、/svc/*）不缓冲
+		# SSE（/api/events）不缓冲
 		flush_interval -1
 	}
 }

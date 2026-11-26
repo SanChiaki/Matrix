@@ -82,7 +82,7 @@ Kylon App 的发布由人审核、可见性分档（research: kylon#apps）。
 
 ## 6. 订阅：在订阅者自己的信任域里
 
-> 2026-11-18：下面第一段的“不做”已经改了：项目可以作为服务对外（第三种发布物），见 [project-services.md](project-services.md)。订阅的规则不变。
+> 2026-11-18 曾把项目作为服务对外（第三种发布物，项目服务），2026-11-26 撤销（REQUIREMENTS #72）：要项目替自己办事的人，被邀请进项目、在项目会话里说。订阅的规则不变。
 
 不做"项目的一个公共 Agent 服务外人"：那是早先 public Agent 的问题（Agent 不跨信任域，不变量 16），
 而且所有者能看自己 Agent 的全部过程，消费者问了什么发布方都会看到（research: project-publishing#consumer-instance、
