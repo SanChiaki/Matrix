@@ -193,6 +193,34 @@ matrix-connect setup <服务器>
 - 没做的：代码签名与公证（macOS 用 curl 下载不带隔离属性，Gatekeeper 不拦；Windows SmartScreen 只管浏览器下载的文件），
   自动更新（重跑安装命令即升级）。
 
+### 2.8 一键创建 Agent、一次性配对令牌与外部驱动（业务系统接入）
+
+业务系统有自己的设备端 Agent、希望用户点一下就连上并建好 Agent 时用（2026-11-26，需求 #77）。接入指南见
+[device-driver-authoring.md](device-driver-authoring.md)，样板 `examples/device-driver/`。
+
+```
+业务系统后端（替用户，/api/* 鉴权）  POST /api/devices/enroll {name?, agent?}  → {code, expires_in}
+设备（matrix-connect setup <服务器> --code <code>）
+  └─ POST /api/devices/enroll/redeem {code, name, hostname, harnesses}  → {token, device_id, agent_id, …}
+       同时建设备（所有者 = 签令牌的人）与 agent 规格里的 Agent（绑到这台设备）
+```
+
+- **一键创建 Agent**：`matrix-connect setup <服务器> --agent <名字> [--agent-harness …] [--agent-description …]`。
+  配对申请带上 Agent 规格（`POST /api/devices/pair` 的 `agent`），批准页显示它，批准时建设备的同时建好这个 Agent、绑到这台设备，
+  所有者是批准的人；拒绝或过期什么都不建。批准页写明它的权限。Agent 名全站唯一，重名时加所有者邮箱的前缀、再重名加序号
+  （`server._bound_agent`，每个用户带来的是同一个名字）；建不成时吊销刚建的设备、申请留在等待中，令牌不会交给连接器（`Pairings.approve` 的 `bind`）。指定的 harness 设备上没报告时申请直接 400。业务方的桌面端 Agent 用技能或提示词
+  替用户跑这条命令，用户只需在批准页点一次（接入指南第一节）。一次性令牌的兑换也接受设备这边的 `agent`，签令牌时指定的优先。
+- 2.5 节的配对码证明的是“这台电脑归批准的人”。业务系统已经知道是谁，所以由他（经 `/api/*` 鉴权）事先签一条令牌，
+  设备凭它直接兑换，省掉人在网页里输码这一步。签令牌的人就是设备与 Agent 的所有者，和批准配对码同一个口径。
+- 令牌 `secrets.token_urlsafe(32)`，10 分钟、只能兑换一次（`auth.Enrollments`，只在内存里，只存 sha256）；
+  每人同时最多 `ENROLL_MAX_PER_USER` 条。兑换不需要登录。指定的 harness 设备上没有时兑换失败但令牌留着；
+  建 Agent 失败时吊销刚签的设备，不留半成品。
+- 不让业务系统直接拿长期设备令牌（`POST /api/devices`）转交：长期凭据不经过业务后端与中间通道。
+- **外部驱动**：连接器按 entry point `matrix.connect_drivers` 加载外部驱动包（`main.load_drivers`），排在内置驱动前面；
+  构造参数约定为 `(bin_path=…, bridge_url=…)`。服务器按 `MATRIX_HARNESSES`（`models.add_harnesses`）追加认得的 harness，
+  不认的照旧在配对时被过滤。独立程序用 `MATRIX_CONNECT_EXTRA_DRIVERS` 把驱动包一起打进去（`packaging/matrix-connect.spec`），
+  部署方放进 `MATRIX_CONNECT_DIST`，安装脚本就下载这一份。
+
 ---
 
 ## 3. 能力与权限
