@@ -361,7 +361,7 @@ def key_setup(tmp_path: Path, monkeypatch, keys: list[dict], providers: list[dic
 
 def test_backend_calls_api_with_a_shared_key(tmp_path: Path, monkeypatch):
     """临时方案 api_keys：密钥对上就信 X-Matrix-User 说的是谁（公司内唯一的 user_id），按 bind_as 绑到 Matrix 用户，等同那个用户本人；
-    第一次来要带邮箱建账号，之后只认 user_id（邮箱换了也是同一个人）；新旧密钥都能用（轮换），删掉的立即作废；管理后台不认；没配就没有这条路。"""
+    没账号时靠邮箱建，之后只认 user_id（每次都带邮箱也行，带了不同的邮箱也是同一个人、邮箱不变）；新旧密钥都能用（轮换），删掉的立即作废；管理后台不认；没配就没有这条路。"""
     entry = {"id": "expense", "name": "报销系统", "keys": ["${EXPENSE_MATRIX_KEY}", "${EXPENSE_MATRIX_KEY_NEXT}"]}
     net, login, path, c = key_setup(tmp_path, monkeypatch, [entry])
     as_ = lambda key, who, **h: {"X-Matrix-Key": key, "X-Matrix-User": who, **h}
@@ -372,6 +372,9 @@ def test_backend_calls_api_with_a_shared_key(tmp_path: Path, monkeypatch):
     assert me["email"] == "wang@corp.example" and me["agent_count"] == 1 and not c.cookies
     assert net.store.users[me["id"]].sso == {"expense": "E1001"}
     assert c.get("/api/me", headers=as_("n" * 40, "E1001")).json()["id"] == me["id"]     # 新密钥、只给 user_id
+    # 业务方每次都带邮箱也没事：绑定后不看它，带了别的邮箱也不改、不换人
+    r = c.get("/api/me", headers=as_("k" * 40, "E1001", **{"X-Matrix-User-Email": "wang.new@corp.example"}))
+    assert r.json()["id"] == me["id"] and r.json()["email"] == "wang@corp.example"
     g = c.post("/api/projects", json={"name": "报销"}, headers=as_("k" * 40, "E1001")).json()
     assert net.store.projects[g["id"]].owner_id == me["id"]
     assert c.get("/api/me", headers=as_("x" * 40, "E1001")).status_code == 401           # 密钥不对

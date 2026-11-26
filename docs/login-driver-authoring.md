@@ -296,7 +296,7 @@ Matrix 不向身份系统核实这个人：**密钥对上，就信后端说的�
 |---|---|
 | `X-Matrix-Key` | 密钥 |
 | `X-Matrix-User` | 这个人在公司里唯一、不会变的 user_id：绑定只认它。不要用工号、邮箱这类会换的 |
-| `X-Matrix-User-Email` | 邮箱。只有第一次来、要建账号时需要（Matrix 账号要有邮箱，邀请按它）；已绑定的人不看它，邮箱换了也不影响是谁 |
+| `X-Matrix-User-Email` | 邮箱。**建议每次都带**，业务方不用判断是不是第一次：还没绑定的人靠它建账号（Matrix 账号要有邮箱，邀请按它）；已绑定的人不看它，带了别的邮箱也不会改 Matrix 里的邮箱、不会换成别人 |
 
 ```bash
 curl -H "X-Matrix-Key: $EXPENSE_MATRIX_KEY" -H "X-Matrix-User: 8f3a2c01" -H "X-Matrix-User-Email: wang@corp.example" \

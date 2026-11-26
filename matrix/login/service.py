@@ -23,7 +23,7 @@
   docs/login-driver-authoring.md 第九节）。每项 `{"id": "expense", "name": "报销系统", "keys": ["${EXPENSE_MATRIX_KEY}"],
   "bind_as": "corp", "auto_create": true, "link_by_email": false, "allow_domains": [...]}`：
   `keys` 可以写几个（轮换时新旧并存，旧的删掉即作废），每个至少 32 个字符，只能经 `${…KEY…}` 环境变量写；
-  请求头 `X-Matrix-Key: <密钥>`、`X-Matrix-User: <这个人在公司里唯一、不会变的 user_id>`，第一次来的人再带 `X-Matrix-User-Email`。
+  请求头 `X-Matrix-Key: <密钥>`、`X-Matrix-User: <这个人在公司里唯一、不会变的 user_id>`，再带上 `X-Matrix-User-Email`（每次都带即可：没绑定时用它建账号，绑定后忽略）。
   身份按 `bind_as`（默认是这一项的 id）下的标识绑定到 Matrix 用户，规则和公司账号登录一样（auth.sso_user）；
   `bind_as` 写成公司账号登录入口的 id，两边就是同一份绑定。`/api/admin/*` 不认。
 - `config` 里的字符串可以写 `${环境变量}`：密钥放在环境变量（`deploy/.env`）里，不要直接写进文件。变量名里要带 `KEY`：
