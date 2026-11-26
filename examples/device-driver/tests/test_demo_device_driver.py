@@ -20,13 +20,12 @@ class Ctx:
         self.events.append(event)
 
 
-def fake_bin(tmp_path: Path) -> str:
-    """把假 Agent 包成一个可执行文件（真的 Agent 就是你们装在电脑上的那个程序）。"""
-    exe = tmp_path / "demo-agent"
-    exe.write_text(f"#!{sys.executable}\nimport sys; sys.path.insert(0, {str(ROOT)!r})\n"
-                   "from matrix_device_demo.fake_agent import main\nmain()\n", encoding="utf-8")
-    exe.chmod(0o755)
-    return str(exe)
+class FakeAgentDriver(DemoAgentDriver):
+    """拉起假 Agent 而不是 PATH 上的 demo-agent：直接用当前的 Python 跑它，Windows 上也一样
+    （真的 Agent 就是你们装在电脑上的那个程序，不用这样）。"""
+
+    def command(self, spec):
+        return [sys.executable, str(ROOT / "matrix_device_demo" / "fake_agent.py"), *super().command(spec)[1:]]
 
 
 def spec(tmp_path, prompt, session_id=None):
@@ -43,8 +42,8 @@ def test_entry_point_points_at_the_driver():
 
 
 def test_runs_a_turn_and_resumes_the_session(tmp_path):
-    d = DemoAgentDriver(bin_path=fake_bin(tmp_path))
-    assert d.available()
+    assert DemoAgentDriver(bin_path=sys.executable).available()  # 按路径找得到程序就算装了
+    d = FakeAgentDriver()
     ctx = Ctx()
     out = d.run(spec(tmp_path, "报销单 42"), ctx, threading.Event())
     assert out.ok and out.final_text == "已处理：报销单 42" and out.session_id
@@ -54,5 +53,5 @@ def test_runs_a_turn_and_resumes_the_session(tmp_path):
 
 
 def test_failure_is_reported(tmp_path):
-    out = DemoAgentDriver(bin_path=fake_bin(tmp_path)).run(spec(tmp_path, "请失败"), Ctx(), threading.Event())
+    out = FakeAgentDriver().run(spec(tmp_path, "请失败"), Ctx(), threading.Event())
     assert not out.ok and "exited 3" in out.error and "按要求失败" in out.error

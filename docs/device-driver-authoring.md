@@ -154,7 +154,9 @@ curl -b <cookie> -X POST http://127.0.0.1:8765/api/devices/enroll -H 'Content-Ty
 ```
 
 ```bash
-# 假 Agent 要在 PATH 上叫 demo-agent：样板的测试里有现成的包装（tests/test_demo_device_driver.py 的 fake_bin）
+# 假 Agent 要在 PATH 上叫 demo-agent（macOS / Linux 的写法；Windows 上在 PATH 里放一个 demo-agent.cmd，内容是 `@python <仓库>\examples\device-driver\matrix_device_demo\fake_agent.py %*`）
+mkdir -p /tmp/fake && printf '#!/bin/sh\nexec python3 %s/examples/device-driver/matrix_device_demo/fake_agent.py "$@"\n' "$PWD" > /tmp/fake/demo-agent
+chmod +x /tmp/fake/demo-agent && export PATH=/tmp/fake:$PATH
 uv run --with-editable examples/device-driver matrix-connect setup http://127.0.0.1:8765 --code <code> --no-service
 uv run --with-editable examples/device-driver matrix-connect run
 ```
