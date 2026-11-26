@@ -505,7 +505,7 @@ footer a { color: var(--text-2); }
           <div class="part"><h4>IM 入口</h4><p>在企业微信等 IM 里和自己的助理单聊：机器人可以是自己的，也可以是部署方的；在 Matrix 里拿一次性绑定码发给它，之后说的话进助理对话、回复回到 IM。别人和群里的消息不进网络</p></div>
           <div class="part"><h4>项目插件页面</h4><p>插件在项目页加自己的标签页，跑在不透明来源的沙箱 iframe 里，拿不到登录凭证、不能联网；读写经父页面的桥转给网络，以人名义发言要人在确认卡上点“发送”。同一页面也能在发布物里打开，那里只读发布时的快照</p></div>
           <div class="part"><h4>CLI</h4><p><code>matrix.cli</code> 在进程内构造网络、跑一轮对话、打印事件流，不经 HTTP；<code>matrix-plugin check</code> 在本地校验插件包；<code>matrix-dsh-check</code> 在升级云端 dsh 前后对真实 dsh 跑冒烟检查</p></div>
-          <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt），或部署方接上的公司账号（单点登录：内置通用 OAuth2，别的协议经登录驱动包）；登录状态是 Matrix 自己的 HttpOnly cookie；接口按用户过滤，无权限一律当作不存在（404）</p></div>
+          <div class="part"><h4>登录与可见性</h4><p>邮箱 + 密码（scrypt），或部署方接上的公司账号（单点登录：内置通用 OAuth2，别的协议经登录驱动包）；登录状态是 Matrix 自己的 HttpOnly cookie；和 Matrix 用同一套登录的业务系统，后端带着用户的凭据直接调同一套接口，经登录驱动向身份系统核实后等同用户本人；接口按用户过滤，无权限一律当作不存在（404）</p></div>
           <div class="part"><h4>管理后台</h4><p><code>/admin</code> 给部署方指定的管理员看整个网络的用量：人数、轮次、token、失败原因，按天、按用户、按模型分组，只有计数、不含任何对话与项目内容；并配置云侧 Agent 能选的模型与模型供应商（协议、地址、密钥）</p></div>
           <div class="part"><h4>人做的决定</h4><p>批准新 Agent 提议 · 逐次批准端侧 Agent 的工作区外溢与沙箱升权 · 确认助理起草的消息 · 验收、退回、取消自己下发的用户任务 · 看、停、删自己的定时 · 主持人发布、撤回发布物，读者给自己的 Agent 订阅</p></div>
         </div></div></div>

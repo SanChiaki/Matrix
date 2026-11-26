@@ -6,6 +6,7 @@
       "id": "demo",
       "name": "演示 SSO",
       "driver": "demo-sso",
+      "api_auth": true,
       "config": {"url": "http://127.0.0.1:9300", "app_id": "matrix", "app_secret": "${DEMO_SSO_KEY}"}
     }
   ]

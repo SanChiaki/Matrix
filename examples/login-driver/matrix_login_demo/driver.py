@@ -8,10 +8,13 @@
 2. 登录后跳回 `<回跳地址>&ticket=<一次性票据>`；
 3. 应用的服务器拿票据去问：`GET {url}/validate?ticket=…&service=…`，请求头 `X-App-Secret: <应用密钥>`，
    得到 `{"ok": true, "user": {"uid": "…", "mail": "…", "name": "…"}}`。票据只能用一次，只对签发时的回跳地址有效。
+4. 登录后浏览器还有一个主域名下共享的登录会话 cookie（`demo_sso`）。持有它的值的后端可以问：
+   `GET {url}/session`，请求头 `X-App-Secret` 与 `X-Session: <cookie 的值>`，回答同第 3 条；用户退出后不再认。
+   业务系统的后端把这个值转给 Matrix（`Authorization: Bearer <值>`），Matrix 经 verify 走这一条（login.json 里 `api_auth`）。
 
 login.json 里这样写（密钥放环境变量）：
 
-    {"id": "corp", "name": "公司账号", "driver": "demo-sso",
+    {"id": "corp", "name": "公司账号", "driver": "demo-sso", "api_auth": true,
      "config": {"url": "http://127.0.0.1:9300", "app_id": "matrix", "app_secret": "${DEMO_SSO_KEY}"}}
 """
 
@@ -52,18 +55,24 @@ class DemoDriver(Driver):
         if not ticket:
             raise LoginError("回调里没有票据")
         # 协议：服务器直接向身份系统核实票据。只信这里拿到的用户，不信浏览器带来的任何用户信息
-        req = urllib.request.Request(f"{self.url}/validate?{urlencode({'ticket': ticket, 'service': flow.return_url})}",
-                                     headers={"X-App-Secret": self.app_secret, "Accept": "application/json"})
+        return self._ask(f"{self.url}/validate?{urlencode({'ticket': ticket, 'service': flow.return_url})}", {}, "票据")
+
+    def verify(self, credential: str) -> Identity:
+        # 协议：业务系统的后端转来的登录会话 cookie 的值，向身份系统核实它现在还有效、是谁（login.json 里 api_auth 打开才用）
+        return self._ask(f"{self.url}/session", {"X-Session": credential}, "登录会话")
+
+    def _ask(self, url: str, headers: dict[str, str], what: str) -> Identity:
+        req = urllib.request.Request(url, headers={"X-App-Secret": self.app_secret, "Accept": "application/json", **headers})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 内网直连，不走环境变量里的代理
         try:
             with opener.open(req, timeout=15) as r:
                 body = json.loads(r.read(1_000_000).decode("utf-8"))
         except urllib.error.HTTPError as e:
-            raise LoginError(f"票据没有通过核实（{e.code}）") from e   # 消息给人看：不要带票据、密钥
+            raise LoginError(f"{what}没有通过核实（{e.code}）") from e   # 消息给人看：不要带票据、cookie、密钥
         except (urllib.error.URLError, OSError, ValueError) as e:
             raise LoginError("连不上演示 SSO") from e
         user = body.get("user") if isinstance(body, dict) and body.get("ok") is True else None
         if not isinstance(user, dict) or not user.get("uid"):
-            raise LoginError("演示 SSO 没有给出用户")
+            raise LoginError(f"演示 SSO 不认这个{what}")
         # subject 用不会变的标识（工号、用户 id），不要用会改的名字；email 是 Matrix 里邀请、认管理员用的
         return Identity(subject=str(user["uid"]), email=str(user.get("mail") or ""), name=str(user.get("name") or ""))

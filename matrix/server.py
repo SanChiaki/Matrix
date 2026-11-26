@@ -669,14 +669,43 @@ SYSTEM_WEB_ROUTES = frozenset({
 
 
 def current_user(request: Request) -> User:
-    """登录用户；没登录 401。业务系统账号只能用 SYSTEM_WEB_ROUTES 里的 GET 接口，别的 403。"""
+    """登录用户；没登录 401。业务系统账号只能用 SYSTEM_WEB_ROUTES 里的 GET 接口，别的 403。
+
+    先认 Matrix 自己的登录 cookie；没有时认外部系统的后端转来的用户凭据（`Authorization: Bearer`，login.json 里
+    打开了 api_auth 的入口经登录驱动向身份系统核实），这次请求就等同那个用户本人（docs/login-driver-authoring.md 第八节）。"""
     user = auth.user_of(request.app.state.network.store, request.cookies.get(auth.COOKIE))
+    if user is None:
+        user = _api_caller(request)
     if user is None:
         raise HTTPException(401, "请先登录")
     if user.is_system:
         route = request.scope.get("route")
         if request.method != "GET" or getattr(route, "path", None) not in SYSTEM_WEB_ROUTES:
             raise HTTPException(403, "业务系统账号在网页上只读：只能看它调用服务的会话与它发布的服务的用量")
+    return user
+
+
+def _api_caller(request: Request) -> User | None:
+    """外部系统带着用户凭据的请求 → 那个用户；没带凭据返回 None。只认请求头：浏览器不会自己带上它，
+    同一主域名下别的页面伪造不了（所以不直接读浏览器带来的共享 cookie）。管理后台不认这种凭据。"""
+    head = request.headers.get("authorization", "")
+    if not head[:7].lower() == "bearer ":
+        return None
+    logins: LoginService = request.app.state.login
+    if not logins.api_auth_enabled():
+        raise HTTPException(401, "这里没有开放用公司账号的凭据调用接口")
+    route = getattr(request.scope.get("route"), "path", "") or request.url.path
+    if route.startswith("/api/admin"):
+        raise HTTPException(403, "管理后台只能在网页上登录后使用")
+    network = request.app.state.network
+    try:
+        p, ident = logins.verify(head[7:], request.headers.get("x-matrix-login") or None)
+        user, created = auth.sso_user(network.store, p.id, ident.subject, ident.email, auto_create=p.auto_create,
+                                      link_by_email=p.link_by_email, allow_domains=p.allow_domains)
+    except (LoginError, auth.AuthError) as e:
+        raise HTTPException(401, f"凭据没有通过核实：{e}") from e
+    if created:
+        network.ensure_assistant(user.id)  # 和公司账号登录一样：第一次来就有账号和助理
     return user
 
 

@@ -251,6 +251,108 @@ def test_login_config_errors_are_contained(tmp_path: Path, monkeypatch):
     assert login.providers() == [] and login.password_login
 
 
+# ================= 外部系统带着用户凭据调接口（api_auth） =================
+class SessionDriver(FakeDriver):
+    """假的身份系统，带 verify：凭据 "s-<工号>" 是那个人的登录会话；"s-boom" 让驱动出错；别的不认。数一数问了几次。"""
+
+    kind = "fake-session"
+    asked: list[str] = []
+
+    def verify(self, credential: str) -> Identity:
+        SessionDriver.asked.append(credential)
+        if credential == "s-boom":
+            raise RuntimeError("secret-token-in-message")
+        if not credential.startswith("s-"):
+            raise LoginError("身份系统不认这个会话")
+        who = credential[2:]
+        return Identity(subject=who, email=f"{who}@corp.example")
+
+
+def api_setup(tmp_path: Path, providers: list[dict], now=None) -> tuple[Network, LoginService, TestClient]:
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path / "data", seed=False)
+    path = tmp_path / "login.json"
+    path.write_text(json.dumps({"providers": providers}), encoding="utf-8")
+    kw = {"now": now} if now else {}
+    login = LoginService(path, drivers={"fake": FakeDriver, "fake-session": SessionDriver}, **kw)
+    return net, login, TestClient(create_app(net, login=login))
+
+
+def bearer(cred: str, **extra: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {cred}", **extra}
+
+
+def test_backend_calls_api_as_the_user(tmp_path: Path):
+    """api_auth 打开后，外部系统的后端带着用户的凭据调 /api/*：等同那个用户本人（第一次来自动建账号、有助理），
+    写操作也行；对到用户的规则和公司账号登录一样（已有账号默认不绑）。不发 Matrix 自己的登录 cookie。"""
+    SessionDriver.asked = []
+    net, _, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake-session", "api_auth": True}])
+    r = c.get("/api/me", headers=bearer("s-u1001"))
+    assert r.status_code == 200, r.text
+    me = r.json()
+    assert me["email"] == "u1001@corp.example" and me["agent_count"] == 1
+    assert "set-cookie" not in r.headers and not c.cookies
+    g = c.post("/api/projects", json={"name": "报销"}, headers=bearer("s-u1001")).json()
+    assert net.store.projects[g["id"]].owner_id == me["id"]
+    # 第二个人只看得到自己的
+    assert c.get(f"/api/projects/{g['id']}", headers=bearer("s-u1001")).status_code == 200
+    assert c.get(f"/api/projects/{g['id']}", headers=bearer("s-u1002")).status_code == 404
+    # 已有同邮箱的账号、没开 link_by_email：不绑
+    auth.register(net.store, "u1003@corp.example", "password-123")
+    r = c.get("/api/me", headers=bearer("s-u1003"))
+    assert r.status_code == 401 and "已经有账号" in r.json()["detail"]
+    # 不认的凭据、驱动出错：401，不漏驱动的异常消息
+    assert c.get("/api/me", headers=bearer("bad")).status_code == 401
+    r = c.get("/api/me", headers=bearer("s-boom"))
+    assert r.status_code == 401 and "secret-token" not in r.text
+
+
+def test_api_auth_is_off_unless_the_deployer_opens_it(tmp_path: Path):
+    """默认不认外来凭据；驱动没实现 verify 时打不开（入口不启用，原因进 errors）；管理后台从不认外来凭据。"""
+    _, login, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake-session"}])
+    assert c.get("/api/me", headers=bearer("s-u1001")).status_code == 401
+    _, login, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake", "api_auth": True}])
+    assert login.providers() == [] and "verify" in login.errors["corp"]
+    assert not FakeDriver.can_verify() and SessionDriver.can_verify()
+
+    net, _, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake-session", "api_auth": True}])
+    me = c.get("/api/me", headers=bearer("s-u1001")).json()
+    assert net.is_admin(me["id"])                           # 第一个人是管理员……
+    r = c.get("/api/admin/usage", headers=bearer("s-u1001"))
+    assert r.status_code == 403                             # ……但管理后台只能在网页上登录后用
+
+
+def test_verified_credentials_are_cached_briefly(tmp_path: Path):
+    """核实结果按凭据的哈希缓存：通过的 60 秒内不再问身份系统，过期后重问（用户退出后很快失效）；不通过的也缓存一会儿。"""
+    SessionDriver.asked = []
+    clock = [1000.0]
+    _, login, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake-session", "api_auth": True}], now=lambda: clock[0])
+    for _ in range(3):
+        assert c.get("/api/me", headers=bearer("s-u1001")).status_code == 200
+    assert SessionDriver.asked == ["s-u1001"]
+    clock[0] += 61
+    c.get("/api/me", headers=bearer("s-u1001"))
+    assert SessionDriver.asked == ["s-u1001"] * 2
+    for _ in range(3):
+        assert c.get("/api/me", headers=bearer("bad")).status_code == 401
+    assert SessionDriver.asked.count("bad") == 1
+    clock[0] += 11
+    c.get("/api/me", headers=bearer("bad"))
+    assert SessionDriver.asked.count("bad") == 2
+    assert not any("s-u1001" in str(k) for k in login._verified)   # 表里只有哈希，没有凭据明文
+
+
+def test_several_api_auth_providers_need_to_be_named(tmp_path: Path):
+    """开了不止一个入口时，请求头 X-Matrix-Login 写明是哪个；同一个标识在不同入口下是不同的人。"""
+    _, _, c = api_setup(tmp_path, [{"id": "corp", "driver": "fake-session", "api_auth": True},
+                                   {"id": "lab", "driver": "fake-session", "api_auth": True,
+                                    "link_by_email": False}])
+    r = c.get("/api/me", headers=bearer("s-u1001"))
+    assert r.status_code == 401 and "X-Matrix-Login" in r.json()["detail"]
+    a = c.get("/api/me", headers=bearer("s-u1001", **{"X-Matrix-Login": "corp"})).json()
+    assert a["email"] == "u1001@corp.example"
+    assert c.get("/api/me", headers=bearer("s-u1001", **{"X-Matrix-Login": "nope"})).status_code == 401
+
+
 def test_builtin_and_template_drivers_pass_the_structure_check():
     """内置驱动在册；一致性检查能认出没写全的驱动（外部驱动包在自己的测试里跑 assert_driver）。"""
     drivers, errors = load_drivers()
@@ -422,4 +524,31 @@ def test_oauth2_driver_checks_its_config_and_the_identity():
             d.identify(Flow(state="s", redirect_uri="http://m/cb"), {"code": "x"})
     finally:
         os.environ.pop("T_SSO_KEY", None)
+        idp.close()
+
+
+def test_oauth2_driver_verifies_forwarded_access_tokens(tmp_path: Path, monkeypatch):
+    """内置 oauth2 驱动的 verify：外部系统转来的访问令牌拿去调 userinfo_url，取得到就是这个人；没配 userinfo_url 打不开。"""
+    monkeypatch.setenv("T_SSO_KEY", "s3cret")
+    idp = FakeIdP()
+    try:
+        idp.tokens["tok-42"] = {"id": 42, "account": "lin", "name": "Lin"}
+        d = OAuth2Driver(oauth_config(idp, client_secret="s3cret"))
+        assert OAuth2Driver.can_verify()
+        who = d.verify("tok-42")
+        assert (who.subject, who.email) == ("42", "lin@corp.example")
+        with pytest.raises(LoginError, match="取用户信息失败"):
+            d.verify("tok-unknown")
+        cfg = oauth_config(idp, client_secret="s3cret")
+        del cfg["userinfo_url"]
+        with pytest.raises(LoginError, match="userinfo_url"):
+            OAuth2Driver(cfg).verify("tok-42")
+
+        net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path / "data", seed=False)
+        path = tmp_path / "login.json"
+        path.write_text(json.dumps({"providers": [{"id": "corp", "driver": "oauth2", "api_auth": True,
+                                                   "config": oauth_config(idp)}]}), encoding="utf-8")
+        c = TestClient(create_app(net, login=LoginService(path)))
+        assert c.get("/api/me", headers={"Authorization": "Bearer tok-42"}).json()["email"] == "lin@corp.example"
+    finally:
         idp.close()
