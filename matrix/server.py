@@ -43,7 +43,7 @@ from .login.base import LoginError
 from .login.service import FLOW_COOKIE, FLOW_TTL_S, LoginService
 from .model_catalog import CatalogConflict, ModelCatalog
 from .plugins import PluginCatalog
-from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, User
+from .models import ATTACHMENT_LIMIT, ATTACHMENTS_PER_MESSAGE, DESCRIPTION_LIMIT, FILE_LIMIT, HARNESSES, User, add_harnesses
 from .runtime import DshRuntime, ScriptedRuntime
 from .scripted import scenario_handler
 
@@ -356,15 +356,43 @@ class DeviceIn(BaseModel):
     name: str = Field("", max_length=80)
 
 
+class EnrollAgentIn(BaseModel):
+    """兑换时建好、绑到这台设备上的 Agent（字段同 AgentIn，设备由兑换决定）。"""
+    name: str = Field(min_length=2, max_length=80)
+    description: str = Field(min_length=2, max_length=DESCRIPTION_LIMIT)
+    capabilities: list[str] = Field(default_factory=list, max_length=10)
+    authority: list[str] = Field(default_factory=list)
+    chat_enabled: bool = True
+    harness: str | None = Field(None, max_length=40)  # 设备上的哪个 harness；None = 设备默认
+    timeout_s: int | None = Field(None, ge=1)
+    max_delegations: int | None = Field(None, ge=1)
+
+
 class PairIn(BaseModel):
     """连接器的配对申请（不需要登录）。字段只用于在批准页展示，超长截断。"""
     name: str = ""
     hostname: str = ""
     harnesses: list[str] = Field(default_factory=list, max_length=16)
+    agent: EnrollAgentIn | None = None   # 批准时顺带建好的 Agent（一键创建）
 
 
 class PairPollIn(BaseModel):
     device_code: str = Field("", max_length=200)
+
+
+class EnrollIn(BaseModel):
+    """签一条一次性配对令牌（docs/device-runtimes.md 第 2.8 节）。"""
+    name: str = Field("", max_length=80)          # 设备名；空 = 用连接器报告的
+    agent: EnrollAgentIn | None = None
+
+
+class RedeemIn(BaseModel):
+    """连接器凭一次性令牌换设备令牌（不需要登录）。"""
+    code: str = Field("", max_length=200)
+    name: str = ""
+    hostname: str = ""
+    harnesses: list[str] = Field(default_factory=list, max_length=16)
+    agent: EnrollAgentIn | None = None   # 签令牌时没指定 Agent 时，用设备这边说的
 
 
 class NoteIn(BaseModel):
@@ -1917,7 +1945,11 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
     def pair_start(body: PairIn) -> dict:
         harnesses = list(dict.fromkeys(h for h in body.harnesses if h in HARNESSES))
         try:
-            p = pairings.start(body.name.strip()[:80], body.hostname.strip()[:80], harnesses)
+            agent = body.agent.model_dump() if body.agent else None
+            if agent and agent["harness"] and agent["harness"] not in harnesses:
+                why = "这台设备上没有它" if agent["harness"] in HARNESSES else "服务器不认得它（MATRIX_HARNESSES）"
+                raise HTTPException(400, f"Agent 要绑的 harness {agent['harness']}：{why}")
+            p = pairings.start(body.name.strip()[:80], body.hostname.strip()[:80], harnesses, agent)
         except auth.PairingLimit as e:
             raise HTTPException(429, str(e)) from e
         return {**p, "verify_path": f"/#pair={p['user_code']}"}
@@ -1932,15 +1964,65 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
 
     @app.post("/api/devices/pair/{code}/approve")
     def pair_approve(code: str, body: DeviceIn, user: Me) -> dict:
-        _pairing(code, user)  # 统一 404 / 429
+        spec = _pairing(code, user)[1].get("agent")  # 统一 404 / 429
         dev = pairings.approve(store, code, user.id, body.name)
-        return {**dev.public(), "online": False}
+        agent_id = _bound_agent(spec, dev.id, user.id)
+        return {**dev.public(), "online": False, "agent_id": agent_id}
+
+    def _bound_agent(spec: dict | None, device_id: str, user_id: str) -> str | None:
+        """一键创建：配对成功时把规格里的 Agent 建好、绑到这台设备上，所有者是批准 / 签令牌的人。
+        建不成就吊销刚签的设备，不留下一台没有 Agent 的半成品。"""
+        if not spec:
+            return None
+        try:
+            return network.create_agent(**spec, device_runtime=device_id, actor=user_id).id
+        except NetworkError:
+            auth.revoke_device(store, device_id, user_id)
+            raise
 
     @app.post("/api/devices/pair/{code}/deny")
     def pair_deny(code: str, user: Me) -> dict:
         _pairing(code, user)
         pairings.deny(code, user.id)
         return {"ok": True}
+
+    # 一次性配对令牌：签令牌要登录（业务系统的后端可以凭 api_keys 替用户签），兑换不需要（设备还没有令牌）
+    enrollments = network.enrollments
+
+    @app.post("/api/devices/enroll")
+    def enroll_issue(body: EnrollIn, user: Me) -> dict:
+        agent = body.agent.model_dump() if body.agent else None
+        if agent and agent["harness"] and agent["harness"] not in HARNESSES:
+            raise HTTPException(400, f"未知的 harness：{agent['harness']}")
+        try:
+            e = enrollments.issue(user.id, body.name.strip()[:80], agent)
+        except auth.PairingLimit as err:
+            raise HTTPException(429, str(err)) from err
+        return e
+
+    @app.post("/api/devices/enroll/redeem")
+    def enroll_redeem(body: RedeemIn) -> dict:
+        try:
+            e = enrollments.take(body.code)
+        except auth.AuthError as err:
+            raise HTTPException(404, str(err)) from err
+        harnesses = list(dict.fromkeys(h for h in body.harnesses if h in HARNESSES))
+        spec = e["agent"] or (body.agent.model_dump() if body.agent else None)  # 签令牌的人指定的优先
+        want = (spec or {}).get("harness")
+        if want and harnesses and want not in harnesses:
+            enrollments.put_back(e)  # 设备上没装这个 harness：令牌留着，装好后再兑换
+            raise HTTPException(400, f"这台设备上没有 {want}（它报告的是 {'、'.join(harnesses)}）")
+        dev, token = auth.issue_device_token(store, e["user_id"], e["name"] or body.name.strip()[:80])
+        with store.lock:
+            dev.hostname, dev.harnesses = body.hostname.strip()[:80], harnesses
+            store.save()
+        try:
+            agent_id = _bound_agent(spec, dev.id, e["user_id"])
+        except NetworkError:
+            enrollments.put_back(e)
+            raise
+        return {"status": "approved", "token": token, "device_id": dev.id, "device_name": dev.name,
+                "email": auth.email_of(store, e["user_id"]), "agent_id": agent_id}
 
     @app.delete("/api/devices/{device_id}")
     def delete_device(device_id: str, user: Me) -> dict:
@@ -2125,6 +2207,8 @@ def main() -> None:
                    help="外部 Agent 平台目录（JSON，改了就生效）；默认 <data>/agent-platforms.json，没有就不能接外部平台的 Agent")
     p.add_argument("--login", default=compat.env("LOGIN"),
                    help="公司账号登录的配置（JSON，改了就生效）；默认 <data>/login.json，没有就只有邮箱密码")
+    p.add_argument("--harnesses", default=compat.env("HARNESSES"),
+                   help="追加的自定义 harness（外部驱动，docs/device-driver-authoring.md）：id=显示名,id2；默认只有内置的三个")
     p.add_argument("--admins", default=compat.env("ADMINS"),
                    help="管理员邮箱（逗号分隔），能看 /admin 管理后台；默认最早注册的那个人")
     # 只在容器里改：容器内监听 0.0.0.0 才能被同一 compose 网络里的反向代理访问；端口不对宿主机发布
@@ -2137,6 +2221,10 @@ def main() -> None:
                         "经沙箱管理器 matrix-sandboxd（MATRIX_SANDBOXD_SOCKET）；默认读 MATRIX_CLOUD_SANDBOX，没有就 off")
     args = p.parse_args()
     args.data = args.data or compat.data_dir()
+    try:
+        add_harnesses(args.harnesses)
+    except ValueError as e:
+        p.error(str(e))
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,

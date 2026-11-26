@@ -19,6 +19,15 @@
   人在已登录的网页（`#pair=<码>`）里批准，令牌经轮询只交付一次，存进本机 0600 配置文件；再装成 launchd / systemd 用户服务（Windows 是任务计划程序里的登录任务）。
   `/api/devices/pair` 与 `…/pair/poll` 不需要登录，所以同时等待的申请数、每个用户输错配对码的次数都有上限（`auth.PAIR_*`），
   不要去掉。手动签发令牌（`POST /api/devices`）留作没有浏览器时的备用。
+- **一键创建 Agent**：`setup --agent <名字>`（可加 `--agent-harness`、`--agent-description`）让配对申请带上 Agent 规格，
+  批准（或兑换一次性令牌）时建好并绑到这台设备，所有者是批准 / 签令牌的人（`server._bound_agent`，建不成就吊销刚签的设备）。
+- **一次性配对令牌**（[设计](../device-runtimes.md) 第 2.8 节，接入指南 [device-driver-authoring.md](../device-driver-authoring.md)）：
+  已登录的人或替他调 `/api/*` 的业务系统后端 `POST /api/devices/enroll` 签一条（10 分钟、单次、可带要建的 Agent），
+  设备 `matrix-connect setup <服务器> --code <令牌>` 兑换（`/api/devices/enroll/redeem`，不需要登录），同时建好设备和 Agent，
+  所有者是签令牌的人。上限 `auth.ENROLL_*` 不要去掉。
+- **外部驱动**：连接器按 entry point `matrix.connect_drivers` 加载装在同一环境里的驱动包（`main.load_drivers`，排在内置的前面），
+  服务器按 `MATRIX_HARNESSES` 认额外的 harness（`models.add_harnesses`）；独立程序用 `MATRIX_CONNECT_EXTRA_DRIVERS` 打进驱动包。
+  样板 `examples/device-driver/`。
 - **免依赖安装**（[设计](../device-runtimes.md) 第 2.7 节）：用户电脑上不需要 uv、git、Python。CI 用 PyInstaller
   （`packaging/matrix-connect.spec`，`.github/workflows/connect-release.yml`，`connect-v*` tag 发 Release）打五个平台的独立程序；
   服务器提供 `/connect/install.sh`、`/connect/install.ps1`（不需要登录）与 `/connect/dist/<包>`（`MATRIX_CONNECT_DIST` 里有就给，

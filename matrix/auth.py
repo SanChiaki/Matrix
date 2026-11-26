@@ -300,7 +300,9 @@ class Pairings:
         for k in [k for k, p in self._by_device.items() if p["expires_at"] <= t]:
             del self._by_device[k]
 
-    def start(self, name: str, hostname: str, harnesses: list[str]) -> dict[str, Any]:
+    def start(self, name: str, hostname: str, harnesses: list[str],
+              agent: dict[str, Any] | None = None) -> dict[str, Any]:
+        """`agent`：批准时顺带建好、绑到这台设备上的 Agent（一键创建，docs/device-runtimes.md 第 2.8 节）。"""
         with self._lock:
             self._sweep()
             if sum(p["status"] == "pending" for p in self._by_device.values()) >= PAIR_MAX_PENDING:
@@ -309,7 +311,8 @@ class Pairings:
             device_code = secrets.token_urlsafe(32)
             self._by_device[device_code] = {
                 "user_code": user_code, "status": "pending", "expires_at": self.now() + PAIR_TTL_S,
-                "name": name, "hostname": hostname, "harnesses": harnesses, "created_at": self.now()}
+                "name": name, "hostname": hostname, "harnesses": harnesses, "agent": agent,
+                "created_at": self.now()}
         return {"device_code": device_code, "user_code": display_user_code(user_code),
                 "expires_in": PAIR_TTL_S, "interval": PAIR_INTERVAL_S}
 
@@ -332,7 +335,8 @@ class Pairings:
     def view(self, p: dict[str, Any]) -> dict[str, Any]:
         """批准页看到的内容：不含 device_code。"""
         return {"user_code": display_user_code(p["user_code"]), "name": p["name"], "hostname": p["hostname"],
-                "harnesses": list(p["harnesses"]), "created_at": p["created_at"], "expires_at": p["expires_at"]}
+                "harnesses": list(p["harnesses"]), "created_at": p["created_at"], "expires_at": p["expires_at"],
+                "agent": ({k: p["agent"].get(k) for k in ("name", "description", "harness")} if p.get("agent") else None)}
 
     def approve(self, store: Store, user_code: str, user_id: str, name: str = "") -> Device:
         device_code, p = self.lookup(user_code, user_id)
@@ -341,7 +345,7 @@ class Pairings:
             dev.hostname, dev.harnesses = p["hostname"], list(p["harnesses"])
             store.save()
         with self._lock:
-            p.update(status="approved", token=token, device_id=dev.id, name=dev.name, email=_email(store, user_id))
+            p.update(status="approved", token=token, device_id=dev.id, name=dev.name, email=email_of(store, user_id))
         return dev
 
     def deny(self, user_code: str, user_id: str) -> None:
@@ -365,9 +369,61 @@ class Pairings:
                     "device_name": p["name"], "email": p["email"]}
 
 
-def _email(store: Store, user_id: str) -> str:
+# ---- 一次性配对令牌（docs/device-runtimes.md 第 2.8 节） ----
+# 已登录的人（或业务系统的后端替他，login.json 的 api_keys）签一条一次性令牌，交给他自己的设备；设备凭它直接换到
+# 设备令牌，不用在网页里输配对码。签令牌的人就是设备的所有者；可以顺带一份 Agent 规格，兑换时建好并绑到这台设备上。
+# 和设备码配对一样只在内存里：服务重启后没用过的令牌作废，重新签一条即可。
+ENROLL_TTL_S = 600
+ENROLL_MAX_PER_USER = 16   # 每个用户同时没用过的令牌有上限
+
+
+def _enroll_hash(code: str) -> str:
+    return hashlib.sha256(("enroll:" + code).encode()).hexdigest()
+
+
+class Enrollments:
+    def __init__(self, now: Any = time.time):
+        self.now = now
+        self._lock = threading.Lock()
+        self._by_hash: dict[str, dict[str, Any]] = {}   # sha256(令牌) -> {user_id, name, agent, expires_at}
+
+    def _sweep(self) -> None:
+        """调用方持有锁。"""
+        t = self.now()
+        for k in [k for k, e in self._by_hash.items() if e["expires_at"] <= t]:
+            del self._by_hash[k]
+
+    def issue(self, user_id: str, name: str = "", agent: dict[str, Any] | None = None) -> dict[str, Any]:
+        """签一条令牌；明文只在这里返回一次。"""
+        with self._lock:
+            self._sweep()
+            if sum(e["user_id"] == user_id for e in self._by_hash.values()) >= ENROLL_MAX_PER_USER:
+                raise PairingLimit("没用过的配对令牌太多，请稍后再试")
+            code = secrets.token_urlsafe(32)
+            self._by_hash[_enroll_hash(code)] = {"user_id": user_id, "name": name, "agent": agent,
+                                                 "expires_at": self.now() + ENROLL_TTL_S}
+        return {"code": code, "expires_in": ENROLL_TTL_S}
+
+    def take(self, code: str) -> dict[str, Any]:
+        """取走令牌（只能用一次）。兑换中途失败、令牌还该能用时调用方用 put_back 放回去。"""
+        with self._lock:
+            self._sweep()
+            e = self._by_hash.pop(_enroll_hash(code or ""), None)
+        if e is None:
+            raise AuthError("配对令牌不存在、已用过或已过期")
+        return {**e, "_hash": _enroll_hash(code)}
+
+    def put_back(self, e: dict[str, Any]) -> None:
+        with self._lock:
+            if e["expires_at"] > self.now():
+                self._by_hash[e["_hash"]] = {k: v for k, v in e.items() if k != "_hash"}
+
+
+def email_of(store: Store, user_id: str) -> str:
     u = store.users.get(user_id)
     return u.email if u is not None else ""
+
+
 
 
 def _new_session(store: Store, user_id: str) -> str:

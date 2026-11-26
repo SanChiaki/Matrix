@@ -56,6 +56,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | 连接器（外部服务）与技能，个人与项目两层，项目的连接器面板与共享项目里的授权，写操作逐次确认，外部页面标签 | [docs/reference/connectors-skills.md](docs/reference/connectors-skills.md)，设计见 [docs/connectors-and-skills.md](docs/connectors-and-skills.md) |
 | 把已有系统接进来：包成 MCP、工具标注与逐次确认、`connectors.json` 字段、外部页面标签对对方系统的要求、上线前检查清单 | [docs/connector-authoring.md](docs/connector-authoring.md)（部署方接入指南，示例 `examples/dashboard-system/`；改了目录字段、确认规则、嵌入限制要同步改它） |
 | 端侧运行时、Matrix 客户端（`matrix-connect`）、设备配对、harness、材料下发（清单 + 缓存）、**云侧与端侧的差异与云侧的隔离欠账**、云侧外层沙箱（`MATRIX_CLOUD_ISOLATION`）与执行单元的 dsh 状态目录 | [docs/reference/device-runtimes.md](docs/reference/device-runtimes.md)，设计见 [docs/device-runtimes.md](docs/device-runtimes.md) |
+| 业务系统自己的设备端 Agent 接入：配对时一键创建 Agent（`setup --agent`）、一次性配对令牌（`/api/devices/enroll`、`setup --code`）、外部驱动（entry point `matrix.connect_drivers`、`MATRIX_HARNESSES`）、把驱动打进独立程序 | [docs/device-driver-authoring.md](docs/device-driver-authoring.md)，样板 `examples/device-driver/`（改了驱动接口、加载约定、打包方式要同步改这两处） |
 | 云侧执行面的生产级方案（阶段 0 单机止血已实现；阶段 1a 沙箱方式已实现、默认关（`MATRIX_CLOUD_SANDBOX`）；其余是设计）：每个执行单元一个沙箱、沙箱即托管设备、出口网关、分阶段与验收检查 | [docs/cloud-runtime.md](docs/cloud-runtime.md)；验证工具包 [deploy/isolation-check/](deploy/isolation-check/README.md) |
 | 存储：`state.json` 怎么写（fsync、`.bak`、读不了时退到上一份）、数据库存储（`MATRIX_STORE`：SQLite / PostgreSQL，增量保存、消息与事件与轮次分表、首次启动自动导入、`export-state` 回退）、附件进内容存储（`MATRIX_BLOBS`：本机 / S3，全站去重、双读、配额）、保存耗时与等锁时间的指标（`/api/admin/storage`、`/metrics`） | [docs/reference/storage.md](docs/reference/storage.md) |
 | 控制面的生产级方案（设计，未实现）：状态进数据库、重启不打断运行、备机接管、按租户分片、登录加固 | [docs/control-plane.md](docs/control-plane.md) |
@@ -87,7 +88,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/egress_ca.py` | 出网 CA（阶段 2b）：私钥只在控制面，按主机现签叶子证书，网关据此解开沙箱的 HTTPS |
 | `matrix/migrate.py` | `matrix migrate`：给现有工作目录建检查点（`workdirs`）、回退写回原目录（`export`）、清理原目录与旧 dsh 状态（`purge-legacy`，要 `--yes`） |
 | `matrix/checkpoints.py` | 内容存储（按 sha 的本机目录，接口留出换对象存储的余地）、分块收沙箱交来的内容并校验、每个执行单元的检查点（产物清单 + 最新两份 dsh 会话包）、旧工作目录导入、会话打包与解包 |
-| `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动（一个连接器同时提供多个）、设备码配对（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`）；云侧沙箱客户端（`sandbox.py`，`Connector` 的薄子类：一个沙箱一个执行单元、私有目录“材料进、改动出”、交检查点与恢复） |
+| `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动与外部驱动（entry point `matrix.connect_drivers`；一个连接器同时提供多个）、设备码配对与一次性配对令牌（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`）；云侧沙箱客户端（`sandbox.py`，`Connector` 的薄子类：一个沙箱一个执行单元、私有目录“材料进、改动出”、交检查点与恢复） |
 | `matrix/connect_install/`、`packaging/` | 连接器的免依赖安装：服务器在 `/connect/install.sh`、`/connect/install.ps1` 提供的安装脚本，PyInstaller 配方（CI：`.github/workflows/connect-release.yml`）；设计见 docs/device-runtimes.md 第 2.7 节 |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
@@ -164,6 +165,8 @@ MATRIX_STORE=sqlite uv run matrix --runtime scripted                 # 状态存
 uv run matrix migrate state|verify / export-state / backup-db --store sqlite   # 导入并对账、按内容比对、导回 state.json、在线备份（docs/reference/storage.md）
 uv run python -m matrix.cli "我要研究一个新的 AI 产品机会。" --runtime scripted   # 在项目群聊里 @ Product Strategy Agent
 uv run matrix-connect setup http://127.0.0.1:8765 --no-service   # 端侧连接器：设备码配对（浏览器里批准），检测本机全部 harness
+uv run matrix-connect setup http://127.0.0.1:8765 --code <令牌> --no-service   # 凭一次性配对令牌直接配对（POST /api/devices/enroll 签发）
+uv run matrix-connect setup http://127.0.0.1:8765 --agent 报销助手 --no-service   # 配对时一键创建一个绑在这台电脑上的 Agent
 uv run matrix-connect run                                        # 前台运行已配对的连接器
 uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设备令牌> --driver dsh   # 手动令牌（备用）
 ```
@@ -238,7 +241,7 @@ uv run matrix-connect --url ws://127.0.0.1:8765/api/devices/connect --token <设
 - 服务只监听 `127.0.0.1`，不要暴露到公网或改成 `0.0.0.0`。
 - 不要在日志、事件或 API 返回里带出密码、哈希、登录令牌；状态里的登录令牌只存 sha256（`auth.session_hash`），不要改回明文作键。
 - 公司账号登录：一次登录只认发起它的浏览器（一次性 cookie + state），不要放宽；外部系统带着用户凭据调接口（`api_auth`）只认 `Authorization` 请求头、只经驱动的 `verify` 向身份系统核实，不要改成直接读浏览器带来的共享 cookie、不要信凭据里自称的用户，`/api/admin/*` 不认它；临时的共享密钥（`api_keys`）只经 `${…KEY…}` 环境变量配、只留 sha256，默认没有，不要做成网页上能填、也不要放进 `/api/admin/*`；邮箱撞上已有账号默认不绑（`link_by_email` 由部署方打开），不要改成默认绑；身份系统的地址与密钥只来自部署方的 `login.json`（密钥经名字带 `KEY` 的环境变量），不要做成用户可填。
-- `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`）不要去掉。
+- `/internal/tools`、`/internal/approval`、`/internal/question`、`/internal/connectors/*` 只凭有效执行上下文令牌调用，不要放宽；`/mcp/remote` 调工具（`tools/call`）只凭“Matrix 签的密钥 + Matrix 发起且还没结束的平台会话 id”，不要放宽成只凭密钥（只有不执行东西的 `initialize` / `ping` / `tools/list` 为了平台试连不要会话 id）；外部平台地址只来自部署方的平台目录；设备配对接口的上限（`auth.PAIR_*`、`auth.ENROLL_*`）不要去掉；一次性配对令牌只能兑换一次、只存 sha256，不要改成可重复用或长期有效，也不要让业务系统转交长期设备令牌代替它。
 - 不要绕过 `build_patch_yaml` 生成的沙箱限制，也不要让审批应答者自动批准（端侧）、提问应答者替人作答；云侧覆盖层不插审批应答者、`/internal/approval` 对云侧一律 `unavailable`（不变量 14）；覆盖层要一直关掉 dsh 的默认技能根。
 - 云侧 dsh 的外层沙箱里只挂这个执行单元的工作目录与 dsh 状态目录（可写）和运行要的代码（只读）：不要把数据目录、别的执行单元或共用的 `~/.dsh` 挂进去，也不要因为某个功能要读别处就放宽（`outer_argv`，`matrix-dsh-check` 的 `read-isolation` 变红就不能上线）。
 - 连接器凭证只进 `vault/`，不要写进运行时的环境、覆盖层、工作目录；模型供应商密钥也只进 `vault/`，唯一的出口是那一轮 dsh 进程的环境变量（变量名要带 `KEY`，`matrix-dsh-check` 的 `key-hidden` 变红就不能升级 dsh），不要写进覆盖层或下发到端侧；用户自定义的连接器地址只能经 `mcp_client.check_public_url` / `public_only` 连 https 公网（网络会被当跳板访问内网），唯一的例外是部署方在 `connectors.json` 的 `allow` 里写的内网目标（可以用 http），不要另开口子；
