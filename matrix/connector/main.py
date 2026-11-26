@@ -243,21 +243,24 @@ def cmd_setup(args: argparse.Namespace) -> None:
         agent = {"name": args.agent, "description": args.agent_description or f"{args.agent}（{name}）"}
         if args.agent_harness:
             agent["harness"] = args.agent_harness
+    made: dict[str, Any] = {}
     try:
         if args.code:  # 一次性配对令牌（业务系统替你签的）：直接换设备令牌，不用在浏览器里批准
             conf = pairing.enroll(args.server, args.code, name=name, hostname=host, harnesses=found,
-                                  workroot=args.workroot, agent=agent)
+                                  workroot=args.workroot, agent=agent, result=made)
         else:
             conf = pairing.pair(args.server, name=name, hostname=host, harnesses=found, show=show,
-                                workroot=args.workroot, agent=agent)
+                                workroot=args.workroot, agent=agent, result=made)
     except (pairing.PairingError, ValueError) as e:
         print(f"配对失败：{e}", file=sys.stderr)
         raise SystemExit(1) from e
     conf.drivers = list(args.driver or [])
     cfg.save(conf, path)
     print(f"已配对：{conf.device_name} → {conf.email}（{'、'.join(found) or '暂无 harness'}）")
-    if agent:
-        print(f"已建好 Agent「{agent['name']}」，绑在这台电脑上")
+    if made.get("agent_id"):  # 以服务器说的为准：重名时它会改名；签令牌的人指定了别的 Agent 时建的是那个
+        print(f"已建好 Agent「{made.get('agent_name') or (agent or {}).get('name', '')}」，绑在这台电脑上")
+    elif agent:
+        print("提示：服务器没有建 Agent（它的版本可能还不支持一键创建），请到 Matrix 网页里建一个绑到这台设备。", file=sys.stderr)
     if args.no_service:
         print("运行：matrix-connect run")
         return

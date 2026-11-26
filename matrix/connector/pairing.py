@@ -40,9 +40,10 @@ def http_post(url: str, body: dict[str, Any]) -> dict[str, Any]:
 def pair(server: str, *, name: str = "", hostname: str = "", harnesses: list[str] | None = None,
          post: Post = http_post, show: Callable[[dict[str, Any]], None] = lambda p: None,
          sleep: Callable[[float], None] = time.sleep, workroot: str | None = None,
-         agent: dict[str, Any] | None = None) -> Config:
+         agent: dict[str, Any] | None = None, result: dict[str, Any] | None = None) -> Config:
     """跑完一次配对，返回要保存的配置。`show(p)` 收到 {user_code, verify_url, expires_in}。
-    `agent`：批准时顺带建好、绑到这台设备上的 Agent（{name, description, harness?}，一键创建）。"""
+    `agent`：批准时顺带建好、绑到这台设备上的 Agent（{name, description, harness?}，一键创建）。
+    `result`：给了就把服务器说的 agent_id / agent_name 填进去（重名时服务器会改名，以它说的为准）。"""
     base = normalize_server(server)
     body: dict[str, Any] = {"name": name, "hostname": hostname, "harnesses": list(harnesses or [])}
     if agent:
@@ -56,6 +57,7 @@ def pair(server: str, *, name: str = "", hostname: str = "", harnesses: list[str
         r = post(f"{base}/api/devices/pair/poll", {"device_code": p["device_code"]})
         status = r.get("status")
         if status == "approved":
+            _note_agent(result, r)
             conf = Config(server=base, token=str(r["token"]), device_id=str(r.get("device_id") or ""),
                           device_name=str(r.get("device_name") or name), email=str(r.get("email") or ""))
             if workroot:
@@ -69,8 +71,14 @@ def pair(server: str, *, name: str = "", hostname: str = "", harnesses: list[str
     raise PairingError("配对码已过期，请重新运行 setup")
 
 
+def _note_agent(result: dict[str, Any] | None, r: dict[str, Any]) -> None:
+    if result is not None and r.get("agent_id"):
+        result.update(agent_id=str(r["agent_id"]), agent_name=str(r.get("agent_name") or ""))
+
+
 def enroll(server: str, code: str, *, name: str = "", hostname: str = "", harnesses: list[str] | None = None,
-           post: Post = http_post, workroot: str | None = None, agent: dict[str, Any] | None = None) -> Config:
+           post: Post = http_post, workroot: str | None = None, agent: dict[str, Any] | None = None,
+           result: dict[str, Any] | None = None) -> Config:
     """凭一次性配对令牌直接换设备令牌（docs/device-runtimes.md 第 2.8 节），不用人在网页里批准。
     `agent` 只在签令牌时没指定 Agent 时生效。"""
     base = normalize_server(server)
@@ -81,6 +89,7 @@ def enroll(server: str, code: str, *, name: str = "", hostname: str = "", harnes
     r = post(f"{base}/api/devices/enroll/redeem", body)
     if r.get("status") != "approved" or not r.get("token"):
         raise PairingError("服务器没有给出设备令牌")
+    _note_agent(result, r)
     conf = Config(server=base, token=str(r["token"]), device_id=str(r.get("device_id") or ""),
                   device_name=str(r.get("device_name") or name), email=str(r.get("email") or ""))
     if workroot:

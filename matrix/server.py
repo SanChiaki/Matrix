@@ -1965,20 +1965,25 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
     @app.post("/api/devices/pair/{code}/approve")
     def pair_approve(code: str, body: DeviceIn, user: Me) -> dict:
         spec = _pairing(code, user)[1].get("agent")  # 统一 404 / 429
-        dev = pairings.approve(store, code, user.id, body.name)
-        agent_id = _bound_agent(spec, dev.id, user.id)
-        return {**dev.public(), "online": False, "agent_id": agent_id}
+        made: dict = {}
+        dev = pairings.approve(store, code, user.id, body.name,
+                               bind=lambda d: made.update(_bound_agent(spec, d.id, user.id)) or made)
+        return {**dev.public(), "online": False, "agent_id": made.get("agent_id"), "agent_name": made.get("agent_name")}
 
-    def _bound_agent(spec: dict | None, device_id: str, user_id: str) -> str | None:
+    def _bound_agent(spec: dict | None, device_id: str, user_id: str) -> dict:
         """一键创建：配对成功时把规格里的 Agent 建好、绑到这台设备上，所有者是批准 / 签令牌的人。
-        建不成就吊销刚签的设备，不留下一台没有 Agent 的半成品。"""
+        返回 {agent_id, agent_name}（没有规格时为空）。Agent 名全站唯一，而同一个业务系统的每个用户带来的是同一个名字：
+        重名时加上所有者邮箱的前缀、再重名加序号，不让第二个人起就批准失败。建不成由调用方吊销刚签的设备。"""
         if not spec:
-            return None
-        try:
-            return network.create_agent(**spec, device_runtime=device_id, actor=user_id).id
-        except NetworkError:
-            auth.revoke_device(store, device_id, user_id)
-            raise
+            return {}
+        with store.lock:
+            base = spec["name"].strip()
+            who = auth.email_of(store, user_id).split("@")[0][:30]
+            names = [base, *([f"{base[:48]}·{who}"] if who else []),
+                     *(f"{base[:48]}·{who} {i}" if who else f"{base[:70]} {i}" for i in range(2, 50))]
+            name = next((n for n in names if store.agent_by_name(n) is None), base)
+            a = network.create_agent(**{**spec, "name": name}, device_runtime=device_id, actor=user_id)
+        return {"agent_id": a.id, "agent_name": a.name}
 
     @app.post("/api/devices/pair/{code}/deny")
     def pair_deny(code: str, user: Me) -> dict:
@@ -2017,12 +2022,14 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
             dev.hostname, dev.harnesses = body.hostname.strip()[:80], harnesses
             store.save()
         try:
-            agent_id = _bound_agent(spec, dev.id, e["user_id"])
+            made = _bound_agent(spec, dev.id, e["user_id"])
         except NetworkError:
+            auth.revoke_device(store, dev.id, e["user_id"])  # 不留下一台没有 Agent 的半成品
             enrollments.put_back(e)
             raise
         return {"status": "approved", "token": token, "device_id": dev.id, "device_name": dev.name,
-                "email": auth.email_of(store, e["user_id"]), "agent_id": agent_id}
+                "email": auth.email_of(store, e["user_id"]),
+                "agent_id": made.get("agent_id"), "agent_name": made.get("agent_name")}
 
     @app.delete("/api/devices/{device_id}")
     def delete_device(device_id: str, user: Me) -> dict:

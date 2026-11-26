@@ -702,10 +702,13 @@ class Network:
                 self._check_members(added, actor)
                 for m in removed:
                     self._check_removable(g, m, actor)
+            if default_agent is not KEEP and default_agent:  # 先查完再动：不是成员时整个请求不生效
+                found = self.store.agents.get(default_agent) or self.store.agent_by_name(default_agent)
+                if found is None or found.id not in (g.member_ids if member_ids is None else new):
+                    raise NetworkError(f"{default_agent} 不是项目「{g.name}」的成员")
+            if member_ids is not None:
                 self._member_events(g, added, removed)
                 g.member_ids = new
-                if g.default_agent_id not in new:  # 默认回答成员离开了项目：清空，不悄悄换成别人
-                    g.default_agent_id = None
             if default_agent is not KEEP:
                 g.default_agent_id = self._member_ref(g, default_agent) if default_agent else None
             if name is not None and name.strip() != g.name:
@@ -754,6 +757,8 @@ class Network:
             conv.updated_at = time.time()
             for aid in removed:  # 授权跟着成员身份走：再加回来要重新确认
                 g.flow_grants.pop(aid, None)
+            if g.default_agent_id in removed:  # 默认回答成员离开了项目（移出、被删、随所有者退出）：清空，
+                g.default_agent_id = None      # 不悄悄换成别人，它再加回来也不会自己变回默认
 
     def _people_event(self, g: Project, text: str, about: str | None = None) -> None:
         """调用方持有锁。参与者变动写进群聊。about：说的是哪份资料 / 哪个技能（可见范围外的 Agent 收不到，不变量 26）。"""

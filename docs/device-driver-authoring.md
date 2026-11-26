@@ -23,6 +23,10 @@ matrix-connect setup https://matrix.corp.example --agent "报销助手" --agent-
 - 批准的同时，Matrix 建好设备和这个 Agent：所有者是批准的人，绑在这台电脑、`--agent-harness` 指定的驱动上
   （不写 = 这台设备的默认，装了外部驱动时就是它）。连接器随后装成后台服务、连上来。
 - `--agent-harness` 指定的驱动这台电脑上没检测到时，申请直接失败并说明原因，不会建出绑不上的 Agent。
+- **Agent 名全站唯一**，而每个用户的桌面端跑的是同一条命令：名字已被占用时，Matrix 自动加上所有者邮箱的前缀
+  （`报销助手·wang`，再重名加序号），不会因此批准失败。命令最后一行“已建好 Agent「…」”和批准接口返回的 `agent_name` 是实际的名字。
+- 批准页同时写明这个 Agent 的权限。命令行建的 Agent 不带 Matrix 的权限（委托别的成员、用连接器等都没有）；要给，所有者之后在 Matrix 里改。
+- Agent 建不成时批准失败并说明原因，设备不会留下，连接器继续等：处理后再点一次批准即可。
 - 只配对、不建 Agent：不写 `--agent`。已经配对过的电脑重跑 `setup` 会配对成一台新设备，升级用 `matrix-connect install`。
 
 给桌面端 Agent 的提示词可以这样写（按你们的地址和名字改）：
@@ -57,7 +61,8 @@ curl -X POST https://matrix.corp.example/api/devices/enroll \
 - `name`：设备名；不写就用连接器报告的（主机名）。
 - `agent`：可选。兑换时建好、绑到这台设备上。字段同 `POST /api/agents`（`name`、`description`、`capabilities`、`authority`、
   `chat_enabled`、`timeout_s`、`max_delegations`），另加 `harness`：设备上的哪个驱动，不写 = 设备的默认（第一个检测到的）。
-  `harness` 必须是服务器认得的（第四节），否则签的时候就 400。
+  `harness` 必须是服务器认得的（第四节），否则签的时候就 400。名字已被占用时同第一节：自动加所有者邮箱的前缀，
+  兑换返回的 `agent_name` 是实际的名字。
 - 令牌高熵、10 分钟有效、只能兑换一次；每人同时最多 16 条没用过的。只在服务器内存里：服务重启后没用过的作废，重新签一条即可。
 
 ### 交给设备

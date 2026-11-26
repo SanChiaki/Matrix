@@ -20,7 +20,8 @@
   `/api/devices/pair` 与 `…/pair/poll` 不需要登录，所以同时等待的申请数、每个用户输错配对码的次数都有上限（`auth.PAIR_*`），
   不要去掉。手动签发令牌（`POST /api/devices`）留作没有浏览器时的备用。
 - **一键创建 Agent**：`setup --agent <名字>`（可加 `--agent-harness`、`--agent-description`）让配对申请带上 Agent 规格，
-  批准（或兑换一次性令牌）时建好并绑到这台设备，所有者是批准 / 签令牌的人（`server._bound_agent`，建不成就吊销刚签的设备）。
+  批准（或兑换一次性令牌）时建好并绑到这台设备，所有者是批准 / 签令牌的人（`server._bound_agent`：重名时加所有者邮箱的前缀；建不成就吊销刚签的设备，设备码配对的申请留在等待中、令牌不交付）。
+  批准页要写明这个 Agent 的权限（规格来自没登录的设备，不要改成批准的人看不到的字段也照建）。
 - **一次性配对令牌**（[设计](../device-runtimes.md) 第 2.8 节，接入指南 [device-driver-authoring.md](../device-driver-authoring.md)）：
   已登录的人或替他调 `/api/*` 的业务系统后端 `POST /api/devices/enroll` 签一条（10 分钟、单次、可带要建的 Agent），
   设备 `matrix-connect setup <服务器> --code <令牌>` 兑换（`/api/devices/enroll/redeem`，不需要登录），同时建好设备和 Agent，

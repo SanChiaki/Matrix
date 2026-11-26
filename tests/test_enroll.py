@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from matrix import auth, models
 from matrix.connector import main as connect_main
+from matrix.engine import NetworkError
 from matrix.connector import pairing
 from matrix.server import create_app
 from tests.test_devices import build, hello
@@ -161,7 +162,7 @@ def test_pairing_with_agent_creates_it_on_approval(tmp_path):
                                              "agent": AGENT}).json()
     alice = client(net, "alice@x.io")
     seen = alice.get(f"/api/devices/pair/{p['user_code']}").json()
-    assert seen["agent"] == {"name": "业务助手", "description": AGENT["description"], "harness": "codex"}
+    assert seen["agent"] == {"name": "业务助手", "description": AGENT["description"], "harness": "codex", "authority": []}
     dev = alice.post(f"/api/devices/pair/{p['user_code']}/approve", json={}).json()
     agent = net.store.agents[dev["agent_id"]]
     assert agent.device_runtime == dev["id"] and agent.harness == "codex"
@@ -211,3 +212,40 @@ def test_setup_agent_flag(tmp_path, monkeypatch):
     connect_main.main(["setup", "http://x", "--name", "pc", "--no-service", "--no-browser",
                        "--config", str(tmp_path / "c.json"), "--agent", "业务助手", "--agent-harness", "codex"])
     assert seen["agent"] == {"name": "业务助手", "description": "业务助手（pc）", "harness": "codex"}
+
+
+def test_one_click_agent_name_taken_gets_a_suffix(tmp_path):
+    """Agent 名全站唯一，而同一个业务系统的每个用户带来的是同一个名字：第二个人起不该批准失败。"""
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    names = []
+    for email in ("alice@x.io", "bob@x.io", "bob@x.io"):
+        p = anon.post("/api/devices/pair", json={"harnesses": ["codex"], "agent": AGENT}).json()
+        dev = client(net, email).post(f"/api/devices/pair/{p['user_code']}/approve", json={}).json()
+        polled = anon.post("/api/devices/pair/poll", json={"device_code": p["device_code"]}).json()
+        assert polled["agent_id"] == dev["agent_id"] and polled["agent_name"] == dev["agent_name"]
+        names.append(dev["agent_name"])
+    assert names == ["业务助手", "业务助手·bob", "业务助手·bob 2"]
+    # 一次性令牌同样
+    code = client(net, "alice@x.io").post("/api/devices/enroll", json={"agent": AGENT}).json()["code"]
+    r = anon.post("/api/devices/enroll/redeem", json={"code": code, "harnesses": ["codex"]}).json()
+    assert r["agent_name"] == "业务助手·alice" and net.store.agents[r["agent_id"]].name == "业务助手·alice"
+
+
+def test_failed_one_click_agent_hands_out_no_token(tmp_path):
+    """Agent 建不成：设备吊销、申请留在等待中，连接器拿不到一个已经作废的令牌。"""
+    net = build(tmp_path)
+    anon = TestClient(create_app(net))
+    p = anon.post("/api/devices/pair", json={"harnesses": ["codex"], "agent": AGENT}).json()
+    alice = client(net, "alice@x.io")
+    assert alice.get(f"/api/devices/pair/{p['user_code']}").json()["agent"]["authority"] == AGENT.get("authority", [])
+    before = len(net.store.agents)
+
+    def boom(*a, **k):
+        raise NetworkError("建不成")
+    real, net.create_agent = net.create_agent, boom
+    assert alice.post(f"/api/devices/pair/{p['user_code']}/approve", json={}).status_code == 409
+    assert all(d.revoked for d in net.store.devices.values()) and len(net.store.agents) == before
+    assert anon.post("/api/devices/pair/poll", json={"device_code": p["device_code"]}).json() == {"status": "pending"}
+    net.create_agent = real
+    assert alice.post(f"/api/devices/pair/{p['user_code']}/approve", json={}).json()["agent_name"] == "业务助手"

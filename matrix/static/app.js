@@ -4198,7 +4198,8 @@ function renderPairing(box, panel) {
     <dl style="margin-top:12px"><dt>配对码</dt><dd><code>${esc(p.user_code)}</code></dd>
       <dt>主机名</dt><dd>${esc(p.hostname || "未报告")}</dd>
       <dt>检测到的 AI 工具</dt><dd>${(p.harnesses || []).length ? harnessTags(p) : '<span class="muted">没有（装好后重启 Matrix 客户端即可）</span>'}</dd>
-      ${p.agent ? `<dt>同时建好的 Agent</dt><dd>${esc(p.agent.name)}<span class="muted"> · ${esc(p.agent.description || "")}${p.agent.harness ? ` · ${esc(harnessLabel(p.agent.harness))}` : ""}</span></dd>` : ""}</dl>
+      ${p.agent ? `<dt>同时建好的 Agent</dt><dd>${esc(p.agent.name)}<span class="muted"> · ${esc(p.agent.description || "")}${p.agent.harness ? ` · ${esc(harnessLabel(p.agent.harness))}` : ""}</span></dd>
+      <dt>它的权限</dt><dd>${(p.agent.authority || []).length ? tags(p.agent.authority) : '<span class="muted">无（只能对话）</span>'}</dd>` : ""}</dl>
     <form class="editor" id="pair-approve">
       <div class="field"><label for="pa-name">设备名称</label><input id="pa-name" name="name" value="${esc(p.name || "")}" maxlength="80"></div>
       <p class="error" role="alert"></p>

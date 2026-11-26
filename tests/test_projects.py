@@ -382,3 +382,29 @@ def test_project_default_agent(tmp_path: Path):
     assert ca.post(f"/api/projects/{p['id']}/sessions", json={"title": "新"}).json()["agent_id"] == a.id  # 退回已在项目里的助理
     ca.patch(f"/api/projects/{p['id']}", json={"default_agent": w.id})
     assert ca.patch(f"/api/projects/{p['id']}", json={"default_agent": None}).json()["default_agent_id"] is None
+
+
+def test_project_default_agent_is_cleared_for_good_and_patch_is_atomic(tmp_path: Path):
+    """默认回答成员随所有者退出项目后清空，再加回来也不会自己变回默认；
+    同一个请求里既改成员又给了不是成员的默认，整个请求不生效。"""
+    net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
+    alice, bob = users(net, "alice@x.io", "bob@x.io")
+    w = net.create_agent("Writer", "w", [], [], actor=alice)
+    r = net.create_agent("Reviewer", "r", [], [], actor=alice)
+    helper = net.create_agent("Helper", "h", [], [], actor=bob)
+    p = net.create_project("P", "", [w.id], actor=alice, default_agent=w.id)
+    chat = len(net._project_chat(p).messages)
+    with pytest.raises(NetworkError, match="不是项目"):
+        net.update_project(p.id, member_ids=[r.id], default_agent=w.id, actor=alice)   # 改完成员后 Writer 不在了
+    assert p.member_ids == [w.id] and p.default_agent_id == w.id and len(net._project_chat(p).messages) == chat
+    assert net.update_project(p.id, member_ids=[w.id, r.id], default_agent="Reviewer", actor=alice).default_agent_id == r.id
+    net.invite(p.id, "bob@x.io", actor=alice)
+    net.respond_invitation(p.id, True, actor=bob)
+    net.add_member(p.id, helper.id, actor=bob)
+    net.update_project(p.id, default_agent=helper.id, actor=alice)
+    net.leave_project(p.id, actor=bob)                       # Helper 随所有者退出
+    assert p.default_agent_id is None
+    net.invite(p.id, "bob@x.io", actor=alice)
+    net.respond_invitation(p.id, True, actor=bob)
+    net.add_member(p.id, helper.id, actor=bob)
+    assert p.default_agent_id is None                        # 加回来不会自己变回默认

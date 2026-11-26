@@ -14,7 +14,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .models import Device, User, new_id
 from .store import Store
@@ -336,16 +336,26 @@ class Pairings:
         """批准页看到的内容：不含 device_code。"""
         return {"user_code": display_user_code(p["user_code"]), "name": p["name"], "hostname": p["hostname"],
                 "harnesses": list(p["harnesses"]), "created_at": p["created_at"], "expires_at": p["expires_at"],
-                "agent": ({k: p["agent"].get(k) for k in ("name", "description", "harness")} if p.get("agent") else None)}
+                "agent": ({k: p["agent"].get(k) for k in ("name", "description", "harness", "authority")}
+                          if p.get("agent") else None)}
 
-    def approve(self, store: Store, user_code: str, user_id: str, name: str = "") -> Device:
+    def approve(self, store: Store, user_code: str, user_id: str, name: str = "",
+                bind: Callable[[Device], dict[str, Any]] | None = None) -> Device:
+        """`bind`：设备建好后、令牌交付前要一起做成的事（一键创建的 Agent），返回的内容并进轮询结果。
+        它失败时吊销刚建的设备、申请留在等待中：连接器不会拿到一个马上作废的令牌，人可以改了再批准或拒绝。"""
         device_code, p = self.lookup(user_code, user_id)
         dev, token = issue_device_token(store, user_id, name.strip() or p["name"])
         with store.lock:
             dev.hostname, dev.harnesses = p["hostname"], list(p["harnesses"])
             store.save()
+        try:
+            extra = bind(dev) if bind is not None else {}
+        except Exception:
+            revoke_device(store, dev.id, user_id)
+            raise
         with self._lock:
-            p.update(status="approved", token=token, device_id=dev.id, name=dev.name, email=email_of(store, user_id))
+            p.update(status="approved", token=token, device_id=dev.id, name=dev.name, email=email_of(store, user_id),
+                     extra=extra)
         return dev
 
     def deny(self, user_code: str, user_id: str) -> None:
@@ -366,7 +376,7 @@ class Pairings:
             if p["status"] == "denied":
                 return {"status": "denied"}
             return {"status": "approved", "token": p["token"], "device_id": p["device_id"],
-                    "device_name": p["name"], "email": p["email"]}
+                    "device_name": p["name"], "email": p["email"], **p.get("extra", {})}
 
 
 # ---- 一次性配对令牌（docs/device-runtimes.md 第 2.8 节） ----
