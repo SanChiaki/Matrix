@@ -1,6 +1,6 @@
 # 项目服务（设计）
 
-> 状态：**第一期（Matrix 用户）已实现**，不变量 29，实现说明见第 9 节；**第二期（外部系统）已随外部应用接入实现**（[open-api.md](open-api.md)：凭应用令牌，不另发服务密钥）；第三期（SSO）随登录改造。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #72。相关设计：[project-publishing.md](project-publishing.md)（发布物）、
+> 状态：**第一期（Matrix 用户）已实现**，不变量 29，实现说明见第 9 节；第二期（外部系统）随外部应用一起撤销（2026-11-26，REQUIREMENTS #73）：外部系统带着用户凭据直接调 `/api/*`。需求见 [REQUIREMENTS.md](../REQUIREMENTS.md) #72。相关设计：[project-publishing.md](project-publishing.md)（发布物）、
 > [public-agents.md](public-agents.md)（服务面，不变量 27）、[remote-agents.md](remote-agents.md)（标准 HTTP 形状，不变量 28）、
 > [reference/archive.md](reference/archive.md)（可见范围，不变量 26）。调研：research: project-publishing#project-service。
 

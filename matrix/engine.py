@@ -69,7 +69,6 @@ from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, materia
                       RuntimeCapabilities, ToolBridge, adopt_dsh_session)
 from .store import Store
 from . import remote_agents as remote
-from .apps import AppsMixin
 from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage, tokens as usage_tokens
 
 HOME_FILE_MAX = 100_000_000     # 沙箱方式：私有目录里一个文件的改动最多收多少字节
@@ -223,7 +222,7 @@ class NeedsConfirm(NetworkError):
         self.items, self.digest = items, digest
 
 
-class Network(AppsMixin):
+class Network:
     def __init__(self, runtime: AgentRuntime, data_dir: Path, limits: Limits | None = None,
                  tool_url: str = "http://127.0.0.1:8765/internal/tools", seed: bool = True,
                  models: ModelCatalog | None = None, connectors: ConnectorCatalog | None = None,
@@ -286,7 +285,6 @@ class Network(AppsMixin):
         self._cascades: dict[str, dict[str, Any]] = {}
         self._seat_cascade: dict[str, str] = {}
         self._hook_hits: dict[str, list[float]] = {}      # 外部回调限速
-        self._app_hits: dict[str, list[float]] = {}       # 应用令牌限频（不变量 30）
         self._frame_key = secrets.token_bytes(32)
         self.bus = EventBus()
         if getattr(self.store.backend, "events", None) is not None:  # 数据库存储：事件落库，重启后网页续得上（M7）
@@ -306,6 +304,7 @@ class Network(AppsMixin):
         self._lock = self.store.lock
         self._pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="matrix-round")
         self._migrate_skill_packs()
+        self._drop_orphans()
         self._setup_sandbox(sandbox, sandbox_url, sandbox_limits)
 
     # ================= 归属与可见性 =================
@@ -465,14 +464,14 @@ class Network(AppsMixin):
         return g
 
     def hosts(self, g: Project | None, actor: str | None) -> bool:
-        """actor 在这个项目里算不算主持人：所有者本人，或业务系统账号主持的项目的负责人（不变量 30）。"""
-        return actor is None or (g is not None and (g.owner_id in (None, actor) or self.manages(actor, g.owner_id)))
+        """actor 在这个项目里算不算主持人：所有者本人。"""
+        return actor is None or (g is not None and g.owner_id in (None, actor))
 
     def hosted_project(self, project_id: str, actor: str | None) -> Project:
         """只有所有者 / 主持人能做的操作（改名、纲要、资源引用、邀请、删除）。"""
         g = self.visible_project(project_id, actor)
         if not self.hosts(g, actor):
-            raise NetworkError("只有主持人能这样做")  # 业务系统账号主持的项目：负责人等同主持人（不变量 30）
+            raise NetworkError("只有主持人能这样做")
         return g
 
     def visible_conv(self, conv_id: str, actor: str | None) -> Conversation:
@@ -763,8 +762,6 @@ class Network(AppsMixin):
     def _people_event(self, g: Project, text: str, about: str | None = None) -> None:
         """调用方持有锁。参与者变动写进群聊。about：说的是哪份资料 / 哪个技能（可见范围外的 Agent 收不到，不变量 26）。"""
         conv = self._project_chat(g)
-        if (app := self._via()) is not None:  # 经外部应用做的事，群聊里写明（不变量 30）
-            text = f"{text}（经「{app.name}」）"
         conv.messages.append(Message(id=new_id("msg"), role="event", text=text, about=about))
         conv.updated_at = time.time()
 
@@ -805,8 +802,8 @@ class Network(AppsMixin):
         with self._lock:
             g = self.hosted_project(project_id, actor)
             user = next((u for u in self.store.users.values() if u.email == email.strip().lower()), None)
-            if user is None or user.is_system:
-                raise NetworkError(f"没有用户 {email.strip()}")  # 业务系统账号不能被邀请：它自己主持项目
+            if user is None:
+                raise NetworkError(f"没有用户 {email.strip()}")
             if user.id in g.people:
                 raise NetworkError(f"{user.email} 已经是参与者")
             if user.id in g.invited:
@@ -854,8 +851,6 @@ class Network(AppsMixin):
             g = self.visible_project(project_id, actor)
             if g.owner_id == actor:
                 raise NetworkError("主持人不能退出；不再需要这个项目可以删除它")
-            if self.manages(actor, g.owner_id):
-                raise NetworkError("你是这个业务系统账号的负责人：要退出，请管理员在管理后台把你从负责人里去掉")
             self._drop_participant(g, actor, f"{self._email(actor)} 退出了项目")
             self.store.save()
         self.bus.emit("project.updated", project=g.to_dict())
@@ -868,8 +863,6 @@ class Network(AppsMixin):
             if user_id in g.invited:  # 撤回邀请
                 g.invited.remove(user_id)
             elif user_id in g.participants:
-                if self.manages(user_id, g.owner_id):
-                    raise NetworkError(f"{self._email(user_id)} 是这个业务系统账号的负责人：要让他退出，请管理员在管理后台改负责人")
                 self._drop_participant(g, user_id, f"{self._email(user_id)} 被主持人移出了项目")
             else:
                 raise NetworkError("不是这个项目的参与者")
@@ -907,8 +900,6 @@ class Network(AppsMixin):
         import json
         g.archive_rev += 1
         entry = {"ts": time.time(), "action": action, "by_user": by_user, "by_agent": by_agent, **detail}
-        if (app := self._via()) is not None:  # 经外部应用的写操作（不变量 30）
-            entry["via_app"] = app.id
         log = self.store.project_dir(g.id).parent / "log.jsonl"
         with log.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1303,14 +1294,9 @@ class Network(AppsMixin):
             d["authorities"] = dict(AUTHORITIES)
             d["embed_tabs"] = self.embed_tabs(g)
             d["embeddable"] = {r.id: s.name for r in g.refs if (s := self._embed_spec(r)) is not None}
-            d["is_host"] = self.hosts(g, actor)  # 业务系统账号主持的项目：负责人等同主持人（不变量 30）
+            d["is_host"] = self.hosts(g, actor)
             d["release_skills"] = sorted(self._release_skill_sources(g)) if d["is_host"] else []
             d["host"] = self._email(g.owner_id)
-            sysu = self.store.users.get(g.owner_id or "")
-            if sysu is not None and sysu.is_system:  # 参与者列表：主持人写应用名，负责人单独标出（在管理后台改，不在这里移出）
-                app = self.store.apps.get(sysu.app_id or "")
-                d["host"] = f"{app.name if app else sysu.email}（业务系统账号）"
-                d["managers"] = [u for u in sysu.managers if u in g.participants]
             d["participant_emails"] = {u: self._email(u) for u in g.people}
             d["invited_emails"] = {u: self._email(u) for u in g.invited} if d["is_host"] else {}
             if not d["is_host"]:
@@ -3129,7 +3115,7 @@ class Network(AppsMixin):
             if op == "context":
                 return {"project": {"id": g.id, "name": g.name, "kind": "joint" if g.shared else "internal", "shared": g.shared},
                         "plugin": {"name": m.name, "version": m.version, "title": m.title},
-                        "viewer": {"is_host": actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id)},
+                        "viewer": {"is_host": self.hosts(g, actor)},
                         "tables": m.public()["tables"],
                         "permissions": list(m.page_permissions)}
             if op == "archive.read":
@@ -3667,7 +3653,7 @@ class Network(AppsMixin):
         带一条工作日早报定时（在定时列表里能停）。已有 Agent 的人不补建（他们已经有助理）。"""
         with self._lock:
             u = self.store.users.get(user_id)
-            if u is None or u.is_system:  # 业务系统账号不新建 Agent（不变量 30），网页登录后也不补助理
+            if u is None:
                 return None
             if any(a.owner_id == user_id for a in self.store.agents.values()):
                 return self.assistant_of(user_id)
@@ -4174,6 +4160,27 @@ class Network(AppsMixin):
         self._archive_saved(g, event)
         self.bus.emit("release.updated", release_id=r.id)
         return r
+
+    def _drop_orphans(self) -> None:
+        """升级时删掉的业务系统账号（外部应用移除，store._drop_external_apps）留下的会话与连接器：会话连同附件删掉，
+        连接器连同保管库里的凭证删掉。主人已经不在的才动，所以重复执行无害。"""
+        with self._lock:
+            users = self.store.users
+            convs = [c.id for c in self.store.conversations.values() if c.owner_id and c.owner_id not in users
+                     and c.kind in ("session", "service", "dm")]
+            conns = [c for c in self.store.connections.values() if c.owner_id not in users]
+            if not convs and not conns:
+                return
+            for cid in convs:
+                del self.store.conversations[cid]
+                self._prune_attachments(cid)
+            for c in conns:
+                self.store.connections.pop(c.id, None)
+            self.store.save()
+        for c in conns:
+            if c.where == "cloud":
+                self.vault.delete(c.id)
+        print(f"[matrix] 已删除业务系统账号留下的 {len(convs)} 个会话、{len(conns)} 个连接器", flush=True)
 
     def _migrate_skill_packs(self) -> None:
         """技能包并进模板（docs/blueprints.md 第 7 节）：启动时把还在发布中的技能包各转成一份只有技能的模板（同样的读者与公开），
@@ -9545,11 +9552,11 @@ class Network(AppsMixin):
         """部署方指定了管理员（--admins / MATRIX_ADMINS）就按邮箱认；没指定时是最早注册的那个人。"""
         with self._lock:
             u = self.store.users.get(user_id or "")
-            if u is None or u.is_system:  # 业务系统账号从不是管理员
+            if u is None:
                 return False
             if self.admins:
                 return u.email in self.admins
-            first = min((x for x in self.store.users.values() if not x.is_system), key=lambda x: x.created_at, default=None)
+            first = min(self.store.users.values(), key=lambda x: x.created_at, default=None)
             return first is not None and u.id == first.id
 
     def admin_usage(self, actor: str | None, days: int = 30) -> dict[str, Any]:
@@ -9873,7 +9880,7 @@ class Network(AppsMixin):
                                   if q.conversation_id == conv_id and q.status == "pending" and q.target_user_id
                                   and (actor is None or q.target_user_id == actor)],
                     "project_shared": bool(g and g.shared),
-                    "is_host": g is None or actor is None or g.owner_id in (None, actor) or self.manages(actor, g.owner_id),
+                    "is_host": g is None or self.hosts(g, actor),
                     "is_home": self._is_home(conv),
                     "drafts": {d.id: self.draft_view(d) for d in self.store.drafts.values()
                                if d.home_id == conv.id and (actor is None or d.owner_id == actor)},
@@ -10036,12 +10043,7 @@ class Network(AppsMixin):
         """调用方持有锁。列表与事件里的项目：邀请名单只给主持人。"""
         d = self._project_dict(g, actor)
         d["host_email"] = self._email(g.owner_id) if g.owner_id else None
-        d["is_host"] = self.hosts(g, actor)  # 界面按它判断：负责人在网页上等同主持人（不变量 30）
-        host = self.store.users.get(g.owner_id or "")
-        if host is not None and host.is_system:  # 业务系统账号主持：写应用名与负责人（不变量 30）
-            app = self.store.apps.get(host.app_id or "")
-            d["host_email"] = f"{app.name if app else host.email}（负责人 {'、'.join(self._email(u) for u in host.managers)}）"
-            d["host_system"] = True
+        d["is_host"] = self.hosts(g, actor)
         if not d["is_host"]:
             d.pop("invited")
             d["suggestions"] = [x for x in d["suggestions"] if x["by_user"] == actor]

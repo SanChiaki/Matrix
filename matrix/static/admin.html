@@ -21,7 +21,6 @@
     <a href="#plugins" data-tab="plugins">插件</a>
     <a href="#im" data-tab="im">IM 机器人</a>
     <a href="#public" data-tab="public">公共 Agent</a>
-    <a href="#apps" data-tab="apps">外部应用</a>
   </nav>
   <span class="grow"></span>
   <span class="muted" id="me"></span>
@@ -204,26 +203,6 @@
     </div>
     <p class="error" id="pa-error" role="alert"></p>
     <div class="table-wrap"><table id="t-public"></table></div>
-  </div>
-  <div id="apps" data-pane="apps" hidden>
-    <div class="view-head">
-      <div><h1>外部应用</h1>
-        <p>公司的业务系统接进 Matrix：查可用的 Agent、组项目、发布和调用服务。只有这里登记过的应用能接进来。
-          可以给它建一个业务系统账号（不能新建 Agent，至少一名负责人；网页登录默认不开，开了也只读），也可以只让用户授权它代表自己。
-          令牌只显示一次；应用拿不到项目里的对话、过程和凭证。</p></div>
-    </div>
-    <p class="error" id="ap-error" role="alert"></p>
-    <div id="ap-token"></div>
-    <div class="table-wrap"><table id="t-apps"></table></div>
-    <h2>登记一个应用</h2>
-    <form id="ap-new" class="m-grid">
-      <label>名称<input name="name" required maxlength="80" placeholder="报销系统"></label>
-      <label>说明<input name="description" maxlength="1000"></label>
-      <fieldset id="ap-scopes"><legend>能申请的授权范围</legend></fieldset>
-      <label class="check"><input type="checkbox" name="system" checked>同时建它的业务系统账号</label>
-      <label>负责人（邮箱，逗号分隔）<input name="managers" placeholder="maya@example.com"></label>
-      <div><button type="submit">登记</button></div>
-    </form>
   </div>
   <dialog id="im-dialog" class="m-dialog">
     <form id="im-form" method="dialog">

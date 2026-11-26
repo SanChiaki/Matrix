@@ -4,7 +4,7 @@
 
 | 概念 | 含义 |
 | --- | --- |
-| User | 邮箱 + 密码（scrypt），或公司账号：`sso` 是登录入口 id → 这个人在那个身份系统里的标识，用公司账号建的账号没有密码（[login-driver-authoring.md](../login-driver-authoring.md)）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent；注册时还没有 Agent 就由网络建一个，否则默认最早创建的），开项目会话时经这个人确认才加入项目、项目会话里陪这个人聊；和它的私聊就是侧栏最上面的“助理”（[assistant.md](assistant.md)） |
+| User | 邮箱 + 密码（scrypt），或公司账号：`sso` 是登录入口 id → 这个人在那个身份系统里的标识，用公司账号建的账号没有密码（[login-driver-authoring.md](../login-driver-authoring.md)）。第一个注册的用户接管已有的无主数据。`assistant_id` 是这个人的**助理**（自己的一个 Agent；注册时还没有 Agent 就由网络建一个，否则默认最早创建的），开项目会话时这个人可以选择带它进项目、让它回答没 @ 任何人的消息（不是必须的）；和它的私聊就是侧栏最上面的“助理”（[assistant.md](assistant.md)） |
 | Agent（节点） | 名称、描述、能力、**自身权限**（运行时上限）、是否允许私聊、可选的运行时模型（云侧启用模型目录时是预置模型 id `model_preset`，否则是 provider / model / reasoning_effort；空则用默认）；
 运行上限 `timeout_s`（每轮运行超时秒数）与 `max_delegations`（每次被 @ / 每个任务的委托次数），默认都不限制；`skills`（勾上的我的技能名）、`connections`（勾上的我的连接）；**所有者**。Agent 只属于所有者、只为所有者工作（不变量 16），没有 public / shared。系统不管理注入 Agent 上下文的经验 |
 | 公共 Agent | 维护组（所有者 + `maintainers`）申请、管理员批准（`public_status`：pending / approved）后所有用户都能私聊、拉进项目的 Agent；批准时冻结权限（`public_authority`，服务面只在它之内），`public_connectors` 是服务面要用的连接器（用调用方自己的授权）。服务面每一轮的调用方是 `ExecContext.principal`（委托里是 `Task.caller_id`，群聊席位记在 `Seat.callers`）。见 [public-agents.md](../public-agents.md)、不变量 27 |
@@ -26,7 +26,6 @@
 | Schedule（定时） | 一个人的定时：`cron` 或一次性的 `at`，到点往 `agent_id`（他自己的 Agent，通常是助理）的私聊收件箱投一条，带 `title` 与 `instruction`。`created_by` 记是谁建的（人、注册时默认、助理），`failures` / `error` 记送不到的原因。只给主人看 |
 | Release（发布物） | 项目对外拿出的东西：主持人发布，按版本固定成快照（`releases/<id>/v<N>/`）。`method` 带技能、可公开；`fact` 带档案文件（可带插件视图 `view`）、只给 `readers`；`follow` 是事实跟随档案自动切版本。`AgentNode.subscriptions` 是人给自己的 Agent 订阅的发布物，只在这一轮能看到输出的人都看得到时生效。见 [releases.md](releases.md)、不变量 23 |
 | ProjectService（项目服务） | 项目对外提供的服务：主持人发布即生效，改了就是新版本。`entry` 是入口（调用方只和它对话），`staff` 是它能委托的岗位（空 = 项目里全部 Agent），`scope` 是能读的档案（实时），`inbox` 是唯一能写的收件目录，`authority` 是服务授予的权限，`readers` / `public` 是给谁用。服务会话是 `Conversation.kind = "service"`（`service_id`），属于调用方；沿途的执行上下文带 `ExecContext.svc`。见 [project-services.md](../project-services.md)、不变量 29 |
-| ExternalApp（外部应用） / AppGrant（应用令牌） | 管理员登记的业务系统（`scopes` 是能申请的范围上限，可以有业务系统账号 `system_user_id`）；一把令牌代表 `user_id`（授权它的人，或系统账号）在 `scopes` 与项目范围（`projects` + 经它建的 `Project.via_app`）内操作，只存 sha256。业务系统账号是 `User.kind = "system"`（`managers` 是负责人）。`AgentNode.open_to` 是所有者开放给哪些应用。见 [open-api.md](../open-api.md)、不变量 30 |
 | ImChannel（IM 机器人） | 一个 IM 里的机器人：`kind` 是驱动（`wecom` 或外部驱动），`owner_id` 是主人（个人的，只能绑主人）或为空（部署方的，管理员配、很多人各自绑定）。`config` 是驱动的非密钥字段，密钥在 `vault/im-<id>`；`status` 是 connecting / online / auth_failed / kicked / error / stopped。见 [im.md](im.md) |
 | ImBinding（IM 绑定） | 某个人在某个 IM 机器人上的身份：`sender` 是核验过绑定码的那个 IM 标识，`chat_id` 是推送用的单聊，`push` 管没人说话时的消息推不推，`error` 记最近一次推送失败。只给本人看（不变量 25） |
 | 插件 | 项目装上的一个业务扩展：清单声明的表（记录在 `projects/<id>/plugin-data/`，是项目档案的一部分）、沙箱里的页面、技能、触发。元数据在 `Project.plugins[name]`（版本、来源、安装人、`disabled`、`data_rev`、各触发的启用人与状态），只有主持人装。触发发的群聊消息、插件页面确认后发的消息带 `Message.via`（插件名）。见 [plugins.md](plugins.md)、不变量 20 |

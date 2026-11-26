@@ -175,17 +175,6 @@ def test_who_may_come_in(tmp_path: Path):
     assert sign_in(c2, "y1").headers["location"] == "/" and c2.get("/api/me").json()["id"] == u.id
 
 
-def test_system_account_cannot_use_company_login(tmp_path: Path):
-    """不变量 30 不因公司账号登录放宽：业务系统账号的网页登录只有管理员开的那条只读的路，邮箱撞上了也不绑。"""
-    net, login, _ = setup(tmp_path, {"link_by_email": True})
-    admin = auth.register(net.store, "admin@corp.example", "password-123")[0]
-    net.create_app(admin.id, "报销系统", system=True, managers=[admin.email])
-    sysu = next(u for u in net.store.users.values() if u.is_system)
-    c = browser(net, login)
-    assert "已经有账号" in error_of(sign_in(c, "s1", email=sysu.email))
-    assert sysu.sso == {} and c.get("/api/me").status_code == 401
-
-
 def test_password_login_can_be_turned_off(tmp_path: Path):
     """password_login=false：邮箱密码不能注册，登录只留管理员（应急）；没有可用的入口时不生效，不会把所有人关在外面。"""
     net, login, path = setup(tmp_path, password_login=False)
