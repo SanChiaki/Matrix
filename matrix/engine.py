@@ -244,6 +244,10 @@ class Network(AppsMixin):
         # 附件的内容存储（M8，docs/reference/storage.md「文件」）：None = 照旧每个对话一个目录；读的时候两边都找（双读）
         self.blobs = blobmod.from_config(compat.env("BLOBS"), self.store.root)
         self.upload_tmp = blobmod.Staging(self.store.root / "tmp" / "uploads")
+        # 正在往内容存储放的 sha → 几个上传在放（从放字节之前到记上引用之后）：回收不删它们。这把锁只管这张表与回收的删除，
+        # 回收时在它里面再拿 self._lock，所以不要在持有 self._lock 时调 _store_attachment
+        self._blob_mu = threading.Lock()
+        self._storing: dict[str, int] = {}
         self.upload_tmp.sweep()
         # 外部平台 Agent（docs/remote-agents.md，不变量 28）：部署方的平台目录；MCP 回调按（Agent, 平台会话 id）落到哪一轮
         self.platforms = platforms or remote.PlatformCatalog(self.store.root / "agent-platforms.json")
@@ -5163,29 +5167,41 @@ class Network(AppsMixin):
             known = sha in self.store.attachment_refs.get(conv_id, {})
             if not known:
                 self._check_quota(by, len(data), sha)
-        if self.blobs is None:
-            dest = self.store.attachment_dir(conv_id) / sha
-            if not dest.exists():
-                tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
-                with tmp.open("wb") as f:
-                    f.write(data)
-                    f.flush()
-                    os.fsync(f.fileno())
-                tmp.chmod(0o444)
-                os.replace(tmp, dest)
-        else:
-            staged, _ = self.upload_tmp.write(data)
-            try:
-                self.blobs.put_file(staged, sha)
-            except blobmod.BlobError as e:
-                raise NetworkError(f"附件没存上：{e}") from e
-            finally:
-                staged.unlink(missing_ok=True)
-        if not known:
-            with self._lock:
-                self.store.attachment_refs.setdefault(conv_id, {})[sha] = {
-                    "at": time.time(), "by": by, "size": len(data)}
-                self.store.save()
+        # 这份内容已经在内容存储里、但还没人引用（等着回收）时，put_file 不会再写；从这里到记上引用之间回收不能删它，
+        # 不然会留下“有引用、字节不在”（gc_blobs 在同一把锁里看这张表）
+        with self._blob_mu:
+            self._storing[sha] = self._storing.get(sha, 0) + 1
+        try:
+            if self.blobs is None:
+                dest = self.store.attachment_dir(conv_id) / sha
+                if not dest.exists():
+                    tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
+                    with tmp.open("wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    tmp.chmod(0o444)
+                    os.replace(tmp, dest)
+            else:
+                staged, _ = self.upload_tmp.write(data)
+                try:
+                    self.blobs.put_file(staged, sha)
+                except blobmod.BlobError as e:
+                    raise NetworkError(f"附件没存上：{e}") from e
+                finally:
+                    staged.unlink(missing_ok=True)
+            if not known:
+                with self._lock:
+                    self.store.attachment_refs.setdefault(conv_id, {})[sha] = {
+                        "at": time.time(), "by": by, "size": len(data)}
+                    self.store.save()
+        finally:
+            with self._blob_mu:
+                left = self._storing.get(sha, 1) - 1
+                if left > 0:
+                    self._storing[sha] = left
+                else:
+                    self._storing.pop(sha, None)
         return {"sha": sha, "name": fname, "size": len(data), "mime": _clean_mime(mime, fname)}
 
     # ---- 附件存在哪（M8）：内容存储有引用就读它，否则读每个对话自己的旧目录 ----
@@ -5264,12 +5280,34 @@ class Network(AppsMixin):
             return 0
         with self._lock:
             keep = {sha for refs in self.store.attachment_refs.values() for sha in refs}
+        if not keep:
+            # 状态里一条引用都没有：多半是接错了库或数据目录（空状态配上别人的内容存储），这时删就是全删。
+            # 误删比晚删代价大得多：宁可留着，等有引用了再回收
+            return 0
         n, cutoff = 0, time.time() - grace_s
         for sha, _size, when in list(self.blobs.items()):
-            if sha not in keep and when < cutoff:
+            if sha in keep or when >= cutoff:
+                continue
+            with self._blob_mu:   # 和“正在放同一份内容”的上传互斥：要么它先登记（这里跳过），要么这里先删（它再写一遍）
+                if sha in self._storing:
+                    continue
+                with self._lock:  # 列目录可能很久（对象存储）：删之前按现在的引用再看一眼
+                    used = any(sha in refs for refs in self.store.attachment_refs.values())
+                if used:
+                    continue
                 self.blobs.delete(sha)
                 n += 1
         return n
+
+    def _warm_attachments(self, ctx: ExecContext) -> None:
+        """用对象存储时，把这一轮要用的附件先拉进本机读缓存。在锁外调：_materials 持有全局锁列清单，
+        不能让它在锁里去对象存储下载（一个 20 MB 的附件会让全网等着）。"""
+        if not isinstance(self.blobs, blobmod.S3Blobs):
+            return
+        with self._lock:
+            items = self._attachments_for(ctx)
+        for a in items:
+            self._attachment_path(ctx.conversation_id, a["sha"])
 
     def _clean_attachments(self, conv: Conversation, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """调用方持有锁。消息上的附件：只认这个对话里已上传的内容；大小以文件为准，名称与类型重新清洗。"""
@@ -5448,10 +5486,14 @@ class Network(AppsMixin):
                                    audience=[agent.owner_id] if agent.owner_id else []))
 
     def _round_safe(self, kind: str, cid: str) -> None:
-        run_state = "failed"
-        holder = self.store.tasks.get(cid) if kind == "task" else None
-        rid = self.store.run_started(kind, cid, holder.delegatee_id if holder else cid.partition("/")[2])
+        run_state, rid = "failed", None
         try:
+            # 轮次台账只是记录：库一时写不了不能让这一轮跑不了，更不能跳过下面的出队（那样这个席位会一直算“在跑”）
+            holder = self.store.tasks.get(cid) if kind == "task" else None
+            try:
+                rid = self.store.run_started(kind, cid, holder.delegatee_id if holder else cid.partition("/")[2])
+            except Exception as e:  # noqa: BLE001
+                print(f"[matrix] 轮次台账没记上（开始）：{e!r}", file=sys.stderr)
             if kind == "seat":
                 conv_id, _, agent_id = cid.partition("/")
                 self._seat_round(self.store.conversations[conv_id], agent_id)
@@ -5461,7 +5503,11 @@ class Network(AppsMixin):
         except Exception as e:  # noqa: BLE001 —— 引擎缺陷也要落到对话或任务里
             self._internal_error(kind, cid, e)
         finally:
-            self.store.run_ended(rid, run_state)
+            if rid is not None:
+                try:
+                    self.store.run_ended(rid, run_state)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[matrix] 轮次台账没记上（结束）：{e!r}", file=sys.stderr)
             with self._lock:  # 判断与出队放在同一把锁里，wait_quiet 不会在两轮之间误判为静止
                 again = self._eligible(kind, cid)
                 wake = self.sandbox is not None and not again
@@ -7178,6 +7224,8 @@ class Network(AppsMixin):
         sandboxed = self._sandboxed(agent)
         unit = self._unit(ctx) if sandboxed else None
         try:
+            if agent.device_runtime or sandboxed:
+                self._warm_attachments(ctx)
             with self._lock:
                 materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime or sandboxed else []
                 llm_provider, llm_env = self._llm_provider(agent) if not agent.remote else (None, {})

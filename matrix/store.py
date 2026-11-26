@@ -1009,15 +1009,23 @@ class DbBackend:
             self.last_rows = 0
             self._edits_seen = edits
             return
-        with self.db.transaction():
-            self.db.executemany("INSERT INTO entity (kind, id, data, updated_at) VALUES (?, ?, ?, ?) "
-                                "ON CONFLICT (kind, id) DO UPDATE SET data = excluded.data, "
-                                "updated_at = excluded.updated_at", upserts)
-            self.db.executemany("DELETE FROM entity WHERE kind = ? AND id = ?", gone)
-            self.db.executemany("DELETE FROM message WHERE conversation_id = ?", [(c,) for c in rewrite + dropped])
-            self.db.executemany("INSERT INTO message (conversation_id, seq, id, data) VALUES (?, ?, ?, ?) "
-                                "ON CONFLICT (conversation_id, seq) DO UPDATE SET id = excluded.id, data = excluded.data",
-                                msg_rows)
+        def write() -> None:
+            with self.db.transaction():
+                self.db.executemany("INSERT INTO entity (kind, id, data, updated_at) VALUES (?, ?, ?, ?) "
+                                    "ON CONFLICT (kind, id) DO UPDATE SET data = excluded.data, "
+                                    "updated_at = excluded.updated_at", upserts)
+                self.db.executemany("DELETE FROM entity WHERE kind = ? AND id = ?", gone)
+                self.db.executemany("DELETE FROM message WHERE conversation_id = ?", [(c,) for c in rewrite + dropped])
+                self.db.executemany("INSERT INTO message (conversation_id, seq, id, data) VALUES (?, ?, ?, ?) "
+                                    "ON CONFLICT (conversation_id, seq) DO UPDATE SET id = excluded.id, "
+                                    "data = excluded.data", msg_rows)
+
+        try:
+            write()
+        except Exception:
+            if not self.db.lost():
+                raise
+            write()   # 连接断了（库重启、网络抖动）：这个事务整个没落下，重连后原样重做一次；还连不上就照常报错
         # 事务落下了才更新记忆：失败时下一次保存会重写同样的行
         self._rows.update(hashes)
         for k in gone:

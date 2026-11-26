@@ -276,3 +276,44 @@ def test_backend_choice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert isinstance(s.backend, DbBackend) and (tmp_path / "matrix.db").exists()
     assert s.metrics()["backend"] == "sqlite"
     s.close()
+
+
+def test_round_survives_run_ledger_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """轮次台账只是记录：它写不了（库一时不通）时这一轮照跑、照出队，席位不会一直算“在跑”。"""
+    data, _ = _populated(tmp_path)
+    net = _net(data, "sqlite")
+    c = TestClient(create_app(net))
+    assert c.post("/api/auth/login", json={"email": "a@example.com", "password": "password-123"}).status_code == 200
+
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("database is unreachable")
+    monkeypatch.setattr(net.store.backend, "run_started", boom)
+    home = _chat(net, c, "台账坏了也要回")
+    assert net.store.conversations[home].messages[-1].role == "agent"
+    assert not net._running, "出队照常"
+    monkeypatch.undo()
+    monkeypatch.setattr(net.store.backend, "run_ended", boom)
+    home = _chat(net, c, "结束时写不了也一样")
+    assert net.store.conversations[home].messages[-1].role == "agent" and not net._running
+    net.store.close()
+
+
+@pytest.mark.skipif(not PG, reason="要一个真的 PostgreSQL（MATRIX_TEST_PG）")
+def test_pg_reconnects_after_connection_loss(tmp_path: Path):
+    """库重启、切换、网络抖动之后连接没了：下一次保存重连并把那个事务整个重做，不用重启服务。"""
+    d = dbmod.Database(PG)
+    d.execute("DROP TABLE IF EXISTS entity, message, event, run, meta")
+    s = Store(tmp_path, seed=False, url=PG)
+    s.sandbox_orphans["before"] = 1.0
+    s.save()
+    d.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+              "WHERE datname = current_database() AND pid <> pg_backend_pid()")
+    s.sandbox_orphans["after"] = 2.0
+    s.save()   # 第一次写会撞上断掉的连接：重连、重做
+    rid = s.run_started("seat", "c/a", "a")
+    s.run_ended(rid)
+    s.close()
+    d.close()
+    again = Store(tmp_path, seed=False, url=PG)
+    assert again.sandbox_orphans == {"before": 1.0, "after": 2.0}
+    again.close()

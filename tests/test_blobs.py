@@ -163,3 +163,19 @@ def test_from_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert isinstance(s, S3Blobs) and s.prefix == "p/" and "SK" not in s.describe()
     with pytest.raises(BlobError):
         blobs.from_config("ftp://x", tmp_path)
+
+
+def test_s3_unreachable_is_a_blob_error(tmp_path: Path):
+    """对象存储连不上（不是 HTTP 状态码）也是 BlobError：调用方只认它，不会漏成 500。"""
+    import socket
+    with socket.socket() as sock:   # 一个确定没人听的端口
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    dead = S3Blobs(f"http://127.0.0.1:{port}", "bkt", "matrix", "AK", "SK", "us-east-1", tmp_path / "cache", timeout=2)
+    sha = hashlib.sha256(b"a").hexdigest()
+    src = tmp_path / "a"
+    src.write_bytes(b"a")
+    for call in (lambda: dead.has(sha), lambda: dead.path(sha), lambda: dead.put_file(src), lambda: list(dead.items())):
+        with pytest.raises(BlobError):
+            call()
+    assert not list((tmp_path / "cache" / ".incoming").glob("*")), "下载失败不留半个文件"
