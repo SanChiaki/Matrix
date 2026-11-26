@@ -897,7 +897,13 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
         """存储的指标（只有数字，不含内容）：每次保存的耗时、等锁的时间、状态有多大。"""
         if not network.is_admin(user.id):
             raise HTTPException(404, "unknown admin")
-        return network.store.metrics()
+        with network.store.lock:
+            usage = network.storage_usage()
+        top = sorted(usage["by_user"].items(), key=lambda x: -x[1])[:20]
+        files = {"backend": network.blobs.describe() if network.blobs else "legacy（每个对话一个目录）",
+                 "attachments": usage["files"], "bytes": usage["total"],
+                 "top_users": [{"email": store.users[u].email if u in store.users else u, "bytes": b} for u, b in top]}
+        return {**network.store.metrics(), "files": files}
 
     @app.get("/metrics")
     def prometheus_metrics(request: Request) -> PlainTextResponse:
@@ -2228,7 +2234,7 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
 def main() -> None:
     from . import utf8_stdio
     utf8_stdio()
-    if sys.argv[1:2] == ["migrate"] and sys.argv[2:3] and sys.argv[2] in ("state", "verify"):
+    if sys.argv[1:2] == ["migrate"] and sys.argv[2:3] and sys.argv[2] in ("state", "verify", "blobs"):
         from .storage_cli import main as storage_main   # 存储迁移（docs/reference/storage.md）
         storage_main(sys.argv[2], sys.argv[3:])
     if sys.argv[1:2] and sys.argv[1] in ("export-state", "backup-db"):

@@ -336,6 +336,9 @@ class Store:
         self.sandboxes: dict[str, SandboxRecord] = {}  # 云侧执行单元的沙箱台账（只在沙箱方式下有）
         # 对账时发现、控制面没有记录的沙箱（只剩卷）：执行单元 → 第一次发现的时间。过保留期才删，计时不随重启重来
         self.sandbox_orphans: dict[str, float] = {}
+        # 对话附件的引用（M8）：对话 → {sha: {at, by, size}}。内容存储是全站去重的，“这个对话里上传过这份”记在这里；
+        # 字节在内容存储（或旧的 attachments/<对话>/），先写字节再记这里
+        self.attachment_refs: dict[str, dict[str, dict[str, Any]]] = {}
         found = self.backend.read()
         if found is not None:
             self._load(*found)
@@ -486,6 +489,7 @@ class Store:
             "im_bindings": [x.to_dict() for x in self.im_bindings.values()],
             **({"sandboxes": [x.to_dict() for x in self.sandboxes.values()]} if self.sandboxes else {}),
             **({"sandbox_orphans": dict(self.sandbox_orphans)} if self.sandbox_orphans else {}),
+            **({"attachment_refs": self.attachment_refs} if self.attachment_refs else {}),
         }
 
     def save(self) -> None:
@@ -631,6 +635,8 @@ class Store:
             self.sandboxes[x["unit"]] = SandboxRecord(**_known(SandboxRecord, x))
         self.sandbox_orphans = {str(k): float(v) for k, v in (raw.get("sandbox_orphans") or {}).items()
                                 if isinstance(v, (int, float))}
+        self.attachment_refs = {str(c): {str(h): dict(r) for h, r in refs.items() if isinstance(r, dict)}
+                                for c, refs in (raw.get("attachment_refs") or {}).items() if isinstance(refs, dict)}
         self._one_trust_domain()
         self.default_assistants()
         if migrated:
@@ -811,7 +817,7 @@ ENTITY_KINDS: list[tuple[str, str, Any]] = [
 ]
 # 本身就是 键 → 值 的字典（state.json 里也是字典）
 DICT_KINDS: list[tuple[str, str]] = [("sessions", "sessions"), ("password_resets", "resets"),
-                                     ("sandbox_orphans", "sandbox_orphans")]
+                                     ("sandbox_orphans", "sandbox_orphans"), ("attachment_refs", "attachment_refs")]
 
 
 def _digest(text: str) -> bytes:

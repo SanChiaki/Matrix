@@ -1,8 +1,10 @@
-# 存储：状态文件、数据库、指标
+# 存储：状态文件、数据库、文件、指标
 
 > 入口见 [AGENTS.md](../../AGENTS.md)。代码：`matrix/store.py`（`Store`、`write_durable`、`TimedRLock`、`Timings`、
 > `JsonBackend` / `DbBackend`、`reconcile`）、`matrix/db.py`（SQL 薄层、`EventLog`）、`matrix/storage_cli.py`（迁移命令）、
-> `server.py` 的 `/api/admin/storage` 与 `/metrics`。测试：`tests/test_store_durability.py`、`tests/test_db_store.py`。
+> `matrix/blobs.py`（内容存储：本机目录 / S3 兼容、暂存区）、`engine.py`「对话附件」一节、
+> `server.py` 的 `/api/admin/storage` 与 `/metrics`。测试：`tests/test_store_durability.py`、`tests/test_db_store.py`、
+> `tests/test_blobs.py`、`tests/test_blob_attachments.py`。
 > 生产级的方向见 [control-plane.md](../control-plane.md) 第 4 节；这里只写已经实现的。
 
 ## state.json 怎么写（M2：写入止血）
@@ -100,3 +102,42 @@ matrix backup-db --out F          # SQLite 在线备份（服务开着也行，�
   要连续备份就用 Litestream 把它流式复制到对象存储。
 - PostgreSQL：`pg_dump` 定时全量 + WAL 归档做按时间点恢复。
 - 数据库只是状态；附件、档案、私有目录等文件仍在数据卷里，照旧一起备份。先备库、再备文件。
+
+## 文件：附件进内容存储（M8）
+
+`MATRIX_BLOBS` 选对话附件的字节放哪：
+
+| 值 | 放哪 |
+| --- | --- |
+| 不设、`legacy` | 照旧：每个对话一个目录 `<data>/attachments/<对话>/<sha>`（默认） |
+| `local` | 全站去重的内容存储 `<data>/blobs/ab/cd/<sha>`；`local:<绝对路径>` 放别处 |
+| `s3://<桶>/<前缀>` | S3 兼容的对象存储；另设 `MATRIX_S3_ENDPOINT`、`MATRIX_S3_ACCESS_KEY`、`MATRIX_S3_SECRET_KEY`、`MATRIX_S3_REGION`（默认 `us-east-1`）。路径风格寻址，SigV4 签名（`tests/test_blobs.py` 用 botocore 算的向量核对） |
+
+规则：
+
+- **全站去重，但只认本对话上传过的**：“这个对话里上传过这份内容”记在状态的 `attachment_refs`（对话 → sha → 上传时间、谁、大小）。
+  消息上挂附件、下载、挂进工作目录都先查它；知道别人文件的 sha 也挂不到自己的消息上（`test_dedup_does_not_leak_across_conversations`）。
+- **先写字节，再写库**：上传先写进暂存区 `<data>/tmp/uploads/`（fsync），放进内容存储（本机：fsync 后改名；S3：PUT 带内容的 sha256），
+  成功了才记引用、保存状态。中途失败最多留下没人引用的块。暂存区用完就删，超过 24 小时的残留启动时与每小时删一次。
+- **双读**：读的时候先看内容存储（有引用时），再看旧目录。切到 `local` / `s3` 之前上传的附件不用搬也照样能读；
+  从 `local` 切回 `legacy` 后，`blobs/` 里的照样读得到。
+- **下载经 Matrix**：可见性检查（看不到就 404）、“一律以附件下载”不变。用对象存储时 Matrix 先拉到本机读缓存
+  `<data>/cache/blobs/`（按 sha 校验，对象被改过就不认），再交给浏览器；对象存储本身不对外暴露、不发预签名地址。缓存可以随时删。
+- **删除**：清空、删除对话时引用立即去掉；字节等没有任何引用、且放进来超过 7 天（`blobs.GC_GRACE_S`）才由每小时的 `gc_blobs` 删。
+- **配额**：`MATRIX_QUOTA_USER_MB`（每人附件总量；同一份内容在一个人名下只算一次，Agent 发的算它的所有者）、
+  `MATRIX_QUOTA_TOTAL_GB`（全站）。不设就不限。超了上传被拒并说明已用多少。管理员在 `/api/admin/storage` 的 `files` 里看总量与用得最多的人
+  （只有邮箱与字节数，没有文件名与内容）。单个附件 20 MB 的上限不变。
+
+搬迁命令（服务停着跑；可重复、可中断）：
+
+```bash
+MATRIX_BLOBS=local matrix migrate blobs            # attachments/<对话>/<sha> → 内容存储，重算 sha 校验、记引用；旧目录不动
+matrix migrate blobs --purge-legacy [--yes]        # 删掉已经搬走的旧副本（不带 --yes 只列出）；“只在旧路径”为 0 后再做
+matrix migrate blobs --to-legacy                   # 回退：把内容存储里的拷回每个对话的旧目录，旧版本照样读
+```
+
+换到对象存储：先 `local` 跑稳 → 用对象存储自己的同步工具（`rclone sync`、`aws s3 sync` 等）把 `<data>/blobs/` 原样同步到
+`s3://<桶>/<前缀>/`（对象键和本机同一个布局 `ab/cd/<sha>`）→ 停服务、切配置、`matrix migrate blobs` 补一遍（已在的跳过）→ 启动。
+
+**还没搬的**：发布物快照（`releases/<id>/v<N>/`）与模板版本（`blueprints/<id>/v<N>/`）仍按版本存在数据卷里（各只留最近几版，量不大）；
+项目档案、私有目录、插件数据要三方合并与文件系统语义，按设计不进内容存储；沙箱方式的检查点本来就是按 sha 的 `content/`。

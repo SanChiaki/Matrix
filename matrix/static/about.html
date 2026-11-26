@@ -553,7 +553,8 @@ footer a { color: var(--text-2); }
           <span class="plus" aria-hidden="true"></span>
         </button>
         <div class="node-detail" id="d-store"><div><ul class="files">
-          <li><code>state.json</code>Agent · 项目 · 对话 · 任务 · 用户 · 设备 · 草稿 · 定时 · 发布物 · IM 机器人与绑定</li>
+          <li><code>state.json</code>Agent · 项目 · 对话 · 任务 · 用户 · 设备 · 草稿 · 定时 · 发布物 · IM 机器人与绑定（写完 fsync，上一份留作 <code>.bak</code>）</li>
+          <li><code>matrix.db</code> 或 PostgreSQL（<code>MATRIX_STORE</code>，可选）同一份状态按表存：只写变了的行，消息只追加，事件与每一轮运行也落库，可导出回 <code>state.json</code></li>
           <li><code>conversations/&lt;id&gt;/</code>每个席位独立的工作目录</li>
           <li><code>tasks/&lt;id&gt;/deliveries/</code>委托交付时的产物快照</li>
           <li><code>agents/&lt;id&gt;/</code>Agent 私有目录，网络不读、不注入</li>
@@ -562,7 +563,7 @@ footer a { color: var(--text-2); }
           <li><code>releases/&lt;id&gt;/v&lt;N&gt;/</code>发布物按版本固定的快照：技能、文件、插件页面代码</li>
           <li><code>users/&lt;id&gt;/skills/</code>每个人的技能库</li>
           <li><code>vault/</code>连接器凭证、模型供应商密钥与 IM 机器人密钥，加密保存，只在代调用或那一轮运行时解开</li>
-          <li><code>attachments/</code>对话附件按 sha256 只读存放</li>
+          <li><code>attachments/</code>对话附件按 sha256 只读存放；<code>MATRIX_BLOBS</code> 打开后改进全站去重的 <code>blobs/</code> 或 S3 兼容存储，下载仍经 Matrix 鉴权</li>
           <li><code>models.json</code> · <code>connectors.json</code> · <code>plugins.json</code> · <code>fetch.json</code>云侧预置模型、云端连接器、插件目录与抓取白名单，改文件即生效</li>
         </ul></div></div>
       </div>

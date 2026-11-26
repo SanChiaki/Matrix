@@ -53,7 +53,8 @@ def test_attachment_reaches_the_seat_as_a_path_line(tmp_path: Path):
     assert not call.modes[rel] & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)  # 只读副本
     workdir = tmp_path / chat.seats[a.id].workdir
     assert not (workdir / ATTACHMENTS).exists()  # 运行后丢弃，下一轮重新拷入
-    stored = net.store.attachment_dir(chat.id) / meta["sha"]
+    stored = net._attachment_path(chat.id, meta["sha"])   # 旧目录或内容存储，看 MATRIX_BLOBS
+    assert stored is not None
     assert stored.read_bytes() == b"hello attachment" and workdir not in stored.parents
     assert chat.messages[0].attachments == [meta]
 

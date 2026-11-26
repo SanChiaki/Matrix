@@ -4,6 +4,8 @@
     matrix migrate verify [--against F]     库里的状态和原来的 state.json（默认 state.json.imported）按内容比对
     matrix export-state [--out F] [--force] 库 → state.json（回退到旧版本之前做）
     matrix backup-db --out F                SQLite 在线备份（服务开着也行）；PostgreSQL 用 pg_dump
+    matrix migrate blobs [--to-legacy | --purge-legacy [--yes]]
+                                            附件搬进内容存储（MATRIX_BLOBS）/ 回退时拷回旧目录 / 清掉已搬走的旧副本
 
 库的位置都来自 --store 或 MATRIX_STORE（sqlite / sqlite:<路径> / postgresql://…）。
 """
@@ -165,8 +167,98 @@ def backup_db(argv: list[str]) -> int:
     return 0
 
 
+def migrate_blobs(argv: list[str]) -> int:
+    """M8：对话附件 `attachments/<对话>/<sha>` → 内容存储。可重复、可中断：已经在的跳过，sha 对不上的不搬并报出来。
+    旧目录不动（读的时候两边都找）；“只在旧路径”为 0 之后才可以 --purge-legacy。"""
+    from . import blobs as blobmod
+    p = argparse.ArgumentParser(prog="matrix migrate blobs")
+    p.add_argument("--data", default=None)
+    p.add_argument("--store", default=None, help="状态存在哪；默认 MATRIX_STORE")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--to-legacy", action="store_true", help="回退：把内容存储里的附件拷回每个对话的旧目录")
+    g.add_argument("--purge-legacy", action="store_true", help="删掉已经搬进内容存储的旧副本（不带 --yes 只列出）")
+    p.add_argument("--yes", action="store_true")
+    a = p.parse_args(argv)
+    data = Path(a.data or compat.data_dir()).resolve()
+    blobs = blobmod.from_config(compat.env("BLOBS"), data)
+    if blobs is None:
+        local = data / "blobs"
+        if not (a.to_legacy and local.is_dir()):
+            raise SystemExit("没有配内容存储：设 MATRIX_BLOBS（local 或 s3://…）")
+        blobs = blobmod.LocalBlobs(local)
+    s = Store(data, seed=False, url=a.store if a.store is not None else compat.env("STORE"))
+    legacy = data / "attachments"
+    stats = {"扫描": 0, "搬入": 0, "已在": 0, "sha 不对": 0, "拷回": 0, "删掉旧副本": 0, "只在旧路径": 0}
+    bad: list[str] = []
+    try:
+        if a.to_legacy:
+            with s.lock:
+                refs = {c: list(r) for c, r in s.attachment_refs.items()}
+            for cid, shas in refs.items():
+                for sha in shas:
+                    dest = legacy / cid / sha
+                    stats["扫描"] += 1
+                    if dest.is_file():
+                        continue
+                    src = blobs.path(sha)
+                    if src is None:
+                        bad.append(f"{cid}/{sha}：内容存储里没有")
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    tmp = dest.with_name(f".{sha}.tmp")
+                    shutil.copyfile(src, tmp)
+                    tmp.chmod(0o444)
+                    os.replace(tmp, dest)
+                    stats["拷回"] += 1
+        else:
+            for d in sorted(legacy.iterdir()) if legacy.is_dir() else []:
+                for f in sorted(d.iterdir()) if d.is_dir() else []:
+                    if not blobmod.SHA_RE.fullmatch(f.name):
+                        continue
+                    stats["扫描"] += 1
+                    with s.lock:
+                        ref = s.attachment_refs.get(d.name, {}).get(f.name)
+                        owner = (s.conversations[d.name].owner_id if d.name in s.conversations else None)
+                    in_store = ref is not None and blobs.has(f.name)
+                    if a.purge_legacy:
+                        if in_store:
+                            stats["删掉旧副本"] += 1
+                            if a.yes:
+                                f.chmod(0o644)
+                                f.unlink()
+                        else:
+                            stats["只在旧路径"] += 1
+                        continue
+                    if in_store:
+                        stats["已在"] += 1
+                        continue
+                    try:
+                        sha, size = blobs.put_file(f, f.name)   # 重算 sha 校验
+                    except blobmod.BlobError:
+                        stats["sha 不对"] += 1
+                        bad.append(f"{d.name}/{f.name}：内容和文件名的 sha 对不上，没搬")
+                        continue
+                    with s.lock:   # 先写字节，再记引用
+                        s.attachment_refs.setdefault(d.name, {}).setdefault(
+                            sha, {"at": f.stat().st_mtime, "by": owner, "size": size})
+                        s.save()
+                    stats["搬入"] += 1
+            if not a.purge_legacy:
+                stats["只在旧路径"] = stats["sha 不对"]
+    finally:
+        s.close()
+    print(f"内容存储：{blobs.describe()}")
+    print("，".join(f"{k} {v}" for k, v in stats.items() if v or k == "只在旧路径"))
+    for b in bad[:50]:
+        print(f"  {b}")
+    if a.purge_legacy and not a.yes and stats["删掉旧副本"]:
+        print("加 --yes 才真的删；删了以后回到旧版本只能从备份恢复附件。", file=sys.stderr)
+    return 0 if not bad else 1
+
+
 def main(cmd: str, argv: list[str]) -> None:
-    fn = {"state": migrate_state, "verify": verify, "export-state": export_state, "backup-db": backup_db}[cmd]
+    fn = {"state": migrate_state, "verify": verify, "export-state": export_state, "backup-db": backup_db,
+          "blobs": migrate_blobs}[cmd]
     try:
         code = fn(argv)
     except (RuntimeError, dbmod.DatabaseError) as e:

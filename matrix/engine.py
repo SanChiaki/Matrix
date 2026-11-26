@@ -50,6 +50,7 @@ from . import flow, homedir, plugins as pluginfs, releases as releasefs, skills 
 from .connector_catalog import ConnectorCatalog, ConnectorSpec
 from .plugin_service import ServiceError, ServiceHost, build_env, resolve_command, venv_python
 from . import blueprints as bps, plugin_sources as sources, sandbox
+from . import blobs as blobmod, compat
 from .web_fetch import FetchConfig
 from .mcp_client import MCPError, RemoteMCP, server_config
 from .vault import Vault, VaultError
@@ -240,6 +241,10 @@ class Network(AppsMixin):
         self.question_url = tool_url.rsplit("/", 1)[0] + "/question"
         self.store = Store(data_dir, seed=seed, url=store_url)
         shutil.rmtree(self.store.root / "staging", ignore_errors=True)  # 暂存文件只属于某一轮：重启时那些轮都已结束
+        # 附件的内容存储（M8，docs/reference/storage.md「文件」）：None = 照旧每个对话一个目录；读的时候两边都找（双读）
+        self.blobs = blobmod.from_config(compat.env("BLOBS"), self.store.root)
+        self.upload_tmp = blobmod.Staging(self.store.root / "tmp" / "uploads")
+        self.upload_tmp.sweep()
         # 外部平台 Agent（docs/remote-agents.md，不变量 28）：部署方的平台目录；MCP 回调按（Agent, 平台会话 id）落到哪一轮
         self.platforms = platforms or remote.PlatformCatalog(self.store.root / "agent-platforms.json")
         self.remote_bindings = remote.Bindings()
@@ -3051,6 +3056,8 @@ class Network(AppsMixin):
                 try:
                     self.run_schedules()
                     self.services.reap()
+                    if int(time.time() // 60) % 60 == 0:  # 每小时：内容存储里没人引用的、暂存区的残留（M8）
+                        self.gc_blobs()
                     if self.sandbox is not None:  # 沙箱对账、空闲停、保留期销毁；每 10 分钟清一次内容存储
                         self.reconcile_sandboxes(gc=int(time.time() // 60) % 10 == 0)
                 except Exception as e:  # noqa: BLE001 —— 定时触发出错不能拖垮服务
@@ -5141,21 +5148,128 @@ class Network(AppsMixin):
             conv = self.visible_conv(conv_id, actor)
             if conv.archived:
                 raise NetworkError("这个对话已归档，只读")
-        return self._store_attachment(conv.id, name, data, mime)
+        return self._store_attachment(conv.id, name, data, mime, by=actor)
 
-    def _store_attachment(self, conv_id: str, name: str, data: bytes, mime: str = "") -> dict[str, Any]:
-        """存进对话的附件区（按内容寻址、只读），返回附件说明。人上传与 Agent 的 send_file 共用。"""
+    def _store_attachment(self, conv_id: str, name: str, data: bytes, mime: str = "",
+                          by: str | None = None) -> dict[str, Any]:
+        """存进对话的附件区（按内容寻址、只读），返回附件说明。人上传与 Agent 的 send_file 共用。
+        by：算在谁的存储配额里（上传的人；Agent 发的算它的所有者）。
+        先写字节、再记引用（M8）：内容存储里放好（fsync）之后才在状态里记“这个对话有这份内容”，再保存。"""
         if len(data) > ATTACHMENT_LIMIT:
             raise NetworkError(f"附件超过上限 {ATTACHMENT_LIMIT // 1_000_000} MB")
         fname = _safe_filename(name)
         sha = hashlib.sha256(data).hexdigest()
-        dest = self.store.attachment_dir(conv_id) / sha
-        if not dest.exists():
-            tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
-            tmp.write_bytes(data)
-            tmp.chmod(0o444)
-            os.replace(tmp, dest)
+        with self._lock:
+            known = sha in self.store.attachment_refs.get(conv_id, {})
+            if not known:
+                self._check_quota(by, len(data), sha)
+        if self.blobs is None:
+            dest = self.store.attachment_dir(conv_id) / sha
+            if not dest.exists():
+                tmp = dest.with_name(f".{sha}.{secrets.token_hex(4)}")
+                with tmp.open("wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                tmp.chmod(0o444)
+                os.replace(tmp, dest)
+        else:
+            staged, _ = self.upload_tmp.write(data)
+            try:
+                self.blobs.put_file(staged, sha)
+            except blobmod.BlobError as e:
+                raise NetworkError(f"附件没存上：{e}") from e
+            finally:
+                staged.unlink(missing_ok=True)
+        if not known:
+            with self._lock:
+                self.store.attachment_refs.setdefault(conv_id, {})[sha] = {
+                    "at": time.time(), "by": by, "size": len(data)}
+                self.store.save()
         return {"sha": sha, "name": fname, "size": len(data), "mime": _clean_mime(mime, fname)}
+
+    # ---- 附件存在哪（M8）：内容存储有引用就读它，否则读每个对话自己的旧目录 ----
+    def _attachment_path(self, conv_id: str, sha: str) -> Path | None:
+        """这个对话的一份附件在本机能读的文件；没有就是 None。用对象存储时会拉到本机读缓存（按 sha 校验）。"""
+        if not SHA_RE.fullmatch(sha or ""):
+            return None
+        if sha in self.store.attachment_refs.get(conv_id, {}):
+            for b in self._blob_readers():
+                try:
+                    p = b.path(sha)
+                except blobmod.BlobError as e:
+                    print(f"[matrix] 读内容存储失败：{e}", file=sys.stderr)
+                    continue
+                if p is not None:
+                    return p
+        legacy = self.store.root / "attachments" / conv_id / sha
+        return legacy if legacy.is_file() else None
+
+    def _blob_readers(self) -> list[Any]:
+        """读附件时找哪些内容存储：配置的那个；切回旧目录（MATRIX_BLOBS=legacy）后，之前放进本机 blobs/ 的照样读得到。"""
+        if self.blobs is not None:
+            return [self.blobs]
+        local = self.store.root / "blobs"
+        return [blobmod.LocalBlobs(local)] if local.is_dir() else []
+
+    def _attachment_size(self, conv_id: str, sha: str) -> int | None:
+        """调用方持有锁。这个对话里有没有这份附件、多大：有引用就用记下的大小（不去对象存储问），否则看旧目录。"""
+        if not SHA_RE.fullmatch(sha or ""):
+            return None
+        ref = self.store.attachment_refs.get(conv_id, {}).get(sha)
+        if ref is not None:
+            return int(ref.get("size") or 0)
+        legacy = self.store.root / "attachments" / conv_id / sha
+        return legacy.stat().st_size if legacy.is_file() else None
+
+    # ---- 存储配额（M8）：按人统计附件的字节数（同一份内容在一个人名下只算一次），另有全站上限 ----
+    def storage_usage(self) -> dict[str, Any]:
+        """调用方持有锁。{"total": 全站字节数, "files": 份数, "by_user": {用户: 字节数}}（同一份内容全站只算一次）。"""
+        total: dict[str, int] = {}
+        mine: dict[str, dict[str, int]] = {}
+        for refs in self.store.attachment_refs.values():
+            for sha, r in refs.items():
+                size = int(r.get("size") or 0)
+                total[sha] = size
+                if r.get("by"):
+                    mine.setdefault(r["by"], {})[sha] = size
+        return {"total": sum(total.values()), "files": len(total),
+                "by_user": {u: sum(x.values()) for u, x in mine.items()}}
+
+    def _check_quota(self, by: str | None, size: int, sha: str) -> None:
+        """调用方持有锁。MATRIX_QUOTA_USER_MB（每人）、MATRIX_QUOTA_TOTAL_GB（全站）：超了拒绝，已有的同一份内容不再算。"""
+        per_user = _env_number("QUOTA_USER_MB", 1_000_000)
+        site = _env_number("QUOTA_TOTAL_GB", 1_000_000_000)
+        if not per_user and not site:
+            return
+        u = self.storage_usage()
+        if any(sha in refs for refs in self.store.attachment_refs.values()):
+            return  # 全站已有这份内容：不多占地方
+        if site and u["total"] + size > site:
+            raise NetworkError(f"全站存储已满（{u['total'] // 1_000_000} MB / {site // 1_000_000} MB）：请管理员清理或调高上限")
+        used = u["by_user"].get(by or "", 0)
+        if per_user and by and used + size > per_user:
+            raise NetworkError(f"你的存储配额满了（已用 {used // 1_000_000} MB / {per_user // 1_000_000} MB）："
+                               "删掉不再需要的对话附件，或请管理员调高配额")
+
+    def _quota_owner(self, ctx: ExecContext) -> str | None:
+        """Agent 发的文件算在谁名下：它的所有者。"""
+        a = self.store.agents.get(ctx.agent_id)
+        return a.owner_id if a else None
+
+    def gc_blobs(self, grace_s: float = blobmod.GC_GRACE_S) -> int:
+        """内容存储里没人引用、而且放进来超过宽限期（默认 7 天）的删掉；暂存区超过 24 小时的残留删掉。返回删了几份。"""
+        self.upload_tmp.sweep()
+        if self.blobs is None:
+            return 0
+        with self._lock:
+            keep = {sha for refs in self.store.attachment_refs.values() for sha in refs}
+        n, cutoff = 0, time.time() - grace_s
+        for sha, _size, when in list(self.blobs.items()):
+            if sha not in keep and when < cutoff:
+                self.blobs.delete(sha)
+                n += 1
+        return n
 
     def _clean_attachments(self, conv: Conversation, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """调用方持有锁。消息上的附件：只认这个对话里已上传的内容；大小以文件为准，名称与类型重新清洗。"""
@@ -5164,11 +5278,11 @@ class Network(AppsMixin):
         out: list[dict[str, Any]] = []
         for it in items:
             sha = str(it.get("sha", "")).lower()
-            f = self.store.attachment_dir(conv.id) / sha if re.fullmatch(r"[0-9a-f]{64}", sha) else None
-            if f is None or not f.is_file():
+            size = self._attachment_size(conv.id, sha)   # 只认这个对话里上传过的（内容存储是全站去重的）
+            if size is None:
                 raise NetworkError(f"附件 {it.get('name', '')} 不存在：先上传到这个对话")
             fname = _safe_filename(str(it.get("name", "")) or sha[:8])
-            a = {"sha": sha, "name": fname, "size": f.stat().st_size, "mime": _clean_mime(str(it.get("mime", "")), fname)}
+            a = {"sha": sha, "name": fname, "size": size, "mime": _clean_mime(str(it.get("mime", "")), fname)}
             if all(attachment_rel(x) != attachment_rel(a) for x in out):
                 out.append(a)
         return out
@@ -5181,9 +5295,10 @@ class Network(AppsMixin):
                          for a in m.attachments if a["sha"] == sha), None) or next(
                 (a for t in self.store.tasks.values() if t.conversation_id == conv.id and self.can_see_task(t, actor)
                  for a in t.attachments + t.sent_files + t.pending_files if a["sha"] == sha), None)
-            f = self.store.attachment_dir(conv.id) / sha if meta is not None else None
-            self._check(f is not None and f.is_file(), f"attachment {sha}")
-            return f, meta
+            self._check(meta is not None, f"attachment {sha}")
+        f = self._attachment_path(conv.id, sha)   # 在锁外：对象存储要先拉到本机读缓存
+        self._check(f is not None, f"attachment {sha}")
+        return f, meta
 
     def _attachments_for(self, ctx: ExecContext) -> list[dict[str, Any]]:
         """调用方持有锁。这个执行上下文能拿到的附件：席位是对话里它能看到的消息上的，任务是委托方转交的。"""
@@ -5207,12 +5322,12 @@ class Network(AppsMixin):
         discard(workdir / ATTACHMENTS)
         with self._lock:
             items = self._attachments_for(ctx)
-        src = self.store.attachment_dir(ctx.conversation_id)
         for a in items:
-            if (src / a["sha"]).is_file():
+            src = self._attachment_path(ctx.conversation_id, a["sha"])
+            if src is not None:
                 dst = workdir / attachment_rel(a)
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src / a["sha"], dst)
+                shutil.copy2(src, dst)
 
     def _prune_attachments(self, conv_id: str) -> None:
         """调用方持有锁。清空 / 删除对话后，删掉不再被消息或委托引用的附件。"""
@@ -5224,6 +5339,12 @@ class Network(AppsMixin):
         for f in d.iterdir() if d.is_dir() else []:
             if f.name not in keep:
                 discard(f)  # 存的是只读文件
+        refs = self.store.attachment_refs.get(conv_id)
+        if refs is not None:  # 内容存储里的字节等宽限期满了由 gc_blobs 删（别的对话可能也引用同一份）
+            for sha in [x for x in refs if x not in keep]:
+                del refs[sha]
+            if not refs or conv is None:
+                del self.store.attachment_refs[conv_id]
 
     def _seat(self, conv: Conversation, agent_id: str) -> Seat:
         """调用方持有锁。席位第一次被用到时创建。"""
@@ -6972,9 +7093,8 @@ class Network(AppsMixin):
             out += [material_file(f"{PROJECT_FILES}/{rel}", f)
                     for rel, f in self._visible_files(p, ctx.agent_id, self.store.project_services.get(ctx.svc or ""))
                     if f.stat().st_size <= 2_000_000]
-        src = self.store.attachment_dir(ctx.conversation_id)
-        out += [material_file(attachment_rel(a), src / a["sha"], sha=a["sha"]) for a in self._attachments_for(ctx)
-                if (src / a["sha"]).is_file()]  # 附件按内容寻址：文件名就是 sha，不用再算
+        out += [material_file(attachment_rel(a), f, sha=a["sha"]) for a in self._attachments_for(ctx)
+                if (f := self._attachment_path(ctx.conversation_id, a["sha"])) is not None]  # 按内容寻址，不用再算 sha
         agent = self.store.agents.get(ctx.agent_id)
         if agent is not None:  # 订阅的交付件（不变量 23）：和云侧一样只在能到达的人都是读者时下发
             out += [material_file(rel, f) for rel, f in self._release_materials(ctx, agent)]
@@ -7595,7 +7715,7 @@ class Network(AppsMixin):
                 return f"一轮回复最多附 {ATTACHMENTS_PER_MESSAGE} 个文件：多的打包成一个 zip 再发", True
             data = (self.store.root / "staging" / fid).read_bytes()
             return self._attach_sent(ctx, self._store_attachment(ctx.conversation_id, name or item["name"], data,
-                                                                 item["mime"])), False
+                                                                 item["mime"], by=self._quota_owner(ctx))), False
         top = Path(rel).parts[0] if Path(rel).parts else ""
         where = f"只能发当前工作目录里的文件（不含 {PROJECT_FILES}/、{HOME_DIR}/、{SKILLS}/、{RELEASES}/、{PLUGIN_MOUNT}/）"
         if top in (PROJECT_FILES, HOME_DIR, SKILLS, RELEASES, PLUGIN_MOUNT) or workdir.safe_rel(rel) is None:
@@ -7628,7 +7748,8 @@ class Network(AppsMixin):
                 name, data = (name if name.endswith(".zip") else f"{name}.zip"), workdir.pack(src)
             else:
                 name, data = name or src.name, src.read_bytes()
-        return self._attach_sent(ctx, self._store_attachment(ctx.conversation_id, name, data)), False
+        return self._attach_sent(ctx, self._store_attachment(ctx.conversation_id, name, data,
+                                                             by=self._quota_owner(ctx))), False
 
     @staticmethod
     def _attach_sent(ctx: ExecContext, a: dict[str, Any]) -> str:
@@ -7768,7 +7889,8 @@ class Network(AppsMixin):
                 if item is None:
                     raise NetworkError(f"找不到暂存文件 {rel}：只认这一轮上传到 /mcp/remote/files 的文件")
                 a = self._store_attachment(ctx.conversation_id, item["name"],
-                                           (self.store.root / "staging" / rel).read_bytes(), item["mime"])
+                                           (self.store.root / "staging" / rel).read_bytes(), item["mime"],
+                                           by=self._quota_owner(ctx))
                 if a not in out:
                     out.append(a)
                 continue
@@ -9126,8 +9248,8 @@ class Network(AppsMixin):
         sha = str(sha).lower()
         with self._lock:
             meta = next((a for a in self._attachments_for(ctx) if a["sha"] == sha), None)
-        f = self.store.root / "attachments" / ctx.conversation_id / sha
-        if meta is None or not re.fullmatch(r"[0-9a-f]{64}", sha) or not f.is_file():
+        f = self._attachment_path(ctx.conversation_id, sha) if meta is not None else None
+        if f is None:
             raise StagingRefused("这一轮拿不到这个文件", 404)
         return f, meta
 
@@ -10031,6 +10153,14 @@ def _archive_walk(root: Path) -> list[tuple[str, Path]]:
         if p.is_file() and not p.is_symlink() and not any(x.startswith(".") for x in rel.split("/")):
             out.append((rel, p))
     return out
+
+
+def _env_number(name: str, unit: int) -> int:
+    """部署方的数字配置（MATRIX_<name>），乘上单位；没设、写错或 ≤ 0 都当 0（不限）。"""
+    try:
+        return max(0, int(float(compat.env(name) or 0) * unit))
+    except ValueError:
+        return 0
 
 
 def _safe_filename(name: str) -> str:
