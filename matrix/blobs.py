@@ -46,7 +46,8 @@ def check_sha(sha: str) -> str:
 
 
 def _fsync_file(p: Path) -> None:
-    with p.open("rb") as f:
+    # 要用可写的句柄：Windows 上对只读打开的文件 fsync（FlushFileBuffers）会报 EBADF
+    with p.open("r+b") as f:
         os.fsync(f.fileno())
 
 
@@ -203,7 +204,7 @@ class S3Blobs:
         extra = {"content-length": str(size)} if size is not None else {}
         headers = sigv4_headers(method, url, self.region, self.access_key, self.secret_key, payload_sha, extra=extra)
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
-        return urllib.request.urlopen(req, timeout=self.timeout)  # noqa: S310 —— 地址只来自部署方的配置
+        return urllib.request.urlopen(req, timeout=self.timeout)  # 地址只来自部署方的配置
 
     def has(self, sha: str) -> bool:
         try:
