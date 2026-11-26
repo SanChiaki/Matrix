@@ -1126,7 +1126,7 @@ async function renderGuestRounds(a) {
   if (!box || !list.length) return;
   box.hidden = false;
   box.innerHTML = `<h3>在别人的会话里</h3><p class="hint">别人在项目会话里 @ 它时，经过它的那几轮你照常看得到；会话本身只属于开它的人。</p>
-    ${list.map((r) => `<details><summary><b>${esc(r.title)}</b> <span class="muted">· 项目会话 · ${esc(r.project_name)} · ${esc(r.caller)} · ${time(r.updated_at)}${r.archived ? " · 只读" : ""}</span></summary>
+    ${list.map((r) => `<details><summary><b>${esc(r.project_name)}</b> <span class="muted">· 项目会话 · ${esc(r.caller)} · ${time(r.updated_at)}${r.archived ? " · 只读" : ""}</span></summary>
       <ul class="thread mini">${r.messages.map((m) => m.role === "user"
         ? `<li class="msg user"><div class="content"><div class="who"><b>${esc(r.caller)}</b>${time(m.ts)}</div><div class="body md">${renderMarkdown(m.text)}</div></div></li>`
         : `<li class="msg agent"><div class="content"><div class="who"><b>${esc(a.name)}</b>${time(m.ts)}</div>${stepsHtml(m.steps || [], false)}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`).join("")}</ul>

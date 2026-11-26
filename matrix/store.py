@@ -525,9 +525,14 @@ class Store:
             if not backup.exists():
                 shutil.copy2(source, backup)
             raw, notes = _merge_groups(raw, self.root)
-        if _drop_apps_and_services(raw):  # 外部应用与项目服务移除之前的数据（原不变量 29、30）
-            if source is not None and not (backup := self.root / "state.pre-services.json").exists():
-                shutil.copy2(source, backup)
+        if _has_apps_or_services(raw):  # 外部应用与项目服务移除之前的数据（原不变量 29、30）：删之前另存一份
+            backup = self.root / "state.pre-services.json"
+            if not backup.exists():
+                if source is not None:
+                    shutil.copy2(source, backup)
+                else:  # 数据库存储：没有可以拷的文件，把读到的状态原样写出来
+                    backup.write_text(json.dumps(raw, ensure_ascii=False, default=str), encoding="utf-8")
+            _drop_apps_and_services(raw)
             migrated = True
         for a in raw.get("agents", []):
             a.pop("memory", None)  # 旧版本的 Agent Memory，已移除
@@ -730,26 +735,33 @@ class Store:
         return [p for p in self.projects.values() if agent_id in p.member_ids]
 
 
-def _drop_apps_and_services(raw: dict[str, Any]) -> bool:
+def _has_apps_or_services(raw: dict[str, Any]) -> bool:
+    """状态里还有外部应用与项目服务移除之前的数据（_drop_apps_and_services 要处理的）。"""
+    return bool(any(u.get("kind") == "system" for u in raw.get("users") or [])
+                or raw.get("apps") or raw.get("app_grants") or raw.get("project_services")
+                or any(p.get("via_app") for p in raw.get("projects", []))
+                or any(c.get("kind") == "service" for c in raw.get("conversations", [])))
+
+
+def _drop_apps_and_services(raw: dict[str, Any]) -> None:
     """外部应用与项目服务移除之前的数据（2026-11-26）：项目服务、外部应用与应用令牌丢弃；业务系统账号（kind = "system"）
-    删掉，它们主持的项目转给第一个还在的负责人（没有负责人时给第一个参与者、再不行给登记应用的管理员），其余负责人留作参与者。
-    服务会话、系统账号留下的会话与连接器（含附件与保管库里的凭证）由 Network 启动时清（engine._drop_orphans）。有要改的返回 True。"""
+    删掉，它们主持的项目转给第一个还在的负责人（没有负责人时给第一个参与者、再不行给登记应用的管理员、最早注册的用户：
+    没有主持人的项目所有人都看得到，不能留成那样），其余负责人留作参与者。
+    服务会话、系统账号留下的会话与连接器（含附件与保管库里的凭证）由 Network 启动时清（engine._drop_orphans）。"""
     users = raw.get("users") or []
     sys_users = {u["id"]: u for u in users if u.get("kind") == "system"}
     creators = {a["id"]: a.get("created_by") or "" for a in raw.get("apps") or [] if "id" in a}
-    changed = bool(sys_users or raw.get("apps") or raw.get("app_grants") or raw.get("project_services")
-                   or any(p.get("via_app") for p in raw.get("projects", []))
-                   or any(c.get("kind") == "service" for c in raw.get("conversations", [])))
     for k in ("apps", "app_grants", "project_services"):
         raw.pop(k, None)
     alive = {u["id"] for u in users if u["id"] not in sys_users}
+    first = min((u for u in users if u["id"] in alive), key=lambda u: u.get("created_at") or 0, default=None)
     for p in raw.get("projects", []):
         sysu = sys_users.get(p.get("owner_id") or "")
         if sysu is None:
             p["participants"] = [x for x in p.get("participants") or [] if x not in sys_users]
             continue
         heirs = [x for x in [*(sysu.get("managers") or []), *(p.get("participants") or []),
-                             creators.get(sysu.get("app_id") or "", "")] if x in alive]
+                             creators.get(sysu.get("app_id") or "", ""), first["id"] if first else ""] if x in alive]
         owner = heirs[0] if heirs else None
         p["owner_id"] = owner
         p["participants"] = list(dict.fromkeys(x for x in [*(sysu.get("managers") or []), *(p.get("participants") or [])]
@@ -761,7 +773,6 @@ def _drop_apps_and_services(raw: dict[str, Any]) -> bool:
     for p in raw.get("projects", []):
         p.pop("via_app", None)
     raw["users"] = [u for u in users if u["id"] not in sys_users]
-    return changed
 
 
 def _hashed_sessions(raw: dict[str, Any], users: dict[str, User]) -> dict[str, dict[str, Any]]:
@@ -935,8 +946,8 @@ class DbBackend:
             self._rows[(kind, key)] = _digest(text)
             if kind in dict_kinds:
                 raw[kind][key] = data
-            elif kind in raw:
-                raw[kind].append(data)
+            else:  # 现在不认识的种类（旧版本留下的，如外部应用）也交给 _load：它决定怎么处理，下次保存时这些行删掉
+                raw.setdefault(kind, []).append(data)
                 if kind == "conversations":
                     convs[key] = data
         for cid, _seq, mid, text in self.db.query(

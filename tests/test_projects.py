@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from matrix.engine import NeedsConfirm, Network, NetworkError
-from matrix.models import Message
+from matrix.engine import ExecContext, NeedsConfirm, Network, NetworkError
+from matrix.models import Message, seat_id
 from matrix.runtime import ScriptCall, ScriptedRuntime
 from tests.test_users import client, joint, users
 
@@ -252,15 +252,25 @@ def test_session_mentions_any_member_as_a_guest(tmp_path: Path):
     net.send_message(s.id, "@B 你看看报销规则", actor=alice, background=False)
     who, prompt, tools = runs[-1]
     assert who == b.id and "这个会话属于 alice@x.io" in prompt and "项目现状" not in prompt
+    assert "写个提纲" not in prompt and "提纲怎么样" not in prompt   # 会话里没 @ 它的部分不给它
     assert not any(t.endswith("read_chat") or t.endswith("read_request") for t in tools)
     assert s.messages[-1].agent_id == b.id and s.messages[-1].text == "收到"
     # 会话仍只属于 alice；bob 只看得到经过 B 的那几轮
     with pytest.raises(NetworkError, match="unknown conversation"):
         net.conversation_detail(s.id, actor=bob)
     rounds = net.guest_rounds(b.id, actor=bob)
-    assert len(rounds) == 1 and rounds[0]["title"] == s.title and rounds[0]["caller"] == "alice@x.io"
+    assert len(rounds) == 1 and "title" not in rounds[0] and rounds[0]["caller"] == "alice@x.io"
     assert [m["text"] for m in rounds[0]["messages"]] == ["@B 你看看报销规则", "收到"]
     assert net.guest_rounds(w.id, actor=alice) == []                 # 自己的会话里自己的 Agent：不算客人
+    # 附件也一样：没 @ 它的消息上的不给它，@ 它的那条上的给
+    private = net.upload_attachment(s.id, "私.txt", b"private", "text/plain", actor=alice)
+    net.send_message(s.id, "@Writer 看这份", actor=alice, attachments=[private], background=False)
+    shared = net.upload_attachment(s.id, "公.txt", b"shared", "text/plain", actor=alice)
+    net.send_message(s.id, "@B 看这份", actor=alice, attachments=[shared], background=False)
+    seat = ExecContext(kind="seat", id=seat_id(s.id, b.id), agent_id=b.id, conversation_id=s.id, project_id=g.id,
+                       authority=[], constraints=[], depth=0, chain=[b.id], guest=True)
+    with net._lock:
+        assert [x["name"] for x in net._attachments_for(seat)] == ["公.txt"]
     with pytest.raises(NetworkError):
         net.guest_rounds(b.id, actor=alice)
 
