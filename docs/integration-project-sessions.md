@@ -5,7 +5,7 @@
 1. **建项目**：创建项目并指定对话的默认 Agent；更换默认 Agent；编辑项目里的 Agent。
 2. **项目会话**：用户在项目里开会话、发消息、收 Agent 的回答。
 
-每个接口的完整字段见 [api-for-business-systems.md](api-for-business-systems.md)；这里只写这两个场景要用的。
+每个接口的请求参数、返回字段、错误码见 [api-for-business-systems.md](api-for-business-systems.md) 第三节（按接口逐个列出）；这里只写这两个场景要用的，示例里的返回只摘了关键字段。
 
 ## 先弄清四件事
 
