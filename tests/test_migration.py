@@ -215,9 +215,9 @@ def test_connector_settings_move_into_the_connector_panel(tmp_path: Path):
     assert "connections_enabled" not in raw
 
 
-def test_external_apps_are_dropped_on_upgrade(tmp_path: Path):
-    """外部应用移除之前的数据：应用与应用令牌丢掉；业务系统账号删掉，它主持的项目转给第一个负责人（其余负责人留作参与者），
-    它的服务会话、连接器与保管库里的凭证一并清掉。旧数据另存一份；再启动一次不再变。"""
+def test_external_apps_and_services_are_dropped_on_upgrade(tmp_path: Path):
+    """外部应用与项目服务移除之前的数据：应用、应用令牌、项目服务丢掉，所有服务会话连同附件删掉；业务系统账号删掉，
+    它主持的项目转给第一个负责人（其余负责人留作参与者），它的连接器与保管库里的凭证一并清掉。旧数据另存一份；再启动一次不再变。"""
     from matrix.engine import Network
     from matrix.runtime import ScriptedRuntime
 
@@ -231,9 +231,10 @@ def test_external_apps_are_dropped_on_upgrade(tmp_path: Path):
             "seats": {}, "messages": []}
     svc = {"id": "conv-svc", "kind": "service", "project_id": "prj-1", "owner_id": "sys1", "agent_id": "a1",
            "title": "报销服务", "seats": {}, "messages": []}
+    mine_svc = {**svc, "id": "conv-svc2", "owner_id": "u3"}  # 普通用户调用服务的会话也删
     conn = {"id": "conn-sys", "owner_id": "sys1", "connector_id": "github", "name": "GitHub"}
     _write(tmp_path, {"agents": [_agent("a1", owner="u1")], "users": [*_users("u1", "u2", "u3"), sysu],
-                      "projects": [hosted, mine], "conversations": [chat, svc], "connections": [conn],
+                      "projects": [hosted, mine], "conversations": [chat, svc, mine_svc], "project_services": [{"id": "svc-1", "project_id": "prj-1"}], "connections": [conn],
                       "apps": [{"id": "app-1", "name": "报销系统", "system_user_id": "sys1", "created_by": "u1"}],
                       "app_grants": [{"id": "grant-1", "app_id": "app-1", "user_id": "sys1", "scopes": [], "token_sha": "x"}]})
     (tmp_path / "attachments" / "conv-svc").mkdir(parents=True)
@@ -243,14 +244,14 @@ def test_external_apps_are_dropped_on_upgrade(tmp_path: Path):
 
     net = Network(ScriptedRuntime(lambda call: "ok"), tmp_path, seed=False)
     s = net.store
-    assert set(s.users) == {"u1", "u2", "u3"} and (tmp_path / "state.pre-apps.json").exists()
+    assert set(s.users) == {"u1", "u2", "u3"} and (tmp_path / "state.pre-services.json").exists()
     g = s.projects["prj-1"]
     assert g.owner_id == "u2" and g.participants == ["u1", "u3"]
-    assert s.conversations["conv-chat"].owner_id == "u2" and "conv-svc" not in s.conversations
+    assert s.conversations["conv-chat"].owner_id == "u2" and not {"conv-svc", "conv-svc2"} & set(s.conversations)
     assert not (tmp_path / "attachments" / "conv-svc").exists() or not any((tmp_path / "attachments" / "conv-svc").iterdir())
     assert "conn-sys" not in s.connections and Vault(tmp_path).get("conn-sys") == {}
     raw = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
-    assert "apps" not in raw and "app_grants" not in raw
+    assert not {"apps", "app_grants", "project_services"} & set(raw)
     assert all("via_app" not in p for p in raw["projects"]) and all("kind" not in u for u in raw["users"])
     net.store.close()
     again = Store(tmp_path)

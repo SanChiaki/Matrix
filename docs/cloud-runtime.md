@@ -370,7 +370,7 @@ class SandboxProvider(Protocol):
 
 **合入 main（2026-11-25）。** 阶段 0 到 2b 原在 `production-cloud-agent` 分支上，这天整体合入 main：阶段 0 默认打开（`MATRIX_CLOUD_ISOLATION=preferred`），
 1a 起照旧在开关后面。合入时对齐了分支之后 main 新加的功能：外部平台 Agent（不变量 28）在平台上跑，不占沙箱、不建 dsh 状态目录
-（`_sandboxed`）；公共 Agent 的服务面（不变量 27）在沙箱方式下私有目录也是只读、改动丢弃；项目服务（不变量 29）的档案范围在两种通道下
+（`_sandboxed`）；公共 Agent 的服务面（不变量 27）在沙箱方式下私有目录也是只读、改动丢弃；项目服务（原不变量 29，2026-11-26 已移除）的档案范围在两种通道下
 都按 `_visible_files` 算（进程方式拷进 `project/`，沙箱方式进材料清单）；外部平台暂存的文件在 `<data>/staging/`，只由控制面读写，
 外层里没有。部署说明随 main 的单容器写法（反向代理在仓库外，`compose.sandbox.yml` 照旧叠加）。分支里新加的“控制面横向扩容”需求改编号为 #76
 （#70 在 main 上已是公共 Agent）。端到端检查 `tests/test_read_isolation.py`：真的起外层 bwrap，读别人的私有目录、别的席位与委托、

@@ -103,12 +103,6 @@ RELEASE_READERS = 200      # 一份发布物最多点名多少个读者
 RELEASE_ITEMS = 30         # 一份发布物最多带几个技能 / 文件
 RELEASE_VERSIONS_KEPT = 3  # 快照保留最近几个版本
 RELEASE_FEEDBACK = 200     # 一份发布物最多保留多少条反馈
-SERVICES_PER_PROJECT = 20   # 一个项目最多几个服务（docs/project-services.md）
-SERVICE_ITEMS = 50          # 一个服务最多圈几项档案范围、几个岗位
-# 服务面（不变量 29）里不给的网络工具：改档案的（纲要、决定、资料链接、技能、插件、提议新成员）与读决定。
-# 插件工具不在此列：主持人在服务里勾了哪些插件，就照插件原来的方式给（ProjectService.plugins）
-SERVICE_DENIED_TOOLS = ("record_decision", "list_decisions", "add_link", "propose_brief", "propose_skill", "propose_plugin",
-                        "propose_agent")
 SUBSCRIPTIONS_PER_AGENT = 30
 
 
@@ -439,12 +433,11 @@ class Conversation:
     archived 的对话只读：项目被删除后的群聊、旧版本遗留的多余对话、人归档的项目会话。"""
 
     id: str
-    kind: str                            # project（项目群聊，被 @ 的成员接任务）| session（项目会话）| dm（私聊，不能委托）| service（服务会话）
+    kind: str                            # project（项目群聊，被 @ 的成员接任务）| session（项目会话）| dm（私聊，不能委托）
     project_id: str | None               # 所在项目（群聊与项目会话）；项目被删后为 None
-    agent_id: str | None                 # 私聊对象 / 项目会话里的助理；群聊为 None
+    agent_id: str | None                 # 私聊对象 / 项目会话的默认成员（没 @ 时回答，可以没有）；群聊为 None
     title: str
     owner_id: str | None = None          # 对话属于谁：群聊 = 项目所有者，私聊 / 项目会话 = 那个用户
-    service_id: str | None = None        # 服务会话（kind=service）：哪个服务；对话属于调用方（不变量 29）
     seats: dict[str, Seat] = field(default_factory=dict)
     messages: list[Message] = field(default_factory=list)
     status: str = "idle"                 # idle | thinking（有席位在跑一轮）| waiting（有进行中的委托）
@@ -875,35 +868,6 @@ class Release:
     feedback: list[dict[str, Any]] = field(default_factory=list)  # 读者自己写的反馈：{id, user_id, text, at}
     created_at: float = field(default_factory=time.time)
     migrated_to: str | None = None       # 旧的技能包并进模板后，对应的模板 id（docs/blueprints.md 第 7 节）
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class ProjectService:
-    """项目对外提供的一个服务（docs/project-services.md，不变量 29）：主持人发布，发布即生效。调用方只和入口对话，
-    入口可以委托岗位（项目里的 Agent）；数据用项目档案的实时内容，只读圈定的范围、只写收件目录；成本记在项目下。
-    配置（入口、岗位、范围、收件目录、权限、给谁用）有版本：改了就是新版本，下一轮起生效。"""
-
-    id: str
-    project_id: str
-    name: str                            # kebab-case，项目内唯一
-    title: str
-    description: str = ""                # 名片上的说明：能办什么
-    entry: str = ""                      # 入口：项目里的一个 Agent
-    staff: list[str] = field(default_factory=list)    # 入口能委托的 Agent；空 = 项目里全部 Agent
-    scope: list[str] = field(default_factory=list)    # 可读的档案文件或目录（相对路径）；空 = 不读档案
-    inbox: str = ""                      # 收件目录（相对路径）：服务里只能写到这里；空 = 不能写
-    authority: list[str] = field(default_factory=list)  # 服务授予的权限：入口与岗位的有效权限再交它
-    plugins: list[str] = field(default_factory=list)  # 服务里能用的项目插件（记录工具、插件服务与挂点照插件原来的方式）；空 = 不用
-    readers: list[str] = field(default_factory=list)  # 点名的调用方（用户 id）；项目参与者总能用
-    public: bool = False                 # 所有登录用户都能用
-    version: int = 1
-    published_at: float = field(default_factory=time.time)
-    published_by: str | None = None
-    status: str = "active"               # active | withdrawn
-    created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

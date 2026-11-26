@@ -258,7 +258,7 @@ def test_session_mentions_any_member_as_a_guest(tmp_path: Path):
     with pytest.raises(NetworkError, match="unknown conversation"):
         net.conversation_detail(s.id, actor=bob)
     rounds = net.guest_rounds(b.id, actor=bob)
-    assert len(rounds) == 1 and rounds[0]["kind"] == "session" and rounds[0]["caller"] == "alice@x.io"
+    assert len(rounds) == 1 and rounds[0]["title"] == s.title and rounds[0]["caller"] == "alice@x.io"
     assert [m["text"] for m in rounds[0]["messages"]] == ["@B 你看看报销规则", "收到"]
     assert net.guest_rounds(w.id, actor=alice) == []                 # 自己的会话里自己的 Agent：不算客人
     with pytest.raises(NetworkError):

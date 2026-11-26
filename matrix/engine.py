@@ -35,13 +35,13 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_
                      GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
                      LIST_TOOLS,
                      PROJECT_FILES, RELEASE_FEEDBACK, RELEASE_ITEMS, RELEASE_KINDS, RELEASE_READERS, RELEASES,
-                     RELEASES_PER_PROJECT, REQUEST_TOOLS, SERVICE_DENIED_TOOLS, SERVICE_ITEMS, SERVICES_PER_PROJECT, SESSION_TOOLS, SKILLS,
+                     RELEASES_PER_PROJECT, REQUEST_TOOLS, SESSION_TOOLS, SKILLS,
                      SUBSCRIPTIONS_PER_AGENT,
                      SKILLS_PER_AGENT, SKILLS_TOTAL, TOOL_AUTHORITY, AgentNode, Approval, Connection, ConnectorNeed,
-                     Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, ProjectService, Proposal, Question,
+                     Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, Proposal, Question,
                      Release, ResourceRef, SandboxRecord,
                      Schedule, Seat, Task, TaskStatus, TERMINAL, UserRequest, attachment_rel, new_id, seat_id)
-from .protocol import (build_notice_prompt, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat, format_service_archive,
+from .protocol import (build_notice_prompt, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_goal_limit, format_goal_round, format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
@@ -69,7 +69,7 @@ from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, materia
                       RuntimeCapabilities, ToolBridge, adopt_dsh_session)
 from .store import Store
 from . import remote_agents as remote
-from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage, tokens as usage_tokens
+from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage
 
 HOME_FILE_MAX = 100_000_000     # 沙箱方式：私有目录里一个文件的改动最多收多少字节
 HOME_TOTAL_MAX = 500_000_000    # 一轮私有目录的改动合计
@@ -138,9 +138,6 @@ class ExecContext:
     # 写下的东西按“只有所有者在场”记来源，和项目会话里会话主人自己的 Agent 一样
     guest: bool = False
     callers: list[str] = field(default_factory=list)
-    # 项目服务（docs/project-services.md，不变量 29）：这一轮属于哪个服务。档案只读圈定范围、只写收件目录，改档案的工具不给
-    svc: str | None = None
-    plugin_scope: list[str] | None = None  # 这一轮能用的插件（服务里是主持人勾的那些）；None = 项目里全部
     # 外部平台 Agent：工作目录在平台上，委托任务里也有 send_file（产物没法在交付时从工作目录拷给委托方）
     remote: bool = False
     # 云侧沙箱方式：私有目录在控制面这边的暂存副本（材料从这里出，客户端报的改动先落在这里，轮次结束三方合并写回）
@@ -163,7 +160,7 @@ class ExecContext:
                                 bool(self.hidden))
         if self.remote and self.kind == "task" and "send_file" not in out:
             out = [*out, "send_file"]
-        return [n for n in out if n not in SERVICE_DENIED_TOOLS] if self.svc else out
+        return out
 
     @property
     def share_tag(self) -> str:
@@ -334,11 +331,6 @@ class Network:
         （私聊的主人、群聊里 @ 过它的人、委托为之而做的人）；维护人在服务面里只看用量（不变量 27）。调用方持有锁。"""
         if actor is None:
             return True
-        svc_conv = conv if conv is not None else (self.store.conversations.get(task.conversation_id) if task else None)
-        if svc_conv is not None and svc_conv.kind == "service":  # 服务会话（不变量 29）：调用方；委托里另有个人 Agent 的所有者
-            if actor == (task.caller_id if task is not None else svc_conv.owner_id):
-                return True
-            return not a.is_public and self.can_use_agent(a, actor)  # 个人 Agent 的所有者照常看它这里的过程
         if not a.is_public:
             return self.can_use_agent(a, actor)
         if task is not None:
@@ -356,9 +348,7 @@ class Network:
 
     @staticmethod
     def _serving(agent: AgentNode, conv: Conversation) -> bool:
-        """这个席位是不是服务面：服务会话（不变量 29）总是；公共 Agent 除了维护人自己和它的私聊（那是维护面）。"""
-        if conv.kind == "service":
-            return True
+        """这个席位是不是服务面：公共 Agent 除了维护人自己和它的私聊（那是维护面）。"""
         return agent.is_public and not (conv.kind != "project" and agent.maintained_by(conv.owner_id))
 
     def _serve_seat(self, ctx: ExecContext, agent: AgentNode, conv: Conversation, seat: Seat) -> None:
@@ -375,21 +365,8 @@ class Network:
         ctx.callers = callers
         ctx.principal = callers[-1] if callers else None
         seat.callers = _dedup([u for u in seat.callers if u not in callers] + callers)[-50:]
-        svc = self.store.project_services.get(conv.service_id or "") if conv.kind == "service" else None
-        if svc is not None:  # 服务会话（不变量 29）：有效权限再交服务授予的
-            self._serve_service(ctx, svc)
         if agent.is_public:
             ctx.authority = [a for a in ctx.authority if a in agent.public_authority]
-
-    def _serve_service(self, ctx: ExecContext, svc: ProjectService) -> None:
-        """调用方持有锁。一轮属于服务：服务面、有效权限交服务授予的；插件只给主持人勾的那些（不变量 29）。"""
-        ctx.service, ctx.svc = True, svc.id
-        ctx.authority = [a for a in ctx.authority if a in svc.authority]
-        ctx.plugin_scope = list(svc.plugins)
-        g = self.store.projects.get(svc.project_id)
-        ctx.plugins = ctx.plugins and any(self._manifest_or_none(g, n) is not None and self._manifest_or_none(g, n).agent_tools
-                                          for n in svc.plugins)
-        ctx.services = ctx.services and any(n in svc.plugins for n, _ in self._service_plugins(g))
 
     def _manifest_or_none(self, g: Project | None, name: str) -> "pluginfs.Manifest | None":
         if g is None or name not in g.plugins:
@@ -400,21 +377,18 @@ class Network:
             return None
 
     def _ctx_service_plugins(self, ctx: ExecContext, g: Project | None) -> list[tuple[str, pluginfs.Manifest]]:
-        """调用方持有锁。这一轮能用的带服务的插件：服务里只给主持人勾的那些。"""
-        out = self._service_plugins(g)
-        return out if ctx.plugin_scope is None else [(n, m) for n, m in out if n in ctx.plugin_scope]
+        """调用方持有锁。这一轮能用的带服务的插件。"""
+        return self._service_plugins(g)
 
     @staticmethod
     def _home_frozen(ctx: ExecContext, agent: AgentNode) -> bool:
-        """私有目录只读、改动不写回：公共 Agent 的服务面（不变量 27）。项目服务里的个人 Agent 照常（不变量 29）。"""
-        return ctx.service and (agent.is_public or not ctx.svc)
+        """私有目录只读、改动不写回：公共 Agent 的服务面（不变量 27）。"""
+        return ctx.service and agent.is_public
 
     def _watchers(self, ctx: ExecContext, agent: AgentNode) -> list[str]:
-        """这一轮的过程、失败说明给谁看：服务面是这一轮的调用方，其余是所有者。项目服务里的个人 Agent
-        照常给它的所有者看（不变量 29）。"""
+        """这一轮的过程、失败说明给谁看：服务面是这一轮的调用方，其余是所有者。"""
         if ctx.service:
-            owner = [agent.owner_id] if ctx.svc and not agent.is_public and agent.owner_id else []
-            return _dedup([u for u in [*ctx.callers, ctx.principal, *owner] if u])
+            return _dedup([u for u in [*ctx.callers, ctx.principal] if u])
         return [agent.owner_id] if agent.owner_id else []
 
     def can_see_project(self, g: Project, actor: str | None) -> bool:
@@ -784,13 +758,6 @@ class Network:
                 if r.project_id == project_id and r.status == "active":
                     r.status, r.follow = "withdrawn", False
                     shutil.rmtree(self.store.release_dir(r.id), ignore_errors=True)
-            for x in self.store.project_services.values():  # 项目服务一并撤回，服务会话一起删（不变量 29）
-                if x.project_id == project_id:
-                    x.status = "withdrawn"
-            gone = [c.id for c in self.store.conversations.values() if c.project_id == project_id and c.kind == "service"]
-            for cid in gone:
-                del self.store.conversations[cid]
-                self._prune_attachments(cid)
             for c in self.store.conversations.values():
                 if c.project_id == project_id:
                     c.project_id, c.archived = None, True  # 群聊记录保留，只读（只有主持人看得到）
@@ -1050,7 +1017,7 @@ class Network:
         return g
 
     def publish_file(self, project_id: str, name: str, content: bytes, actor: str | None = None,
-                     agent_id: str | None = None, source: str | None = None, quiet: bool = False) -> str:
+                     agent_id: str | None = None, source: str | None = None) -> str:
         """把一份文件发布进项目档案。名字可以带目录（`设计/方案.md`），目录按需建。同名覆盖（日志里留着谁、什么时候）。
         Agent 只能写进它看得到的位置（可见范围，不变量 26）。返回档案里的路径。"""
         fname = _safe_path(name)
@@ -1072,8 +1039,7 @@ class Network:
             self._archive_changed(g, "file.publish", by_user=actor, by_agent=agent_id, file=fname,
                                   size=len(content), source=source)
             who = self._name(agent_id) if agent_id else self._email(actor)
-            if not quiet:  # 服务写进收件目录不通知（docs/project-services.md 决策 13），日志里照记
-                self._people_event(g, f"{who} 发布了文件 {fname}", about=f"file:{fname}")
+            self._people_event(g, f"{who} 发布了文件 {fname}", about=f"file:{fname}")
             followed = self._follow_releases(g, fname)  # 开了跟随档案的发布物（不变量 23）
         self._archive_saved(g, "\n".join(followed) or None)
         return fname
@@ -1289,8 +1255,6 @@ class Network:
             d["connector_panel"] = self.connector_panel(g, actor)
             d["plugin_list"] = self.project_plugins(g)
             d["release_list"] = self.project_releases(g, actor)
-            d["service_list"] = [self.service_view(x, actor) for x in sorted(self.store.project_services.values(),
-                                                                             key=lambda x: x.created_at) if x.project_id == g.id]
             d["authorities"] = dict(AUTHORITIES)
             d["embed_tabs"] = self.embed_tabs(g)
             d["embeddable"] = {r.id: s.name for r in g.refs if (s := self._embed_spec(r)) is not None}
@@ -1849,14 +1813,12 @@ class Network:
         if ctx.principal is None or len(set(ctx.callers)) > 1:
             return []
         out = []
-        # 公共 Agent 用维护人声明的连接器；服务里的个人 Agent 用它自己勾的那些连接器的同款（不变量 29）
-        wanted = set(agent.public_connectors) if agent.is_public or not ctx.svc else {
-            x.connector_id for cid in agent.connections if (x := self.store.connections.get(cid)) is not None}
+        wanted = set(agent.public_connectors)  # 公共 Agent 用维护人声明的连接器
         for c in self.store.connections.values():
             if c.owner_id != ctx.principal or c.where != "cloud" or c.url or c.status != "ok" \
                     or c.connector_id not in wanted or self._spec(c) is None:
                 continue
-            if g is not None and g.shared and not ctx.svc:  # 调用方在确认卡上选过“这个项目里都可以 / 不行”的照旧；服务会话只有调用方看得到，不问
+            if g is not None and g.shared:  # 调用方在确认卡上选过“这个项目里都可以 / 不行”的照旧
                 grant = g.connector_grants.get(agent.id, {}).get(c.id, "ask")
                 if grant == "deny":
                     continue
@@ -3212,10 +3174,9 @@ class Network:
         g = self._require_project(ctx, delegate=False)
         name = str(args.get("plugin", "")).strip()
         with self._lock:
-            have_names = [n for n in g.plugins if ctx.plugin_scope is None or n in ctx.plugin_scope]
-            if name not in have_names:
-                have = "、".join(have_names) or "（没有）"
-                raise NetworkError(f"{'服务里' if ctx.svc else '项目里'}没有插件 {name!r}：能用的有 {have}")
+            if name not in g.plugins:
+                have = "、".join(g.plugins) or "（没有）"
+                raise NetworkError(f"项目里没有插件 {name!r}：能用的有 {have}")
             m = self._manifest(g, name)
         if need not in m.agent_tools:
             raise NetworkError(f"插件「{m.title}」没有把{'读' if need == 'records.read' else '写'}记录开给 Agent")
@@ -4162,12 +4123,12 @@ class Network:
         return r
 
     def _drop_orphans(self) -> None:
-        """升级时删掉的业务系统账号（外部应用移除，store._drop_external_apps）留下的会话与连接器：会话连同附件删掉，
-        连接器连同保管库里的凭证删掉。主人已经不在的才动，所以重复执行无害。"""
+        """外部应用与项目服务移除之前的数据（store._drop_apps_and_services）：服务会话、删掉的业务系统账号留下的会话
+        连同附件删掉，它们的连接器连同保管库里的凭证删掉。只动这些，所以重复执行无害。"""
         with self._lock:
             users = self.store.users
-            convs = [c.id for c in self.store.conversations.values() if c.owner_id and c.owner_id not in users
-                     and c.kind in ("session", "service", "dm")]
+            convs = [c.id for c in self.store.conversations.values() if c.kind == "service"
+                     or (c.owner_id and c.owner_id not in users and c.kind in ("session", "dm"))]
             conns = [c for c in self.store.connections.values() if c.owner_id not in users]
             if not convs and not conns:
                 return
@@ -4180,7 +4141,7 @@ class Network:
         for c in conns:
             if c.where == "cloud":
                 self.vault.delete(c.id)
-        print(f"[matrix] 已删除业务系统账号留下的 {len(convs)} 个会话、{len(conns)} 个连接器", flush=True)
+        print(f"[matrix] 已删除服务会话与业务系统账号留下的 {len(convs)} 个会话、{len(conns)} 个连接器", flush=True)
 
     def _migrate_skill_packs(self) -> None:
         """技能包并进模板（docs/blueprints.md 第 7 节）：启动时把还在发布中的技能包各转成一份只有技能的模板（同样的读者与公开），
@@ -4699,257 +4660,19 @@ class Network:
             self._kick("seat", kick)
         return kick is not None
 
-    # ================= 项目服务（docs/project-services.md，不变量 29） =================
-    # 项目配置好以后对外提供服务：主持人发布（发布即生效），调用方只和入口对话，入口可以委托岗位（项目里的 Agent）。
-    # 服务调用沿途都在服务面：为调用方做、业务授权只用调用方自己的；档案只读圈定的范围、只写收件目录；委托不出项目；
-    # 用量记在项目下；主持人只看用量，服务会话只属于调用方。个人 Agent 照常跑（它说出所有者的东西由所有者负责）。
-    def can_see_service(self, x: ProjectService, actor: str | None) -> bool:
-        """项目参与者总是看得到（含撤回的）；点名的调用方与公开服务的所有登录用户，只看得到在发布中的。"""
-        if actor is None:
-            return True
-        g = self.store.projects.get(x.project_id)
-        if g is not None and actor in g.people:
-            return True
-        return x.status == "active" and actor in self.store.users and (x.public or actor in x.readers)
-
-    def _service_of(self, conv_id: str | None) -> ProjectService | None:
-        """调用方持有锁。服务会话所属的服务；别的对话为 None。"""
-        conv = self.store.conversations.get(conv_id or "")
-        if conv is None or conv.kind != "service":
-            return None
-        return self.store.project_services.get(conv.service_id or "")
-
-    def _service_staff(self, g: Project, x: ProjectService) -> list[str]:
-        """调用方持有锁。入口能委托的 Agent：点名的岗位，没点名就是项目里全部 Agent（都要还在项目里）。"""
-        ids = [m for m in g.member_ids if m in self.store.agents]
-        return [m for m in ids if m in x.staff] if x.staff else ids
-
-    def _service_ready(self, conv: Conversation, actor: str | None) -> ProjectService:
-        """调用方持有锁。服务会话能不能再发消息：服务在发布中、调用方还能用、入口还在项目里。入口换了，会话跟着换到新入口。"""
-        x = self.store.project_services.get(conv.service_id or "")
-        g = self.store.projects.get(conv.project_id or "")
-        if x is None or g is None or x.status != "active":
-            raise NetworkError("这个服务已撤回：会话只读")
-        if actor is not None and not self.can_see_service(x, actor):
-            raise NetworkError("这个服务已不再对你开放")
-        if x.entry not in g.member_ids or x.entry not in self.store.agents:
-            raise NetworkError(f"服务「{x.title}」暂停：入口已不在项目里，等主持人换一个入口")
-        if conv.agent_id != x.entry:
-            conv.agent_id = x.entry
-        return x
-
-    def _hosted_service(self, project_id: str, service_id: str, actor: str | None) -> tuple[Project, ProjectService]:
-        """调用方持有锁。只有主持人能发布、改、撤回服务。"""
-        g = self.hosted_project(project_id, actor)
-        x = self.store.project_services.get(service_id)
-        self._check(x is not None and x.project_id == g.id, f"service {service_id}")
-        return g, x
-
-    def _member_ids(self, g: Project, value: Any, what: str) -> list[str]:
-        """调用方持有锁。按 id 或名字认项目里的 Agent。"""
-        out: list[str] = []
-        for v in _as_list(value):
-            v = str(v).strip()
-            if not v:
-                continue
-            aid = v if v in g.member_ids else next((m for m in g.member_ids if self._name(m) == v), None)
-            if aid is None or aid not in self.store.agents:
-                raise NetworkError(f"{what}「{v}」不是项目里的 Agent")
-            if aid not in out:
-                out.append(aid)
-        return out
-
-    def _service_config(self, g: Project, f: dict[str, Any], x: ProjectService | None) -> dict[str, Any]:
-        """调用方持有锁。校验服务的配置；没给的项沿用 x 的。"""
-        out: dict[str, Any] = {}
-        if f.get("entry") is not None or x is None:
-            entry = self._member_ids(g, [f.get("entry") or ""], "入口")
-            if not entry:
-                raise NetworkError("选一个入口：项目里的一个 Agent，调用方只和它对话")
-            out["entry"] = entry[0]
-        if f.get("staff") is not None:
-            out["staff"] = self._member_ids(g, f["staff"], "岗位")
-        root = self.store.project_dir(g.id)
-        if f.get("scope") is not None:
-            scope = _dedup([_safe_path(str(p)) for p in _as_list(f["scope"]) if str(p).strip().strip("/")])
-            missing = [p for p in scope if not (root / p).exists()]
-            if missing:
-                raise NetworkError(f"档案里没有：{'、'.join(missing)}")
-            out["scope"] = scope
-        if f.get("inbox") is not None:
-            inbox = str(f["inbox"]).strip().strip("/")
-            if inbox:
-                inbox = _safe_path(inbox)
-                if (root / inbox).is_file():
-                    raise NetworkError(f"{inbox} 是一个文件：收件目录要是目录")
-            out["inbox"] = inbox
-        if f.get("authority") is not None:
-            auth = _dedup([str(a).strip() for a in _as_list(f["authority"]) if str(a).strip()])
-            bad = [a for a in auth if a not in AUTHORITIES]
-            if bad:
-                raise NetworkError(f"没有这些权限：{'、'.join(bad)}")
-            out["authority"] = auth
-        if f.get("plugins") is not None:
-            names = _dedup([str(n).strip() for n in _as_list(f["plugins"]) if str(n).strip()])
-            missing = [n for n in names if n not in g.plugins]
-            if missing:
-                raise NetworkError(f"项目里没有插件：{'、'.join(missing)}")
-            out["plugins"] = names
-        if f.get("readers") is not None:
-            out["readers"] = self._reader_ids(f["readers"], g)
-        if f.get("public") is not None:
-            out["public"] = bool(f["public"])
-        if len(out.get("staff", [])) > SERVICE_ITEMS or len(out.get("scope", [])) > SERVICE_ITEMS:
-            raise NetworkError(f"岗位与档案范围各最多 {SERVICE_ITEMS} 项")
-        return out
-
-    def _service_who(self, x: ProjectService) -> str:
-        """调用方持有锁。群聊里说明给谁用。"""
-        if x.public:
-            return "所有登录用户都能用"
-        if not x.readers:
-            return "目前只有项目参与者能用"
-        names = "、".join(self._email(u) for u in x.readers[:5]) + (f" 等 {len(x.readers)} 人" if len(x.readers) > 5 else "")
-        return f"给 {names} 用"
-
-    def create_service(self, project_id: str, name: str, title: str, description: str = "", actor: str | None = None,
-                       **fields: Any) -> ProjectService:
-        """主持人发布一个服务（不变量 29）：发布即生效。fields：entry、staff、scope、inbox、authority、readers、public。"""
-        title = " ".join(str(title or "").split())[:80]
-        if not title:
-            raise NetworkError("标题不能为空")
-        try:
-            name = releasefs.check_name(name)
-        except releasefs.ReleaseError as e:
-            raise NetworkError(str(e)) from e
-        with self._lock:
-            g = self.hosted_project(project_id, actor)
-            mine = [x for x in self.store.project_services.values() if x.project_id == g.id and x.status == "active"]
-            if any(x.name == name for x in mine):
-                raise NetworkError(f"已经有一个叫 {name} 的服务")
-            if len(mine) >= SERVICES_PER_PROJECT:
-                raise NetworkError(f"一个项目最多 {SERVICES_PER_PROJECT} 个服务")
-            cfg = self._service_config(g, fields, None)
-            x = ProjectService(id=new_id("svc"), project_id=g.id, name=name, title=title,
-                               description=str(description or "").strip()[:2000], published_by=actor, **cfg)
-            if x.inbox:
-                (self.store.project_dir(g.id) / x.inbox).mkdir(parents=True, exist_ok=True)
-            self.store.project_services[x.id] = x
-            self._archive_changed(g, "service.publish", by_user=actor, service=x.id, name=x.name, version=x.version)
-            event = f"主持人发布了服务「{title}」v1（{self._service_who(x)}；入口 {self._name(x.entry)}）"
-        self._archive_saved(g, event)
-        self.bus.emit("service.updated", service_id=x.id, project_id=g.id)
-        return x
-
-    def update_service(self, project_id: str, service_id: str, actor: str | None = None, **fields: Any) -> ProjectService:
-        """改服务：标题、说明、入口、岗位、范围、收件目录、权限、给谁用。改了就是新版本，下一轮起生效（不用快照）。"""
-        with self._lock:
-            g, x = self._hosted_service(project_id, service_id, actor)
-            if x.status != "active":
-                raise NetworkError("已撤回的服务不能再改")
-            if fields.get("title") is not None:
-                t = " ".join(str(fields["title"]).split())[:80]
-                if not t:
-                    raise NetworkError("标题不能为空")
-                x.title = t
-            if fields.get("description") is not None:
-                x.description = str(fields["description"]).strip()[:2000]
-            cfg = self._service_config(g, fields, x)
-            for k, v in cfg.items():
-                setattr(x, k, v)
-            if x.inbox:
-                (self.store.project_dir(g.id) / x.inbox).mkdir(parents=True, exist_ok=True)
-            x.version += 1
-            x.published_at, x.published_by = time.time(), actor
-            self._archive_changed(g, "service.update", by_user=actor, service=x.id, version=x.version)
-            event = f"主持人更新了服务「{x.title}」到 v{x.version}（{self._service_who(x)}；入口 {self._name(x.entry)}）"
-        self._archive_saved(g, event)
-        self.bus.emit("service.updated", service_id=x.id, project_id=g.id)
-        return x
-
-    def withdraw_service(self, project_id: str, service_id: str, actor: str | None = None) -> ProjectService:
-        """撤回：服务下线，已有的服务会话变成只读（还留给调用方看）。"""
-        with self._lock:
-            g, x = self._hosted_service(project_id, service_id, actor)
-            if x.status != "active":
-                return x
-            if any(c.service_id == x.id and c.status != "idle" for c in self.store.conversations.values()):
-                raise NetworkError("服务里还有进行中的会话，等它们结束再撤回")
-            x.status = "withdrawn"
-            for c in self.store.conversations.values():
-                if c.kind == "service" and c.service_id == x.id:
-                    c.archived = True
-            self._archive_changed(g, "service.withdraw", by_user=actor, service=x.id)
-            event = f"主持人撤回了服务「{x.title}」"
-        self._archive_saved(g, event)
-        self.bus.emit("service.updated", service_id=x.id, project_id=g.id)
-        return x
-
-    def service_view(self, x: ProjectService, actor: str | None) -> dict[str, Any]:
-        """调用方持有锁。名片：标题、说明、项目、入口、请求会经过谁的 Agent。配置细节只给项目参与者。"""
-        g = self.store.projects.get(x.project_id)
-        staff = self._service_staff(g, x) if g is not None else []
-        agents = _dedup([x.entry, *staff])
-        passes = [{"agent": self._name(a), "owner": self._email(self.store.agents[a].owner_id)}
-                  for a in agents if a in self.store.agents and not self.store.agents[a].is_public]
-        d: dict[str, Any] = {
-            "id": x.id, "name": x.name, "title": x.title, "description": x.description, "version": x.version,
-            "status": x.status, "project_id": x.project_id, "project_name": g.name if g else "",
-            "entry": {"id": x.entry, "name": self._name(x.entry)},
-            "paused": g is None or x.entry not in g.member_ids, "passes": passes,
-            "published_at": x.published_at}
-        if g is not None and (actor is None or actor in g.people):
-            d.update(staff=list(x.staff), staff_names=[self._name(a) for a in x.staff], scope=list(x.scope),
-                     inbox=x.inbox, authority=list(x.authority), public=x.public, plugins=list(x.plugins),
-                     readers=[self._email(u) for u in x.readers], who=self._service_who(x),
-                     sessions=sum(1 for c in self.store.conversations.values() if c.service_id == x.id))
-        return d
-
-    def project_services(self, project_id: str, actor: str | None = None) -> list[dict[str, Any]]:
-        with self._lock:
-            g = self.visible_project(project_id, actor)
-            return [self.service_view(x, actor) for x in sorted(self.store.project_services.values(),
-                                                                 key=lambda x: x.created_at) if x.project_id == g.id]
-
-    def services_for(self, actor: str | None) -> list[dict[str, Any]]:
-        """我能用的服务（在发布中的）：点名给我的、公开的、我参与的项目里的。"""
-        with self._lock:
-            return [self.service_view(x, actor) for x in sorted(self.store.project_services.values(),
-                                                                 key=lambda x: -x.published_at)
-                    if x.status == "active" and self.can_see_service(x, actor)]
-
-    def visible_service(self, service_id: str, actor: str | None) -> ProjectService:
-        x = self.store.project_services.get(service_id)
-        self._check(x is not None and self.can_see_service(x, actor), f"service {service_id}")
-        return x
-
-    def open_service_session(self, service_id: str, actor: str | None = None, title: str = "") -> Conversation:
-        """开一个服务会话：属于调用方，只有他看得到；项目里的人（包括主持人）看不到。每次新开一个，不设期限。"""
-        with self._lock:
-            x = self.visible_service(service_id, actor)
-            conv = Conversation(id=new_id("conv"), kind="service", project_id=x.project_id, agent_id=x.entry,
-                                title=" ".join(str(title or "").split())[:80] or x.title, owner_id=actor,
-                                service_id=x.id)
-            self._service_ready(conv, actor)
-            self.store.conversations[conv.id] = conv
-            self.store.save()
-        self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
-        return conv
-
+    # ================= 别人的会话里的我的 Agent =================
     def guest_rounds(self, agent_id: str, actor: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
-        """个人 Agent 的所有者看它在别人的会话里的那几轮：别人的项目会话里 @ 它（不变量 18）、项目服务里当入口或岗位
-        （不变量 29）。交给它的消息、它的回复与过程；只有经过它的部分，不是整个会话，会话本身仍只属于开它的人。
-        公共 Agent 的维护人在服务面只看用量（不变量 27）。"""
+        """个人 Agent 的所有者看它在别人的项目会话里的那几轮（别人 @ 它，不变量 18）：交给它的消息、它的回复与过程；
+        只有经过它的部分，不是整个会话，会话本身仍只属于开它的人。公共 Agent 的维护人在服务面只看用量（不变量 27）。"""
         with self._lock:
             a = self.owned_agent(agent_id, actor)
             if a.is_public:
                 return []
             out = []
-            convs = sorted((c for c in self.store.conversations.values() if a.id in c.seats and (
-                c.kind == "service" or (c.kind == "session" and c.owner_id != a.owner_id))),
-                key=lambda c: -c.updated_at)[:max(1, min(int(limit), 100))]
+            convs = sorted((c for c in self.store.conversations.values() if a.id in c.seats
+                            and c.kind == "session" and c.owner_id != a.owner_id),
+                           key=lambda c: -c.updated_at)[:max(1, min(int(limit), 100))]
             for c in convs:
-                x = self.store.project_services.get(c.service_id or "") if c.kind == "service" else None
                 g = self.store.projects.get(c.project_id or "")
                 msgs = [m for m in c.messages if (m.role == "user" and a.id in m.mentions)
                         or (m.role in ("agent", "system") and m.agent_id == a.id)]
@@ -4961,36 +4684,10 @@ class Network:
                     d.pop("audience", None)
                     d.pop("private_to", None)
                     view.append(d)
-                out.append({"conversation_id": c.id, "kind": c.kind,
-                            "service": x.title if x else c.title, "title": x.title if x else c.title,
-                            "project_name": g.name if g else "", "caller": self._email(c.owner_id),
-                            "updated_at": c.updated_at, "archived": c.archived, "messages": view})
+                out.append({"conversation_id": c.id, "title": c.title, "project_name": g.name if g else "",
+                            "caller": self._email(c.owner_id), "updated_at": c.updated_at, "archived": c.archived,
+                            "messages": view})
             return out
-
-    service_rounds = guest_rounds
-
-    def service_usage(self, project_id: str, service_id: str, days: int = 30, actor: str | None = None) -> dict[str, Any]:
-        """主持人看服务的用量：多少轮、成没成、工具调用、token，按调用方汇总。不给内容（不变量 29）。"""
-        days = max(1, min(int(days), MAX_DAYS))
-        with self._lock:
-            g, x = self._hosted_service(project_id, service_id, actor)
-            sessions = sum(1 for c in self.store.conversations.values() if c.service_id == x.id)
-        rows = [e for e in self.usage.read(time.time() - days * DAY_S) if e.get("service") == x.id]
-        by_user: dict[str, dict[str, Any]] = {}
-        total = {"input": 0, "output": 0, "cached": 0, "total": 0}
-        for e in rows:
-            tk = usage_tokens(e.get("usage") or {})
-            for k in total:
-                total[k] += tk[k]
-            b = by_user.setdefault(e.get("user") or "", {"user": self._email(e.get("user")), "runs": 0, "failed": 0,
-                                                         "tools": 0, "tokens": 0, "last_at": 0.0})
-            b["runs"] += 1
-            b["failed"] += 0 if e.get("ok") else 1
-            b["tools"] += int(e.get("tools") or 0)
-            b["tokens"] += tk["total"]
-            b["last_at"] = max(b["last_at"], float(e.get("ts") or 0))
-        return {"days": days, "sessions": sessions, "runs": len(rows), "failed": sum(1 for e in rows if not e.get("ok")),
-                "tokens": total, "users": sorted(by_user.values(), key=lambda b: -b["runs"])}
 
     # ================= 对话：群聊与私聊 =================
     # 群聊（kind=project）就是项目本身：每个项目一个，没有“主 Agent”，人在消息里 @ 谁，谁就接这个任务。
@@ -5058,9 +4755,7 @@ class Network:
         """只能删除已归档的对话；群聊随项目存在，私聊随 Agent 存在，要清掉记录用 clear_conversation。"""
         with self._lock:
             conv = self.visible_conv(conv_id, actor)
-            if conv.kind == "service" and conv.status != "idle":
-                raise NetworkError("服务会话还在进行中，等这一轮结束再删")
-            if not conv.archived and conv.kind != "service":  # 服务会话属于调用方：他自己随时能删（不变量 29）
+            if not conv.archived:
                 raise NetworkError("群聊随项目存在、私聊随 Agent 存在，不能删除；可以清空聊天记录")
             del self.store.conversations[conv_id]
             self._prune_attachments(conv_id)
@@ -5070,7 +4765,7 @@ class Network:
     def resolve_mentions(self, conv: Conversation, text: str, explicit: list[str] | None = None) -> list[str]:
         """消息里 @ 到的项目成员（按名称匹配，最长优先），加上调用方显式给出的成员 id。私聊总是对方；
         项目会话里 @ 到的是会话主人自己在项目里的 Agent，没 @ 任何人时交给助理。"""
-        if conv.kind in ("dm", "service"):
+        if conv.kind == "dm":
             return [conv.agent_id] if conv.agent_id else []
         g = self.store.projects.get(conv.project_id or "")
         members = [self.store.agents[m] for m in self._members(conv)]
@@ -5113,8 +4808,6 @@ class Network:
                 g = self.store.projects.get(conv.project_id or "")
                 if g is None or (actor is not None and actor not in g.people):
                     raise NetworkError("你已不在这个项目里，会话只读")
-            if conv.kind == "service":
-                self._service_ready(conv, actor)
             targets = self.resolve_mentions(conv, text, mentions)
             msg = Message(id=new_id("msg"), role="user", text=text.strip(), mentions=targets, user_id=actor,
                           attachments=files, via=via)
@@ -5773,11 +5466,8 @@ class Network:
                 self._serve_seat(ctx, agent, conv, seat)
             elif conv.kind == "dm" and conv.owner_id and conv.owner_id != agent.owner_id:
                 ctx.principal = conv.owner_id  # 维护人自己和它的私聊：为这个维护人做
-            svc = self.store.project_services.get(ctx.svc or "")
             archive_rev = project.archive_rev if project else -1
-            if svc is not None:  # 服务的配置换了版本也要重推（版本放在高位，和档案版本合成一个数）
-                archive_rev += svc.version * 1_000_000_000
-            archive = self._archive_text(project, agent.id, svc) if project and seat.archive_seen != archive_rev else ""
+            archive = self._archive_text(project, agent.id) if project and seat.archive_seen != archive_rev else ""
             state = self._session_state(project, conv.owner_id) if project and ctx.session else ""
             joint_state = ""
             if home:  # 助理对话：跨项目总览，联合项目单独一块
@@ -5807,7 +5497,6 @@ class Network:
         mount_home = self.home_mounted(project, agent)
         hidden, mixed = self._home_plan(ctx, agent) if mount_home and not agent.device_runtime else ([], [])
         prompt = build_seat_prompt(agent, conv, project, ctx.can_delegate, transcript, notices, first,
-                                   service=svc,
                                    home_writable="file.write" in ctx.authority and not self._home_frozen(ctx, agent),
                                    archive=archive,
                                    home=mount_home, joint=joint, plugins=ctx.plugins, services=ctx.services, assistant_home=home,
@@ -5911,9 +5600,8 @@ class Network:
         # 沙箱方式：任务目录在执行面里，这里只是它的逻辑路径（不在数据目录里建）
         workdir = self.store.task_path(task.id) if self._sandboxed(agent) else self.store.task_dir(task.id)
         with self._lock:
-            svc = self.store.project_services.get(ctx.svc or "")
-            archive_rev = g.archive_rev + (svc.version * 1_000_000_000 if svc is not None else 0)
-            archive = self._archive_text(g, agent.id, svc) if task.archive_seen != archive_rev else ""
+            archive_rev = g.archive_rev
+            archive = self._archive_text(g, agent.id) if task.archive_seen != archive_rev else ""
         if task.dsh_session_id is None:  # 第一次运行（或在拿到会话之前就失败了）：发完整委托
             knowledge = self.visible_knowledge(ctx)
             task.prompt = build_task_prompt(task, agent, delegator, g, ctx.can_delegate, knowledge, home_writable,
@@ -5987,11 +5675,6 @@ class Network:
                           constraints=list(task.effective_constraints), depth=task.depth,
                           chain=self._chain(task) + [agent.id], plugins=self._plugin_tools_on(g),
                           services=self._services_on(g), remote=bool(agent.remote))
-        svc = self._service_of(task.conversation_id)
-        if svc is not None:  # 服务会话里的委托（不变量 29）：服务面，为调用方做
-            ctx.principal = task.caller_id
-            ctx.callers = [task.caller_id] if task.caller_id else []
-            self._serve_service(ctx, svc)
         if agent.is_public:  # 委托给公共 Agent：服务面，为委托为之而做的那个人（不变量 27）
             ctx.service, ctx.principal = True, task.caller_id
             ctx.callers = [task.caller_id] if task.caller_id else []
@@ -6072,9 +5755,7 @@ class Network:
                     raise NetworkError("执行者用到了别处的资料，工作目录要等它的所有者确认交付后才能看")  # 不变量 22
                 return None if a is not None and a.device_runtime else self.store.task_dir(t.id)
             conv_id, _, agent_id = ref.partition("/")
-            raw = self.store.conversations.get(conv_id)
-            # 服务会话只属于调用方；经过个人 Agent 的那一席，它的所有者照常看得到工作目录（不变量 29）
-            conv = raw if raw is not None and raw.kind == "service" else self.visible_conv(conv_id, actor)
+            conv = self.visible_conv(conv_id, actor)
             a = self.store.agents.get(agent_id)
             seat = conv.seats.get(agent_id)
             self._check(seat is not None and a is not None and self.can_watch(a, actor, conv), f"seat {ref}")
@@ -6845,23 +6526,18 @@ class Network:
             return
         (workdir / PROJECT_FILES).mkdir(parents=True, exist_ok=True)
         with self._lock:
-            files = self._visible_files(p, ctx.agent_id, self.store.project_services.get(ctx.svc or ""))
+            files = self._visible_files(p, ctx.agent_id)
         for rel, src in files:
             dst = workdir / PROJECT_FILES / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-    def _visible_files(self, g: Project, agent_id: str, svc: ProjectService | None = None) -> list[tuple[str, Path]]:
-        """调用方持有锁。档案里这个 Agent 看得到的文件：(相对路径, 文件)。服务里再收窄到圈定的范围（不变量 29）。"""
-        return [(rel, f) for rel, f in _archive_walk(self.store.project_dir(g.id))
-                if self._file_visible(g, rel, agent_id) and (svc is None or _under_any(rel, svc.scope))]
+    def _visible_files(self, g: Project, agent_id: str) -> list[tuple[str, Path]]:
+        """调用方持有锁。档案里这个 Agent 看得到的文件：(相对路径, 文件)。"""
+        return [(rel, f) for rel, f in _archive_walk(self.store.project_dir(g.id)) if self._file_visible(g, rel, agent_id)]
 
-    def _archive_text(self, g: Project, agent_id: str, svc: ProjectService | None = None) -> str:
-        """调用方持有锁。只列这个 Agent 看得到的文件与技能（不变量 26）。服务里只给服务说明与圈定范围里的文件（不变量 29）。"""
-        if svc is not None:
-            return format_service_archive(g, svc, [rel for rel, _ in self._visible_files(g, agent_id, svc)],
-                                          [self._name(x) for x in self._service_staff(g, svc)],
-                                          [m.title for n in svc.plugins if (m := self._manifest_or_none(g, n)) is not None])
+    def _archive_text(self, g: Project, agent_id: str) -> str:
+        """调用方持有锁。只列这个 Agent 看得到的文件与技能（不变量 26）。"""
         plugins = []
         for name in g.plugins:
             try:
@@ -7164,7 +6840,7 @@ class Network:
         p = self.store.projects.get(ctx.project_id or "")
         if p is not None:
             out += [material_file(f"{PROJECT_FILES}/{rel}", f)
-                    for rel, f in self._visible_files(p, ctx.agent_id, self.store.project_services.get(ctx.svc or ""))
+                    for rel, f in self._visible_files(p, ctx.agent_id)
                     if f.stat().st_size <= 2_000_000]
         out += [material_file(attachment_rel(a), f, sha=a["sha"]) for a in self._attachments_for(ctx)
                 if (f := self._attachment_path(ctx.conversation_id, a["sha"])) is not None]  # 按内容寻址，不用再算 sha
@@ -7311,8 +6987,7 @@ class Network:
                 "ok": res.ok, "error": "device_offline" if offline else res.error_class,
                 "tools": len(res.tool_calls), "usage": dict(measured if measured is not None else res.usage),
                 **({"usage_source": "gateway"} if measured is not None else {}),
-                **({"public": True} if ctx.service and agent.is_public else {}),  # 维护人看用量用（不变量 27）
-                **({"service": ctx.svc, "payer": "project"} if ctx.svc else {})})  # 项目服务：成本记在项目下（不变量 29）
+                **({"public": True} if ctx.service and agent.is_public else {})})  # 维护人看用量用（不变量 27）
         except OSError as e:  # 只给部署方看日志：事件会推给所有人，错误里有服务器路径
             print(f"[matrix] 用量台账写不进去：{e}", file=sys.stderr)
 
@@ -7735,17 +7410,7 @@ class Network:
         if top in (PROJECT_FILES, HOME_DIR, SKILLS) or workdir.safe_rel(rel) is None:
             return f"找不到 {rel}：只能发布当前工作目录里的文件（不含 {PROJECT_FILES}/ 与 {HOME_DIR}/）", True
 
-        svc = self.store.project_services.get(ctx.svc or "")
-        if svc is not None and not svc.inbox:
-            return f"服务「{svc.title}」没有收件目录：服务里不能往项目档案写东西", True
-
         def publish(fname: str, content: bytes) -> str:
-            if svc is not None:  # 服务里只写收件目录（不变量 29）：不在里面的名字放进去；不在群聊里通知
-                fname = fname.strip().strip("/")
-                if not _under_any(fname, [svc.inbox]):
-                    fname = f"{svc.inbox}/{Path(fname).name}"
-                name = self.publish_file(g.id, fname, content, agent_id=ctx.agent_id, source=ctx.id, quiet=True)
-                return f"已放进收件目录：{name}。项目里的人能看到它，调用方看不到项目档案。"
             name = self.publish_file(g.id, fname, content, agent_id=ctx.agent_id, source=ctx.id)
             return f"已发布到项目档案：{PROJECT_FILES}/{name}。项目里所有人此后都能读到。"
         agent = self.store.agents.get(ctx.agent_id)
@@ -7849,9 +7514,8 @@ class Network:
 
     def _tool_list_members(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
         g = self._require_project(ctx)
-        svc = self.store.project_services.get(ctx.svc or "")
-        lines = [f"服务「{svc.title}」的岗位（你自己除外）：" if svc is not None else f"项目「{g.name}」成员（你自己除外）："]
-        for mid in (self._service_staff(g, svc) if svc is not None else g.member_ids):
+        lines = [f"项目「{g.name}」成员（你自己除外）："]
+        for mid in g.member_ids:
             a = self.store.agents.get(mid)
             if a is None or a.id == ctx.agent_id:
                 continue
@@ -7910,11 +7574,8 @@ class Network:
                               if o])
 
         reason = None
-        svc = self.store.project_services.get(ctx.svc or "")
         if target is None:
             reason = f"「{args.get('agent', '')}」不是项目「{g.name}」的成员；只能委托 list_members 返回的成员"
-        elif svc is not None and target.id not in self._service_staff(g, svc):
-            reason = f"{target.name} 不是服务「{svc.title}」的岗位；只能委托 list_members 返回的成员"
         elif target.id in ctx.chain:
             reason = f"{target.name} 已在本委托链上（{' → '.join(self._name(i) for i in ctx.chain)}），不能成环"
         elif not delegation.mission or not delegation.expected_outcome:
@@ -9817,7 +9478,6 @@ class Network:
                 "agents": [self.agent_view(a, actor) for a in agents],
                 "projects": [self.project_view(g, actor) for g in projects],
                 "conversations": [self.conversation_view(c, actor) for c in sorted(convs, key=lambda c: -c.updated_at)],
-                "services": self.services_for(actor),
                 "relations": self.relations(actor),
                 "active_tasks": [t.to_dict() for t in tasks if t.status in (TaskStatus.RUNNING, TaskStatus.IN_REVIEW)],
                 "proposals": [p.to_dict() for p in sorted(self.store.proposals.values(), key=lambda p: -p.created_at)
@@ -9892,11 +9552,6 @@ class Network:
     def conversation_view(self, c: Conversation, actor: str | None) -> dict[str, Any]:
         """调用方持有锁。列表摘要：联合项目里只带自己 Agent 的席位状态，最后一条消息按可见性取。"""
         d = c.to_dict(full=False)
-        if c.kind == "service":  # 服务会话：调用方看名片（入口、会经过谁的 Agent），不看项目（不变量 29）
-            x = self.store.project_services.get(c.service_id or "")
-            d["service"] = self.service_view(x, actor) if x is not None else None
-            d["agent_names"] = {a: self._name(a) for a in {*c.seats, *([c.agent_id] if c.agent_id else []),
-                                                         *(m.agent_id for m in c.messages if m.agent_id)}}
         if actor is None:
             return d
         mine = {a for a in c.seats if (ag := self.store.agents.get(a)) is not None and self.can_watch(ag, actor, c)}
@@ -9918,7 +9573,7 @@ class Network:
 
     def _members(self, conv: Conversation) -> list[str]:
         """调用方持有锁。可以 @ 的成员：群聊与项目会话是项目里的全部 Agent（项目会话的默认成员排第一）；私聊是对方。"""
-        if conv.kind in ("dm", "service"):
+        if conv.kind == "dm":
             return [conv.agent_id] if conv.agent_id else []
         g = self.store.projects.get(conv.project_id or "")
         ids = [m for m in (g.member_ids if g else []) if m in self.store.agents]
@@ -9964,9 +9619,6 @@ class Network:
                            "plugin.submission", "im.updated"):
                 # 我的技能、我的连接器、助理起草的消息、我的定时、等我确认的输出、我的 IM 机器人与绑定：只给本人
                 return data if data.get("user_id") == actor else None
-            if ev_type == "service.updated":  # 只推 id：看得到的人自己去取（不变量 29）
-                x = self.store.project_services.get(str(data.get("service_id", "")))
-                return data if x is not None and self.can_see_service(x, actor) else None
             if ev_type == "release.updated":  # 只推 id：看得到的人自己去取（不变量 23）
                 r = self.store.releases.get(str(data.get("release_id", "")))
                 return data if r is not None and self.can_see_release(r, actor) else None
@@ -10337,11 +9989,6 @@ def _step(ev: dict[str, Any]) -> dict[str, Any] | None:
     if t == "tool_result" and ev.get("callId"):
         return {"kind": "result", "call_id": ev["callId"], "status": ev.get("status") or "completed"}
     return None
-
-
-def _under_any(rel: str, roots: Iterable[str]) -> bool:
-    """rel 是不是 roots 里某一项本身或它下面的（目录按前缀认）。"""
-    return any(rel == r or rel.startswith(r.rstrip("/") + "/") for r in roots if r)
 
 
 def _tool_brief(v: Any) -> str:
