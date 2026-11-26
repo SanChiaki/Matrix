@@ -1052,8 +1052,8 @@ function renderAgentEditor(force = false) {
       </fieldset>
       <label class="switch"><input type="checkbox" name="chat_enabled" ${x.chat_enabled ? "checked" : ""}> 允许你和它私聊（群聊里随时可以 @ 它）</label>
       ${a ? (S.me?.assistant_id === a.id
-        ? '<p class="hint"><span class="tag ok">你的助理</span> 项目会话里由它陪你聊（它不会自己进项目：第一次在项目里开会话时问你）。</p>'
-        : a.public_status ? "" : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 项目会话里由它陪你聊（第一次在项目里开会话时问你要不要把它加进项目）。</p>') : ""}
+        ? '<p class="hint"><span class="tag ok">你的助理</span> 它在项目里时，项目会话里没 @ 任何人的消息由它回答。它不会自己进项目：要它在，就把它加进项目。</p>'
+        : a.public_status ? "" : '<p class="hint"><button type="button" class="link" id="af-assistant">设为我的助理</button> · 它在项目里时，项目会话里没 @ 任何人的消息由它回答。</p>') : ""}
       <p class="hint">它只为你工作。要和别人协作，把它带进共享项目：别人可以在那里 @ 它，但它仍然以你的名义、用你的资源运行，工作区外的操作由你审批。</p>
       <p class="error" role="alert"></p>
       <div class="actions"><button type="submit">${a ? "保存" : "创建"}</button>
@@ -1138,14 +1138,15 @@ async function renderOpenApps(a) {
   });
 }
 
-// 我的 Agent 在别的项目服务里的那几轮（不变量 29）：交给它的消息、它的回复与过程。只有经过它的部分，不是整个服务会话
+// 我的 Agent 在别人的会话里的那几轮：别人的项目会话里 @ 它（不变量 18）、项目服务里（不变量 29）。
+// 交给它的消息、它的回复与过程；只有经过它的部分，会话本身只属于开它的人
 async function renderServiceRounds(a) {
-  const list = await api(`/api/agents/${a.id}/service-rounds`).catch(() => []);
+  const list = await api(`/api/agents/${a.id}/guest-rounds`).catch(() => []);
   const box = $("#af-service-rounds");
   if (!box || !list.length) return;
   box.hidden = false;
-  box.innerHTML = `<h3>在服务里</h3><p class="hint">它在项目服务里当入口或岗位时，经过它的那几轮你照常看得到；服务会话本身只属于调用方。</p>
-    ${list.map((r) => `<details><summary><b>${esc(r.service)}</b> <span class="muted">· ${esc(r.project_name)} · 调用方 ${esc(r.caller)} · ${time(r.updated_at)}${r.archived ? " · 只读" : ""}</span></summary>
+  box.innerHTML = `<h3>在别人的会话里</h3><p class="hint">别人在项目会话里 @ 它、或它在项目服务里时，经过它的那几轮你照常看得到；会话本身只属于开它的人。</p>
+    ${list.map((r) => `<details><summary><b>${esc(r.title || r.service)}</b> <span class="muted">· ${r.kind === "service" ? "服务" : "项目会话"} · ${esc(r.project_name)} · ${esc(r.caller)} · ${time(r.updated_at)}${r.archived ? " · 只读" : ""}</span></summary>
       <ul class="thread mini">${r.messages.map((m) => m.role === "user"
         ? `<li class="msg user"><div class="content"><div class="who"><b>${esc(r.caller)}</b>${time(m.ts)}</div><div class="body md">${renderMarkdown(m.text)}</div></div></li>`
         : `<li class="msg agent"><div class="content"><div class="who"><b>${esc(a.name)}</b>${time(m.ts)}</div>${stepsHtml(m.steps || [], false)}<div class="body md">${renderMarkdown(m.text)}</div></div></li>`).join("")}</ul>
@@ -3434,11 +3435,13 @@ function renderMembers() {
     const a = agent(c.agent_id);
     const chat = S.snap.conversations.find((x) => x.kind === "project" && x.project_id === g.id && !x.archived);
     const more = (c.members || []).filter((id) => id !== c.agent_id).map(agent).filter(Boolean);
-    if (!setHtml(box, `${a ? `<ul class="member-list">${row(a, "", "你的助理")}</ul>` : placeholder("助理已删除。")}
-      ${more.length ? `<h3>也能 @ · ${more.length}</h3><ul class="member-list">${more.map((x) => row(x)).join("")}</ul>
-        <p class="hint">你在这个项目里的其他 Agent：@ 它就直接交给它，没 @ 时交给助理。别人的 Agent 看不到这里，要找它们去群聊。</p>` : ""}
-      <p class="hint">项目会话只有你看得到。助理每一轮都会拿到「${esc(g.name)}」的纲要、决定、成员、没结束的任务和群聊里最近的消息，
-        也能委托项目成员、登记任务；它写纲要、决定、文件时会在群聊里留一条事件。</p>
+    const inProj = a && g.member_ids.includes(a.id);
+    if (!setHtml(box, `${inProj ? `<h3>没 @ 时回答</h3><ul class="member-list">${row(a, "", a.id === S.me?.assistant_id ? "你的助理" : "")}</ul>`
+        : '<p class="hint">这个会话没有默认回答的成员：@ 谁谁接，没 @ 的消息只留在会话里。</p>'}
+      ${more.length ? `<h3>能 @ · ${more.length}</h3><ul class="member-list">${more.map((x) => row(x)).join("")}</ul>
+        <p class="hint">项目里的 Agent 都能 @：@ 谁就交给谁。别人的 Agent 的所有者看得到经过它的那几轮，看不到会话的其余部分。</p>` : ""}
+      <p class="hint">项目会话只有你看得到。你自己的 Agent 在这里每一轮都会拿到「${esc(g.name)}」的纲要、决定、成员、没结束的任务和群聊里最近的消息，
+        也能委托项目成员、登记任务；写纲要、决定、文件时会在群聊里留一条事件。</p>
       <p><a href="#${esc(chat ? chat.id : `p-${g.id}`)}">回到项目群聊</a> · ${g.member_ids.length} 名成员</p>
       ${workdirsHtml(c)}`)) return;
     bindWorkdirs(box, c);
@@ -3501,7 +3504,7 @@ function renderThread() {
         <div class="muted">${c.archived ? "服务已撤回，只读" : `服务 · 来自「${esc(svc.project_name || "")}」· 由 ${esc(svc.entry?.name || "")} 接待 · 只有你看得到`}</div></div>`
     : sess
     ? `<span class="avatar session" aria-hidden="true">›</span><div class="info"><h2 class="panel-title" style="margin:0">${esc(c.title)} ${pill(c.status)}</h2>
-        <div class="muted">${c.archived ? "已归档，只读" : `项目会话 · ${esc(g?.name || "")} · 和 ${esc(peer?.name || "助理")} 单独聊，只有你看得到`}</div></div>`
+        <div class="muted">${c.archived ? "已归档，只读" : `项目会话 · ${esc(g?.name || "")} · ${peer ? `没 @ 时由 ${esc(peer.name)} 回答` : "@ 谁谁接"}，只有你看得到`}</div></div>`
     : dm && c.is_home
     ? `${avatar(peer?.name)}<div class="info"><h2 class="panel-title" style="margin:0">助理 ${pill(c.status)}</h2>
         <div class="muted">你和助理 ${esc(peer?.name || "")} · 只有你看得到 · 它看得到你各个项目的进展，替你起草消息、按你的话定时提醒</div></div>`
@@ -3516,7 +3519,7 @@ function renderThread() {
       ? `${g ? '<button type="button" class="ghost" id="sess-restore">恢复</button>' : ""}<button type="button" class="danger" id="conv-del">删除</button>`
       : '<button type="button" class="ghost" id="sess-rename">改名</button><button type="button" class="ghost" id="sess-archive">归档</button>')
     : c.archived ? '<button type="button" class="danger" id="conv-del">删除</button>'
-    : c.kind === "project" && g ? `<button type="button" class="ghost" id="sess-new" title="和你的助理单独聊这个项目，不打扰群聊">新会话</button>${c.is_host === false ? ""
+    : c.kind === "project" && g ? `<button type="button" class="ghost" id="sess-new" title="在这个项目里单独聊，不打扰群聊；只有你看得到">新会话</button>${c.is_host === false ? ""
       : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>'}`
     : c.is_host === false ? ""  // 共享项目的群聊只有主持人能清空
     : '<button type="button" class="ghost" id="conv-clear" title="清空聊天记录，成员从新的会话开始">清空记录</button>';
@@ -3533,8 +3536,8 @@ function renderThread() {
     const sw = (x, label, title) => `<a href="#${esc(x.id)}" ${x.id === c.id ? 'aria-current="page"' : ""} title="${esc(title)}">${esc(label)}</a>`;
     const switcher = `<nav class="conv-switch" aria-label="这个项目里的对话">
       ${group ? sw(group, "群聊", `${c.members.length} 名成员 · @ 谁，谁接任务`) : ""}
-      ${mine.map((x) => sw(x, x.title, `项目会话：和 ${aname(x.agent_id) || "助理"} 单独聊，只有你看得到`)).join("")}
-      <button type="button" class="ghost sm" id="sess-new" title="和你的助理单独聊这个项目，不打扰群聊；只有你看得到">＋ 新会话</button></nav>`;
+      ${mine.map((x) => sw(x, x.title, `项目会话：只有你看得到${aname(x.agent_id) ? `，没 @ 时由 ${aname(x.agent_id)} 回答` : ""}`)).join("")}
+      <button type="button" class="ghost sm" id="sess-new" title="在这个项目里单独聊，不打扰群聊；只有你看得到">＋ 新会话</button></nav>`;
     const note = sess ? '<span class="muted sess-note">只有你看得到</span>' : "";
     const small = (html) => html.replaceAll('class="ghost"', 'class="ghost sm"');
     $("#thread-head").innerHTML = switcher + stale + note + pill(c.status) + small(sideBtn + actions.replace(/<button[^>]*id="sess-new"[^>]*>[^<]*<\/button>/, ""));
@@ -3548,9 +3551,8 @@ function renderThread() {
     catch (err) { alert(err.message); }
   });
   $("#sess-new")?.addEventListener("click", async () => {
-    try {  // 助理还不在项目里：先问一句再加进来（不变量 18）
-      const r = await withPluginConfirm((c, digest) => api(`/api/projects/${g.id}/sessions`, { method: "POST", body: c ? { join: digest } : {} }), "加入并开会话");
-      if (!r) return;
+    try {  // 不需要助理（不变量 18）：它在项目里时没 @ 的消息交给它，否则 @ 谁谁接
+      const r = await api(`/api/projects/${g.id}/sessions`, { method: "POST", body: {} });
       await reload(); location.hash = r.id;
     }
     catch (err) { alert(err.message); }
@@ -4119,8 +4121,8 @@ function bindAttachments() {
 }
 
 // ---------- 输入框：@ 成员 ----------
-// 群聊里 @ 谁谁接任务：输入 @ 弹出成员列表补全。项目会话里能 @ 自己在项目里的其他 Agent（成员列表由网络给，
-// 只有自己的），没 @ 时交给助理。私聊不需要 @。
+// 群聊与项目会话里 @ 谁谁接任务：输入 @ 弹出成员列表补全（成员列表由网络给）。项目会话里没 @ 时交给默认成员
+// （有的话）。私聊不需要 @。
 const members = () => (S.conv?.members || proj(S.conv?.project_id)?.member_ids || []).map(agent).filter(Boolean);
 const mentionedIn = (text) => members().filter((a) => text.toLowerCase().includes(`@${a.name.toLowerCase()}`));
 

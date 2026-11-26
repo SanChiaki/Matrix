@@ -7,19 +7,21 @@
   私有目录在共享项目里按来源场合挂载（不变量 22，[projects.md](../projects.md) 第 6 节）。
 - **助理**（`User.assistant_id`，`Network.assistant_of`）：注册时网络给没有 Agent 的人建一个（`ensure_assistant`，见 [assistant.md](assistant.md)）；
   没指定时是用户第一个创建的 Agent（`Store.default_assistants`，删掉后取下一个），
-  `PUT /api/me/assistant` 换。助理不会自己进项目（不变量 18）：只有开项目会话、这个人确认之后，
+  `PUT /api/me/assistant` 换。助理不会自己进项目（不变量 18）：人把它加进项目，或开项目会话时明确带上它（`join`），
   `_bring_assistant` 才把它加进成员并在群聊记一条事件；助理和别的成员一样能移出。换助理不动已有项目。
-- **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是开会话时的助理）：
-  `POST /api/projects/<id>/sessions` 新建（助理还不是成员时返回 409 + `confirm` + `digest`（助理 id），带 `join: <digest>`
-  再发一次才加入并开会话，这期间换了助理就再问；这个人已有还没发过消息的会话时沿用它，
-  侧栏也只列出发过消息的会话），`GET` 列出自己的，
+- **项目会话**（`Conversation.kind = session`，`owner_id` 是这个人，`agent_id` 是没 @ 时默认回答的成员，可以为空）：
+  `POST /api/projects/<id>/sessions` 新建，不需要助理（`{title?, agent?, join?}`：`agent` 是默认成员，按 id 或名字，要是项目成员；
+  不给时用已经在项目里的助理，没有就为空；`join: <助理 id>` 先把自己的助理带进项目再当默认成员）。
+  这个人已有还没发过消息、默认成员相同的会话时沿用它，侧栏也只列出发过消息的会话），`GET` 列出自己的，
   `PATCH /api/sessions/<id>` 改名、归档 / 恢复（进行中不能归档；人已不在项目里不能恢复）。只有它的人看得到（不变量 18）；
-  人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；助理不在项目里了，会话不能再发消息。
-- 会话席位和群聊席位一样：没 @ 的消息交给助理，@ 到的是会话主人自己在项目里的其他 Agent（`_members` / `resolve_mentions`，
-  别人的 Agent 不能 @），能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
+  人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；默认成员不在项目里了，没 @ 的消息只留在会话里。
+- 会话席位和群聊席位一样：能 @ 项目里的任何 Agent（`_members` / `resolve_mentions`），没 @ 的交给默认成员；
+  能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
+  被 @ 进来的别人的 Agent（`ExecContext.guest`）：没有下面的项目现状与读工具，写下的东西按“只有所有者在场”记来源；
+  回复的听众是会话主人与它的所有者（`_conv_audience`），所有者经 `GET /api/agents/<id>/guest-rounds`（`guest_rounds`）看经过它的那几轮。
   此外每轮带一份**项目现状**（`_session_state` / `protocol.format_session_state`：成员、没结束的用户任务、
   最近 `SESSION_MESSAGES` 条群聊公开消息，字节封顶），按 sha1 记在 `Seat.state_seen`，只在变化时重新推送；
-  只读工具 `read_chat`、`read_request`（`SESSION_TOOLS`）只在会话里有。读到的一切按会话主人的可见性过滤。
+  只读工具 `read_chat`、`read_request`（`SESSION_TOOLS`）只给会话主人自己的 Agent。读到的一切按会话主人的可见性过滤。
 - 用户任务的项目归属由网络按所在对话认定（`open_request` 时），不让模型填；私聊里的任务由下发的人手动归到自己主持的项目
   （`assign_request`，`PUT /api/requests/<id>/project`）。
 - 无权限一律按不存在（404）；`project.*` 事件按可见性推送（`event_view`）。
