@@ -17,7 +17,7 @@
   人退出 / 被移出时这个人的会话归档为只读（`_drop_participant`）；默认成员不在项目里了，没 @ 的消息只留在会话里。
 - 会话席位和群聊席位一样：能 @ 项目里的任何 Agent（`_members` / `resolve_mentions`），没 @ 的交给默认成员；
   能委托项目成员、登记用户任务、用档案工具；档案写入照常在项目群聊里记事件。
-  被 @ 进来的别人的 Agent（`ExecContext.guest`）：没有下面的项目现状与读工具，写下的东西按“只有所有者在场”记来源；
+  被 @ 进来的别人的 Agent（`ExecContext.guest`）：只拿得到 @ 它的消息与上面的附件（`_seat_round`、`_attachments_for`），没有下面的项目现状与读工具，写下的东西按“只有所有者在场”记来源；
   回复的听众是会话主人与它的所有者（`_conv_audience`），所有者经 `GET /api/agents/<id>/guest-rounds`（`guest_rounds`）看经过它的那几轮。
   此外每轮带一份**项目现状**（`_session_state` / `protocol.format_session_state`：成员、没结束的用户任务、
   最近 `SESSION_MESSAGES` 条群聊公开消息，字节封顶），按 sha1 记在 `Seat.state_seen`，只在变化时重新推送；

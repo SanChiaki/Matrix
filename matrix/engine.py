@@ -4684,7 +4684,8 @@ class Network:
                     d.pop("audience", None)
                     d.pop("private_to", None)
                     view.append(d)
-                out.append({"conversation_id": c.id, "title": c.title, "project_name": g.name if g else "",
+                # 会话的标题是按会话主人的第一条消息起的，不一定经过它：不给
+                out.append({"conversation_id": c.id, "project_name": g.name if g else "",
                             "caller": self._email(c.owner_id), "updated_at": c.updated_at, "archived": c.archived,
                             "messages": view})
             return out
@@ -5066,7 +5067,9 @@ class Network:
         conv = self.store.conversations.get(ctx.conversation_id)
         agent = self.store.agents.get(ctx.agent_id)
         owner = agent.owner_id if agent else None
-        mine = [a for m in (conv.messages if conv else []) if not m.audience or owner in m.audience for a in m.attachments]
+        mine = [a for m in (conv.messages if conv else []) if (not m.audience or owner in m.audience)
+                and (not ctx.guest or ctx.agent_id in m.mentions or m.agent_id == ctx.agent_id)  # 客人：只有 @ 它的消息上的
+                for a in m.attachments]
         return _merge_files(mine, delivered)
 
     def _mount_attachments(self, ctx: ExecContext, workdir: Path) -> None:
@@ -5453,6 +5456,8 @@ class Network:
             fresh = [m for m in fresh if self._about_visible(project, m.about, agent.id)]  # 范围外的资料、技能（不变量 26）
             mine = {q.id for q in self.store.questions.values() if q.agent_id == agent.id}
             fresh = [m for m in fresh if m.answers not in mine or m.answers is None]  # 回答它提问的消息：那一轮已经拿到
+            if ctx.guest:  # 别人的项目会话：只送 @ 它的消息，会话的其余部分它和它的所有者都拿不到（不变量 18）
+                fresh = [m for m in fresh if m.role == "user" and agent.id in m.mentions]
             ctx.addressed = [m.id for m in fresh if m.role == "user" and agent.id in m.mentions]
             for it in items:  # 这一轮属于哪一串接力；route 分派给它认领的人的消息，算交代给它的（规则 4：下发人是原作者）
                 if it.get("cascade"):

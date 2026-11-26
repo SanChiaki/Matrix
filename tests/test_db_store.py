@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from matrix import db as dbmod
 from matrix import storage_cli
 from matrix.engine import Network
-from matrix.models import Message, new_id
+from matrix.models import Message, Project, User, new_id
 from matrix.runtime import ScriptedRuntime
 from matrix.server import create_app
 from matrix.store import DICT_KINDS, ENTITY_KINDS, DbBackend, Store
@@ -227,7 +227,7 @@ def test_rounds_write_runs(tmp_path: Path):
 _WRITER = """
 import sys
 from pathlib import Path
-from matrix.models import Message, new_id
+from matrix.models import Message, Project, User, new_id
 from matrix.store import Store
 s = Store(Path(sys.argv[1]), seed=True, url="sqlite")
 conv = next(iter(s.conversations.values()))
@@ -317,3 +317,34 @@ def test_pg_reconnects_after_connection_loss(tmp_path: Path):
     again = Store(tmp_path, seed=False, url=PG)
     assert again.sandbox_orphans == {"before": 1.0, "after": 2.0}
     again.close()
+
+
+def test_removed_kinds_in_the_db_are_backed_up_then_dropped(tmp_path: Path, url: str):
+    """外部应用与项目服务移除之前写进库里的行：升级后第一次启动先把读到的状态另存一份（state.pre-services.json），
+    再删掉；业务系统账号主持的项目照样转给登记应用的人（库里的应用行读得到）。"""
+    s = Store(tmp_path, seed=False, url=url)
+    s.users["u1"] = User(id="u1", email="a@example.com", password_hash="", salt="")
+    s.projects["prj-1"] = Project(id="prj-1", name="报销", description="", member_ids=[], owner_id="u1")
+    s.save()
+    s.close()
+    d = dbmod.Database(dbmod.resolve_url(url, tmp_path))
+    now = time.time()
+    sysu = {"id": "sys1", "email": "sys1@system.local", "password_hash": "", "salt": "", "kind": "system", "app_id": "app-1"}
+    hosted = {"id": "prj-2", "name": "系统的", "description": "", "member_ids": [], "owner_id": "sys1", "participants": []}
+    for kind, key, data in [("apps", "app-1", {"id": "app-1", "name": "报销系统", "system_user_id": "sys1", "created_by": "u1"}),
+                            ("app_grants", "grant-1", {"id": "grant-1", "app_id": "app-1", "user_id": "sys1"}),
+                            ("project_services", "svc-1", {"id": "svc-1", "project_id": "prj-1"}),
+                            ("users", "sys1", sysu), ("projects", "prj-2", hosted)]:
+        d.execute("INSERT INTO entity (kind, id, data, updated_at) VALUES (?, ?, ?, ?)", (kind, key, json.dumps(data), now))
+    d.close()
+
+    again = Store(tmp_path, seed=False, url=url)
+    assert set(again.users) == {"u1"} and again.projects["prj-2"].owner_id == "u1"
+    kept = json.loads((tmp_path / "state.pre-services.json").read_text(encoding="utf-8"))
+    assert kept["apps"][0]["id"] == "app-1" and kept["project_services"] and kept["app_grants"]
+    assert {u["id"] for u in kept["users"]} == {"u1", "sys1"}
+    again.close()
+    d = dbmod.Database(dbmod.resolve_url(url, tmp_path))
+    kinds = {k for (k,) in d.query("SELECT DISTINCT kind FROM entity")}
+    d.close()
+    assert not {"apps", "app_grants", "project_services"} & kinds
