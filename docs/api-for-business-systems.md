@@ -54,7 +54,7 @@ curl https://matrix.corp.example/api/me \
 ## 二、通用约定
 
 - 请求体与返回都是 JSON（`Content-Type: application/json`），UTF-8。上传附件例外：请求体就是文件内容。
-- id 是带前缀的字符串：`user-…`、`agent-…`、`prj-…`、`conv-…`、`msg-…`、`req-…`、`task-…`。当不透明字符串存，不要解析。
+- id 是带前缀的字符串：`user-…`、`agent-…`、`prj-…`、`conv-…`、`msg-…`、`req-…`、`task-…`、`dev-…`。当不透明字符串存，不要解析。
 - 时间是 Unix 秒（浮点数）。
 - 返回的对象字段会**增加**，不会无故减少或改含义：按名字取要用的字段，忽略不认识的。
 - 写操作不是幂等的（没有幂等键）：超时后重试前先查一下（比如发消息前看对话里是不是已经有了）。
@@ -70,11 +70,12 @@ curl https://matrix.corp.example/api/me \
 | 404 | 不存在，**或这个用户看不到**（两者不区分，不变量 13） | 检查 id、检查替的是不是对的人 |
 | 409 | 这个操作现在做不了（名字重复、不是成员、不是主持人能做的事的另一些情况、对话进行中等） | `detail` 说明原因，可以直接给用户看 |
 | 413 | 附件太大（单个 20 MB） | |
+| 429 | 设备配对相关的数量限制（没用过的配对令牌太多、配对码输错太多） | 稍后再试 |
 | 422 | 请求体字段不对（缺字段、超长） | 改请求 |
 
 ## 三、接口清单（稳定子集）
 
-下面这些是业务系统接入时用得到、我们会尽量保持不变的接口。**不在这里的 `/api/*`（插件、模板、发布、连接器、设备、IM、管理后台等）是给
+下面这些是业务系统接入时用得到、我们会尽量保持不变的接口。**不在这里的 `/api/*`（插件、模板、发布、连接器、IM、管理后台等）是给
 Matrix 自己的网页用的，会随版本变，不建议依赖**；确实要用时先和 Matrix 的维护者确认。
 
 | 分组 | 接口 |
@@ -86,6 +87,7 @@ Matrix 自己的网页用的，会随版本变，不建议依赖**；确实要�
 | [项目会话](#5-项目会话) | `POST /api/projects/{project_id}/sessions`、`GET /api/projects/{project_id}/sessions`、`PATCH /api/sessions/{conv_id}`、`DELETE /api/conversations/{conv_id}` |
 | [消息](#6-消息与附件) | `POST /api/conversations/{conv_id}/messages`、`GET /api/conversations/{conv_id}`、`POST /api/conversations/{conv_id}/attachments`、`GET /api/conversations/{conv_id}/attachments/{sha}`、`POST /api/conversations/{conv_id}/seats/{agent_id}/stop`、`POST /api/questions/{question_id}` |
 | [事件流](#7-事件流sse) | `GET /api/events` |
+| [设备](#8-设备端侧连接器) | `GET /api/devices`、`POST /api/devices/enroll`、`DELETE /api/devices/{device_id}`、`GET /api/devices/pair/{code}`、`POST /api/devices/pair/{code}/approve`、`POST /api/devices/pair/{code}/deny` |
 
 **每个接口都要带的请求头**（下面各节不再重复）：
 
@@ -125,6 +127,8 @@ Matrix 自己的网页用的，会随版本变，不建议依赖**；确实要�
 | `effective_authority` | string[] | 实际生效的权限（它运行的地方做不到的会被去掉） |
 | `chat_enabled` | boolean | 能不能和它私聊 |
 | `model_preset` | string? | 选的预置模型 id；`null` = 默认模型 |
+| `device_runtime` | string? | 绑定的设备 id（`dev-…`，见[第 8 节](#8-设备端侧连接器)）；`null` = 在平台云侧运行 |
+| `harness` | string? | 在设备上用哪个 harness（驱动）；`null` = 设备的默认，云侧的 Agent 总是 `null` |
 | `timeout_s` | integer? | 每轮运行超时（秒）；`null` = 不限制 |
 | `max_delegations` | integer? | 每次被 @ 最多委托几次；`null` = 不限制 |
 | `owner_id` | string | 所有者的用户 id |
@@ -268,7 +272,9 @@ Agent 属于创建它的用户（所有者），只有所有者能改、能删�
 | `capabilities` | string[]，最多 10 个 | 否（`[]`） | 擅长什么 |
 | `authority` | string[] | 否（`[]`：只能对话） | 权限上限，取值：`web.research` 查公开信息；`file.write` 在工作目录里写文件；`shell.exec` 执行命令；`delegate` 委托项目里别的成员；`connector.use` 用所有者授权的连接器 |
 | `chat_enabled` | boolean | 否（`true`） | 能不能和它私聊 |
-| `model_preset` | string? | 否（`null`：默认模型） | 预置模型的 id，取自 `GET /api/models` |
+| `model_preset` | string? | 否（`null`：默认模型） | 预置模型的 id，取自 `GET /api/models`；只用于平台云侧的 Agent |
+| `device_runtime` | string? | 否（`null`：平台云侧） | 让它在用户自己的某台设备上运行：设备 id，取自 `GET /api/devices`，必须是这个用户的 |
+| `harness` | string?，≤40 | 否（`null`：设备的默认） | 设备上的哪个 harness，必须在设备的 `harnesses` 里；不给 `device_runtime` 时不能给 |
 | `timeout_s` | integer?，≥1 | 否（`null`：不限制） | 每轮运行超时（秒） |
 | `max_delegations` | integer?，≥1 | 否（`null`：不限制） | 每次被 @ 最多委托几次 |
 
@@ -280,7 +286,9 @@ Agent 属于创建它的用户（所有者），只有所有者能改、能删�
 |---|---|---|
 | 409 | `Agent 名称已存在：…` | 重名 |
 | 409 | `未知权限：…` | `authority` 里有不认识的值 |
-| 409 | `没有配置预置模型` 等 | `model_preset` 不可用 |
+| 409 | `没有配置预置模型` 等 | `model_preset` 不可用（设备上的 Agent 不能用预置模型） |
+| 409 | `设备 … 不存在或属于别人` | `device_runtime` 不是这个用户的设备 |
+| 409 | `设备 … 上没有 …` / `未知的 harness：…` / `平台云侧运行内置 dsh，不能选 harness…` | `harness` 不对 |
 | 422 | | 缺 `name` / `description`、长度不对 |
 
 ```bash
@@ -314,12 +322,14 @@ curl -X POST $MATRIX/api/agents $AUTH -H "Content-Type: application/json" -d '{
 | `authority` | string[] | 整份替换 |
 | `chat_enabled` | boolean | |
 | `model_preset` | string? | 换预置模型；`null` = 改回默认模型 |
+| `device_runtime` | string? | 换到某台设备上运行；`null` = 改回平台云侧（`harness` 一并清掉）。公共 Agent、外部平台的 Agent 不能换到设备上 |
+| `harness` | string? | 换设备上的 harness；只给它时沿用原来的设备 |
 | `timeout_s` | integer? | `null` = 改回不限制 |
 | `max_delegations` | integer? | `null` = 改回不限制 |
 
 **返回** 200：改完的 Agent 对象。
 
-**错误**：404（不是你的 Agent）；409（重名、未知权限、预置模型不可用）。
+**错误**：404（不是你的 Agent）；409（重名、未知权限、预置模型不可用、设备或 harness 不对，同 `POST /api/agents`）。
 
 ```bash
 curl -X PATCH $MATRIX/api/agents/agent-b5b043fe $AUTH -H "Content-Type: application/json" \
@@ -769,10 +779,165 @@ data: {"seq": 132, "type": "message.added", "ts": 1795677856.27, "data": {"conve
 | `project.deleted` | `project_id` | 项目被删了 |
 | `question.updated` | `question`（提问对象） | Agent 向这个人提了问题，或问题已经回答 / 作废 |
 | `agent.updated` | `agent`（Agent 对象） | Agent 的资料或状态变了 |
+| `device.connected` | `device_id`、`runtime` | 这个用户的一台设备连上了（只给设备的所有者） |
+| `device.disconnected` | `device_id` | 这个用户的一台设备断开了 |
 
 ```bash
 curl -N "$MATRIX/api/events?since=131" $AUTH
 ```
+
+### 8. 设备（端侧连接器）
+
+设备是用户自己电脑上装的连接器 `matrix-connect`，Agent 绑到设备上以后就在那台电脑上、用那里的 harness 运行。
+设备属于签发或批准它的那个用户，别人的设备按不存在处理（404）。整体设计见 [device-runtimes.md](device-runtimes.md) 第 2 节，
+业务系统想让用户“点一下就连上、建好 Agent”时按 [device-driver-authoring.md](device-driver-authoring.md) 接。
+
+接入设备有两条路，都是让**这个用户**成为设备的所有者：
+
+| 方式 | 流程 | 什么时候用 |
+|---|---|---|
+| 一次性配对令牌（推荐） | 业务系统后端 `POST /api/devices/enroll` 签一条令牌 → 交给用户的电脑 → 电脑上运行 `matrix-connect setup <服务器> --code <code>` | 业务系统能把令牌安全地送到那台电脑上（比如它自己的桌面端） |
+| 设备码配对 | 电脑上运行 `matrix-connect setup <服务器>`，显示配对码 → 用户在 Matrix 网页（或业务系统自己的批准页，调下面的 `pair/{code}` 接口）核对后批准 | 送不了令牌，或者要用户当面确认 |
+
+两种方式都可以顺带一份 Agent 规格（`agent`），配对成功时建好这个 Agent、绑到这台设备上。
+
+**不要**让业务系统后端调 `POST /api/devices` 拿长期设备令牌再转交：那条路能跑通，但长期凭据会经过业务后端和中间通道。
+一次性令牌只能兑换一次、10 分钟就过期。
+
+#### 设备对象
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | string | 设备 id（`dev-…`），绑 Agent 时填进 `device_runtime` |
+| `name` | string | 设备名 |
+| `hostname` | string | 连接器报告的主机名，只用于展示 |
+| `harnesses` | string[] | 最近一次报告的 harness，第一个是默认；设备离线时仍按它选 |
+| `online` | boolean | 现在连着没有 |
+| `revoked` | boolean | 吊销了没有 |
+| `last_seen_at` | number? | 最近一次连上的时间；没连过为 `null` |
+| `created_at` | number | 创建时间 |
+
+#### 配对时的 Agent 规格
+
+`POST /api/devices/enroll` 和配对申请里的 `agent` 字段，配对成功时按它建 Agent，所有者是这个用户。
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，2–80 | 是 | 名字。已被占用时自动加所有者邮箱的前缀，再重名加序号；实际的名字看兑换结果里的 `agent_name` |
+| `description` | string，2–2000 | 是 | 设定 |
+| `capabilities` | string[]，最多 10 个 | 否（`[]`） | 同 `POST /api/agents` |
+| `authority` | string[] | 否（`[]`） | 同 `POST /api/agents` |
+| `chat_enabled` | boolean | 否（`true`） | |
+| `harness` | string?，≤40 | 否（`null`：设备的默认） | 设备上的哪个 harness，必须是服务器认得的 |
+| `timeout_s` | integer?，≥1 | 否（`null`） | |
+| `max_delegations` | integer?，≥1 | 否（`null`） | |
+
+#### `GET /api/devices`：这个用户的设备
+
+**返回** 200：设备对象的数组（含已吊销的，看 `revoked`）。
+
+```bash
+curl $MATRIX/api/devices $AUTH
+```
+
+```json
+[{"id": "dev-3c1a9e20", "name": "王工的电脑", "hostname": "wang-mbp", "harnesses": ["biz-agent", "claude"],
+  "online": true, "revoked": false, "last_seen_at": 1795677900.12, "created_at": 1795677850.01}]
+```
+
+#### `POST /api/devices/enroll`：签一次性配对令牌
+
+签令牌的这个用户就是将来设备和 Agent 的所有者。令牌 10 分钟内有效、只能兑换一次，每人同时最多 16 条没用过的；
+只存在服务器内存里，服务重启后没用过的作废，重新签一条即可。
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，≤80 | 否（`""`：用连接器报告的） | 设备名 |
+| `agent` | object? | 否（`null`：只配对，不建 Agent） | Agent 规格，见上 |
+
+**返回** 200：`{"code": "<令牌>", "expires_in": 600}`。`code` 只在这里出现一次，不要写进日志、不要长期存。
+
+**错误**
+
+| 状态码 | `detail` | 情况 |
+|---|---|---|
+| 400 | `未知的 harness：…` | `agent.harness` 服务器不认得 |
+| 429 | `没用过的配对令牌太多，请稍后再试` | 这个用户同时有 16 条没用过的 |
+
+```bash
+curl -X POST $MATRIX/api/devices/enroll $AUTH -H "Content-Type: application/json" -d '{
+  "name": "王工的电脑",
+  "agent": {"name": "报销助手", "description": "在这台电脑上处理报销单据", "harness": "biz-agent"}}'
+```
+
+```json
+{"code": "…43 个字符…", "expires_in": 600}
+```
+
+之后把 `code` 和 Matrix 的地址交给那台电脑，由它运行 `matrix-connect setup https://matrix.corp.example --code <code>`。
+兑换成功后，设备会出现在 `GET /api/devices` 里；建了 Agent 的话，还会收到 `agent.updated` 事件，设备连上时收到 `device.connected`。
+
+#### `DELETE /api/devices/{device_id}`：吊销设备
+
+令牌立即失效，在线的连接随之断开。绑在它上面的 Agent 不会被删，只是没有地方运行，可以用 `PATCH /api/agents/{agent_id}` 改回平台云侧或换一台设备。
+
+**返回** 200：`{"ok": true}`。
+
+**错误**：400 `设备不存在`（不存在或不是这个用户的）。
+
+#### `GET /api/devices/pair/{code}`：查看设备码配对申请
+
+业务系统想用自己的页面替用户批准时用。`code` 是电脑上显示的 8 位配对码（`ABCD-EFGH`，大小写、连字符都可以不管）。
+
+**返回** 200：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `user_code` | string | 配对码（`ABCD-EFGH`） |
+| `name` | string | 连接器报告的设备名 |
+| `hostname` | string | 主机名 |
+| `harnesses` | string[] | 这台电脑上检测到的 harness |
+| `agent` | object? | 申请里附带的 Agent 规格（只有 `name`、`description`、`harness`、`authority`）；没有为 `null` |
+| `created_at`、`expires_at` | number | 申请时间、过期时间（申请 10 分钟有效） |
+
+**错误**：404 `配对码不存在或已过期`；429 `输错次数太多，请稍后再试`（每个用户 10 分钟内最多输错 10 次，之后正确的码也不受理）。
+
+#### `POST /api/devices/pair/{code}/approve`：批准
+
+批准的这个用户就是设备的所有者。申请里附带了 Agent 规格的话，同时建好这个 Agent、绑到这台设备上；建不成时设备不会建、申请留在等待中。
+
+**请求体**
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string，≤80 | 否（`""`：用连接器报告的） | 设备名 |
+
+**返回** 200：设备对象（`online` 为 `false`，连接器拿到令牌后才会连上），另加 `agent_id`、`agent_name`（建了 Agent 时，否则为 `null`）。
+
+**错误**：同 `GET /api/devices/pair/{code}`；409（建 Agent 失败，`detail` 说明原因）。
+
+#### `POST /api/devices/pair/{code}/deny`：拒绝
+
+**返回** 200：`{"ok": true}`。连接器下一次轮询时得到 `denied`，什么都不建。
+
+**错误**：同 `GET /api/devices/pair/{code}`。
+
+#### 连接器自己调的接口（业务系统一般用不到）
+
+这些接口不需要登录（电脑上还没有任何凭据），由 `matrix-connect` 调用，列在这里方便排查问题。
+如果业务系统自己的桌面端程序不想经过命令行，可以直接调 `POST /api/devices/enroll/redeem`，再按 `matrix/connector/config.py` 的格式写配置、拉起 `matrix-connect run`，一般没必要。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/devices/enroll/redeem` | 用一次性令牌换设备令牌。请求 `{"code", "name", "hostname", "harnesses", "agent"?}`（签令牌时指定了 Agent 的话以签的为准），返回 `{"status": "approved", "token", "device_id", "device_name", "email", "agent_id", "agent_name"}`。令牌不对、用过或过期时返回 404；指定的 harness 这台电脑上没有时返回 400，令牌不作废，装好后可以再兑换 |
+| `POST /api/devices/pair` | 发起设备码配对。请求 `{"name", "hostname", "harnesses", "agent"?}`，返回 `{"device_code", "user_code", "expires_in": 600, "interval": 2, "verify_path": "/#pair=<user_code>"}`。等待中的申请全站最多 64 条，超过返回 429 |
+| `POST /api/devices/pair/poll` | 拿 `device_code` 轮询，返回 `status`：`pending` / `denied` / `expired` / `approved`。`approved` 时带上 `token`、`device_id`、`device_name`、`email`、`agent_id`、`agent_name`，令牌只交付一次 |
+| `WebSocket /api/devices/connect?token=<设备令牌>` | 连接器从设备往外连到服务器的长连接，令牌不对时以 1008 关闭 |
+| `GET /connect/install.sh`、`GET /connect/install.ps1`、`GET /connect/dist/{asset}` | 连接器的安装脚本与安装包 |
+
+`POST /api/devices` 也能签设备令牌（返回设备对象加 `token`），但它签的是长期凭据，业务系统不要用，原因见本节开头。
 
 ## 四、要知道的限制
 
