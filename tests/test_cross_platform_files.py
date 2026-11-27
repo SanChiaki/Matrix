@@ -112,7 +112,10 @@ class FileHost:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Content-Disposition", "attachment; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.csv")
                 self.end_headers()
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except OSError:  # /big：客户端看到 Content-Length 超过上限就断开，不读内容
+                    pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
         self.port = self.server.server_address[1]
