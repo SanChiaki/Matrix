@@ -1,0 +1,335 @@
+"""跨平台的文件（docs/files-across-platforms.md）：各平台收发文件的方式不同，差异只在部署方的目录与驱动里消化——
+fetch_file 只从部署方登记的来源拉（凭证不给模型、只发给第一跳的主机、每一跳都在 hosts 里），拉进这一轮的暂存区再 send_file；
+平台目录的 files.in 决定这一轮的文件怎么交给平台（短期链接 / 平台的 file_id / 平台来取），files.source 接住平台在流里报的文件，
+export_file 按 files.export 把 Matrix 的文件交给平台上的工具。短期链接只在签它的那一轮里有效。"""
+
+from __future__ import annotations
+
+import json
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from matrix import file_sources as fsrc
+from matrix.engine import ExecContext, Network
+from matrix.file_sources import SourceCatalog, SourceError, parse_sources
+from matrix.remote_agents import PlatformCatalog, PlatformError, parse_platforms
+from matrix.runtime import ScriptedRuntime
+from matrix.server import create_app
+from tests.test_users import users
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "examples" / "remote-agent"))
+from demo_platform import API_KEY, DemoPlatform, report  # noqa: E402
+
+
+class Env:
+    """演示平台 + Matrix。`files` 是平台目录里 demo 平台的 files 配置；来源目录里登记了演示平台的文件库（带平台凭证）。"""
+
+    def __init__(self, tmp_path: Path, files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None):
+        data = tmp_path / "data"
+        data.mkdir()
+        self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post, file_get=self._file_get)
+        plats = tmp_path / "agent-platforms.json"
+        plats.write_text(json.dumps({"platforms": [
+            {"id": "demo", "name": "演示平台", "url": self.demo.url, "bind_wait_s": 3, **({"files": files} if files else {})},
+        ]}), encoding="utf-8")
+        srcs = tmp_path / "file-sources.json"
+        srcs.write_text(json.dumps({"sources": [
+            {"id": "demo-files", "name": "演示平台的文件库", "url": self.demo.url + "/files/{ref}/content",
+             "auth": "platform", "platform": "demo", "hint": "平台的文件 id（pf-…）"},
+            *(extra_sources or []),
+        ]}), encoding="utf-8")
+        self.net = Network(ScriptedRuntime(lambda call: "云侧"), data, seed=False, platforms=PlatformCatalog(plats),
+                           file_sources=SourceCatalog(srcs))
+        self.client = TestClient(create_app(self.net))
+
+    def _mcp_post(self, url: str, headers: dict[str, str], body: dict) -> dict:
+        r = self.client.post("/mcp/remote", json=body, headers=headers)
+        return r.json() if r.content else {}
+
+    def _file_post(self, url: str, headers: dict[str, str], data: bytes) -> tuple[int, dict]:
+        r = self.client.post(url.removeprefix("http://matrix"), content=data, headers=headers)
+        return r.status_code, r.json()
+
+    def _file_get(self, url: str, headers: dict[str, str]) -> tuple[int, bytes]:
+        r = self.client.get(url.removeprefix("http://matrix"), headers=headers)
+        return r.status_code, r.content
+
+    def connect_mcp(self, agent_id: str, actor: str, platform_agent: str = "expense") -> str:
+        k = self.net.issue_remote_key(agent_id, actor=actor)
+        self.demo.mcp[platform_agent] = {"url": "http://matrix" + k["path"], "headers": {k["header"]: k["value"]}}
+        return k["key"]
+
+    def close(self) -> None:
+        self.demo.close()
+
+
+@pytest.fixture
+def make_env(tmp_path: Path):
+    made: list[Env] = []
+
+    def make(files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None) -> Env:
+        e = Env(tmp_path, files, extra_sources)
+        made.append(e)
+        return e
+    yield make
+    for e in made:
+        e.close()
+
+
+class FileHost:
+    """一个第三方的文件暂存：/f 给文件，/r 重定向到 localhost:同一端口/f，/big 超过 1 MB，/away 重定向到别的主机。"""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str]] = []   # (路径, Authorization)
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a: Any) -> None:
+                pass
+
+            def do_GET(self) -> None:  # noqa: N802
+                outer.seen.append((self.path, self.headers.get("Authorization", "")))
+                port = self.server.server_address[1]
+                if self.path == "/r":
+                    self.send_response(302)
+                    self.send_header("Location", f"http://localhost:{port}/f")
+                    self.end_headers()
+                    return
+                if self.path == "/away":
+                    self.send_response(302)
+                    self.send_header("Location", "http://elsewhere.invalid/f")
+                    self.end_headers()
+                    return
+                body = b"x" * 1_500_000 if self.path == "/big" else "季度报表".encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/csv")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Disposition", "attachment; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.csv")
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+
+
+@pytest.fixture
+def host():
+    h = FileHost()
+    yield h
+    h.close()
+
+
+def _ctx(dm_id: str, agent_id: str, kind: str = "seat") -> ExecContext:
+    return ExecContext(kind=kind, id=f"{dm_id}/{agent_id}", agent_id=agent_id, conversation_id=dm_id, project_id=None,
+                       authority=[], constraints=[], depth=0, chain=[agent_id])
+
+
+def test_source_catalog_only_takes_what_the_deployer_wrote():
+    """来源只来自部署方目录：地址模板要含 {ref}，整条链接的来源要写 hosts，带凭证的要写平台；ref 按来源的格式收。"""
+    with pytest.raises(SourceError, match=r"\{ref\}"):
+        parse_sources({"sources": [{"id": "a", "url": "https://x.example/files"}]})
+    with pytest.raises(SourceError, match="hosts"):
+        parse_sources({"sources": [{"id": "a", "url": "{ref}"}]})
+    with pytest.raises(SourceError, match="platform"):
+        parse_sources({"sources": [{"id": "a", "url": "https://x.example/{ref}", "auth": "platform"}]})
+    with pytest.raises(SourceError, match="auth"):
+        parse_sources({"sources": [{"id": "a", "url": "https://x.example/{ref}", "auth": "cookie"}]})
+    with pytest.raises(SourceError, match="重复"):
+        parse_sources({"sources": [{"id": "a", "url": "https://x.example/{ref}"}, {"id": "a", "url": "https://y/{ref}"}]})
+    ids, links = parse_sources({"sources": [
+        {"id": "ids", "url": "https://files.example/api/{ref}/raw"},
+        {"id": "links", "url": "{ref}", "hosts": ["oss.example"], "max_mb": 500}]})
+    assert ids.hosts == ("files.example",) and links.max_mb == 20  # 不超过附件上限
+    assert ids.resolve("file-1") == "https://files.example/api/file-1/raw"
+    with pytest.raises(SourceError, match="格式"):
+        ids.resolve("../../admin")  # 模板来源只收一个 id，路径穿不出去
+    with pytest.raises(SourceError, match="格式"):
+        links.resolve("javascript:alert(1)")
+    assert ids.usable_by(None) and not parse_sources({"sources": [
+        {"id": "p", "url": "https://x.example/{ref}", "auth": "platform", "platform": "corp"}]})[0].usable_by("other")
+
+
+def test_fetch_stays_on_listed_hosts_and_drops_credentials_on_redirect(host: FileHost):
+    """每一跳都要在 hosts 里；凭证只发给第一跳的主机，重定向到别的主机（预签名链接常见）时不带；超过上限不收。"""
+    src, = parse_sources({"sources": [{"id": "oss", "url": "{ref}", "hosts": ["127.0.0.1", "localhost"], "max_mb": 1}]})
+    data, mime, name = fsrc.fetch(src, f"http://127.0.0.1:{host.port}/f", {"Authorization": "Bearer s3cret"})
+    assert data == "季度报表".encode("utf-8") and mime == "text/csv" and name == "报表.csv"
+    fsrc.fetch(src, f"http://127.0.0.1:{host.port}/r", {"Authorization": "Bearer s3cret"})
+    assert host.seen[-2] == ("/r", "Bearer s3cret") and host.seen[-1] == ("/f", "")
+    with pytest.raises(SourceError, match="白名单"):
+        fsrc.fetch(src, f"http://127.0.0.1:{host.port}/away")
+    with pytest.raises(SourceError, match="上限"):
+        fsrc.fetch(src, f"http://127.0.0.1:{host.port}/big")
+    only_ip, = parse_sources({"sources": [{"id": "x", "url": "{ref}", "hosts": ["10.9.9.9"]}]})
+    with pytest.raises(SourceError, match="白名单"):
+        fsrc.fetch(only_ip, f"http://127.0.0.1:{host.port}/f")
+
+
+def test_fetch_file_pulls_a_platform_file_into_staging_and_sends_it(make_env):
+    """平台回答里只给自己的文件 id：模型调 fetch_file(source, ref)，Matrix 带平台凭证去取（模型看不到凭证），
+    拉进这一轮的暂存区，再 send_file 附在回复上；一轮结束暂存删掉。"""
+    env = make_env()
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    env.connect_mcp(a.id, maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "拉文件「demo-files」", actor=maya, background=False)
+    reply = dm.messages[-1]
+    assert [x["name"] for x in reply.attachments] == ["报销助手底稿.md"], reply.text
+    f, _ = net.attachment_file(dm.id, reply.attachments[0]["sha"], actor=maya)
+    assert f.read_bytes() == report("expense")
+    assert env.demo.file_gets[-1]["Authorization"] == f"Bearer {API_KEY}"
+    prompt = env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+    assert "## 外部文件来源" in prompt and "`demo-files`：演示平台的文件库" in prompt and API_KEY not in prompt
+    assert not any((net.store.root / "staging").iterdir())
+    # 不在目录里的来源、不合格式的 ref：不发请求
+    live = _ctx(dm.id, a.id)
+    n = len(env.demo.file_gets)
+    with pytest.raises(Exception, match="没有能用的来源"):
+        net.fetch_into_staging(live, "nope", "pf-1")
+    with pytest.raises(Exception, match="格式"):
+        net.fetch_into_staging(live, "demo-files", "../agents/expense")
+    assert len(env.demo.file_gets) == n
+
+
+def test_fetch_file_is_offered_only_where_it_can_be_used(make_env, host: FileHost):
+    """fetch_file 只在有这个 Agent 能用的来源、且这一轮发得出去时出现：带平台凭证的来源只给那个平台的 Agent，
+    云侧 Agent 只看得到不带凭证的来源；拉来的文件同样用 send_file(file_id) 发。"""
+    env = make_env(extra_sources=[{"id": "oss", "name": "对象存储", "url": "{ref}", "hosts": ["127.0.0.1"]}])
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    cloud = net.create_agent("云侧助手", "d", [], [], actor=maya)
+    dm = net.direct_chat(cloud.id, actor=maya)
+    ctx = _ctx(dm.id, cloud.id)
+    assert net._file_tools(ctx, cloud) == ["fetch_file"]
+    assert [s.id for s in net._sources_for(cloud)] == ["oss"]  # 平台的文件库要平台凭证：云侧 Agent 用不了
+    ctx.file_tools = ["fetch_file"]
+    net._contexts["t-cloud"] = ctx
+    with pytest.raises(Exception, match="没有能用的来源"):
+        net.fetch_into_staging(ctx, "demo-files", "pf-1")
+    text, bad = net.handle_tool("t-cloud", "fetch_file", {"source": "oss", "ref": f"http://127.0.0.1:{host.port}/f"})
+    assert not bad and "报表.csv" in text
+    fid = next(iter(ctx.staged))
+    text, bad = net.handle_tool("t-cloud", "send_file", {"file_id": fid})
+    assert not bad and [x["name"] for x in ctx.sent] == ["报表.csv"]
+    net._contexts.pop("t-cloud")
+    net._drop_staged(ctx)
+    # 委托任务里没有 send_file 也没有 delegate：拉来了也发不出去，不给
+    task = _ctx(dm.id, cloud.id, kind="task")
+    assert net._file_tools(task, cloud) == []
+    text, bad = net.handle_tool("t-none", "fetch_file", {})
+    assert bad
+
+
+def test_files_reported_in_the_stream_are_fetched_and_attached_even_without_mcp(make_env):
+    """files.source：平台在流里报 file {ref, name}，Matrix 按那个来源取回，照 send_file 附在这一轮的回复上——
+    基础接入（没配 Matrix 的 MCP）也行。没配 files.source 的平台报的文件不取。"""
+    env = make_env(files={"source": "demo-files"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    reply = dm.messages[-1]
+    assert [x["name"] for x in reply.attachments] == ["报销助手报表.md"], reply.text
+    f, _ = net.attachment_file(dm.id, reply.attachments[0]["sha"], actor=maya)
+    assert f.read_bytes() == report("expense")
+    assert "Matrix 会自动取回" in env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+
+
+def test_files_in_url_hands_short_links_valid_for_that_round(make_env):
+    """files.in = url：这一轮拿得到的文件随对话请求附上 Matrix 签的短期链接，平台不用带请求头就能取；一轮结束链接作废。"""
+    env = make_env(files={"in": "url", "matrix_url": "http://matrix"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)  # 基础接入就能收文件
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF-1.4 invoice", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看这张发票", attachments=[meta], actor=maya, background=False)
+    got, = env.demo.received_last
+    assert got["code"] == 200 and got["data"] == b"%PDF-1.4 invoice" and got["sha256"] == meta["sha"]
+    assert got["url"].startswith("http://matrix/mcp/remote/links/lnk_")
+    assert "随消息收到：发票.pdf" in dm.messages[-1].text
+    prompt = env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+    assert "已经随这条消息交给你的平台" in prompt and "GET /mcp/remote/files/" not in prompt
+    assert env.client.get(got["url"].removeprefix("http://matrix")).status_code == 404
+    assert env.client.get("/mcp/remote/links/lnk_guess").status_code == 404
+
+
+def test_files_in_upload_puts_files_into_the_platform_once(make_env):
+    """files.in = upload：先传到平台自己的文件接口，对话请求里附平台的 file_id；同一份内容不重复传。"""
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF-1.4 invoice", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    got, = env.demo.received_last
+    assert got["file_id"] in env.demo.files and got["data"] == b"%PDF-1.4 invoice" and "url" not in got
+    net.send_message(dm.id, "再看看", actor=maya, background=False)
+    again, = env.demo.received_last
+    assert again["file_id"] == got["file_id"] and len(env.demo.files) == 1
+
+
+def test_export_file_gives_the_platform_a_link_for_its_own_tools(make_env):
+    """export_file：平台默认来取（pull），但平台上的工具只认链接时，按 files.export 签一条这一轮有效的短期链接。"""
+    env = make_env(files={"matrix_url": "http://matrix"})  # 写了 matrix_url，export 默认就是 url
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    env.connect_mcp(a.id, maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "数据.csv", b"a,b\n1,2\n", "text/csv", actor=maya)
+    net.send_message(dm.id, "导出", attachments=[meta], actor=maya, background=False)
+    assert env.demo.downloads[-1] == ("expense", 200, b"a,b\n1,2\n")
+    assert "短期下载链接" in dm.messages[-1].text
+    ctx = _ctx(dm.id, a.id)
+    assert "export_file" in net._file_tools(ctx, a)
+    text, bad = net._tool_export_file(ctx, {"file": "0" * 64})
+    assert bad and "拿不到" in text
+
+
+def test_platform_files_config_is_validated():
+    """平台目录的 files：短期链接要写 Matrix 的地址；方式只能是认得的那几种。"""
+    with pytest.raises(PlatformError, match="matrix_url"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"in": "url"}}]})
+    with pytest.raises(PlatformError, match="files.in"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"in": "ftp"}}]})
+    with pytest.raises(PlatformError, match="files.export"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"export": "mail"}}]})
+    p, = parse_platforms({"platforms": [{"id": "x", "url": "http://x"}]})
+    assert (p.files_in, p.files_export, p.files_source) == ("pull", None, None)  # 不写 files：和原来一样
+    q, = parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"matrix_url": "https://m.example/"}}]})
+    assert q.files_export == "url" and q.matrix_url == "https://m.example"
+
+
+def test_a_driver_without_file_support_falls_back_to_pull(make_env):
+    """外部驱动没声明 files_in 时，files.in 照旧按 pull：在提示词里列出文件，平台带请求头来取。"""
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    from matrix.remote_agents import StandardDriver
+
+    class Old(StandardDriver):
+        files_in = ()
+    net._remote_driver = lambda name: Old()
+    net.remote_runtime._driver = net._remote_driver
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    assert not env.demo.received_last and not env.demo.files
+    assert f"GET /mcp/remote/files/{meta['sha']}" in env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+    assert any(e.type == "remote.files_fallback" for e in net.bus.since(0))

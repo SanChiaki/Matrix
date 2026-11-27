@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .events import EventBus
-from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
+from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_TOOLS, FILE_TOOLS, ATTACHMENT_LIMIT, ATTACHMENTS,
                      ATTACHMENTS_PER_MESSAGE, AUTHORITIES, BRIEF_LIMIT, CONNECTOR_PREFIX, DESCRIPTION_LIMIT, FILE_LIMIT,
                      GRANTS, HARNESSES, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, OUTBOUND_TOOLS, PLUGIN_CONTEXT_TOTAL, PLUGIN_MOUNT, ROUTE_BUDGET, PLUGIN_PAGE_CAPS, PLUGIN_RECORDS, PLUGIN_TOOLS, PLUGINS_PER_PROJECT,
                      LIST_TOOLS,
@@ -41,7 +41,7 @@ from .models import (AGENT_HOME as HOME_DIR, ABILITY_TOOLS, ARCHIVE_TOOLS, CHAT_
                      Conversation, Decision, Delegation, Draft, Held, KnowledgeItem, Message, Project, Proposal, Question,
                      Release, ResourceRef, SandboxRecord,
                      Schedule, Seat, Task, TaskStatus, TERMINAL, UserRequest, attachment_rel, new_id, seat_id)
-from .protocol import (build_notice_prompt, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat,
+from .protocol import (build_notice_prompt, format_file_sources, format_remote_files, build_seat_prompt, build_task_prompt, format_archive, format_chat,
                        format_abilities, format_decision, format_delivery, format_home_state, format_now, format_request_detail,
                        format_schedule_notice, format_session_state, format_failure, format_failure_notice, format_ledger, format_open_requests,
                        format_goal_limit, format_goal_round, format_note, format_proposal_notice, format_question_notice, format_request_changes, format_rewrite, format_route,
@@ -69,6 +69,7 @@ from .runtime import (GOAL_TOOLS, STOPPED_ERROR, AgentRuntime, Material, materia
                       RuntimeCapabilities, ToolBridge, adopt_dsh_session)
 from .store import Store
 from . import remote_agents as remote
+from . import file_sources as fsrc
 from .usage import DAY_S, MAX_DAYS, UsageLog, summarize as summarize_usage
 
 HOME_FILE_MAX = 100_000_000     # 沙箱方式：私有目录里一个文件的改动最多收多少字节
@@ -130,6 +131,9 @@ class ExecContext:
     sent: list[dict[str, Any]] = field(default_factory=list)  # 这一轮 send_file 发出的文件（对话附件），附在这一轮的回复上
     # 外部平台 Agent 这一轮暂存的文件（/mcp/remote/files）：file_id → {name, size, sha, mime}；只属于这一轮，结束就删
     staged: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 文件工具（docs/files-across-platforms.md）：这一轮网络另外加的 fetch_file / export_file；这一轮签出的短期链接
+    file_tools: list[str] = field(default_factory=list)
+    links: list[str] = field(default_factory=list)
     # 公共 Agent 的服务面（docs/public-agents.md，不变量 27）：这一轮为谁做（principal）、这一轮 @ 它的全部调用方。
     # principal 为 None 表示普通情形：为 Agent 的所有者做
     service: bool = False
@@ -160,7 +164,7 @@ class ExecContext:
                                 bool(self.hidden))
         if self.remote and self.kind == "task" and "send_file" not in out:
             out = [*out, "send_file"]
-        return out
+        return out + [n for n in self.file_tools if n not in out]
 
     @property
     def share_tag(self) -> str:
@@ -230,7 +234,7 @@ class Network:
                  fetch: FetchConfig | None = None, platforms: "remote.PlatformCatalog | None" = None,
                  remote_driver: Callable[[str], Any] | None = None, sandbox: SandboxProvider | None = None,
                  sandbox_url: str | None = None, sandbox_limits: dict[str, Any] | None = None,
-                 store_url: str | None = None):
+                 store_url: str | None = None, file_sources: "fsrc.SourceCatalog | None" = None):
         """sandbox：云侧执行面的沙箱后端（docs/cloud-runtime.md 阶段 1a，开关 MATRIX_CLOUD_SANDBOX，默认关）。
         None = 照旧：云侧 Agent 是服务的子进程。sandbox_url：沙箱客户端连回来的地址；sandbox_limits：并发与保留期等。
         store_url：状态存在哪（None = 读 MATRIX_STORE，没设就是 state.json；docs/reference/storage.md）。"""
@@ -257,6 +261,10 @@ class Network:
         self.remote_bindings = remote.Bindings()
         self.remote_runtime = remote.RemoteRuntime(self.remote_bindings, remote_driver or remote.load_driver)
         self._remote_driver = remote_driver or remote.load_driver
+        # 外部文件来源（docs/files-across-platforms.md）：fetch_file 与平台 file 事件只从这里登记的来源取
+        self.file_sources = file_sources or fsrc.SourceCatalog(self.store.root / "file-sources.json")
+        self._links: dict[str, tuple[ExecContext, str]] = {}   # 短期链接 → (那一轮, sha 或暂存 file_id)，一轮结束作废
+        self._remote_uploads: dict[tuple[str, str], str] = {}  # (Agent, sha) → 平台上的 file_id（只在内存里）
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
@@ -6897,9 +6905,9 @@ class Network:
         conns = conns or []
         ctx.connections = [c.id for c in conns]
         ctx.remote = bool(agent.remote)
-        if agent.remote:  # 附件不在平台的工作目录里：告诉它这一轮拿得到哪些、怎么取（docs/remote-agents.md“发文件”）
-            with self._lock:
-                prompt += format_remote_files(self._attachments_for(ctx))
+        ctx.file_tools = self._file_tools(ctx, agent)
+        if "fetch_file" in ctx.file_tools:  # 部署方登记的外部文件来源（docs/files-across-platforms.md）
+            prompt += format_file_sources([x.public() for x in self._sources_for(agent)])
         cloud = [c for c in conns if c.where == "cloud"]
         connectors = ConnectorBridge(url=self.connector_url, token=token,
                                      list_tools=lambda: self.connector_tools(token),
@@ -6973,6 +6981,8 @@ class Network:
                 materials = self._materials(ctx) + list(skill_files or []) if agent.device_runtime or sandboxed else []
                 llm_provider, llm_env = self._llm_provider(agent) if not agent.remote else (None, {})
                 remote_call = self._remote_call(ctx, agent) if agent.remote else None
+            if remote_call is not None:  # 附件不在平台的工作目录里：按平台的方式交过去，再告诉它这一轮有哪些、怎么拿
+                prompt += self._hand_remote_files(ctx, agent, remote_call, token)
             extra: dict[str, Any] = {}
             blobs: list[Material] = []
             if sandboxed:
@@ -7051,6 +7061,8 @@ class Network:
                     f"{name} 只能在助理对话里使用" if name in HOME_TOOLS else
                     f"{name} 只能在项目会话与助理对话里使用" if name in SESSION_TOOLS else
                     f"{name} 只在装了开放记录工具的插件的项目里有" if name in PLUGIN_TOOLS else
+                    f"{name} 这一轮不能用：fetch_file 要有部署方登记的文件来源，export_file 只给配置了 files.export 的外部平台"
+                    if name in FILE_TOOLS else
                     f"{name} 只能在项目里使用" if name in ARCHIVE_TOOLS else f"{name} 需要 delegate 权限"), True
         if name in OUTBOUND_TOOLS and ctx.sources:  # 不变量 22：会话读过越界的来源，会让别人看到的不放行
             agent = self.store.agents.get(ctx.agent_id)
@@ -7488,7 +7500,7 @@ class Network:
             with ctx.lock:
                 item = ctx.staged.get(fid) if fid else None
             if item is None:
-                return ((f"找不到暂存文件 {fid}：只认这一轮上传到 /mcp/remote/files 的文件，一轮结束就删了" if fid else
+                return ((f"找不到暂存文件 {fid}：只认这一轮暂存的文件（/mcp/remote/files 或 fetch_file），一轮结束就删了" if fid else
                          "你的文件在你自己的平台上，Matrix 读不到 path：先把文件 POST 到 /mcp/remote/files（同一把密钥与会话 id），"
                          "再用返回的 file_id 调 send_file"), True)
             if len(ctx.sent) >= ATTACHMENTS_PER_MESSAGE:
@@ -7663,7 +7675,7 @@ class Network:
                 with ctx.lock:
                     item = ctx.staged.get(rel)
                 if item is None:
-                    raise NetworkError(f"找不到暂存文件 {rel}：只认这一轮上传到 /mcp/remote/files 的文件")
+                    raise NetworkError(f"找不到暂存文件 {rel}：只认这一轮暂存的文件（/mcp/remote/files 或 fetch_file）")
                 a = self._store_attachment(ctx.conversation_id, item["name"],
                                            (self.store.root / "staging" / rel).read_bytes(), item["mime"],
                                            by=self._quota_owner(ctx))
@@ -9075,11 +9087,192 @@ class Network:
                 "note": "这一轮里用 send_file(file_id=…) 发给对话里的人；一轮结束就删"}
 
     def _drop_staged(self, ctx: ExecContext) -> None:
-        """一轮结束：删掉这一轮暂存的文件（发出去的已经拷进对话的附件区）。"""
+        """一轮结束：删掉这一轮暂存的文件（发出去的已经拷进对话的附件区），这一轮签出的短期链接作废。"""
         with ctx.lock:
             ids, ctx.staged = list(ctx.staged), {}
+            links, ctx.links = list(ctx.links), []
         for fid in ids:
             (self.store.root / "staging" / fid).unlink(missing_ok=True)
+        with self._lock:
+            for tok in links:
+                self._links.pop(tok, None)
+
+    # ================= 跨平台的文件（docs/files-across-platforms.md） =================
+    def _sources_for(self, agent: AgentNode | None) -> list[fsrc.FileSource]:
+        """这个 Agent 能用的外部文件来源：不带凭证的谁都能用，带平台凭证的只给那个平台的 Agent。"""
+        platform = (agent.remote or {}).get("platform") if agent is not None and agent.remote else None
+        return self.file_sources.usable(platform)
+
+    def _platform_driver(self, spec: remote.PlatformSpec) -> Any:
+        try:
+            return self._remote_driver(spec.driver)
+        except remote.PlatformError:
+            return None
+
+    def _file_tools(self, ctx: ExecContext, agent: AgentNode) -> list[str]:
+        """这一轮另外加的文件工具：fetch_file 要有能用的来源，且这一轮发得出去（send_file 或 delegate）；
+        export_file 只给平台目录里写了 files.export、驱动也支持的外部平台 Agent。"""
+        out: list[str] = []
+        base = ctx.tools
+        if self._sources_for(agent) and {"send_file", "delegate"} & set(base):
+            out.append("fetch_file")
+        spec = self.platforms.get(agent.remote.get("platform")) if agent.remote else None
+        if spec is not None and spec.files_export and \
+                (spec.files_export == "url" or remote.files_supported(self._platform_driver(spec), "upload")):
+            out.append("export_file")
+        return out
+
+    def _sign_link(self, ctx: ExecContext, key: str, base: str) -> str:
+        """签一条短期下载链接（这一轮有效）：key 是这一轮拿得到的附件 sha，或这一轮暂存的 file_id。"""
+        tok = "lnk_" + secrets.token_urlsafe(24)
+        with self._lock:
+            self._links[tok] = (ctx, key)
+        with ctx.lock:
+            ctx.links.append(tok)
+        return f"{base.rstrip('/')}/mcp/remote/links/{tok}"
+
+    def _round_file(self, ctx: ExecContext, key: str) -> tuple[Path, dict[str, Any]] | None:
+        """这一轮拿得到的一个文件：附件按 sha（口径同 _attachments_for），暂存的按 file_id。"""
+        key = str(key).strip()
+        if key.startswith("stg_"):
+            with ctx.lock:
+                item = ctx.staged.get(key)
+            f = self.store.root / "staging" / key
+            return (f, item) if item is not None and f.is_file() else None
+        sha = key.lower()
+        with self._lock:
+            meta = next((a for a in self._attachments_for(ctx) if a["sha"] == sha), None)
+        f = self._attachment_path(ctx.conversation_id, sha) if meta is not None else None
+        return (f, meta) if f is not None else None
+
+    def link_file(self, tok: str) -> tuple[Path, dict[str, Any]]:
+        """平台按短期链接取文件（GET /mcp/remote/links/<令牌>）：令牌就是凭证，只在签它的那一轮里有效。"""
+        with self._lock:
+            got = self._links.get(str(tok))
+            alive = got is not None and any(c is got[0] for c in self._contexts.values())
+        found = self._round_file(got[0], got[1]) if got is not None and alive else None
+        if found is None:
+            raise StagingRefused("链接已失效：只在签它的那一轮里有效", 404)
+        return found
+
+    def _upload_to_platform(self, agent: AgentNode, spec: remote.PlatformSpec, driver: Any, headers: dict[str, str],
+                            f: Path, meta: dict[str, Any]) -> str:
+        """传到平台自己的文件接口，返回平台的 file_id。同一个 Agent 传过的同一份内容不再传（只记在内存里）。"""
+        sha = str(meta.get("sha") or hashlib.sha256(f.read_bytes()).hexdigest())
+        fid = self._remote_uploads.get((agent.id, sha))
+        if fid is None:
+            fid = driver.upload(spec, str(meta.get("name") or f.name), f.read_bytes(), str(meta.get("mime") or ""), headers)
+            self._remote_uploads[(agent.id, sha)] = fid
+        return fid
+
+    def _hand_remote_files(self, ctx: ExecContext, agent: AgentNode, call: remote.RemoteCall, token: str) -> str:
+        """外部平台 Agent 这一轮拿得到的文件：按平台目录的 files.in 随对话请求交过去（短期链接 / 平台的 file_id），
+        交不了的照旧列出取文件的地址；配了 files.source 时接住平台在流里报的文件。返回提示词里的“文件”一节。"""
+        with self._lock:
+            items = list(self._attachments_for(ctx))
+        spec, mode, handed = call.platform, call.platform.files_in, {}
+        driver = self._platform_driver(spec) if mode != "pull" and call.error is None and items else None
+        if driver is not None and not remote.files_supported(driver, mode):
+            self.bus.emit("remote.files_fallback", agent_id=agent.id, platform=spec.id, mode=mode)
+            driver = None
+        for a in items if driver is not None else []:
+            entry = {"name": a["name"], "mime": a.get("mime", ""), "size": a.get("size", 0), "sha256": a["sha"]}
+            if mode == "url":
+                entry["url"] = self._sign_link(ctx, a["sha"], spec.matrix_url)
+                handed[a["sha"]] = "附上了短期下载链接"
+            else:
+                f = self._attachment_path(ctx.conversation_id, a["sha"])
+                if f is None:
+                    continue
+                try:
+                    entry["file_id"] = self._upload_to_platform(agent, spec, driver, call.headers, f, a)
+                except remote.PlatformError as e:  # 传不上去的这一个照旧让平台来取
+                    self.bus.emit("remote.upload_failed", agent_id=agent.id, platform=spec.id, error=str(e)[:200])
+                    continue
+                handed[a["sha"]] = f"平台文件 {entry['file_id']}"
+            call.files.append(entry)
+        src = self.file_sources.get(spec.files_source) if spec.files_source else None
+        if src is not None and src.usable_by(spec.id):
+            call.on_file = lambda ref, name: self._remote_file_event(token, ref, name)
+        return format_remote_files(items, handed, export="export_file" in ctx.tools, emit=call.on_file is not None)
+
+    def _source_headers(self, agent: AgentNode | None, src: fsrc.FileSource) -> dict[str, str]:
+        """来源要带的凭证：auth=platform 时是那个平台的凭证（添加这个 Agent 的人填的 API Key）。"""
+        if src.auth != "platform":
+            return {}
+        spec = self.platforms.get(src.platform)
+        key = self.vault.get(self._remote_vault(agent.id)).get("api_key") if agent is not None else None
+        if spec is None or not key:
+            raise NetworkError(f"来源「{src.name}」要用 {src.platform} 平台的凭证，这个 Agent 还没有")
+        return {spec.auth_header: spec.auth_template.replace("{value}", key)}
+
+    def fetch_into_staging(self, ctx: ExecContext, source: str, ref: str, name: str = "") -> dict[str, Any]:
+        """按部署方登记的来源取一个文件，放进这一轮的暂存区（同 /mcp/remote/files），返回 {file_id, name, size, sha256}。"""
+        agent = self.store.agents.get(ctx.agent_id)
+        usable = self._sources_for(agent)
+        src = next((x for x in usable if x.id == source), None)
+        if src is None:
+            ids = "、".join(x.id for x in usable) or "没有"
+            raise NetworkError(f"没有能用的来源 {source or '（空）'}：这一轮能用的有 {ids}")
+        headers = self._source_headers(agent, src)
+        try:
+            data, mime, fname = fsrc.fetch(src, ref, headers)
+        except fsrc.SourceError as e:
+            raise NetworkError(f"从「{src.name}」取不到：{e}") from e
+        try:
+            out = self.stage_remote_file(ctx, name or fname, data, mime)
+        except StagingRefused as e:
+            raise NetworkError(str(e)) from e
+        self.bus.emit("file.fetched", context=ctx.kind, context_id=ctx.id, agent_id=ctx.agent_id, source=src.id,
+                      name=out["name"], size=out["size"])
+        return out
+
+    def _tool_fetch_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        out = self.fetch_into_staging(ctx, str(args.get("source", "")).strip(), str(args.get("ref", "")),
+                                      str(args.get("name", "")).strip())
+        size = f"{out['size'] / 1_000_000:.1f} MB" if out["size"] >= 1_000_000 else f"{max(1, out['size'] // 1000)} KB"
+        return (f"已拉进这一轮的暂存区：{out['name']}（{size}），file_id `{out['file_id']}`。"
+                "用 send_file(file_id=…) 发给对话里的人，或写进 delegate 的 attachments 转交；一轮结束就删。"), False
+
+    def _tool_export_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
+        agent = self.store.agents.get(ctx.agent_id)
+        spec = self.platforms.get((agent.remote or {}).get("platform")) if agent is not None and agent.remote else None
+        if spec is None or not spec.files_export:
+            return "你所在的平台没有配置交文件的方式（files.export）", True
+        key = str(args.get("file", "")).strip()
+        found = self._round_file(ctx, key)
+        if found is None:
+            return f"这一轮拿不到 {key or '（空）'}：写提示词“文件”一节里列出的 sha256，或这一轮暂存的 file_id", True
+        f, meta = found
+        if spec.files_export == "url":
+            url = self._sign_link(ctx, key if key.startswith("stg_") else key.lower(), spec.matrix_url)
+            return f"{meta['name']} 的短期下载链接（只在这一轮有效，不用带请求头）：{url}", False
+        driver = self._platform_driver(spec)
+        if not remote.files_supported(driver, "upload"):
+            return f"{spec.name} 的驱动不支持上传文件", True
+        with self._lock:
+            call = self._remote_call(ctx, agent)
+        if call.error:
+            return call.error.split(" ", 1)[-1], True
+        try:
+            fid = self._upload_to_platform(agent, spec, driver, call.headers, f, meta)
+        except remote.PlatformError as e:
+            return f"传不到平台：{e}", True
+        return f"{meta['name']} 已传到 {spec.name}：平台的 file_id 是 {fid}", False
+
+    def _remote_file_event(self, token: str, ref: str, name: str) -> tuple[str, bool]:
+        """平台在流里报出的文件（file 事件）：按平台目录的 files.source 取回暂存，再照 send_file 附在这一轮的回复上
+        （信息流检查、每轮上限都照旧）。"""
+        ctx = self._contexts.get(token)
+        agent = self.store.agents.get(ctx.agent_id) if ctx is not None else None
+        spec = self.platforms.get((agent.remote or {}).get("platform")) if agent is not None and agent.remote else None
+        if ctx is None or spec is None or not spec.files_source:
+            return "那一轮已经结束，或平台没有配置 files.source", True
+        try:
+            out = self.fetch_into_staging(ctx, spec.files_source, ref, name)
+        except NetworkError as e:
+            return str(e), True
+        return self.handle_tool(token, "send_file", {"file_id": out["file_id"]})
 
     def _remote_seen(self, agent: AgentNode) -> None:
         """平台带着 Matrix 发起的会话连上来过：界面上显示“完整接入”。只有落到某一轮的调用才算，试连不算。"""
@@ -9776,6 +9969,8 @@ TOOL_HANDLERS = {
     "list_schedules": Network._tool_list_schedules,
     "cancel_schedule": Network._tool_cancel_schedule,
     "open_note": Network._tool_open_note,
+    "fetch_file": Network._tool_fetch_file,
+    "export_file": Network._tool_export_file,
 }
 
 
@@ -9785,6 +9980,8 @@ def network_tools_for(kind: str, in_project: bool, can_delegate: bool, session: 
     助理对话里有起草与定时工具；项目里有档案工具；装了开放记录工具的插件时有插件记录工具；有 delegate 时再加协作工具；
     私有目录里有这一轮没挂上的笔记时有 open_note。"""
     def ok(n: str) -> bool:
+        if n in FILE_TOOLS:  # 由网络按这一轮的条件另外加（ExecContext.file_tools）
+            return False
         if n in NOTE_TOOLS:
             return notes
         if n in PLUGIN_TOOLS:
@@ -9951,7 +10148,7 @@ def _violations(tool_calls: list[dict[str, Any]], authority: list[str]) -> list[
     for c in tool_calls:
         tool = str(c.get("tool") or "")
         if tool.startswith(MCP_PREFIX) and "delegate" not in authority \
-                and tool.removeprefix(MCP_PREFIX) not in ARCHIVE_TOOLS + REQUEST_TOOLS + ABILITY_TOOLS:
+                and tool.removeprefix(MCP_PREFIX) not in ARCHIVE_TOOLS + REQUEST_TOOLS + ABILITY_TOOLS + FILE_TOOLS:
             out.append(f"无 delegate 权限却调用了 {tool}")
         elif tool.startswith(CONNECTOR_PREFIX) and "connector.use" not in authority:
             out.append(f"无 connector.use 权限却调用了连接器 {tool}")

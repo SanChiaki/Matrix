@@ -91,6 +91,7 @@ CHARTER 讲"我们要往哪走"。需要判断某个改动是否该做时，以 
 | `matrix/connector/` | 端侧连接器 `matrix-connect`：出站 WebSocket、本机桥（`/internal/*` 转发出站）、dsh / Claude Code / Codex 驱动与外部驱动（entry point `matrix.connect_drivers`；一个连接器同时提供多个）、设备码配对与一次性配对令牌（`pairing.py`）、本机配置（`config.py`）、后台服务（`service.py`）；云侧沙箱客户端（`sandbox.py`，`Connector` 的薄子类：一个沙箱一个执行单元、私有目录“材料进、改动出”、交检查点与恢复） |
 | `matrix/connect_install/`、`packaging/` | 连接器的免依赖安装：服务器在 `/connect/install.sh`、`/connect/install.ps1` 提供的安装脚本，PyInstaller 配方（CI：`.github/workflows/connect-release.yml`）；设计见 docs/device-runtimes.md 第 2.7 节 |
 | `matrix/im/` | IM 入口：`base.py` 驱动接口（字段、能力、收发）、`registry.py` 内置驱动 + entry point `matrix.im_drivers`、`bridge.py` 桥（绑定码、只认绑定的人、回复回到 IM、推送、按能力降级、限频，不变量 25 都在这里）、`wecom.py` 企业微信长连接驱动、`fake.py` 测试用的假驱动、`testing.py` 驱动一致性检查 |
+| `matrix/file_sources.py` | 跨平台的文件（docs/files-across-platforms.md）：部署方的外部文件来源目录 `SourceCatalog`（`file-sources.json`，热加载）、按来源取文件（每一跳在 `hosts` 里、凭证只给第一跳）；`fetch_file` / `export_file`、平台目录的 `files`、短期链接在 `engine.py`「跨平台的文件」一节 |
 | `matrix/remote_agents.py` | 外部平台 Agent（不变量 28）：平台目录 `PlatformCatalog`（`agent-platforms.json`，热加载）、驱动接口与内置标准 HTTP 驱动（entry point `matrix.agent_platforms`）、`RemoteRuntime`（读流、转事件、中断）、`Bindings`（平台会话 id → 这一轮的网络工具，带等待）；引擎里的添加、凭证、调用方透传与 `remote_mcp` 在 `engine.py`「外部平台 Agent」一节 |
 | `matrix/mcp_sse.py` | `/mcp/remote` 的旧版 MCP 传输（HTTP+SSE）：`GET /mcp/remote` 开流、`POST /mcp/remote/messages` 发消息，规则同 `remote_mcp`（不变量 28） |
 | `matrix/skills.py` | 技能文件（`SKILL.md` + 附带文件）的读写校验、按层合并（项目 > 连接器自带 > 我的）与挂载 |

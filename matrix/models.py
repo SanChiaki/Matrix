@@ -152,6 +152,10 @@ ROUTE_BUDGET = 3                 # 一条人发的消息引出的接力里，插
 PLUGIN_CONTEXT_TOTAL = 8000      # 全部插件的 context 挂点一轮最多往提示词里加多少字符
 # 能力工具：任何执行上下文都有。缺连接器时提醒所有者（只弹一张卡片，不授权、不安装）
 ABILITY_TOOLS = ("suggest_connector",)
+# 文件工具（docs/files-across-platforms.md）：不按执行上下文的种类给，由网络按这一轮的条件加——
+# fetch_file：部署方登记了这个 Agent 能用的文件来源，且这一轮有 send_file 或 delegate（拉进来的文件才发得出去）；
+# export_file：外部平台 Agent，平台目录里写了 files.export
+FILE_TOOLS = ("fetch_file", "export_file")
 # 私有目录工具：这一轮有没挂上的笔记时才有，读来自别的场合的笔记（不变量 22，matrix/flow.py）
 NOTE_TOOLS = ("open_note",)
 # 会让别人看到内容的网络工具：会话读过越界的来源时一律不放行（不变量 22）。群聊回复与任务交付另外拦下等所有者确认

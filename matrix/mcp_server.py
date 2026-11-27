@@ -109,15 +109,45 @@ TOOLS = [
         "name": "send_file",
         "description": ("把你当前工作目录里的一个文件（或一个目录，打成 zip）发给对话里的人：附在你这一轮的回复上，"
                         "人在对话里直接下载。回复里说明这是什么就行，不用把内容贴进回复。"
-                        "外部平台上的 Agent 文件不在 Matrix：先把文件 POST 到 /mcp/remote/files 拿 file_id，再传 file_id。"),
+                        "文件不在工作目录里时（外部平台上的 Agent 先 POST 到 /mcp/remote/files，或用 fetch_file 拉来的），传 file_id。"),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "工作目录里的相对路径，如 report.md 或 out/charts"},
                 "file_id": {"type": "string",
-                            "description": "外部平台 Agent 用：这一轮上传到 /mcp/remote/files 返回的 file_id（stg_ 开头），代替 path"},
+                            "description": "这一轮暂存的文件（/mcp/remote/files 或 fetch_file 返回的 file_id，stg_ 开头），代替 path"},
                 "name": {"type": "string", "description": "可选：给人看的文件名（默认用原文件名，目录是 <目录名>.zip）"},
             },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fetch_file",
+        "description": ("把放在别处的文件按部署方登记的来源拉进这一轮的暂存区，返回 file_id："
+                        "平台回答里给的文件 id、第三方暂存的临时链接都用它。之后 send_file(file_id=…) 发给人，"
+                        "或写进 delegate 的 attachments。能用哪些来源见提示词的“外部文件来源”。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "source": {"type": "string", "description": "来源 id（提示词“外部文件来源”里列出的）"},
+                "ref": {"type": "string", "description": "那个文件在来源里的 id，或它的下载链接（按来源的说明写）"},
+                "name": {"type": "string", "description": "可选：文件名（默认取来源给的）"},
+            },
+            "required": ["source", "ref"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "export_file",
+        "description": ("外部平台 Agent 用：把这一轮拿得到的一个文件按你所在平台的方式交给你，"
+                        "返回一条短期下载链接或平台的 file_id，给你平台上的工具读。只在这一轮有效。"),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string",
+                         "description": "附件的 sha256（提示词“文件”一节列出的），或这一轮暂存的 file_id（stg_ 开头）"},
+            },
+            "required": ["file"],
             "additionalProperties": False,
         },
     },

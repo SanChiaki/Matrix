@@ -80,6 +80,9 @@
   - 暂存只属于那一轮：存在 `<data>/staging/<file_id>`，`file_id` 只在那一轮里认，一轮结束（或服务重启）就删；
     发出去、转交出去的已经拷进对话的附件区。签密钥时返回的 `files_path` 就是这个地址。
   - 传和取都要由**平台**做（它的文件处理 / 代码沙箱），不是模型：密钥配在平台的 MCP 设置里，模型看不到，也不该看到。
+  - 平台收发文件的方式不是这两种时（对话接口按入参收文件、只能把文件放进第三方暂存、回答里给文件 id 或临时链接），
+    见 [files-across-platforms.md](files-across-platforms.md)：平台目录的 `files`（`in` = `url` / `upload` 随对话请求交文件、
+    `source` 接住流里的 `file` 事件、`export` 给 `export_file`），以及部署方登记的外部文件来源与 `fetch_file`。
 
 ## 5. 凭证与调用方授权
 
@@ -110,14 +113,15 @@
 | 运行时 | `RemoteRuntime`：读流、转事件、超时与终止时中断、结束时解除绑定；`remote_agents.capabilities` |
 | 绑定 | `Bindings`（按（Matrix Agent, 平台会话 id）绑定这一轮的 `ToolBridge`，带等待） |
 | 引擎 | `AgentNode.remote`；`add_remote_agent`、`set_remote_api_key`、`issue_remote_key`、`_remote_call`（凭证与调用方请求头）、`remote_mcp`（JSON-RPC：initialize / ping / tools/list / tools/call）；`runtime_for`、`capabilities`、`home_mounted` |
-| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`POST /mcp/remote/files`（暂存要发的文件，`stage_remote_file`）；`GET /mcp/remote/files/{sha}`（取这一轮拿得到的文件，`remote_file`）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，反向代理上也不加额外的认证层（[reverse-proxy.md](reverse-proxy.md)） |
+| 接口 | `GET /api/agent-platforms`；`POST /api/remote-agents`；`PUT /api/agents/{id}/remote/api-key`；`POST /api/agents/{id}/remote/key`；`POST /mcp/remote`（Streamable HTTP）；`POST /mcp/remote/files`（暂存要发的文件，`stage_remote_file`）；`GET /mcp/remote/files/{sha}`（取这一轮拿得到的文件，`remote_file`）；`GET /mcp/remote/links/{令牌}`（这一轮有效的短期链接，`link_file`，[files-across-platforms.md](files-across-platforms.md)）；`GET /mcp/remote` + `POST /mcp/remote/messages`（旧版 HTTP+SSE，`matrix/mcp_sse.py`）；都不走登录，反向代理上也不加额外的认证层（[reverse-proxy.md](reverse-proxy.md)） |
 | 界面 | Agent 页“接入外部平台的 Agent”；外部 Agent 的设置里“外部平台”一节（接入状态、签 / 重签密钥、换 API Key） |
 | 样板与测试 | `examples/remote-agent/demo_platform.py`（演示平台）；`tests/test_remote_agents.py` |
 
 **第一版的限制**：
 
-- 基础接入只送文本：附件、项目文件、技能正文平台拿不到。完整接入时附件与平台产出的文件经第 4 节“传文件”进出，项目文件用档案工具读；
-  项目档案文件、技能正文还不能按文件取。
+- 基础接入默认只送文本：附件、项目文件、技能正文平台拿不到；平台目录写了 `files.in`（`url` / `upload`）时附件随对话请求交过去，
+  写了 `files.source` 时平台在流里报的文件取得回来（[files-across-platforms.md](files-across-platforms.md)）。
+  完整接入时附件与平台产出的文件经第 4 节“传文件”进出，项目文件用档案工具读；项目档案文件、技能正文还不能按文件取。
 - 运行中提问（`ask_user_question`）、工作区外溢审批都没有：平台自己的权限弹窗转不回来。
 - Matrix 的连接器不经 `/mcp/remote` 提供；要用户鉴权的系统走调用方授权透传。
 - 平台上 Agent 的工具名前缀可能和提示词里写的 `mcp__matrix_net__*` 不一样：模型一般能对上，对不上时要在平台的 Agent 说明里写一句。
