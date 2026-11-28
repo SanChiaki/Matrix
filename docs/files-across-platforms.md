@@ -31,9 +31,9 @@
 
 | 情况 | 怎么处理 | 谁来做 |
 | --- | --- | --- |
-| 平台回答里给自己的文件 id / 第三方暂存的临时链接 | `fetch_file(source, ref)` 拉进这一轮的暂存区，再 `send_file(file_id)` 或写进 `delegate` 的 `attachments` | 模型调工具，Matrix 取 |
+| 文件 id / 临时链接在某处（平台的回答、别人的消息），Agent 要拿来用 | 模型主动调 `fetch_file(source, ref)`，这一轮中途拉进暂存区，再由它 `send_file(file_id)` 或写进 `delegate` 的 `attachments`；平台 Agent 自己、读到它回答的云侧 / 端侧 Agent 都能用 | 模型调工具（要能调 Matrix 的工具），Matrix 取 |
 | 平台在流里报出产出的文件 | 标准形状的 `file {ref, name}` 事件：按平台目录的 `files.sources` 取回，照 `send_file` 附在这一轮的回复上 | 驱动 + Matrix（**基础接入也行**） |
-| 平台只在回复正文里写了文件 id | `files.scan`：从最终回复里认出这一轮新产出的 id，取回附上（第 6.4 节，默认关） | Matrix（**基础接入也行**） |
+| 平台 Agent 谁也没调工具，只在自己的回复正文里写了产出的文件 id | `files.scan`：Matrix 在这一轮结束后扫最终回复，认出这一轮新出现的 id，取回并自动附上（第 6.4 节，默认关） | Matrix 自己（**基础接入也行**） |
 | 平台的对话接口按入参收文件 | 平台目录的 `files.in`：`url` 附 Matrix 签的短期链接，`upload` 先传到平台的文件接口、附平台的 file_id | 驱动（发起这一轮时） |
 | 平台上的工具按 file_id / 链接读文件 | `export_file(file)` 按 `files.export` 返回短期链接或平台的 file_id | 模型调工具，Matrix 交 |
 
