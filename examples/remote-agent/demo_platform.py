@@ -124,6 +124,8 @@ class DemoPlatform:
         self.require_download_token = False             # 取文件要先换下载令牌（演示定制鉴权）
         self.tokens: set[str] = set()                   # 有效的下载令牌（清空 = 令牌全部作废）
         self.tokens_issued = 0
+        self.upload_headers: list[dict[str, str]] = []  # 上传时收到的请求头（看 on_behalf 带没带）
+        self.deleted: list[str] = []                    # 被删掉的平台文件
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -177,6 +179,17 @@ class DemoPlatform:
                 else:
                     self._json(404, {"error": "no such agent"})
 
+            def do_DELETE(self) -> None:  # noqa: N802
+                if not self._authed():
+                    return
+                m = re.match(r"^/files/([\w-]+)$", self.path)
+                if not m or m.group(1) not in outer.files:
+                    self._json(404, {"error": "no such file"})
+                    return
+                del outer.files[m.group(1)]
+                outer.deleted.append(m.group(1))
+                self._json(200, {"ok": True})
+
             def do_PUT(self) -> None:  # noqa: N802
                 m = re.match(r"^/agents/([\w-]+)/mcp$", self.path)
                 if not self._authed() or not m:
@@ -194,6 +207,7 @@ class DemoPlatform:
                     self._json(200, {"token": tok, "expires_in": 600})
                     return
                 if self.path.startswith("/files?"):
+                    outer.upload_headers.append(dict(self.headers))
                     name = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("name", ["file"])[0]
                     n = int(self.headers.get("Content-Length") or 0)
                     fid = outer.store(name, self.rfile.read(n))

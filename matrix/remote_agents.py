@@ -18,6 +18,9 @@
 - `caller`（可省略）：调用方的授权怎么透传：取这一轮调用方自己在 Matrix 里授权的那个目录连接器的某个字段，放进这个请求头。
   调用方没授权时这一轮不发起会话。从不放维护人 / 添加的人的。
 - `bind_wait_s`：建会话与第一条消息是同一次请求时，MCP 调用可能比流里的会话 id 先到：带着陌生会话 id 的调用最多等这么久。
+- `on_behalf`（可省略）：平台只认应用级凭证、认不出终端用户时，把“这一轮替谁做”放进一个请求头告诉平台（发起会话、上传、
+  按平台凭证下载都带），平台据此把文件、用量按用户分开。`{"header": "X-End-User", "value": "pseudonym" | "user_id" | "email"}`：
+  pseudonym（默认）是 Matrix 用户 id 的哈希，同一个人始终相同、平台推不出是谁；email 只在部署方明确选时发。它不是凭证。
 - `files`（可省略，docs/files-across-platforms.md）：这个平台怎么收发文件——
   `in`：这一轮拿得到的文件怎么交给平台。`pull`（默认）在消息末尾列出，平台带 MCP 密钥来取；
   `url` 随对话请求附上 Matrix 签的短期链接（这一轮有效，平台不用带请求头）；`upload` 先传到平台自己的文件接口，附上平台的 file_id。
@@ -41,6 +44,7 @@
             作为调用方，这里不认识的事件一律跳过）
     POST {url}/sessions/{session_id}/interrupt
     POST {url}/files?name=<文件名>           请求体就是文件内容 -> {"file_id": ...}   （只在 files.in / export 是 upload 时用）
+    DELETE {url}/files/{file_id}             可选：删掉传上去的文件（对话删除、upload_ttl_s 过期重传时）
 """
 
 from __future__ import annotations
@@ -84,6 +88,12 @@ class CallerHeader:
 
 
 @dataclass(frozen=True)
+class OnBehalf:
+    header: str
+    value: str = "pseudonym"   # pseudonym | user_id | email
+
+
+@dataclass(frozen=True)
 class PlatformSpec:
     id: str
     name: str
@@ -105,6 +115,7 @@ class PlatformSpec:
     files_scan: bool = False            # 从这一轮的最终回复正文里认文件 id 取回附上
     files_export: str | None = None     # export_file 的方式：url | upload；None = 没有这个工具
     matrix_url: str = ""                # 平台访问 Matrix 的地址（签短期链接用）
+    on_behalf: OnBehalf | None = None   # 把“这一轮替谁做”告诉只认应用级凭证的平台
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "auth_label": self.auth_label,
@@ -141,6 +152,14 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
         proxy = str(p.get("proxy", "direct"))
         if proxy not in ("direct", "env"):
             raise PlatformError(f"{pid} 的 proxy 只能是 direct 或 env")
+        ob = p.get("on_behalf")
+        on_behalf = None
+        if ob:
+            if not isinstance(ob, dict) or not HEADER.match(str(ob.get("header", ""))):
+                raise PlatformError(f"{pid} 的 on_behalf 要写 header（合法的请求头名）")
+            if str(ob.get("value") or "pseudonym") not in ("pseudonym", "user_id", "email"):
+                raise PlatformError(f"{pid} 的 on_behalf.value 只能是 pseudonym / user_id / email")
+            on_behalf = OnBehalf(header=str(ob["header"]), value=str(ob.get("value") or "pseudonym"))
         files = p.get("files") or {}
         if not isinstance(files, dict):
             raise PlatformError(f"{pid} 的 files 要是一个对象")
@@ -179,7 +198,7 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
             auth_label=str(auth.get("label", "平台 API Key")), mcp_session_header=headers[1], caller=cal,
             bind_wait_s=float(p.get("bind_wait_s", 30)), timeout_s=float(p.get("timeout_s", 900)), proxy=proxy,
             files_in=f_in, files_sources=tuple(dict.fromkeys(f_sources)), files_repeat=f_repeat,
-            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_scan=bool(files.get("scan")), files_export=f_export, matrix_url=matrix_url))
+            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_scan=bool(files.get("scan")), on_behalf=on_behalf, files_export=f_export, matrix_url=matrix_url))
     return out
 
 
@@ -229,6 +248,11 @@ class Driver(Protocol):
     def interrupt(self, spec: PlatformSpec, session_id: str, headers: dict[str, str]) -> None: ...
 
     def upload(self, spec: PlatformSpec, name: str, data: bytes, mime: str, headers: dict[str, str]) -> str: ...
+    # upload / file_auth 还可以多收一个关键字参数 session_id（平台会话 id，能把文件绑在会话上的平台用；可能是 None），
+    # 驱动的方法签名里写了它网络才传。
+
+    # 可选：删掉之前传到平台的文件（对话被删除、upload_ttl_s 过期重传时网络调它，失败只记事件）。
+    def delete_upload(self, spec: PlatformSpec, file_id: str, headers: dict[str, str]) -> None: ...
 
     # 可选：取平台文件要定制鉴权时（先换下载令牌、签名、先要预签名地址……）。来源 auth = platform 时，网络取文件前先调它：
     # headers 是这个 Agent 的平台凭证（同发起会话用的那份），source_id / ref 是要取的来源与文件。返回
@@ -317,6 +341,17 @@ class StandardDriver:
         if not fid:
             raise PlatformError("平台的文件接口没有返回 file_id")
         return fid
+
+    def delete_upload(self, spec: PlatformSpec, file_id: str, headers: dict[str, str]) -> None:
+        req = urllib.request.Request(f"{spec.url}/files/{quote(file_id, safe='')}", method="DELETE", headers=headers)
+        try:
+            with _opener(spec).open(req, timeout=30):
+                pass
+        except urllib.error.HTTPError as e:
+            if e.code != 404:  # 已经没了就算删掉了
+                raise PlatformError(f"平台删文件返回 {e.code}") from e
+        except (urllib.error.URLError, OSError) as e:
+            raise PlatformError(f"连不上平台的文件接口：{e}") from e
 
 
 def _standard_event(event: str, body: dict[str, Any]) -> dict[str, Any]:

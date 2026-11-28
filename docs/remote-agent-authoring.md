@@ -73,6 +73,8 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 （[files-across-platforms.md](files-across-platforms.md)；演示平台的 `take_files`、`/files` 接口、“报文件”“拉文件”“导出”是样板）。
 上传、下载平台文件要定制鉴权（换令牌、签名、预签名地址）时：上传写在驱动的 `upload()` 里，下载写在驱动的 `file_auth()` 里
 （第 8.1 节，样板 `DemoTokenDriver`）；对话接口的文件入参格式写在驱动的 `chat(..., files=[...])` 里。
+平台的文件接口只认应用级凭证、认不出终端用户时：来源写 `scope: app`（Matrix 只取属于这个对话的文件 id），平台目录配 `on_behalf`
+告诉平台每一轮替谁做；平台能把文件绑在会话上的，驱动的 `upload` / `file_auth` 收 `session_id`；能删的实现 `delete_upload`（第 4.2、8 节）。
 你的驱动照 `tests/test_remote_agents.py`、`tests/test_cross_platform_files.py` 写一份对假平台的测试。
 
 ## 五、上线
