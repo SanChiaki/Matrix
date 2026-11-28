@@ -538,3 +538,64 @@ def test_file_sources_section_says_what_this_round_can_do_with_the_file():
     assert "随交付交回" in format_file_sources(srcs, task=True)
     no_send = format_file_sources(srcs, send=False, task=True)
     assert "这里没有 send_file" in no_send and "send_file 发" not in no_send
+
+
+# ================= 上下文里出现的文件 id：就地标注 =================
+def test_file_ids_in_later_context_are_annotated_with_the_matrix_copy(make_env):
+    """外部平台 Agent 在回复里写了平台的文件 id、Matrix 按 file 事件把它取回附上之后，别的成员被 @ 时，
+    上下文里的这个 id 就地标注成对话里的那份附件（云侧 / 端侧就是 attachments/ 下的路径），不用再按 id 取一次。"""
+    env = make_env(files={"sources": ["demo-files"]})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    cloud = net.create_agent("分析员", "d", [], [], actor=maya)
+    g = net.create_project("报销", "", [a.id, cloud.id], actor=maya)
+    chat = net.project_chat(g.id, actor=maya)
+    net.send_message(chat.id, f"@{a.name} 报文件", actor=maya, background=False)
+    att, = chat.messages[-1].attachments
+    fid = env.demo.reported["expense"]
+    assert fid in chat.messages[-1].text
+    seen: list[str] = []
+    net.runtime.handler = lambda call: seen.append(call.prompt) or "看过了"
+    net.send_message(chat.id, f"@{cloud.name} 看看上面那份报表", actor=maya, background=False)
+    from matrix.models import attachment_rel
+    assert f"{fid}（Matrix 已拿到：`{attachment_rel(att)}`）" in seen[-1]
+    assert fid in chat.messages[-3].text and "Matrix 已拿到" not in chat.messages[-3].text  # 只在提示词里标，消息原文不变
+
+
+def test_annotations_cover_upload_ids_and_respect_visibility(make_env):
+    """传到平台得到的 file_id 也记下、也标注；只标这一轮本来就拿得到的附件，只标整个 id（pf-1 不标进 pf-12）；
+    外部平台 Agent 看到的标注指向“文件”一节，不是它那里不存在的 attachments/ 路径。"""
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF-1.4 invoice", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    fid = env.demo.received_last[0]["file_id"]
+    assert dm.file_refs[f"up:demo:{fid}"] == meta["sha"]
+    ctx = _ctx(dm.id, a.id)
+    out = net._annotate_file_ids(ctx, a, f"平台说 {fid} 处理完了；{fid}9 不是它")
+    assert f"{fid}（Matrix 已拿到：附件 发票.pdf，sha256 {meta['sha']}" in out and f"{fid}9 不是它" in out
+    cloud = net.create_agent("云侧助手", "d", [], [], actor=maya)
+    other = net.direct_chat(cloud.id, actor=maya)
+    assert net._annotate_file_ids(_ctx(other.id, cloud.id), cloud, f"{fid}") == fid  # 别的对话：没有这份附件，不标
+
+
+def test_service_face_only_uses_sources_without_credentials(make_env):
+    """不变量 27：公共 Agent 在服务面只为调用方做事、用调用方自己的授权；平台凭证（添加它的人的）、来源密钥（部署方的）
+    都不是调用方的，服务面里这类来源一律不给，不带凭证的照常。"""
+    env = make_env(extra_sources=[{"id": "open", "name": "公开暂存", "url": "{ref}", "hosts": ["127.0.0.1"]},
+                                  {"id": "dms", "url": "{ref}", "hosts": ["127.0.0.1"], "auth": "secret", "for": ["*"]}])
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _ctx(dm.id, a.id)
+    assert [x.id for x in net._sources_for(a, ctx)] == ["demo-files", "open", "dms"]
+    ctx.service = True
+    assert [x.id for x in net._sources_for(a, ctx)] == ["open"]
+    net._contexts["t-svc"] = ctx
+    with pytest.raises(Exception, match="没有能用的来源"):
+        net.fetch_into_staging(ctx, "demo-files", "pf-1")

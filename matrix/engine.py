@@ -6905,9 +6905,10 @@ class Network:
         conns = conns or []
         ctx.connections = [c.id for c in conns]
         ctx.remote = bool(agent.remote)
+        prompt = self._annotate_file_ids(ctx, agent, prompt)  # 上下文里出现的、Matrix 已经拿到的文件 id：就地标注
         ctx.file_tools = self._file_tools(ctx, agent)
         if "fetch_file" in ctx.file_tools:  # 部署方登记的外部文件来源（docs/files-across-platforms.md）
-            prompt += format_file_sources([x.public() for x in self._sources_for(agent)], send="send_file" in ctx.tools,
+            prompt += format_file_sources([x.public() for x in self._sources_for(agent, ctx)], send="send_file" in ctx.tools,
                                           task=ctx.kind == "task")
         cloud = [c for c in conns if c.where == "cloud"]
         connectors = ConnectorBridge(url=self.connector_url, token=token,
@@ -9111,10 +9112,12 @@ class Network:
             return "remote"
         return "device" if agent is not None and agent.device_runtime else "cloud"
 
-    def _sources_for(self, agent: AgentNode | None) -> list[fsrc.FileSource]:
-        """这个 Agent 能用的外部文件来源（来源的 for：平台 id、remote、cloud、device、*）。"""
+    def _sources_for(self, agent: AgentNode | None, ctx: ExecContext | None = None) -> list[fsrc.FileSource]:
+        """这个 Agent 这一轮能用的外部文件来源（来源的 for：平台 id、remote、cloud、device、*）。
+        公共 Agent 的服务面（不变量 27）只用不带凭证的：平台凭证是添加它的人的、来源密钥是部署方的，都不是调用方自己的授权。"""
         platform = (agent.remote or {}).get("platform") if agent is not None and agent.remote else None
-        return self.file_sources.usable(platform, self._placement(agent))
+        out = self.file_sources.usable(platform, self._placement(agent))
+        return [x for x in out if x.auth == "none"] if ctx is not None and ctx.service else out
 
     def _platform_sources(self, spec: remote.PlatformSpec) -> list[fsrc.FileSource]:
         """平台目录 files.sources 里、这个平台的 Agent 能用的来源（平台在流里报的文件按它们取）。"""
@@ -9147,7 +9150,7 @@ class Network:
         export_file 只给平台目录里写了 files.export、驱动也支持的外部平台 Agent。"""
         out: list[str] = []
         base = ctx.tools
-        if self._sources_for(agent) and {"send_file", "delegate"} & set(base):
+        if self._sources_for(agent, ctx) and {"send_file", "delegate"} & set(base):
             out.append("fetch_file")
         spec = self.platforms.get(agent.remote.get("platform")) if agent.remote else None
         if spec is not None and spec.files_export and \
@@ -9201,6 +9204,43 @@ class Network:
             return conv is not None and any(m.role == "agent" and m.agent_id == ctx.agent_id
                                             and any(a.get("sha") == sha for a in m.attachments) for m in conv.messages)
 
+    # ---- 上下文里的文件 id 标注 ----
+    ANNOTATE_MIN = 6   # 太短的 id 容易撞上普通文字，不标
+
+    @staticmethod
+    def _ref_display(key: str) -> str:
+        """file_refs 的键 → 上下文里会出现的那个 id：src:<来源>:<ref> / up:<平台>:<file_id> / stg:<file_id>。"""
+        kind, _, rest = key.partition(":")
+        return rest.partition(":")[2] if kind in ("src", "up") else rest
+
+    def _annotate_file_ids(self, ctx: ExecContext, agent: AgentNode, prompt: str) -> str:
+        """这一轮的上下文（对话里的消息、委托目标、交付通知……）里出现了 Matrix 已经拿到的文件 id（取回的平台文件 id、
+        临时链接，传到平台得到的 file_id，暂存的 file_id）时，就地标注它就是对话里的哪份附件：这份附件本来就随这一轮下发
+        （云侧在 attachments/，端侧作为材料，外部平台按“文件”一节），模型直接用，不用再按 id 取一次。
+        只标这一轮本来就拿得到的附件（口径同 _attachments_for），只标已经出现在文字里的 id，不带出新东西。"""
+        with self._lock:
+            conv = self.store.conversations.get(ctx.conversation_id)
+            refs = dict(conv.file_refs) if conv is not None else {}
+            if not refs:
+                return prompt
+            visible = {a["sha"]: a for a in self._attachments_for(ctx)}
+        ids: dict[str, dict[str, Any]] = {}
+        for key, sha in refs.items():
+            shown = self._ref_display(key)
+            if sha in visible and len(shown) >= self.ANNOTATE_MIN and shown in prompt:
+                ids.setdefault(shown, visible[sha])
+        if not ids:
+            return prompt
+
+        def note(a: dict[str, Any]) -> str:
+            if agent.remote:
+                return f"（Matrix 已拿到：附件 {a['name']}，sha256 {a['sha']}，见“文件”一节）"
+            return f"（Matrix 已拿到：`{attachment_rel(a)}`）"
+        # 前后不能紧挨着 id / 链接里会出现的字符：pf-1 不会标进 pf-12 里，一条链接的前半截也不会被标
+        pattern = re.compile(r"(?<![A-Za-z0-9_~%/-])(?:" + "|".join(re.escape(x) for x in sorted(ids, key=len, reverse=True))
+                             + r")(?![A-Za-z0-9_~%/?#=&-])")
+        return pattern.sub(lambda m: m.group(0) + note(ids[m.group(0)]), prompt)
+
     # ---- 短期链接 ----
     def _sign_link(self, ctx: ExecContext, key: str, base: str) -> str:
         """签一条短期下载链接（这一轮有效）：key 是这一轮拿得到的附件 sha，或这一轮暂存的 file_id。"""
@@ -9248,6 +9288,8 @@ class Network:
         if got and (not ttl or time.time() - float(got[1]) < ttl):
             return str(got[0])
         fid = driver.upload(spec, str(meta.get("name") or f.name), f.read_bytes(), str(meta.get("mime") or ""), headers)
+        # 平台的 file_id 也记成这份附件：之后谁的上下文里出现它，都标注成 Matrix 里已有的那份
+        self._remember_refs(ctx.conversation_id, [f"up:{spec.id}:{fid}"], sha)
         with self._lock:
             conv = self.store.conversations.get(ctx.conversation_id)
             if conv is not None:
@@ -9296,7 +9338,7 @@ class Network:
                 handed[a["sha"]] = f"平台文件 {entry['file_id']}"
             call.files.append(entry)
         ctx.handed = sorted(handed) if spec.files_resend == "new" and driver is not None else None
-        if self._platform_sources(spec):
+        if [x for x in self._platform_sources(spec) if not ctx.service or x.auth == "none"]:
             call.on_file = lambda ref, name: self._remote_file_event(token, ref, name)
         return format_remote_files(items, handed, export="export_file" in ctx.tools, emit=call.on_file is not None)
 
@@ -9338,7 +9380,7 @@ class Network:
         """按部署方登记的来源取一个文件，放进这一轮的暂存区（同 /mcp/remote/files），返回 {file_id, name, size, sha256}。
         这个对话里取过的同一个（来源, ref），来源允许缓存且这一轮拿得到那份附件时，直接用那份，不再取（cached=True）。"""
         agent = self.store.agents.get(ctx.agent_id)
-        usable = self._sources_for(agent)
+        usable = self._sources_for(agent, ctx)
         src = next((x for x in usable if x.id == source), None)
         if src is None:
             ids = "、".join(x.id for x in usable) or "没有"
@@ -9419,6 +9461,8 @@ class Network:
         agent = self.store.agents.get(ctx.agent_id) if ctx is not None else None
         spec = self.platforms.get((agent.remote or {}).get("platform")) if agent is not None and agent.remote else None
         sources = self._platform_sources(spec) if spec is not None else []
+        if ctx is not None and ctx.service:  # 服务面只用不带凭证的来源（不变量 27）
+            sources = [x for x in sources if x.auth == "none"]
         if ctx is None or spec is None or not sources:
             return "那一轮已经结束，或平台没有配置 files.sources", True, "failed"
         try:

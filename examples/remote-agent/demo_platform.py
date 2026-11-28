@@ -312,7 +312,7 @@ class DemoPlatform:
                     parts.append(self._tool(agent, sid, "send_file", {"file_id": out["file_id"]}))
                 else:
                     parts.append(f"暂存失败（{code}）：{out.get('detail')}")
-            m = re.search(r"转发「(stg_[\w-]+)」", message)
+            m = re.search(r"转发「(stg_[\w-]+)", message)  # 后面可能跟着 Matrix 的标注（已拿到的文件 id）
             if m:
                 parts.append(self._tool(agent, sid, "send_file", {"file_id": m.group(1)}))
             m = re.search(r"拉文件「([\w-]+)」", message)
@@ -337,6 +337,7 @@ class DemoPlatform:
             fid = self.reported.get(agent) or self.store(name, report(agent))
             self.reported[agent] = fid
             send("file", {"ref": fid, "name": name})
+            parts.append(f"报表的文件 id 是 {fid}")
         for link in re.findall(r"报链接「(\S+?)」", message):
             send("file", {"ref": link})
         if self.received:
