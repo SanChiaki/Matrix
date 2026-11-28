@@ -707,3 +707,22 @@ def test_file_tools_are_listed_on_the_external_mcp(make_env):
     assert "fetch_file" not in names(rpc(live, method="tools/list"))
     net.remote_bindings.unbind(a.id, "s-live")
     net._contexts.pop("t-live")
+
+
+def test_scan_respects_what_the_model_already_decided_with_fetch_file(make_env):
+    """fetch_file 与 files.scan 可以同时用：模型这一轮自己 fetch_file 过的 id，怎么用由它决定（发、转交或不发），
+    回复里再写出这个 id 时扫描不替它附到回复上；发过的同样不重复附。"""
+    env = make_env(files={"sources": ["demo-files"], "scan": True}, demo_ref=PF)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    fid = env.demo.store("只给委托方的.md", b"for the delegate only")
+    ctx = _live(net, dm.id, a.id, "t-scan")
+    text, bad = net._tool_fetch_file(ctx, {"source": "demo-files", "ref": fid})  # 模型取了，打算只转交，不发给对话里的人
+    assert not bad
+    net._scan_reply("t-scan", ctx, a, "（提示词里没有这个 id）", f"已把 {fid} 转给成员")
+    assert ctx.sent == []
+    ev = _scan_events(net)[-1]
+    assert ev["outcome"] == "skipped" and "fetch_file" in ev["note"]
+    net._contexts.pop("t-scan")

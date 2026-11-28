@@ -135,6 +135,7 @@ class ExecContext:
     file_tools: list[str] = field(default_factory=list)
     links: list[str] = field(default_factory=list)
     handed: list[str] | None = None   # files.resend = new：这一轮交给平台的（连同这个会话里之前交过的）附件 sha
+    fetched: set[str] = field(default_factory=set)  # 这一轮模型自己 fetch_file 过的（来源, ref）：怎么用由它定，files.scan 不替它附
     # 公共 Agent 的服务面（docs/public-agents.md，不变量 27）：这一轮为谁做（principal）、这一轮 @ 它的全部调用方。
     # principal 为 None 表示普通情形：为 Agent 的所有者做
     service: bool = False
@@ -9416,8 +9417,10 @@ class Network:
         return {**out, "cached": f is not None and known is not None}
 
     def _tool_fetch_file(self, ctx: ExecContext, args: dict[str, Any]) -> tuple[str, bool]:
-        out = self.fetch_into_staging(ctx, str(args.get("source", "")).strip(), str(args.get("ref", "")),
-                                      str(args.get("name", "")).strip(), fresh=bool(args.get("fresh")))
+        source, ref = str(args.get("source", "")).strip(), str(args.get("ref", ""))
+        out = self.fetch_into_staging(ctx, source, ref, str(args.get("name", "")).strip(), fresh=bool(args.get("fresh")))
+        with ctx.lock:
+            ctx.fetched.add(self._ref_key(source, ref))
         size = f"{out['size'] / 1_000_000:.1f} MB" if out["size"] >= 1_000_000 else f"{max(1, out['size'] // 1000)} KB"
         how = "这个对话里取过，用的是已有的那份；" if out["cached"] else ""
         return (f"已拉进这一轮的暂存区：{out['name']}（{size}），file_id `{out['file_id']}`。{how}"
@@ -9475,9 +9478,21 @@ class Network:
             return
         sources = [x for x in self._platform_sources(spec) if not ctx.service or x.auth == "none"]
         for ref in fsrc.find_refs(sources, reply)[:ATTACHMENTS_PER_MESSAGE]:
+            skip = ""
             if ref in prompt:
+                skip = "这个 id 在这一轮的上下文里本来就有：不是它这一轮产出的，不取"
+            else:
+                try:
+                    key = self._ref_key(fsrc.route(sources, ref).id, ref)
+                except fsrc.SourceError:
+                    key = ""
+                with ctx.lock:
+                    mine = key in ctx.fetched
+                if mine:
+                    skip = "模型这一轮自己用 fetch_file 取过它：发不发、转交给谁由它决定，不替它附到回复上"
+            if skip:
                 self.bus.emit("remote.file", context=ctx.kind, context_id=ctx.id, agent_id=ctx.agent_id,
-                              outcome="skipped", via="scan", note="这个 id 在这一轮的上下文里本来就有：不是它这一轮产出的，不取")
+                              outcome="skipped", via="scan", note=skip)
                 continue
             self._remote_file_event(token, ref, "", via="scan")
 
