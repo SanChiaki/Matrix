@@ -675,3 +675,35 @@ def test_scan_follows_the_same_rules_as_file_events(make_env):
     reply = dm.messages[-1]
     assert [x["name"] for x in reply.attachments] == ["报销助手报表.md"]  # 只附一次
     assert _scan_events(net)[-1]["outcome"] == "skipped"
+
+
+def test_file_tools_are_listed_on_the_external_mcp(make_env):
+    """对外的 MCP（/mcp/remote）：平台试连（没落到某一轮）时列出全部工具说明，含 fetch_file / export_file；
+    落到某一轮时只列这一轮能用的——文件工具按这一轮的条件出现，不能用的不列、调了也拒绝。"""
+    env = make_env(files={"matrix_url": "http://matrix"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    key = env.connect_mcp(a.id, maya)
+    rpc = lambda h, **p: env.client.post("/mcp/remote", headers=h, json={"jsonrpc": "2.0", "id": 1, **p}).json()  # noqa: E731
+    names = lambda out: {t["name"] for t in out["result"]["tools"]}  # noqa: E731
+    auth = {"Authorization": f"Bearer {key}"}
+    probe = rpc(auth, method="tools/list")
+    assert {"fetch_file", "export_file"} <= names(probe)
+    fetch = next(t for t in probe["result"]["tools"] if t["name"] == "fetch_file")
+    assert set(fetch["inputSchema"]["required"]) == {"source", "ref"} and "fresh" in fetch["inputSchema"]["properties"]
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _ctx(dm.id, a.id)
+    ctx.file_tools = net._file_tools(ctx, a)
+    assert ctx.file_tools == ["fetch_file", "export_file"]
+    bridge = type("B", (), {"token": "t-live", "names": ctx.tools, "handler": staticmethod(lambda n, args: ("[]", False))})()
+    net._contexts["t-live"] = ctx
+    net.remote_bindings.bind(a.id, "s-live", bridge)
+    live = {**auth, "X-Session-Id": "s-live"}
+    assert {"fetch_file", "export_file", "send_file"} <= names(rpc(live, method="tools/list"))
+    ctx.service = True  # 服务面：平台凭证的来源不给，这里没有别的来源 → 不列 fetch_file
+    ctx.file_tools = net._file_tools(ctx, a)
+    bridge.names = ctx.tools
+    assert "fetch_file" not in names(rpc(live, method="tools/list"))
+    net.remote_bindings.unbind(a.id, "s-live")
+    net._contexts.pop("t-live")
