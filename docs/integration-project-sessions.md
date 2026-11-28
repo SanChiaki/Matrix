@@ -7,7 +7,7 @@
 
 每个接口的请求参数、返回字段、错误码见 [api-for-business-systems.md](api-for-business-systems.md) 第三节（按接口逐个列出）；这里只写这两个场景要用的，示例里的返回只摘了关键字段。
 
-以前用“外部应用”（`mat_` 令牌、`/open/v1/*`、`/svc/*`）或“项目服务”接入的，先看文末的[从外部应用、项目服务迁移](#从外部应用项目服务迁移)。
+以前用“外部应用”（`mat_` 令牌、`/open/v1/*`、`/svc/*`）或“项目服务”接入的，先看文末的[概念怎么换](#概念怎么换)起的迁移说明。
 
 ## 先弄清四件事
 
@@ -209,18 +209,6 @@ curl -X PATCH $MATRIX/api/sessions/conv-fdfe42ba $AS_USER $J -d '{"archived": tr
 用户：  GET  /api/events                      （长连接，收回答）
 用户：  POST /api/conversations/{conv_id}/messages
 ```
-
-## 从外部应用、项目服务迁移
-
-2026-11-26 的四个改动（[SanChiaki/Matrix#110](https://github.com/SanChiaki/Matrix/pull/110)–[#113](https://github.com/SanChiaki/Matrix/pull/113)）
-把业务系统的接入方式换掉了，旧的接口已经删除，没有兼容期：
-
-| 改动 | 内容 |
-|---|---|
-| #110 | 业务系统的后端带着**用户的凭据**直接调 `/api/*`，每次请求等同那个用户本人（之后又加了临时的共享密钥方式，见上文“准备”） |
-| #111 | 项目会话不再依赖助理：能 @ 项目里的任何 Agent，开会话时可以指定默认 Agent |
-| #112 | 删除**外部应用**：应用登记、应用令牌（`mat_…`）、业务系统账号、`/open/v1/*`、`/svc/*`、开放给应用的 Agent（不变量 30 撤销） |
-| #113 | 删除**项目服务**：服务、服务会话、`/api/services*`、`/api/projects/{id}/services*`（不变量 29 撤销） |
 
 ### 概念怎么换
 
