@@ -7,6 +7,8 @@
 
 每个接口的请求参数、返回字段、错误码见 [api-for-business-systems.md](api-for-business-systems.md) 第三节（按接口逐个列出）；这里只写这两个场景要用的，示例里的返回只摘了关键字段。
 
+以前用“外部应用”（`mat_` 令牌、`/open/v1/*`、`/svc/*`）或“项目服务”接入的，先看文末的[概念怎么换](#概念怎么换)起的迁移说明。
+
 ## 先弄清四件事
 
 - **每次请求都是替某个用户做的**，等同他本人。Matrix 里没有“业务系统”这个身份：项目是某个人建的，会话是某个人开的。
@@ -207,3 +209,135 @@ curl -X PATCH $MATRIX/api/sessions/conv-fdfe42ba $AS_USER $J -d '{"archived": tr
 用户：  GET  /api/events                      （长连接，收回答）
 用户：  POST /api/conversations/{conv_id}/messages
 ```
+
+### 概念怎么换
+
+| 以前 | 现在 |
+|---|---|
+| 应用令牌，按 scope（`agents.read`、`projects.write`、`services.publish`、`services.call`）授权 | 没有应用、没有令牌、没有 scope：每次请求**替某个用户**做，能做的就是他在网页上能做的 |
+| **业务系统账号**（`<应用 id>@apps.matrix`）当主持人，真人负责人代管 | 一个**真实用户**当主持人（通常是原来的负责人或运营）；系统账号已删除 |
+| 代表一个人的令牌 | 直接替那个人调：`X-Matrix-User` 填他的 user_id（或带他的登录凭据） |
+| 发布**项目服务**（入口、岗位、范围、收件目录、读者），调用方开**服务会话** | 主持人把终端用户**邀请进项目**，每个人开自己的**项目会话**，@ 项目里的 Agent；没 @ 时交给默认 Agent |
+| 服务的入口 Agent | 项目的**默认 Agent**（`default_agent`），每个会话也可以单独指定 |
+| 开放给应用的个人 Agent（所有者自动成为参与者） | 公共 Agent，或主持人自己的 Agent；别人的 Agent 要进项目，先邀请它的所有者，由所有者把自己的 Agent 加进来 |
+| 系统账号的连接器（负责人代授权） | 每个人用自己授权的连接器；平台 Agent 要用户身份时走调用方授权透传 |
+| `/svc` 一次请求 SSE 流式等到做完 | 发消息立即返回；回答在事件流 `GET /api/events` 里整条到（或轮询会话） |
+| 服务用量（`…/services/{sid}/usage`） | 没有按项目的用量接口；管理员在管理后台按用户、按模型看用量 |
+
+### 功能与接口对照
+
+按原来外部应用的四层能力（查、组、发、调）和网页上的“服务”分组。每一行：原来能做什么、用哪个接口；现在用什么功能做到、调哪个接口（括号里是替谁调）；两者有什么不同。
+
+#### 查：找能用的 Agent 与模板
+
+| 原功能 | 原接口 | 新功能 | 新接口 | 区别 |
+|---|---|---|---|---|
+| 列出应用能用的 Agent（公共的、授权人自己的、所有者开放给这个应用的），只给名片 | `GET /open/v1/agents` | 列出这个用户看得到的 Agent；单独列出公共 Agent | `GET /api/network`（用户）、`GET /api/public-agents`（用户） | 没有“开放给应用的 Agent”：别人的个人 Agent 要进项目，先邀请它的所有者，由所有者把它加进来 |
+| 列出能用的模板 | `GET /open/v1/blueprints` | 列出这个用户能用的模板 | `GET /api/blueprints`（用户） | 无 |
+
+#### 组：建项目、配成员与资料
+
+| 原功能 | 原接口 | 新功能 | 新接口 | 区别 |
+|---|---|---|---|---|
+| 列出应用能管的项目、看项目配置（不给对话内容） | `GET /open/v1/projects`、`GET /open/v1/projects/{id}` | 列出这个用户参与的项目、看项目详情 | `GET /api/network`、`GET /api/projects/{project_id}`（用户） | 现在给的是这个用户看得到的全部，包括群聊与档案 |
+| 以应用（系统账号或授权人）的身份建项目，带纲要与成员 | `POST /open/v1/projects` `{name, description, brief, members}` | 以主持人本人的身份建项目，同时定默认 Agent；纲要另外写 | `POST /api/projects` `{name, description, member_ids, default_agent}`、`PUT /api/projects/{id}/brief` `{text}`（主持人） | `members` 改名 `member_ids`；成员只能是主持人自己的 Agent 和公共 Agent；多了 `default_agent` |
+| 用模板建项目 | `POST /open/v1/projects` `{blueprint, params, roles, digest}` | 用模板建项目（也能装进已有项目） | `POST /api/blueprints/{bid}/projects` `{name, params, roles, confirm, digest}`（主持人） | 要确认的事照旧：第一次 409 返回 `{confirm, digest}`，带上 `digest` 再调 |
+| 改项目的说明、纲要、角色 | `PATCH /open/v1/projects/{id}` `{description, brief, roles}` | 改项目基本信息、成员、默认 Agent；纲要、角色各有接口 | `PATCH /api/projects/{id}` `{name, description, member_ids, default_agent}`、`PUT …/brief`、`PUT /api/projects/{id}/roles` `{roles}`（主持人） | 拆成了三个接口 |
+| 删项目（只能删经这个应用建的） | `DELETE /open/v1/projects/{id}` | 删项目 | `DELETE /api/projects/{project_id}`（主持人） | 主持人能删自己主持的任何项目 |
+| 拉成员进项目 / 移出 | `PUT` / `DELETE /open/v1/projects/{id}/members/{agent}` | 加成员 / 移出成员 | `POST /api/projects/{project_id}/members` `{agent_id}`、`DELETE …/members/{agent_id}`（主持人或那个 Agent 的所有者） | 加成员从 `PUT` 路径参数改成 `POST` 请求体 |
+| 上传资料 | `PUT /open/v1/projects/{id}/files/{path}`（请求体是文件） | 上传项目资料 | `POST /api/projects/{project_id}/files?name=<路径>`（请求体是文件，主持人） | 路径从 URL 路径改到 `?name=` |
+| 设资料的可见范围 | `PATCH /open/v1/projects/{id}/access` `{path, rule}` | 设资料的可见范围 | `PUT /api/projects/{project_id}/file-access` `{path, roles, agents}`（主持人） | `rule: null`（所有成员可见）改成 `roles`、`agents` 都给空 |
+| 写项目技能 | `POST /open/v1/projects/{id}/skills` `{name, description, body}` | 写项目技能 | `PUT /api/projects/{project_id}/skills` `{name, description, body}`（主持人） | `POST` 改 `PUT` |
+| 从部署方目录装插件 | `POST /open/v1/projects/{id}/plugins` `{name, digest}` | 装项目插件 | `POST /api/projects/{project_id}/plugins` `{name, confirm, digest}`（主持人） | 多了 `confirm` |
+
+#### 发：把项目作为服务给别人用
+
+| 原功能 | 原接口 | 新功能 | 新接口 | 区别 |
+|---|---|---|---|---|
+| 发布服务：定入口、岗位、授予的权限、能读的资料、收件目录、读者 | `POST /open/v1/projects/{id}/services`、`POST /api/projects/{id}/services` | 没有“服务”这一层：把项目本身配好、邀请读者进项目 | ① `PATCH /api/projects/{id}` 定 `default_agent`（原入口）与 `member_ids`（原岗位）；② `POST …/files?name=`、`PUT …/file-access` 放资料、收窄范围；③ `POST /api/projects/{id}/invitations` `{email}`（主持人）+ `POST /api/projects/{id}/invitation` `{accept: true}`（读者本人） | 没有发布时冻结的权限；没有收件目录；没有 `public: true`。各字段落在哪见下一节 |
+| 修改服务（改了切新版本，下一轮生效） | `PATCH /open/v1/projects/{id}/services/{sid}`、`PATCH /api/projects/{id}/services/{sid}` | 直接改项目、Agent、可见范围 | `PATCH /api/projects/{id}`、`PATCH /api/agents/{id}`（Agent 的所有者）、`PUT …/file-access`、`PUT …/roles`（主持人） | 没有版本，改了下一轮就生效 |
+| 撤回服务（已有服务会话变只读） | `DELETE /open/v1/projects/{id}/services/{sid}`、`DELETE /api/projects/{id}/services/{sid}` | 让读者不能再用：移出参与者（他的会话变只读）；或不设默认 Agent；或删项目 | `DELETE /api/projects/{project_id}/participants/{user_id}`、`PATCH /api/projects/{id}` `{default_agent: null}`、`DELETE /api/projects/{id}`（主持人） | 移出是逐个人做的 |
+| 增加 / 去掉读者 | 改服务的 `readers` | 邀请进项目 / 移出参与者 | `POST …/invitations` + `POST …/invitation`；`DELETE …/participants/{user_id}` | 读者要接受邀请才算进来 |
+| 列出项目里的服务 | `GET /api/projects/{id}/services` | 看项目 | `GET /api/projects/{project_id}`（主持人） | 一个项目就是原来的一个服务 |
+| 看服务用量：会话数、轮数、失败、token、按调用方汇总 | `GET /open/v1/projects/{id}/services/{sid}/usage`、`GET /api/projects/{id}/services/{sid}/usage` | 没有按项目的用量 | 管理后台（管理员） | 只有管理员能看，按用户、按模型 |
+
+#### 调：调用服务、对话
+
+| 原功能 | 原接口 | 新功能 | 新接口 | 区别 |
+|---|---|---|---|---|
+| 看服务名片（名称、说明） | `GET /svc/agents/{service}` | 看项目：成员、默认 Agent | `GET /api/projects/{project_id}`（读者） | 无 |
+| 调用服务：发一条消息，同一次请求 SSE 流式等到做完 | `POST /svc/agents/{service}/chat` `{message, session_id?}` | 第一次开项目会话；之后在会话里发消息；回答从事件流收 | `POST /api/projects/{project_id}/sessions`（读者，返回 `conv_id`）、`POST /api/conversations/{conv_id}/messages` `{text}`、`GET /api/events`（读者） | 发消息立即返回，不等回答；回答一轮结束时整条到（`message.added`），不是逐字流式；不想维持长连接就轮询 `GET /api/conversations/{conv_id}` |
+| 续接（带上 `session_id`） | `POST /svc/agents/{service}/chat` `{session_id}` | 往同一个会话继续发 | `POST /api/conversations/{conv_id}/messages`（读者） | `session_id` 就是现在的 `conv_id` |
+| 看过程：委托建了 / 换了状态、执行方的工具与中途的话、心跳 | `/svc/…/chat` 流里的 `tool`、`progress` 事件 | 会话状态 | `GET /api/events` 的 `conversation.updated`（`thinking` / `waiting` / `idle`，读者） | 逐步的过程只推给 Agent 的所有者（`run.progress`），读者看不到 |
+| 中断这一轮 | `POST /svc/sessions/{session_id}/interrupt` | 打断正在回答的那个 Agent | `POST /api/conversations/{conv_id}/seats/{agent_id}/stop`（读者） | 要指明打断哪个 Agent |
+
+#### 网页上的服务（Matrix 用户自己用）
+
+| 原功能 | 原接口 | 新功能 | 新接口 | 区别 |
+|---|---|---|---|---|
+| “给你用的服务”列表 | `GET /api/services` | 我参与的项目 | `GET /api/network` 的项目列表 | 无 |
+| 开服务会话 | `POST /api/services/{service_id}/sessions` | 开项目会话 | `POST /api/projects/{project_id}/sessions` | 会话里能 @ 项目里的任何 Agent，没 @ 时交给默认 Agent |
+| 读服务会话、结束 | 普通的会话接口 | 读项目会话、归档 | `GET /api/conversations/{conv_id}`、`PATCH /api/sessions/{conv_id}` `{archived: true}` | 无 |
+
+### 服务的字段对照
+
+发布服务时填的每个字段，现在落在哪里：
+
+| 服务的字段 | 现在 | 怎么设 |
+|---|---|---|
+| `name`、`title`、`description` | 项目的名字与说明 | `POST /api/projects`、`PATCH /api/projects/{id}` 的 `name`、`description` |
+| `entry`（入口） | 项目的默认 Agent | `default_agent`；某个会话单独指定用 `POST …/sessions` 的 `agent`，开着的会话换用 `PATCH /api/sessions/{conv_id}` `{agent}` |
+| `staff`（入口能委托的 Agent） | 项目成员 | `member_ids`，或 `POST …/members` / `DELETE …/members/{agent_id}`。会话里也能直接 @ 它们；入口要能委托它们，入口 Agent 自己要有 `delegate` 权限 |
+| `authority`（服务授予的权限，发布时冻结） | 没有这一层：用 Agent 自己的权限 | `PATCH /api/agents/{id}` `{authority}`（所有者）；要比平时更窄，就为这个项目单独建一个 Agent |
+| `scope`（能读的资料） | 项目资料与可见范围 | `POST …/files?name=` 放资料，`PUT …/file-access` `{path, roles, agents}` 收窄到某些角色、成员 |
+| `inbox`（收件目录） | 没有对应 | Agent 写的东西在它的工作目录里，要发给人用 `send_file`，要进项目档案用档案工具 |
+| `plugins`（服务里能用的插件） | 项目插件 | `POST /api/projects/{id}/plugins` |
+| `readers`（给谁用） | 项目参与者 | 逐个 `POST …/invitations` + 对方 `POST …/invitation` |
+| `public: true`（所有登录用户） | 没有对应 | 业务系统在用户第一次进来时替他做一次邀请 + 接受 |
+
+### 一个服务怎么改成项目会话
+
+以前：主持人发布服务 `intake`（入口 `财务助手`，`readers` 给几个人），业务系统凭令牌调 `/svc/agents/svc-…/chat`。现在：
+
+1. **主持人**（原来的负责人）建项目，把原来的入口设成默认 Agent：
+   `POST /api/projects` `{"name": "报销咨询", "member_ids": ["agent-财务助手", "agent-合同审核"], "default_agent": "agent-财务助手"}`。
+   原来服务里的资料用 `POST …/files?name=` 放进项目，要收窄 Agent 能看的范围用 `PUT …/file-access`。
+2. **每个终端用户**被主持人邀请、替他接受（上文场景二第 1 步）。这对应原来服务的 `readers`；以前的 `public: true`（所有登录用户都能用）
+   现在没有：业务系统在用户第一次进这个功能时替他做一次邀请 + 接受。
+3. **替用户**开项目会话、发消息、收回答（场景二第 2–4 步）。会话 id 存在业务系统里，下次续接同一个会话。
+
+和服务相比要知道的差别：
+
+- **权限**：没有“服务授予的权限”这一层（发布时冻结、比入口更窄）。Agent 用的是它自己的 `authority`，要收窄就给它更小的权限，或单独建一个只用于这个项目的 Agent。
+- **数据范围**：没有服务的 `scope`、收件目录。项目资料默认所有成员可见，用 `file-access` 按角色、成员收窄；Agent 写下的东西照常进它的工作目录、或经档案工具进项目。
+- **谁看得到**：项目会话只属于开它的人，主持人和其他参与者看不到（以前的服务会话也是这样）。被 @ 进来的别人的 Agent，它的所有者只看得到经过它的那几轮。
+- **过程**：以前 `/svc` 流里有 `progress`（委托、执行方的工具与中途的话）。现在业务系统只收到回答本身（`message.added`）和会话状态（`conversation.updated` 的 `thinking` / `waiting` / `idle`）；
+  逐步的过程只推给 Agent 的所有者（`run.progress`）。
+- **超时**：以前 `/svc` 一次请求最多等 15 分钟。现在是异步的：发完消息就返回，等事件或轮询，没有这个上限。
+- **限频**：以前每把令牌每分钟 600 次。现在没有接口级的限频，业务系统自己控制并发。
+- **留痕**：以前档案日志记“经哪个应用”。现在只记是哪个用户做的，还不区分“网页上做的”与“业务系统替他做的”。
+
+### 升级时已有数据怎么处理
+
+升级到这几个版本，启动时自动做，**升级前照常备份**（数据库存储会在首次保存时清掉相应的行）：
+
+| 数据 | 处理 |
+|---|---|
+| 外部应用、应用令牌 | 丢弃，令牌立刻失效（401） |
+| 业务系统账号 | 删除。它主持的项目转给第一个还在的负责人（没有就给第一个参与者，再没有就给登记应用的管理员），其余负责人留作参与者 |
+| 系统账号的会话、附件、连接器及保管库里的凭证 | 删除 |
+| 已发布的项目服务 | 丢弃 |
+| 服务会话（连同附件） | 删除 |
+| `state.json` | 先另存一份 `state.pre-services.json` |
+
+### 迁移清单
+
+- [ ] 向部署方要接入方式：用户凭据（`login.json` 的 `api_auth`，[login-driver-authoring.md](login-driver-authoring.md) 第八节），或临时的共享密钥（`api_keys`，第九节）
+- [ ] 业务系统里删掉 `mat_` 令牌，不再调 `/open/v1/*`、`/svc/*`；反向代理上去掉为它们做的放行，原样传 `Authorization`、`X-Matrix-*` 请求头（[reverse-proxy.md](reverse-proxy.md)）
+- [ ] 确定每个项目的主持人（真实用户），确认升级后项目转到了谁名下
+- [ ] 原来的每个服务改成一个项目：成员、默认 Agent、资料与可见范围（上一节）
+- [ ] 原来服务的读者改成逐个邀请；业务系统里补上“用户第一次进来时邀请 + 接受”
+- [ ] 调用路径改成：开项目会话 → 发消息 → 订阅事件（或轮询），保存 `conv_id` 以便续接
+- [ ] 原来依赖系统账号连接器的，改成让每个用户授权自己的连接器
+- [ ] 用一个测试用户把场景一、场景二从头走一遍
+
