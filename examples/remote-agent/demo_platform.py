@@ -19,6 +19,7 @@
 - 消息里有“发文件”：在平台上写一份演示报告，POST 到 Matrix 的 `<MCP 地址>/files`（同一份请求头 + `X-Session-Id`）拿 file_id，
   再经 MCP 调 send_file(file_id=…) 附在回复上（委托任务里就是随交付交回）；“转发「stg_…」”是拿一个给定的 file_id 调 send_file；
 - 消息里有“委托「成员」带文件：<要它做的事>”：先暂存一份报告，再 delegate，attachments 写 file_id，mission 是冒号后面那句；
+- 消息里有“只写文件 id”：把报告存进平台文件库，只在回复正文里写出 file_id（不报事件）；“复述「…」”把引号里的文字照抄进回复；
 - 消息里有“报文件”：把报告存进平台自己的文件库（同一个 Agent 一直是同一个 file_id，像平台每轮都报一遍会话里的文件），
   在流里报 `file {ref, name}`（Matrix 按 files.sources 取回）；“报链接「<链接>」”：报一个放在第三方暂存的文件；
 - 消息里有“拉文件「来源」”：把报告存进平台自己的文件库，经 MCP 调 fetch_file(source=来源, ref=file_id)，再 send_file；
@@ -340,6 +341,11 @@ class DemoPlatform:
             parts.append(f"报表的文件 id 是 {fid}")
         for link in re.findall(r"报链接「(\S+?)」", message):
             send("file", {"ref": link})
+        if "只写文件 id" in message:  # 不报 file 事件，只在回复正文里写出 id（Matrix 的 files.scan 认出来取回）
+            fid = self.store(f"{AGENTS[agent]['name'][:4]}明细.md", report(agent))
+            parts.append(f"明细已生成，文件 id：{fid}。")
+        for quoted in re.findall(r"复述「(.+?)」", message):  # 把别人给的文字照抄进回复（演示：引用来的 id 不该被当成它产出的）
+            parts.append(quoted)
         if self.received:
             parts.append("随消息收到：" + "、".join(f"{f['name']}（{len(f['data'])} 字节）" for f in self.received
                                                 if f.get("code") == 200))

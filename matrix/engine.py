@@ -7003,6 +7003,8 @@ class Network:
                                               unit=unit, blobs=blobs, sandbox=extra))
             if sandboxed and res.extra:
                 self._sandbox_collect(unit, ctx, res.extra)
+            if remote_call is not None and res.ok:  # 平台只在回复正文里写了文件 id：files.scan 打开时认出来取回附上
+                self._scan_reply(token, ctx, agent, prompt, res.final_text)
             if remote_call is not None:
                 self._remember_handed(ctx, agent, res.session_id)
         except Exception as e:  # noqa: BLE001
@@ -9137,6 +9139,9 @@ class Network:
                     out.append(f"平台 {spec.id} 的 files.sources 里的 {sid} 没给这个平台用（来源的 for）")
             for a, b in fsrc.overlaps(self._platform_sources(spec)):
                 out.append(f"平台 {spec.id} 的来源 {a} 与 {b} 的 ref 格式一样：平台报的文件分不出按哪个取，给它们写能区分开的 ref 正则")
+            if spec.files_scan:
+                out += [f"平台 {spec.id} 打开了 files.scan，来源 {x.id} 没写 ref 正则：从回复正文里认 id 时不用它"
+                        for x in self._platform_sources(spec) if not fsrc.scannable(x)]
         return out
 
     def _platform_driver(self, spec: remote.PlatformSpec) -> Any:
@@ -9340,7 +9345,8 @@ class Network:
         ctx.handed = sorted(handed) if spec.files_resend == "new" and driver is not None else None
         if [x for x in self._platform_sources(spec) if not ctx.service or x.auth == "none"]:
             call.on_file = lambda ref, name: self._remote_file_event(token, ref, name)
-        return format_remote_files(items, handed, export="export_file" in ctx.tools, emit=call.on_file is not None)
+        return format_remote_files(items, handed, export="export_file" in ctx.tools, emit=call.on_file is not None,
+                                   scan=spec.files_scan and call.on_file is not None)
 
     def _remember_handed(self, ctx: ExecContext, agent: AgentNode, session_id: str) -> None:
         """files.resend = new：记下这个平台会话里已经交过哪些（会话 id 变了就从头交）。"""
@@ -9446,16 +9452,34 @@ class Network:
             return f"传不到平台：{e}", True
         return f"{meta['name']} 已传到 {spec.name}：平台的 file_id 是 {fid}", False
 
-    def _remote_file_event(self, token: str, ref: str, name: str) -> tuple[str, bool]:
+    def _remote_file_event(self, token: str, ref: str, name: str, via: str = "event") -> tuple[str, bool]:
         """平台在流里报出的文件（file 事件）：在平台目录的 files.sources 里按 ref 格式选来源（恰好一个才取），
         取回暂存，再照 send_file 附在这一轮的回复上（信息流检查、每轮上限都照旧）。files.repeat = skip 时，
-        这个 Agent 在这里已经发过的同一份文件不再附。每个都记一条 remote.file 事件（不带 ref：可能是临时链接）。"""
+        这个 Agent 在这里已经发过的同一份文件不再附。每个都记一条 remote.file 事件（不带 ref：可能是临时链接）。
+        via：event（平台报的）| scan（从回复正文里认出来的，见 _scan_reply）。"""
         ctx = self._contexts.get(token)
         text, bad, outcome = self._take_remote_file(token, ctx, ref, name)
         if ctx is not None:
             self.bus.emit("remote.file", context=ctx.kind, context_id=ctx.id, agent_id=ctx.agent_id,
-                          outcome=outcome, note=text[:200])
+                          outcome=outcome, via=via, note=text[:200])
         return text, bad
+
+    def _scan_reply(self, token: str, ctx: ExecContext, agent: AgentNode, prompt: str, reply: str) -> None:
+        """files.scan（docs/files-across-platforms.md 6.4）：平台只在回复正文里写了文件 id、没报 file 事件时，
+        在这一轮的最终回复里按 files.sources 认出 id，取回附上。正文是模型写的，所以多几道闸：
+        - 只认这一轮上下文（发给平台的提示词）里**没有**的 id：转述的、引用的、别人写进来诱导它复述的，一律不取；
+        - 只用链接来源（链接主机在 hosts 里）和明确写了 ref 正则的 id 来源；照旧要恰好匹配一个来源；
+        - 取和附同 file 事件：repeat 去重、send_file 的信息流检查、每次回复的上限、服务面只用不带凭证的来源。"""
+        spec = self.platforms.get((agent.remote or {}).get("platform")) if agent.remote else None
+        if spec is None or not spec.files_scan or not reply:
+            return
+        sources = [x for x in self._platform_sources(spec) if not ctx.service or x.auth == "none"]
+        for ref in fsrc.find_refs(sources, reply)[:ATTACHMENTS_PER_MESSAGE]:
+            if ref in prompt:
+                self.bus.emit("remote.file", context=ctx.kind, context_id=ctx.id, agent_id=ctx.agent_id,
+                              outcome="skipped", via="scan", note="这个 id 在这一轮的上下文里本来就有：不是它这一轮产出的，不取")
+                continue
+            self._remote_file_event(token, ref, "", via="scan")
 
     def _take_remote_file(self, token: str, ctx: ExecContext | None, ref: str, name: str) -> tuple[str, bool, str]:
         agent = self.store.agents.get(ctx.agent_id) if ctx is not None else None

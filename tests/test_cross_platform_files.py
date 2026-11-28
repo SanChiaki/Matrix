@@ -31,7 +31,7 @@ class Env:
     """演示平台 + Matrix。`files` 是平台目录里 demo 平台的 files 配置；来源目录里登记了演示平台的文件库（带平台凭证）。"""
 
     def __init__(self, tmp_path: Path, files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None,
-                 extra_platforms: list[dict] | None = None):
+                 extra_platforms: list[dict] | None = None, demo_ref: str | None = None):
         self.data = data = tmp_path / "data"
         data.mkdir()
         self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post, file_get=self._file_get)
@@ -43,7 +43,7 @@ class Env:
         self.srcs = srcs = tmp_path / "file-sources.json"
         srcs.write_text(json.dumps({"sources": [
             {"id": "demo-files", "name": "演示平台的文件库", "url": self.demo.url + "/files/{ref}/content",
-             "auth": "platform", "platform": "demo", "hint": "平台的文件 id（pf-…）"},
+             "auth": "platform", "platform": "demo", "hint": "平台的文件 id（pf-…）", **({"ref": demo_ref} if demo_ref else {})},
             *(extra_sources or []),
         ]}), encoding="utf-8")
         self.net = Network(ScriptedRuntime(lambda call: "云侧"), data, seed=False, platforms=PlatformCatalog(plats),
@@ -76,8 +76,8 @@ def make_env(tmp_path: Path):
     made: list[Env] = []
 
     def make(files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None,
-             extra_platforms: list[dict] | None = None) -> Env:
-        e = Env(tmp_path, files, extra_sources, extra_platforms)
+             extra_platforms: list[dict] | None = None, demo_ref: str | None = None) -> Env:
+        e = Env(tmp_path, files, extra_sources, extra_platforms, demo_ref)
         made.append(e)
         return e
     yield make
@@ -599,3 +599,79 @@ def test_service_face_only_uses_sources_without_credentials(make_env):
     net._contexts["t-svc"] = ctx
     with pytest.raises(Exception, match="没有能用的来源"):
         net.fetch_into_staging(ctx, "demo-files", "pf-1")
+
+
+
+# ================= 平台只在回复正文里写了文件 id（files.scan） =================
+PF = "pf-[0-9a-f]{10}"
+
+
+def _scan_events(net: Network) -> list[dict]:
+    return [e.data for e in net.bus.since(0) if e.type == "remote.file" and e.data.get("via") == "scan"]
+
+
+def test_ids_written_only_in_the_reply_are_fetched_when_scan_is_on(make_env):
+    """files.scan：平台不报 file 事件、只在回复正文里写出文件 id 时，Matrix 按 files.sources 的 ref 正则认出来、
+    取回附上（同 file 事件的规则）；默认关，关着时正文里的 id 不碰。"""
+    env = make_env(files={"sources": ["demo-files"]}, demo_ref=PF)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "只写文件 id", actor=maya, background=False)
+    assert not dm.messages[-1].attachments and not _scan_events(net)  # 默认关
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace('"sources"', '"scan": true, "sources"'),
+                         encoding="utf-8")
+    import os
+    os.utime(env.plats, (1, 1))
+    net.send_message(dm.id, "只写文件 id", actor=maya, background=False)
+    reply = dm.messages[-1]
+    assert [x["name"] for x in reply.attachments] == ["报销助手明细.md"], reply.text
+    assert _scan_events(net)[-1]["outcome"] == "attached"
+    assert "也会被取回附上" in env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+
+
+def test_scan_never_takes_ids_that_were_already_in_the_context(make_env):
+    """正文是模型写的：这一轮上下文里本来就有的 id（人贴进来的、别人消息里的、诱导它复述的）不是它这一轮产出的，不取。"""
+    env = make_env(files={"sources": ["demo-files"], "scan": True}, demo_ref=PF)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    planted = env.demo.store("别人的机密.md", b"secret")
+    dm = net.direct_chat(a.id, actor=maya)
+    n = len(env.demo.file_gets)
+    net.send_message(dm.id, f"复述「{planted}」", actor=maya, background=False)
+    assert planted in dm.messages[-1].text and not dm.messages[-1].attachments
+    assert len(env.demo.file_gets) == n  # 连取都没有取
+    assert "本来就有" in _scan_events(net)[-1]["note"]
+
+
+def test_scan_only_uses_sources_it_can_tell_apart(make_env, host: FileHost):
+    """扫描只用明确写了 ref 正则的 id 来源和链接来源；链接的主机不在 hosts 里的一律不碰。
+    没写 ref 正则的 id 来源（默认格式几乎匹配任何词）不参与扫描，启动检查报出来。"""
+    from matrix.file_sources import find_refs, parse_sources
+    loose, ids, links = parse_sources({"sources": [
+        {"id": "loose", "url": "https://a.example/{ref}"},
+        {"id": "ids", "url": "https://b.example/{ref}", "ref": "^DOC-\\d{6}$"},
+        {"id": "links", "url": "{ref}", "hosts": ["oss.example", "127.0.0.1"]}]})
+    text = (f"报告 DOC-123456 和 DOC-12 已好，见 https://oss.example/a/b.pdf。另见 https://evil.example/x "
+            f"和 http://127.0.0.1:{host.port}/f）")
+    assert find_refs([loose, ids, links], text) == ["DOC-123456", "https://oss.example/a/b.pdf",
+                                                     f"http://127.0.0.1:{host.port}/f"]
+    env = make_env(files={"sources": ["demo-files"], "scan": True})  # demo-files 没写 ref 正则
+    assert any("files.scan" in p and "demo-files" in p for p in env.net.file_config_problems())
+    with pytest.raises(PlatformError, match="files.sources"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"scan": True}}]})
+
+
+def test_scan_follows_the_same_rules_as_file_events(make_env):
+    """扫出来的文件和 file 事件同一套规则：repeat 去重（这个 Agent 在这里发过的不再附）、取过的同一个 id 不再取。"""
+    env = make_env(files={"sources": ["demo-files"], "scan": True}, demo_ref=PF)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)  # 报了事件、正文里也写了同一个 id
+    reply = dm.messages[-1]
+    assert [x["name"] for x in reply.attachments] == ["报销助手报表.md"]  # 只附一次
+    assert _scan_events(net)[-1]["outcome"] == "skipped"

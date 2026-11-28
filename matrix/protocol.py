@@ -716,7 +716,7 @@ def format_task_result(task: Task, agent_name: str) -> str:
 
 
 def format_remote_files(items: list[dict[str, Any]], handed: dict[str, str] | None = None,
-                        export: bool = False, emit: bool = False) -> str:
+                        export: bool = False, emit: bool = False, scan: bool = False) -> str:
     """外部平台 Agent 的提示词末尾：附件不在它的工作目录里，写明这一轮拿得到哪些、怎么拿到，以及怎么发文件。
     `handed`：已经随这条消息交给平台的（sha → "链接" / "平台文件"，平台目录的 files.in），其余的平台带 MCP 请求头来取。
     `export`：这一轮有 export_file。`emit`：平台在流里报的 file 事件 Matrix 取得回来（files.source）。"""
@@ -739,7 +739,9 @@ def format_remote_files(items: list[dict[str, Any]], handed: dict[str, str] | No
     lines.append("- 要发文件：先 `POST /mcp/remote/files?name=<文件名>`（请求体就是内容）拿 file_id，"
                  "再用 send_file(file_id=…) 发给对话里的人（委托任务里就是随交付交给委托方），"
                  "或写进 delegate 的 attachments（每行一个 file_id）转交给你委托的成员。"
-                 + ("你的平台在回复里报出的文件，Matrix 会自动取回、附在这一轮的回复上。" if emit else ""))
+                 + ("你的平台在回复里报出的文件，Matrix 会自动取回、附在这一轮的回复上。" if emit else "")
+                 + ("你在最终回复里写出的平台文件 id（这一轮新产出的）也会被取回附上：要发的文件写出它的 id 即可，"
+                    "不要写你并不想发出的文件 id。" if scan else ""))
     return "\n".join(lines)
 
 

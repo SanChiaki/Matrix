@@ -74,6 +74,7 @@ class FileSource:
     header: str = "Authorization"
     template: str = "Bearer {value}"
     cache: bool = True
+    explicit_ref: bool = False   # 部署方明确写了 ref 正则（从回复正文里认 id 时只用这样的 id 来源）
 
     @property
     def whole(self) -> bool:
@@ -170,7 +171,8 @@ def parse_sources(raw: Any) -> list[FileSource]:
         out.append(FileSource(id=sid, name=str(s.get("name") or sid)[:80], url=url,
                               hosts=tuple(h.strip() for h in hosts), ref=ref, auth=auth, for_=tuple(who),
                               max_mb=max(1, min(LIMIT_MB, max_mb)), hint=str(s.get("hint") or "")[:200],
-                              header=header, template=template, cache=s.get("cache", True)))
+                              header=header, template=template, cache=s.get("cache", True),
+                              explicit_ref=bool(s.get("ref"))))
     return out
 
 
@@ -185,6 +187,46 @@ def route(sources: list[FileSource], ref: str) -> FileSource:
         raise SourceError("这个文件 id 不符合这个平台任何一个文件来源的格式（" + "、".join(s.id for s in sources) + "）")
     raise SourceError("这个文件 id 同时符合几个文件来源的格式（" + "、".join(s.id for s in hit) +
                       "）：请部署方把这几个来源的 ref 正则写得能区分开")
+
+
+URL_IN_TEXT = re.compile(r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+")
+EDGE_L, EDGE_R = r"(?<![A-Za-z0-9_~%/-])", r"(?![A-Za-z0-9_~%/?#=&-])"
+
+
+def scannable(src: FileSource) -> bool:
+    """从回复正文里认 id 时用得上的来源：链接来源（链接的主机还得在 hosts 里），或明确写了 ref 正则的 id 来源
+    （默认的 id 格式几乎匹配任何一个词，不能拿来扫正文）。"""
+    return src.whole or src.explicit_ref
+
+
+def find_refs(sources: list[FileSource], text: str) -> list[str]:
+    """从一段正文里认出可能是这些来源里的文件的 ref（按出现顺序、去重）。只是候选：取之前照旧要 route() 恰好匹配一个来源。
+    链接只认主机在某个链接来源 hosts 里的（别的链接一律不碰、不解析），末尾的标点去掉。"""
+    out: list[str] = []
+    for src in sources:
+        if not scannable(src):
+            continue
+        if src.whole:
+            policy = src.policy()
+            for m in URL_IN_TEXT.finditer(text or ""):
+                url = m.group(0).rstrip(".,;:!?)]'")
+                host = (urlsplit(url).hostname or "").rstrip(".").lower()
+                literal = None
+                try:
+                    import ipaddress
+                    literal = str(ipaddress.ip_address(host))
+                except ValueError:
+                    pass
+                if host and (policy.named(host) or (literal is not None and policy.listed(literal))):
+                    out.append(url)
+            continue
+        body = src.ref.removeprefix("^").removesuffix("$")
+        try:
+            pattern = re.compile(EDGE_L + "(?:" + body + ")" + EDGE_R)
+        except re.error:
+            continue
+        out += [m.group(0) for m in pattern.finditer(text or "")]
+    return list(dict.fromkeys(x for x in out if x))
 
 
 def overlaps(sources: list[FileSource]) -> list[tuple[str, str]]:

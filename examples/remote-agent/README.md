@@ -27,7 +27,7 @@ curl -X PUT http://127.0.0.1:8801/agents/expense/mcp -H "Authorization: Bearer d
 跨平台的文件（[docs/files-across-platforms.md](../../docs/files-across-platforms.md)）：`agent-platforms.files.json` 与
 `file-sources.json` 是一份配好的样板（`--platforms … --file-sources …`；短期链接按 `matrix_url` 签，换成你的地址）。之后说
 “报文件”（平台在流里报文件，Matrix 取回附上，不用接 MCP）、“拉文件「demo-files」”（经 MCP 调 fetch_file）、
-带附件说“导出”（经 MCP 调 export_file 拿短期链接）；带附件发消息时演示平台会说“随消息收到”了哪些。
+带附件说“导出”（经 MCP 调 export_file 拿短期链接）、“只写文件 id”（不报事件、只在正文里写 id，平台目录打开 `files.scan` 时取回附上）；带附件发消息时演示平台会说“随消息收到”了哪些。
 
 演示 Agent 最后一句会说收没收到调用方的授权（`X-User-Token`）：平台目录里加 `caller` 配置后可以看到透传。
 

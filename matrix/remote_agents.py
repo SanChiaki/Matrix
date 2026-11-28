@@ -24,7 +24,8 @@
   `sources`：平台在流里报 `file` 事件时，ref 按 file-sources.json 里的哪些来源取（按 ref 正则选，恰好匹配一个才取；
   写一个字符串 `source` 也认）。`repeat`：平台又报了这个对话里它已经发过的文件时，`skip`（默认，不再附）或 `attach`。
   `upload_ttl_s`：`upload` 传过的平台 file_id 用多久（默认 0 = 一直用）。`resend`：`all`（默认，每轮交这一轮拿得到的全部）
-  或 `new`（同一个平台会话里只交上一轮之后新出现的）。
+  或 `new`（同一个平台会话里只交上一轮之后新出现的）。`scan`：平台只在回复正文里写文件 id、不报 file 事件时打开（默认 false）：
+  Matrix 在这一轮的最终回复里按 sources 的 ref 正则认出**这一轮上下文里没有的** id，取回附上（docs/files-across-platforms.md 6.4）。
   `export`：export_file 工具把 Matrix 的文件交给平台的方式（`url` / `upload`；不写时有 matrix_url 就是 `url`）。
   `matrix_url`：平台访问 Matrix 用的地址（签短期链接用），如 https://matrix.corp.example。
 
@@ -101,6 +102,7 @@ class PlatformSpec:
     files_repeat: str = "skip"          # 平台又报了已经发过的文件：skip | attach
     files_upload_ttl_s: float = 0       # upload 传过的平台 file_id 用多久；0 = 一直用
     files_resend: str = "all"           # all | new（同一个平台会话里只交新出现的）
+    files_scan: bool = False            # 从这一轮的最终回复正文里认文件 id 取回附上
     files_export: str | None = None     # export_file 的方式：url | upload；None = 没有这个工具
     matrix_url: str = ""                # 平台访问 Matrix 的地址（签短期链接用）
 
@@ -163,6 +165,10 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
             raise PlatformError(f"{pid} 的 files.repeat 只能是 skip / attach")
         if f_resend not in ("all", "new"):
             raise PlatformError(f"{pid} 的 files.resend 只能是 all / new")
+        if "scan" in files and not isinstance(files["scan"], bool):
+            raise PlatformError(f"{pid} 的 files.scan 要是 true 或 false")
+        if files.get("scan") and not f_sources:
+            raise PlatformError(f"{pid} 打开了 files.scan：要写 files.sources（按哪些来源认、取正文里的文件 id）")
         try:
             f_ttl = float(files.get("upload_ttl_s", 0) or 0)
         except (TypeError, ValueError) as e:
@@ -173,7 +179,7 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
             auth_label=str(auth.get("label", "平台 API Key")), mcp_session_header=headers[1], caller=cal,
             bind_wait_s=float(p.get("bind_wait_s", 30)), timeout_s=float(p.get("timeout_s", 900)), proxy=proxy,
             files_in=f_in, files_sources=tuple(dict.fromkeys(f_sources)), files_repeat=f_repeat,
-            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_export=f_export, matrix_url=matrix_url))
+            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_scan=bool(files.get("scan")), files_export=f_export, matrix_url=matrix_url))
     return out
 
 
