@@ -6907,7 +6907,8 @@ class Network:
         ctx.remote = bool(agent.remote)
         ctx.file_tools = self._file_tools(ctx, agent)
         if "fetch_file" in ctx.file_tools:  # 部署方登记的外部文件来源（docs/files-across-platforms.md）
-            prompt += format_file_sources([x.public() for x in self._sources_for(agent)])
+            prompt += format_file_sources([x.public() for x in self._sources_for(agent)], send="send_file" in ctx.tools,
+                                          task=ctx.kind == "task")
         cloud = [c for c in conns if c.where == "cloud"]
         connectors = ConnectorBridge(url=self.connector_url, token=token,
                                      list_tools=lambda: self.connector_tools(token),

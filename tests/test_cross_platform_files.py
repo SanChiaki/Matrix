@@ -528,3 +528,13 @@ def test_resend_new_hands_only_new_files_within_the_same_platform_session(make_e
     third = net.upload_attachment(dm.id, "三.txt", b"three", "text/plain", actor=maya)
     net.send_message(dm.id, "第三份", attachments=[third], actor=maya, background=False)
     assert sorted(f["name"] for f in env.demo.received_last) == ["一.txt", "三.txt", "二.txt"]
+
+
+def test_file_sources_section_says_what_this_round_can_do_with_the_file():
+    """提示词里的“外部文件来源”按这一轮的工具写：委托任务里发的随交付交回；没有 send_file 时只能转交。"""
+    from matrix.protocol import format_file_sources
+    srcs = [{"id": "oss", "name": "对象存储", "hint": "临时链接"}]
+    assert "发给对话里的人" in format_file_sources(srcs)
+    assert "随交付交回" in format_file_sources(srcs, task=True)
+    no_send = format_file_sources(srcs, send=False, task=True)
+    assert "这里没有 send_file" in no_send and "send_file 发" not in no_send

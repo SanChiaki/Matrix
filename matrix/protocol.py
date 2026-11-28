@@ -123,7 +123,8 @@ TOOL_GUIDE: dict[str, str] = {
     "list_members": "查看项目成员及其能力；只能委托这些成员。",
     "delegate": ("委托一个成员：写清 mission、expected_outcome（交回什么、以什么形式），可选 authority（只能收窄对方自身权限）、"
                  "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）、"
-                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个；在外部平台上写暂存的 file_id）。"
+                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个；也可以写暂存的 file_id：外部平台上传的、"
+                 "fetch_file 拉来的，之前几轮暂存后发出去的也认）。"
                  "**立即返回任务 id，不等待结果**。"),
     "list_tasks": "查看你发起的委托及其状态。",
     "accept_task": "接受一个已交付（in_review）的委托。",
@@ -742,11 +743,14 @@ def format_remote_files(items: list[dict[str, Any]], handed: dict[str, str] | No
     return "\n".join(lines)
 
 
-def format_file_sources(sources: list[dict[str, Any]]) -> str:
-    """这一轮 fetch_file 能用的来源（部署方登记的，docs/files-across-platforms.md）。"""
+def format_file_sources(sources: list[dict[str, Any]], send: bool = True, task: bool = False) -> str:
+    """这一轮 fetch_file 能用的来源（部署方登记的，docs/files-across-platforms.md）。
+    `send`：这一轮有 send_file（没有时拉来的只能写进 delegate 的 attachments）；`task`：在委托任务里（发的随交付交给委托方）。"""
+    use = (f"拿到 file_id 再 send_file 发{'给委托方（随交付交回）' if task else '给对话里的人'}，或写进 delegate 的 attachments"
+           if send else "拿到 file_id 再写进 delegate 的 attachments 转交给你委托的成员（这里没有 send_file，拉来的不随交付交回）")
     lines = ["", "", "## 外部文件来源",
              f"文件不在 Matrix、只有一个文件 id 或一条临时链接时，用 `{MCP_PREFIX}fetch_file` 按下面的来源拉进这一轮的暂存区，"
-             "拿到 file_id 再 send_file 发给人或写进 delegate 的 attachments。只能用这些来源：", ]
+             f"{use}。拉进来的文件不在你的工作目录里。只能用这些来源："]
     lines += [f"- `{s['id']}`：{s['name']}" + (f"。ref：{s['hint']}" if s.get("hint") else "") for s in sources]
     return "\n".join(lines)
 
