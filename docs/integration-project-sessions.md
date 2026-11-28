@@ -252,12 +252,53 @@ curl -X PATCH $MATRIX/api/sessions/conv-fdfe42ba $AS_USER $J -d '{"archived": tr
 | `PATCH /open/v1/projects/{id}/access` `{path, rule}` | `PUT /api/projects/{project_id}/file-access` `{path, roles, agents}` | `roles`、`agents` 都空 = 所有成员可见（以前的 `rule: null`） |
 | `POST /open/v1/projects/{id}/skills` | `PUT /api/projects/{project_id}/skills` `{name, description, body}` | |
 | `POST /open/v1/projects/{id}/plugins` `{name, digest}` | `POST /api/projects/{project_id}/plugins` `{name, confirm, digest}` | |
-| `POST/PATCH/DELETE /open/v1/projects/{id}/services…`、`/api/projects/{id}/services…` | 没有对应接口 | 改成“邀请用户 + 项目会话”，见下一节 |
-| `GET /open/v1/projects/{id}/services/{sid}/usage` | 没有对应接口 | 管理后台看用量 |
+| `POST /open/v1/projects/{id}/services`、`POST /api/projects/{id}/services`（发布） | 设好项目的默认 Agent、资料与可见范围，再邀请读者 | 没有单独的“发布”一步，见下面的[按操作对照](#按操作对照服务--项目会话) |
+| `PATCH …/services/{sid}`（修改） | `PATCH /api/projects/{id}`、`PATCH /api/agents/{id}`、`PUT …/file-access` 等 | 按改的是哪个字段，见[字段对照](#服务的字段对照) |
+| `DELETE …/services/{sid}`（撤回） | 移出参与者，或删项目 | 见按操作对照 |
+| `GET /api/projects/{id}/services`（项目里的服务列表） | `GET /api/projects/{project_id}` | 一个项目就是一个“服务” |
+| `GET /open/v1/projects/{id}/services/{sid}/usage`、`GET /api/projects/{id}/services/{sid}/usage` | 没有对应接口 | 管理后台按用户、按模型看用量 |
 | `GET /svc/agents/{service}` | `GET /api/projects/{project_id}` | 看项目里有哪些 Agent、默认 Agent 是谁 |
 | `POST /svc/agents/{service}/chat` `{message, session_id?}` | 第一次：`POST /api/projects/{id}/sessions` 拿 `conv_id`；之后每条：`POST /api/conversations/{conv_id}/messages` `{text}`；回答：`GET /api/events` | 以前的 `session_id` 对应现在的 `conv_id`，同一个会话续接上下文 |
 | `POST /svc/sessions/{session_id}/interrupt` | `POST /api/conversations/{conv_id}/seats/{agent_id}/stop` | 要指明打断哪个 Agent |
 | `GET /api/services`、`POST /api/services/{id}/sessions`（网页里的“给你用的服务”） | 项目列表与项目会话 | |
+
+### 按操作对照（服务 → 项目会话）
+
+原来“服务”的每个操作，现在怎么做。**谁来调**：发布方的操作替主持人调，调用方的操作替终端用户调。
+
+| 原来的操作 | 现在怎么做 | 接口（替谁调） |
+|---|---|---|
+| **发布服务** | ① 建项目，把原来的入口设成默认 Agent，原来的岗位加成成员<br>② 放资料、按需收窄可见范围<br>③ 邀请原来的读者 | ① `POST /api/projects` `{name, description, member_ids, default_agent}`（主持人）<br>② `POST /api/projects/{id}/files?name=…`、`PUT /api/projects/{id}/file-access`（主持人）<br>③ `POST /api/projects/{id}/invitations` `{email}`（主持人）+ `POST /api/projects/{id}/invitation` `{accept: true}`（读者本人） |
+| **修改服务** | 按改的字段分别改，见下一节；改了下一轮就生效，不用“重新发布” | `PATCH /api/projects/{id}`、`PATCH /api/agents/{id}`、`PUT …/file-access`、`PUT …/roles`（主持人或 Agent 的所有者） |
+| **增加读者** | 邀请 + 接受 | 同发布第 ③ 步 |
+| **去掉读者** | 移出参与者：他的会话变只读 | `DELETE /api/projects/{project_id}/participants/{user_id}`（主持人） |
+| **撤回服务** | 移出所有参与者；或不设默认 Agent（`default_agent: null`）让新消息没人接；或删项目 | `DELETE …/participants/{user_id}`、`PATCH /api/projects/{id}`、`DELETE /api/projects/{id}`（主持人） |
+| **看服务名片** | 看项目：成员、默认 Agent | `GET /api/projects/{project_id}`（读者） |
+| **列出“给你用的服务”** | 列出这个人参与的项目 | `GET /api/network` 的项目列表（读者） |
+| **开服务会话** | 开项目会话 | `POST /api/projects/{project_id}/sessions`（读者），返回 `conv_id` |
+| **调用服务**（`/svc/…/chat` 发一条） | 在会话里发消息 | `POST /api/conversations/{conv_id}/messages` `{text}`（读者） |
+| **收流式回复**（SSE 的 `delta` / `done`） | 订阅事件，收 `message.added`（整条），看 `conversation.updated` 的 `status` 回到 `idle` | `GET /api/events`，或轮询 `GET /api/conversations/{conv_id}`（读者） |
+| **续接会话**（带 `session_id`） | 往同一个 `conv_id` 继续发 | 同上 |
+| **中断** | 打断正在回答的那个 Agent | `POST /api/conversations/{conv_id}/seats/{agent_id}/stop`（读者） |
+| **读服务会话的历史** | 读会话 | `GET /api/conversations/{conv_id}`（读者） |
+| **结束一个服务会话** | 归档 | `PATCH /api/sessions/{conv_id}` `{archived: true}`（读者） |
+| **看用量** | 没有按项目的用量接口 | 管理后台 |
+
+### 服务的字段对照
+
+发布服务时填的每个字段，现在落在哪里：
+
+| 服务的字段 | 现在 | 怎么设 |
+|---|---|---|
+| `name`、`title`、`description` | 项目的名字与说明 | `POST /api/projects`、`PATCH /api/projects/{id}` 的 `name`、`description` |
+| `entry`（入口） | 项目的默认 Agent | `default_agent`；某个会话单独指定用 `POST …/sessions` 的 `agent`，开着的会话换用 `PATCH /api/sessions/{conv_id}` `{agent}` |
+| `staff`（入口能委托的 Agent） | 项目成员 | `member_ids`，或 `POST …/members` / `DELETE …/members/{agent_id}`。会话里也能直接 @ 它们；入口要能委托它们，入口 Agent 自己要有 `delegate` 权限 |
+| `authority`（服务授予的权限，发布时冻结） | 没有这一层：用 Agent 自己的权限 | `PATCH /api/agents/{id}` `{authority}`（所有者）；要比平时更窄，就为这个项目单独建一个 Agent |
+| `scope`（能读的资料） | 项目资料与可见范围 | `POST …/files?name=` 放资料，`PUT …/file-access` `{path, roles, agents}` 收窄到某些角色、成员 |
+| `inbox`（收件目录） | 没有对应 | Agent 写的东西在它的工作目录里，要发给人用 `send_file`，要进项目档案用档案工具 |
+| `plugins`（服务里能用的插件） | 项目插件 | `POST /api/projects/{id}/plugins` |
+| `readers`（给谁用） | 项目参与者 | 逐个 `POST …/invitations` + 对方 `POST …/invitation` |
+| `public: true`（所有登录用户） | 没有对应 | 业务系统在用户第一次进来时替他做一次邀请 + 接受 |
 
 ### 一个服务怎么改成项目会话
 
