@@ -23,7 +23,9 @@
   把当前工作目录里的一个文件（目录打成 zip，顶层是目录名）存进同一个附件区，附在**这一轮的回复**上（`Message.attachments`），
   看得到这条回复的人直接下载，之后被唤醒的席位也在 `attachments/` 里读得到。端侧经连接器取文件（`fetch_file`，不能发目录）。
   外部平台 Agent 的文件在平台上：平台先 `POST /mcp/remote/files` 暂存拿 `file_id`，同一轮里 `send_file(file_id=…)`；
-  它的委托任务里也有 `send_file`（产物没法在交付时从工作目录拷），发的文件随交付交给委托方；附件它用 `GET /mcp/remote/files/<sha>` 取
+  它的委托任务里也有 `send_file`（产物没法在交付时从工作目录拷），发的文件随交付交给委托方；
+  `fetch_file` 从部署方登记的外部文件来源拉来的文件也进同一个暂存区、同样用 file_id 发（云侧、端侧也能用），之前几轮暂存后发出去的 file_id 之后还认
+  （[files-across-platforms.md](../files-across-platforms.md)）；附件它用 `GET /mcp/remote/files/<sha>` 取
   （[remote-agents.md](../remote-agents.md)“传文件”，暂存一轮结束就删）。
   - 只读挂载不能发：`project/`、`agent-home/`、`skills/`、`releases/`、`plugins/`（它们各有去向规则，不变量 8、17、23、24）；
     一轮最多 10 个、每个 ≤20 MB（同人上传）。

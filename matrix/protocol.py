@@ -12,7 +12,7 @@ import time
 from typing import Any, Callable
 
 from .models import (AGENT_HOME as HOME, ARCHIVE_TOOLS, CHAT_TOOLS, ATTACHMENTS, AUTHORITIES, CONNECTOR_PREFIX, DECISIONS_PUSHED,
-                     HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
+                     FILE_TOOLS, HOME_TOOLS, MCP_PREFIX, NOTE_TOOLS, PLUGIN_MOUNT, PLUGIN_TOOLS, PROJECT_FILES, RELEASES, SKILLS, ABILITY_TOOLS,
                      REQUEST_TOOLS, SESSION_TOOLS, AgentNode, Conversation, Decision, KnowledgeItem, Message, Project,
                      Proposal, Question, Task, UserRequest, attachment_rel)
 
@@ -123,7 +123,8 @@ TOOL_GUIDE: dict[str, str] = {
     "list_members": "查看项目成员及其能力；只能委托这些成员。",
     "delegate": ("委托一个成员：写清 mission、expected_outcome（交回什么、以什么形式），可选 authority（只能收窄对方自身权限）、"
                  "constraints（不能做什么，每行一条）、share（共享给对方的知识 key）、"
-                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个；在外部平台上写暂存的 file_id）。"
+                 f"attachments（转交给对方的附件：`{ATTACHMENTS}/` 下的路径，每行一个；也可以写暂存的 file_id：外部平台上传的、"
+                 "fetch_file 拉来的，之前几轮暂存后发出去的也认）。"
                  "**立即返回任务 id，不等待结果**。"),
     "list_tasks": "查看你发起的委托及其状态。",
     "accept_task": "接受一个已交付（in_review）的委托。",
@@ -131,8 +132,14 @@ TOOL_GUIDE: dict[str, str] = {
     "retry_task": "续接一个失败的委托，对方在原会话里接着做，已完成的部分不会丢。",
     "send_file": ("把工作目录里的文件（或目录，打成 zip）附在这一轮的回复上发给对话里的人，人直接下载；"
                   "回复里说明是什么，不要把长内容贴进回复，也不要让人去工作目录里找。"
-                  "你在外部平台上时，先把文件传到 /mcp/remote/files，用返回的 file_id 代替 path；"
+                  "文件不在你的工作目录里时（你在外部平台上，或是用 fetch_file 拉来的），用暂存的 file_id 代替 path；"
                   "在委托任务里发的文件随交付交给委托方。"),
+    "fetch_file": ("把放在别处的文件（平台回答里的文件 id、第三方暂存的临时链接）按部署方登记的来源拉进这一轮的暂存区，"
+                   "返回 file_id；再用 send_file(file_id=…) 发给人，或写进 delegate 的 attachments。"
+                   "source 写来源 id，ref 写那个文件 id 或链接；不要把链接直接贴给人当作发了文件。"
+                   "这个对话里取过的同一个文件直接用已有的那份，要最新的内容时加 fresh=true。"),
+    "export_file": ("把这一轮拿得到的一个文件（附件的 sha256，或暂存的 file_id）按你所在平台的方式交给你："
+                    "返回一条短期下载链接或平台的 file_id，给你平台上的工具用。只在这一轮有效。"),
     "answer_question": ("回答你委托的成员问你的问题（question_id 来自网络通知）。它一直在等：能替人决定的就直接答，"
                         "一个选项时写那个选项的原文。"),
     "escalate_question": ("成员问的事你决定不了（要人拍板、你没有依据）时转给人，可在 note 里写你的看法；"
@@ -197,7 +204,7 @@ def _network_tools(project: Project, can_delegate: bool, plugins: bool = False, 
         "", f"## 协作：你所在的项目「{project.name}」",
         *(f"- `{MCP_PREFIX}{name}`：{text}" for name, text in TOOL_GUIDE.items()
           if name not in ARCHIVE_TOOLS + REQUEST_TOOLS + SESSION_TOOLS + ABILITY_TOOLS + PLUGIN_TOOLS + HOME_TOOLS + NOTE_TOOLS
-          + CHAT_TOOLS),
+          + CHAT_TOOLS + FILE_TOOLS),
         *joint,
         "",
         "委托是异步的：",
@@ -708,18 +715,45 @@ def format_task_result(task: Task, agent_name: str) -> str:
     return "\n".join(head + ["已受理，正在执行。结果会作为网络通知送给你；现在不必等待。"])
 
 
-def format_remote_files(items: list[dict[str, Any]]) -> str:
-    """外部平台 Agent 的提示词末尾：附件不在它的工作目录里，写明这一轮拿得到哪些、平台怎么取，以及怎么发文件。"""
+def format_remote_files(items: list[dict[str, Any]], handed: dict[str, str] | None = None,
+                        export: bool = False, emit: bool = False, scan: bool = False) -> str:
+    """外部平台 Agent 的提示词末尾：附件不在它的工作目录里，写明这一轮拿得到哪些、怎么拿到，以及怎么发文件。
+    `handed`：已经随这条消息交给平台的（sha → "链接" / "平台文件"，平台目录的 files.in），其余的平台带 MCP 请求头来取。
+    `export`：这一轮有 export_file。`emit`：平台在流里报的 file 事件 Matrix 取得回来（files.source）。"""
+    handed = handed or {}
     lines = ["", "", "## 文件（你在外部平台上）",
              "你的工作目录在你自己的平台上，上面写的 `attachments/…` 路径在你那里不存在。"
-             "文件由平台带着调 Matrix MCP 的同一份请求头（密钥 + 会话 id）去取、去传，只在这一轮有效："]
-    if items:
-        lines.append("- 这一轮拿得到的文件（`GET /mcp/remote/files/<sha256>` 取内容）：")
+             "文件由平台去取、去传（不是你），只在这一轮有效："]
+    given = [a for a in items if a["sha"] in handed]
+    pulled = [a for a in items if a["sha"] not in handed]
+    if given:
+        lines.append("- 这一轮的文件已经随这条消息交给你的平台：")
+        lines += [f"  - {a.get('name', '')}（{a.get('mime', '')}，{_size(int(a.get('size', 0)))}，{handed[a['sha']]}）"
+                  for a in given]
+    if pulled:
+        lines.append("- 这一轮拿得到的文件（平台带调 Matrix MCP 的同一份请求头 `GET /mcp/remote/files/<sha256>` 取内容）：")
         lines += [f"  - {a.get('name', '')}（{a.get('mime', '')}，{_size(int(a.get('size', 0)))}）："
-                  f"`GET /mcp/remote/files/{a['sha']}`" for a in items]
+                  f"`GET /mcp/remote/files/{a['sha']}`" for a in pulled]
+    if export:
+        lines.append(f"- 要平台上的工具读某个文件：`{MCP_PREFIX}export_file`（写它的 sha256）拿一条短期链接或平台的 file_id。")
     lines.append("- 要发文件：先 `POST /mcp/remote/files?name=<文件名>`（请求体就是内容）拿 file_id，"
                  "再用 send_file(file_id=…) 发给对话里的人（委托任务里就是随交付交给委托方），"
-                 "或写进 delegate 的 attachments（每行一个 file_id）转交给你委托的成员。")
+                 "或写进 delegate 的 attachments（每行一个 file_id）转交给你委托的成员。"
+                 + ("你的平台在回复里报出的文件，Matrix 会自动取回、附在这一轮的回复上。" if emit else "")
+                 + ("你在最终回复里写出的平台文件 id（这一轮新产出的）也会被取回附上：要发的文件写出它的 id 即可，"
+                    "不要写你并不想发出的文件 id。" if scan else ""))
+    return "\n".join(lines)
+
+
+def format_file_sources(sources: list[dict[str, Any]], send: bool = True, task: bool = False) -> str:
+    """这一轮 fetch_file 能用的来源（部署方登记的，docs/files-across-platforms.md）。
+    `send`：这一轮有 send_file（没有时拉来的只能写进 delegate 的 attachments）；`task`：在委托任务里（发的随交付交给委托方）。"""
+    use = (f"拿到 file_id 再 send_file 发{'给委托方（随交付交回）' if task else '给对话里的人'}，或写进 delegate 的 attachments"
+           if send else "拿到 file_id 再写进 delegate 的 attachments 转交给你委托的成员（这里没有 send_file，拉来的不随交付交回）")
+    lines = ["", "", "## 外部文件来源",
+             f"文件不在 Matrix、只有一个文件 id 或一条临时链接时，用 `{MCP_PREFIX}fetch_file` 按下面的来源拉进这一轮的暂存区，"
+             f"{use}。拉进来的文件不在你的工作目录里。只能用这些来源："]
+    lines += [f"- `{s['id']}`：{s['name']}" + (f"。ref：{s['hint']}" if s.get("hint") else "") for s in sources]
     return "\n".join(lines)
 
 

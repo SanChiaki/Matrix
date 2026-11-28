@@ -36,6 +36,7 @@ from .sandboxes import hello_message as sandbox_hello, provider_named, sandbox_c
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError, StagingRefused
 from . import mcp_sse
 from .remote_agents import PlatformCatalog
+from .file_sources import SOURCE_ID, SourceCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
 from .im.bridge import ImBridge
@@ -1061,6 +1062,19 @@ def create_app(network: Network, im: ImBridge | None = None, login: LoginService
             return JSONResponse({"detail": str(e)}, status_code=e.status)
         return FileResponse(f, media_type=meta["mime"], filename=meta["name"], content_disposition_type="attachment",
                             headers={"X-Content-Type-Options": "nosniff", "X-File-Sha256": meta["sha"]})
+
+    @app.get("/mcp/remote/links/{token}")
+    async def remote_link_file(token: str) -> Response:
+        """短期下载链接（docs/files-across-platforms.md）：Matrix 随对话请求或经 export_file 交给平台的，令牌就是凭证，
+        只在签它的那一轮里有效，只能取那一个文件。平台带不了请求头时用。"""
+        try:
+            f, meta = await asyncio.to_thread(network.link_file, token)
+        except StagingRefused as e:
+            return JSONResponse({"detail": str(e)}, status_code=e.status)
+        return FileResponse(f, media_type=meta.get("mime") or "application/octet-stream", filename=meta["name"],
+                            content_disposition_type="attachment",
+                            headers={"X-Content-Type-Options": "nosniff", "X-File-Sha256": meta["sha"],
+                                     "Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
     mcp_sse.install(app, network)  # 同一个地址的旧版传输（HTTP+SSE）：GET 开流，消息发到流里给的地址
 
@@ -2163,7 +2177,8 @@ class MatrixServer(uvicorn.Server):
 def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh", seed: bool = False,
                   models: str | None = None, connectors: str | None = None, plugins: str | None = None,
                   admins: str | None = None, fetch: str | None = None, platforms: str | None = None,
-                  sandbox: str | None = None, host: str = "127.0.0.1", store: str | None = None) -> Network:
+                  sandbox: str | None = None, host: str = "127.0.0.1", store: str | None = None,
+                  file_sources: str | None = None) -> Network:
     """seed：全新数据目录是否预置种子 Agent。服务默认不预置——用户登录后自己创建；CLI 演练时预置。
     models：云侧预置模型目录文件；None = `<data>/models.json`（没有这个文件就不启用目录）。
     admins：管理员邮箱，逗号分隔；None = 最早注册的那个人。
@@ -2177,11 +2192,35 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
                    admins=(admins or "").split(","),
                    fetch=FetchConfig(Path(fetch).resolve()) if fetch else None,
                    platforms=PlatformCatalog(Path(platforms).resolve()) if platforms else None,
+                   file_sources=SourceCatalog(Path(file_sources).resolve()) if file_sources else None,
                    sandbox=provider_named(sandbox if sandbox is not None else sandbox_config()["backend"]),
                    sandbox_url=f"ws://127.0.0.1:{port}/api/sandbox/connect",
                    # 出口网关把沙箱连接转给核心：核心监听在哪就连哪（容器里核心只监听内部网络的地址，沙箱网络上没有它）
                    sandbox_limits={"gateway_core": f"{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"},
                    store_url=store)
+
+
+def file_source_secret(argv: list[str]) -> None:
+    """matrix file-source-secret <来源 id> [--data D] [--delete]：密钥从标准输入读（不进命令行、不进 shell 历史），
+    存进保管库 file-source-<id>；auth 是 secret 的来源取文件时带上它。"""
+    from .vault import Vault
+    p = argparse.ArgumentParser(prog="matrix file-source-secret")
+    p.add_argument("source")
+    p.add_argument("--data", default=None)
+    p.add_argument("--delete", action="store_true")
+    a = p.parse_args(argv)
+    if not SOURCE_ID.match(a.source):
+        raise SystemExit(f"来源 id 不合法：{a.source!r}")
+    vault = Vault(Path(a.data or compat.data_dir()).resolve())
+    if a.delete:
+        vault.delete(f"file-source-{a.source}")
+        print(f"已删掉来源 {a.source} 的密钥")
+        return
+    value = sys.stdin.readline().strip()
+    if not value:
+        raise SystemExit("标准输入里没有密钥")
+    vault.put(f"file-source-{a.source}", {"value": value})
+    print(f"已存好来源 {a.source} 的密钥（保管库 file-source-{a.source}）")
 
 
 def main() -> None:
@@ -2193,6 +2232,9 @@ def main() -> None:
     if sys.argv[1:2] and sys.argv[1] in ("export-state", "backup-db"):
         from .storage_cli import main as storage_main
         storage_main(sys.argv[1], sys.argv[2:])
+    if sys.argv[1:2] == ["file-source-secret"]:   # 给外部文件来源存密钥（docs/files-across-platforms.md 第 4 节）
+        file_source_secret(sys.argv[2:])
+        return
     if sys.argv[1:2] == ["migrate"]:   # matrix migrate workdirs | export | purge-legacy（docs/cloud-runtime.md 第 10 节）
         from .migrate import main as migrate_main
         migrate_main(sys.argv[2:])
@@ -2212,6 +2254,9 @@ def main() -> None:
                    help="抓取白名单（JSON，改了就生效）；默认 <data>/fetch.json，没有就用 dsh 自带的 web_fetch（只抓公网）")
     p.add_argument("--platforms", default=compat.env("PLATFORMS"),
                    help="外部 Agent 平台目录（JSON，改了就生效）；默认 <data>/agent-platforms.json，没有就不能接外部平台的 Agent")
+    p.add_argument("--file-sources", default=compat.env("FILE_SOURCES"),
+                   help="外部文件来源目录（JSON，改了就生效，docs/files-across-platforms.md）；默认 <data>/file-sources.json，"
+                        "没有就没有 fetch_file")
     p.add_argument("--login", default=compat.env("LOGIN"),
                    help="公司账号登录的配置（JSON，改了就生效）；默认 <data>/login.json，没有就只有邮箱密码")
     p.add_argument("--harnesses", default=compat.env("HARNESSES"),
@@ -2235,7 +2280,8 @@ def main() -> None:
 
     network = build_network(args.runtime, args.data, args.port, args.dsh_bin, models=args.models,
                             connectors=args.connectors, plugins=args.plugins, admins=args.admins, fetch=args.fetch,
-                            platforms=args.platforms, sandbox=args.sandbox, host=args.host, store=args.store)
+                            platforms=args.platforms, sandbox=args.sandbox, host=args.host, store=args.store,
+                            file_sources=args.file_sources)
     if network.sandbox is not None:
         rep = network.sandbox_report()
         print(f"[matrix] 云侧执行面：{rep['backend']} 后端（{rep['note']}）")
@@ -2259,6 +2305,10 @@ def main() -> None:
               f"{'' if policy.public else '，不抓公网'}{'，替代自带的 web_fetch' if policy.replace_builtin else ''}）")
     if network.platforms.items():
         print(f"外部 Agent 平台：{network.platforms.path}（{len(network.platforms.items())} 个）")
+    if network.file_sources.items():
+        print(f"外部文件来源：{network.file_sources.path}（{len(network.file_sources.items())} 个）")
+    for problem in network.file_config_problems():
+        print(f"[matrix] 文件来源配置：{problem}")
     if network.plugin_dir_catalog.items():
         print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
     network.start_scheduler()

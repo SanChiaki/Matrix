@@ -18,15 +18,29 @@
 - `caller`（可省略）：调用方的授权怎么透传：取这一轮调用方自己在 Matrix 里授权的那个目录连接器的某个字段，放进这个请求头。
   调用方没授权时这一轮不发起会话。从不放维护人 / 添加的人的。
 - `bind_wait_s`：建会话与第一条消息是同一次请求时，MCP 调用可能比流里的会话 id 先到：带着陌生会话 id 的调用最多等这么久。
+- `files`（可省略，docs/files-across-platforms.md）：这个平台怎么收发文件——
+  `in`：这一轮拿得到的文件怎么交给平台。`pull`（默认）在消息末尾列出，平台带 MCP 密钥来取；
+  `url` 随对话请求附上 Matrix 签的短期链接（这一轮有效，平台不用带请求头）；`upload` 先传到平台自己的文件接口，附上平台的 file_id。
+  `sources`：平台在流里报 `file` 事件时，ref 按 file-sources.json 里的哪些来源取（按 ref 正则选，恰好匹配一个才取；
+  写一个字符串 `source` 也认）。`repeat`：平台又报了这个对话里它已经发过的文件时，`skip`（默认，不再附）或 `attach`。
+  `upload_ttl_s`：`upload` 传过的平台 file_id 用多久（默认 0 = 一直用）。`resend`：`all`（默认，每轮交这一轮拿得到的全部）
+  或 `new`（同一个平台会话里只交上一轮之后新出现的）。`scan`：平台只在回复正文里写文件 id、不报 file 事件时打开（默认 false）：
+  Matrix 在这一轮的最终回复里按 sources 的 ref 正则认出**这一轮上下文里没有的** id，取回附上（docs/files-across-platforms.md 6.4）。
+  `export`：export_file 工具把 Matrix 的文件交给平台的方式（`url` / `upload`；不写时有 matrix_url 就是 `url`）。
+  `matrix_url`：平台访问 Matrix 用的地址（签短期链接用），如 https://matrix.corp.example。
 
 标准 HTTP 形状（平台能改的话照这个提供，就不用写驱动）::
 
     GET  {url}/agents/{agent}                 -> {"name": ..., "description": ...}
     POST {url}/agents/{agent}/chat            {"message": ..., "session_id": null | "..."}
+         {"message": ..., "session_id": ..., "files": [...]}  files 只在 files.in 是 url / upload 时有：
+            每项 {name, mime, size, sha256, url | file_id}
          -> text/event-stream：event: session {"session_id"} 必须最先；delta {"text"}；tool {"name", "input"}；
-            done {"text"}（最终回复）；error {"message"}；可选 progress {"kind", ...}（被委托方的进展与心跳；
+            done {"text"}（最终回复）；error {"message"}；可选 file {"ref", "name"?}（平台产出的文件：Matrix 按 files.sources
+            里 ref 格式对得上的那个来源取回、附在这一轮的回复上）；可选 progress {"kind", ...}（被委托方的进展与心跳；
             作为调用方，这里不认识的事件一律跳过）
     POST {url}/sessions/{session_id}/interrupt
+    POST {url}/files?name=<文件名>           请求体就是文件内容 -> {"file_id": ...}   （只在 files.in / export 是 upload 时用）
 """
 
 from __future__ import annotations
@@ -52,6 +66,9 @@ HEADER = re.compile(r"^[A-Za-z0-9-]{1,64}$")
 ENTRY_POINT = "matrix.agent_platforms"
 # 远程 Agent 经网络工具做到的事由网络强制；它在自己平台上做什么（执行代码、联网、它自己的连接器）Matrix 管不到
 NETWORK_ENFORCED = ("delegate",)
+
+
+FILES_IN = ("pull", "url", "upload")
 
 
 class PlatformError(RuntimeError):
@@ -80,6 +97,14 @@ class PlatformSpec:
     bind_wait_s: float = 30
     timeout_s: float = 900
     proxy: str = "direct"
+    files_in: str = "pull"             # pull | url | upload
+    files_sources: tuple[str, ...] = ()  # 流里 file 事件的 ref 按哪些文件来源取（按 ref 正则选）
+    files_repeat: str = "skip"          # 平台又报了已经发过的文件：skip | attach
+    files_upload_ttl_s: float = 0       # upload 传过的平台 file_id 用多久；0 = 一直用
+    files_resend: str = "all"           # all | new（同一个平台会话里只交新出现的）
+    files_scan: bool = False            # 从这一轮的最终回复正文里认文件 id 取回附上
+    files_export: str | None = None     # export_file 的方式：url | upload；None = 没有这个工具
+    matrix_url: str = ""                # 平台访问 Matrix 的地址（签短期链接用）
 
     def public(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "auth_label": self.auth_label,
@@ -116,11 +141,45 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
         proxy = str(p.get("proxy", "direct"))
         if proxy not in ("direct", "env"):
             raise PlatformError(f"{pid} 的 proxy 只能是 direct 或 env")
+        files = p.get("files") or {}
+        if not isinstance(files, dict):
+            raise PlatformError(f"{pid} 的 files 要是一个对象")
+        f_in, matrix_url = str(files.get("in") or "pull"), str(files.get("matrix_url") or "").rstrip("/")
+        if f_in not in FILES_IN:
+            raise PlatformError(f"{pid} 的 files.in 只能是 {' / '.join(FILES_IN)}")
+        if matrix_url and not re.match(r"^https?://[^/\s]+(/\S*)?$", matrix_url):
+            raise PlatformError(f"{pid} 的 files.matrix_url 要是 http(s) 地址")
+        f_export = files.get("export", "url" if matrix_url else None)
+        f_export = None if f_export in (None, "", "none") else str(f_export)
+        if f_export not in (None, "url", "upload"):
+            raise PlatformError(f"{pid} 的 files.export 只能是 url / upload / none")
+        if "url" in (f_in, f_export) and not matrix_url:
+            raise PlatformError(f"{pid} 用短期链接交文件（files.in / export 是 url）：要写 files.matrix_url")
+        f_sources = files.get("sources", [files["source"]] if files.get("source") else [])
+        if isinstance(f_sources, str):
+            f_sources = [f_sources]
+        if not isinstance(f_sources, list) or not all(isinstance(x, str) and x for x in f_sources):
+            raise PlatformError(f"{pid} 的 files.sources 要是来源 id 的列表")
+        f_repeat, f_resend = str(files.get("repeat") or "skip"), str(files.get("resend") or "all")
+        if f_repeat not in ("skip", "attach"):
+            raise PlatformError(f"{pid} 的 files.repeat 只能是 skip / attach")
+        if f_resend not in ("all", "new"):
+            raise PlatformError(f"{pid} 的 files.resend 只能是 all / new")
+        if "scan" in files and not isinstance(files["scan"], bool):
+            raise PlatformError(f"{pid} 的 files.scan 要是 true 或 false")
+        if files.get("scan") and not f_sources:
+            raise PlatformError(f"{pid} 打开了 files.scan：要写 files.sources（按哪些来源认、取正文里的文件 id）")
+        try:
+            f_ttl = float(files.get("upload_ttl_s", 0) or 0)
+        except (TypeError, ValueError) as e:
+            raise PlatformError(f"{pid} 的 files.upload_ttl_s 要是秒数") from e
         out.append(PlatformSpec(
             id=pid, name=str(p.get("name") or pid), url=url, driver=str(p.get("driver") or "standard"),
             auth_header=headers[0], auth_template=str(auth.get("template", "Bearer {value}")),
             auth_label=str(auth.get("label", "平台 API Key")), mcp_session_header=headers[1], caller=cal,
-            bind_wait_s=float(p.get("bind_wait_s", 30)), timeout_s=float(p.get("timeout_s", 900)), proxy=proxy))
+            bind_wait_s=float(p.get("bind_wait_s", 30)), timeout_s=float(p.get("timeout_s", 900)), proxy=proxy,
+            files_in=f_in, files_sources=tuple(dict.fromkeys(f_sources)), files_repeat=f_repeat,
+            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_scan=bool(files.get("scan")), files_export=f_export, matrix_url=matrix_url))
     return out
 
 
@@ -153,15 +212,31 @@ class PlatformCatalog:
 
 # ================= 驱动 =================
 class Driver(Protocol):
-    """和一个平台说话的方式。events() 产出 {"type": "session" | "delta" | "tool" | "done" | "error", ...}；
-    session 必须最先（拿到会话 id 网络才能把 MCP 回调落到这一轮）。"""
+    """和一个平台说话的方式。events() 产出 {"type": "session" | "delta" | "tool" | "file" | "done" | "error", ...}；
+    session 必须最先（拿到会话 id 网络才能把 MCP 回调落到这一轮）。
+
+    文件（可选，docs/files-across-platforms.md）：驱动在 `files_in` 里声明支持哪些交文件的方式（"url"、"upload"），
+    声明了才会收到 `chat(..., files=[...])`；支持 "upload" 的还要有 `upload()`。没声明的照旧只收文本，网络按 pull 交文件。
+    平台产出的文件用 {"type": "file", "ref": ..., "name": ...} 报出来，网络按平台目录的 files.source 取回。"""
+
+    files_in: tuple[str, ...]
 
     def describe(self, spec: PlatformSpec, agent: str, headers: dict[str, str]) -> dict[str, str]: ...
 
     def chat(self, spec: PlatformSpec, agent: str, message: str, session_id: str | None,
-             headers: dict[str, str]) -> Iterator[dict[str, Any]]: ...
+             headers: dict[str, str], files: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]: ...
 
     def interrupt(self, spec: PlatformSpec, session_id: str, headers: dict[str, str]) -> None: ...
+
+    def upload(self, spec: PlatformSpec, name: str, data: bytes, mime: str, headers: dict[str, str]) -> str: ...
+
+
+def files_supported(driver: Any, mode: str) -> bool:
+    """驱动支不支持这种交文件的方式（pull 谁都支持：只是提示词里的一节）。"""
+    if mode == "pull":
+        return True
+    ok = mode in tuple(getattr(driver, "files_in", ()) or ())
+    return ok and (mode != "upload" or callable(getattr(driver, "upload", None)))
 
 
 def _opener(spec: PlatformSpec) -> urllib.request.OpenerDirector:
@@ -171,6 +246,8 @@ def _opener(spec: PlatformSpec) -> urllib.request.OpenerDirector:
 
 class StandardDriver:
     """标准 HTTP 形状（见文件开头）。"""
+
+    files_in = ("url", "upload")
 
     def _req(self, spec: PlatformSpec, path: str, headers: dict[str, str], body: Any = None,
              timeout: float = 30) -> Any:
@@ -192,9 +269,11 @@ class StandardDriver:
         return {"name": str(d.get("name") or agent), "description": str(d.get("description") or "")}
 
     def chat(self, spec: PlatformSpec, agent: str, message: str, session_id: str | None,
-             headers: dict[str, str]) -> Iterator[dict[str, Any]]:
-        r = self._req(spec, f"/agents/{quote(agent, safe='')}/chat", headers,
-                      {"message": message, "session_id": session_id}, timeout=spec.timeout_s)
+             headers: dict[str, str], files: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
+        body: dict[str, Any] = {"message": message, "session_id": session_id}
+        if files:
+            body["files"] = files
+        r = self._req(spec, f"/agents/{quote(agent, safe='')}/chat", headers, body, timeout=spec.timeout_s)
         with r:
             event, data = "message", []
             for raw in r:
@@ -216,6 +295,20 @@ class StandardDriver:
         with self._req(spec, f"/sessions/{quote(session_id, safe='')}/interrupt", headers, {}):
             pass
 
+    def upload(self, spec: PlatformSpec, name: str, data: bytes, mime: str, headers: dict[str, str]) -> str:
+        req = urllib.request.Request(f"{spec.url}/files?name={quote(name, safe='')}", data=data, method="POST",
+                                     headers={**headers, "Content-Type": mime or "application/octet-stream"})
+        try:
+            with _opener(spec).open(req, timeout=120) as r:
+                fid = str(json.loads(r.read().decode("utf-8") or "{}").get("file_id") or "")
+        except urllib.error.HTTPError as e:
+            raise PlatformError(f"平台的文件接口返回 {e.code}：{e.read().decode('utf-8', 'replace')[:300]}") from e
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise PlatformError(f"传不到平台的文件接口：{e}") from e
+        if not fid:
+            raise PlatformError("平台的文件接口没有返回 file_id")
+        return fid
+
 
 def _standard_event(event: str, body: dict[str, Any]) -> dict[str, Any]:
     if event == "session":
@@ -228,6 +321,9 @@ def _standard_event(event: str, body: dict[str, Any]) -> dict[str, Any]:
         return {"type": "done", "text": str(body.get("text", ""))}
     if event == "error":
         return {"type": "error", "message": str(body.get("message", "平台报错"))}
+    if event == "file":
+        return {"type": "file", "ref": str(body.get("ref") or body.get("url") or body.get("file_id") or ""),
+                "name": str(body.get("name") or "")}
     return {"type": "other"}
 
 
@@ -288,6 +384,10 @@ class RemoteCall:
     agent: str
     headers: dict[str, str] = field(repr=False)
     error: str | None = None   # 网络在发起之前就判定这一轮不能跑（例如调用方还没授权），直接按失败返回
+    # 随对话请求交给平台的文件（files.in 是 url / upload 时；pull 时为空）：每项 {name, mime, size, sha256, url | file_id}
+    files: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    # 平台在流里报出文件时：网络按 files.source 取回、附在这一轮的回复上，返回（给这一轮记下的说明, 是否失败）
+    on_file: Callable[[str, str], tuple[str, bool]] | None = field(default=None, repr=False)
 
 
 def capabilities(platform: str, mcp: bool) -> RuntimeCapabilities:
@@ -329,7 +429,8 @@ class RemoteRuntime:
 
         def pump() -> None:
             try:
-                for ev in driver.chat(call.platform, call.agent, req.prompt, req.session_id, call.headers):
+                kw = {"files": call.files} if call.files else {}
+                for ev in driver.chat(call.platform, call.agent, req.prompt, req.session_id, call.headers, **kw):
                     t = ev.get("type")
                     if t == "session" and ev.get("id"):
                         if state["sid"] and state["sid"] != ev["id"]:
@@ -346,6 +447,15 @@ class RemoteRuntime:
                                                "status": "completed"})
                         emit({"type": "tool_call", "callId": cid, "tool": ev.get("name", ""), "input": ev.get("input") or {}})
                         emit({"type": "tool_result", "callId": cid, "status": "completed", "result": ""})
+                    elif t == "file":
+                        cid = f"remote-{len(state['tools'])}"
+                        args = {"ref": ev.get("ref", ""), "name": ev.get("name", "")}
+                        emit({"type": "tool_call", "callId": cid, "tool": "file", "input": args})
+                        text, bad = (call.on_file(args["ref"], args["name"]) if call.on_file is not None
+                                     else ("这个平台没有配置 files.sources：平台报的文件取不回来", True))
+                        status = "failed" if bad else "completed"
+                        state["tools"].append({"tool": "file", "input": args, "status": status, "result": text})
+                        emit({"type": "tool_result", "callId": cid, "status": status, "result": text})
                     elif t == "done":
                         state["final"] = ev.get("text", "")
                     elif t == "error":

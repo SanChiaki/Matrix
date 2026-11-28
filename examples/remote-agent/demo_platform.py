@@ -8,6 +8,8 @@
 - `POST /sessions/{id}/interrupt`：会话中断，会话保留；
 - `PUT  /agents/{agent}/mcp`：扮演平台的“Agent 级 MCP 配置”页面（真实平台是在网页上填）：{url, headers}；
   之后这个 Agent 每次做事都按这份配置回调 MCP，请求里带 `X-Session-Id`（平台填的，模型改不了）。
+- 平台自己的文件（docs/files-across-platforms.md）：`POST /files?name=` 上传（请求体就是内容）→ {file_id}；
+  `GET /files/{file_id}/content` 取（要 API Key）。对话请求里的 `files`（Matrix 按 files.in 附上的短期链接或 file_id）都收下。
 
 演示 Agent 的“脑子”是确定性的：
 - 消息里有“成员”：经 MCP 调 list_members，把结果说出来；
@@ -17,6 +19,11 @@
 - 消息里有“发文件”：在平台上写一份演示报告，POST 到 Matrix 的 `<MCP 地址>/files`（同一份请求头 + `X-Session-Id`）拿 file_id，
   再经 MCP 调 send_file(file_id=…) 附在回复上（委托任务里就是随交付交回）；“转发「stg_…」”是拿一个给定的 file_id 调 send_file；
 - 消息里有“委托「成员」带文件：<要它做的事>”：先暂存一份报告，再 delegate，attachments 写 file_id，mission 是冒号后面那句；
+- 消息里有“只写文件 id”：把报告存进平台文件库，只在回复正文里写出 file_id（不报事件）；“复述「…」”把引号里的文字照抄进回复；
+- 消息里有“报文件”：把报告存进平台自己的文件库（同一个 Agent 一直是同一个 file_id，像平台每轮都报一遍会话里的文件），
+  在流里报 `file {ref, name}`（Matrix 按 files.sources 取回）；“报链接「<链接>」”：报一个放在第三方暂存的文件；
+- 消息里有“拉文件「来源」”：把报告存进平台自己的文件库，经 MCP 调 fetch_file(source=来源, ref=file_id)，再 send_file；
+- 消息里有“导出”：对这一轮列出的第一个文件调 export_file，按返回的短期链接取下来（或拿到平台的 file_id）；
 - Matrix 在消息末尾列了这一轮拿得到的文件（`GET /mcp/remote/files/<sha256>`）：平台都取下来，回复里说收到了哪些、多大；
 - 只照“对话里的新消息”（委托任务里是目标）动手：提示词里的工具说明、网络通知里引用的任务说明不算（`asked`）；
 - 最后一句回复里写明收没收到调用方的授权（`X-User-Token`），只说有没有，不回显内容。
@@ -107,6 +114,11 @@ class DemoPlatform:
         self.interrupted: set[str] = set()
         self.seen_headers: list[dict[str, str]] = []
         self.mcp_results: list[dict[str, Any]] = []
+        self.files: dict[str, tuple[str, bytes]] = {}   # 平台自己的文件库：file_id → (文件名, 内容)
+        self.received: list[dict[str, Any]] = []        # 对话请求里收到的 files（每项另记取到的内容 data）
+        self.received_last: list[dict[str, Any]] = []   # 上一轮收到的（回复之后挪到这里）
+        self.file_gets: list[dict[str, str]] = []       # 取平台文件时带的请求头
+        self.reported: dict[str, str] = {}              # agent → “报文件”报过的那个 file_id
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -132,6 +144,22 @@ class DemoPlatform:
                 return json.loads(self.rfile.read(n) or b"{}")
 
             def do_GET(self) -> None:  # noqa: N802
+                f = re.match(r"^/files/([\w-]+)/content$", self.path)
+                if f:
+                    outer.file_gets.append(dict(self.headers))
+                    if not self._authed():
+                        return
+                    if f.group(1) not in outer.files:
+                        self._json(404, {"error": "no such file"})
+                        return
+                    name, data = outer.files[f.group(1)]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/markdown")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(name))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 m = re.match(r"^/agents/([\w-]+)$", self.path)
                 if not self._authed():
                     return
@@ -150,6 +178,12 @@ class DemoPlatform:
             def do_POST(self) -> None:  # noqa: N802
                 if not self._authed():
                     return
+                if self.path.startswith("/files?"):
+                    name = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("name", ["file"])[0]
+                    n = int(self.headers.get("Content-Length") or 0)
+                    fid = outer.store(name, self.rfile.read(n))
+                    self._json(200, {"file_id": fid})
+                    return
                 m = re.match(r"^/sessions/([\w-]+)/interrupt$", self.path)
                 if m:
                     outer.interrupted.add(m.group(1))
@@ -166,6 +200,7 @@ class DemoPlatform:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
+                outer.take_files(body.get("files") or [])
                 outer.chat(m.group(1), sid, str(body.get("message", "")), dict(self.headers), self._send)
 
             def _send(self, event: str, data: dict[str, Any]) -> bool:
@@ -182,6 +217,20 @@ class DemoPlatform:
 
     def close(self) -> None:
         self.server.shutdown()
+
+    def store(self, name: str, data: bytes) -> str:
+        fid = f"pf-{uuid.uuid4().hex[:10]}"
+        self.files[fid] = (name, data)
+        return fid
+
+    def take_files(self, files: list[dict[str, Any]]) -> None:
+        """Matrix 随对话请求附上的文件：短期链接直接取（不带任何请求头），file_id 是先传进平台文件库的。"""
+        for f in files:
+            if f.get("url"):
+                code, data = self.file_get(str(f["url"]), {})
+            else:
+                code, data = (200, self.files[f["file_id"]][1]) if f.get("file_id") in self.files else (404, b"")
+            self.received.append({**f, "code": code, "data": data})
 
     # ---- 演示 Agent 的“脑子” ----
     def _call(self, agent: str, sid: str, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -264,9 +313,43 @@ class DemoPlatform:
                     parts.append(self._tool(agent, sid, "send_file", {"file_id": out["file_id"]}))
                 else:
                     parts.append(f"暂存失败（{code}）：{out.get('detail')}")
-            m = re.search(r"转发「(stg_[\w-]+)」", message)
+            m = re.search(r"转发「(stg_[\w-]+)", message)  # 后面可能跟着 Matrix 的标注（已拿到的文件 id）
             if m:
                 parts.append(self._tool(agent, sid, "send_file", {"file_id": m.group(1)}))
+            m = re.search(r"拉文件「([\w-]+)」", message)
+            if m:  # 文件在平台自己的文件库里：让 Matrix 按登记的来源拉过去，再发
+                fid = self.store(f"{AGENTS[agent]['name'][:4]}底稿.md", report(agent))
+                out = self._tool(agent, sid, "fetch_file", {"source": m.group(1), "ref": fid})
+                parts.append(out)
+                staged = re.search(r"`(stg_[\w-]+)`", out)
+                if staged:
+                    parts.append(self._tool(agent, sid, "send_file", {"file_id": staged.group(1)}))
+            if "导出" in message:
+                sha = re.search(r"`GET /mcp/remote/files/([0-9a-f]{64})`", listing)
+                out = self._tool(agent, sid, "export_file", {"file": sha.group(1) if sha else ""})
+                link = re.search(r"(https?://\S+/mcp/remote/links/[\w-]+)", out)
+                if link:
+                    code, data = self.file_get(link.group(1), {})
+                    self.downloads.append((agent, code, data))
+                    out += f"（取到 {len(data)} 字节）" if code == 200 else f"（取不到：{code}）"
+                parts.append(out)
+        if "报文件" in message:  # 平台产出的文件：放进平台自己的文件库，在流里报出来，Matrix 取回附在回复上
+            name = f"{AGENTS[agent]['name'][:4]}报表.md"
+            fid = self.reported.get(agent) or self.store(name, report(agent))
+            self.reported[agent] = fid
+            send("file", {"ref": fid, "name": name})
+            parts.append(f"报表的文件 id 是 {fid}")
+        for link in re.findall(r"报链接「(\S+?)」", message):
+            send("file", {"ref": link})
+        if "只写文件 id" in message:  # 不报 file 事件，只在回复正文里写出 id（Matrix 的 files.scan 认出来取回）
+            fid = self.store(f"{AGENTS[agent]['name'][:4]}明细.md", report(agent))
+            parts.append(f"明细已生成，文件 id：{fid}。")
+        for quoted in re.findall(r"复述「(.+?)」", message):  # 把别人给的文字照抄进回复（演示：引用来的 id 不该被当成它产出的）
+            parts.append(quoted)
+        if self.received:
+            parts.append("随消息收到：" + "、".join(f"{f['name']}（{len(f['data'])} 字节）" for f in self.received
+                                                if f.get("code") == 200))
+            self.received_last, self.received = self.received, []
         token = next((v for k, v in headers.items() if k.lower() == "x-user-token"), "")
         parts.append("收到了调用方的授权" if token else "没有调用方的授权")
         send("delta", {"text": "处理中"})

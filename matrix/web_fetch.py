@@ -349,6 +349,46 @@ def fetch_bytes(policy: FetchPolicy, url: str, limit: int, accept: str = "*/*",
     raise FetchError(f"重定向超过 {MAX_REDIRECTS} 次")
 
 
+def fetch_file(policy: FetchPolicy, url: str, limit: int, headers: dict[str, str] | None = None,
+               resolver: Resolver = _resolve) -> tuple[bytes, str, str, str]:
+    """外部文件来源（matrix/file_sources.py）取一个文件：同样的校验与连接固定，每一跳都要在 policy 里。
+    `headers`（来源的凭证）只发给第一跳的主机：重定向到别的主机（常见于对象存储的预签名链接）时不带。
+    返回（内容, 内容类型, 最后的地址, Content-Disposition）。超过 limit 字节、非 2xx 都抛 FetchError。"""
+    deadline = time.monotonic() + DEADLINE_S
+    current = (url or "").strip()
+    first = check_url(current)[1]
+    for _hop in range(MAX_REDIRECTS + 1):
+        host = check_url(current)[1]
+        if not policy.public and not policy.named(host) and _literal(host) is None:  # 不在白名单里的域名：连解析都不做
+            raise FetchError(f"{host} 不在这个文件来源的白名单里（{_allow_text(policy)}）")
+        route = plan(policy, current, resolver)
+        timeout = max(1.0, min(TIMEOUT_S, deadline - time.monotonic()))
+        conn, path, extra = _connection(current, route, timeout)
+        auth = dict(headers or {}) if host == first else {}
+        try:
+            conn.request("GET", path, headers={"User-Agent": USER_AGENT, "Accept": "*/*",
+                                               "Accept-Encoding": "identity", **auth, **extra})
+            resp = conn.getresponse()
+            if resp.status in (301, 302, 303, 307, 308) and resp.getheader("Location"):
+                current = urljoin(current, resp.getheader("Location", ""))
+                continue
+            if not 200 <= resp.status < 300:
+                raise FetchError(f"文件来源返回 {resp.status}")
+            declared = resp.getheader("Content-Length", "") or ""
+            if declared.isdigit() and int(declared) > limit:
+                raise FetchError(f"文件超过上限 {limit // 1_000_000} MB")
+            body = resp.read(limit + 1)
+        except (OSError, http.client.HTTPException) as e:
+            raise FetchError(f"取文件失败：{e}") from e
+        finally:
+            conn.close()
+        if len(body) > limit:
+            raise FetchError(f"文件超过上限 {limit // 1_000_000} MB")
+        return (body, (resp.getheader("Content-Type", "") or "").split(";")[0].strip().lower(), current,
+                resp.getheader("Content-Disposition", "") or "")
+    raise FetchError(f"重定向超过 {MAX_REDIRECTS} 次")
+
+
 _META_CHARSET = re.compile(rb"""<meta[^>]+charset=["']?([A-Za-z0-9_\-]+)""", re.I)
 
 

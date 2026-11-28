@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {
+      "id": "demo-files",
+      "name": "演示平台的文件库",
+      "url": "http://127.0.0.1:8801/files/{ref}/content",
+      "ref": "pf-[0-9a-f]{10}",
+      "auth": "platform",
+      "for": [
+        "demo"
+      ],
+      "hint": "平台的文件 id（pf-…）"
+    }
+  ]
+}

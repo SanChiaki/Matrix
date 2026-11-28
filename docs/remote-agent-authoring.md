@@ -68,12 +68,15 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 签 MCP 密钥后，按 `examples/remote-agent/README.md` 把地址和密钥填进演示平台（模拟平台网页上的配置），在私聊里说“抢跑”“成员”“发文件”试。
 
 平台 Agent 要传文件时，平台那边（不是模型）把文件 `POST` 到 `<MCP 地址>/files?name=…`，请求头和调 MCP 时一样（密钥 + 会话 id），拿回 `file_id` 后由模型调 `send_file(file_id=…)`，或写进 `delegate` 的 `attachments`；Matrix 在提示词末尾列出这一轮拿得到的文件，平台按列出的地址 `GET <MCP 地址>/files/<sha256>` 取下来放进 Agent 能读的地方（[remote-agents.md](remote-agents.md)“传文件”，演示平台的 `_stage` / `_fetch_listed` 是样板）。
-你的驱动照 `tests/test_remote_agents.py` 写一份对假平台的测试。
+平台收发文件的方式不是这样时（对话接口按入参收文件、文件只能放在第三方暂存、回答里只给文件 id 或临时链接），
+在平台目录里写 `files`，在 `file-sources.json` 里登记取文件的来源，驱动声明 `files_in`、实现 `upload`、把产出的文件报成 `file` 事件
+（[files-across-platforms.md](files-across-platforms.md)；演示平台的 `take_files`、`/files` 接口、“报文件”“拉文件”“导出”是样板）。
+你的驱动照 `tests/test_remote_agents.py`、`tests/test_cross_platform_files.py` 写一份对假平台的测试。
 
 ## 五、上线
 
 1. 平台目录写好，驱动包装进 Matrix 的运行环境（`uv pip install`，或加进部署镜像）。
-2. 平台要能访问到 Matrix 的 `/mcp/remote` 与 `/mcp/remote/*`：反向代理上加了额外的认证层（如 basic auth）时要放行这两类路径，
+2. 平台要能访问到 Matrix 的 `/mcp/remote` 与 `/mcp/remote/*`（含短期链接 `/mcp/remote/links/*`）：反向代理上加了额外的认证层（如 basic auth）时要放行这两类路径，
    由 Matrix 凭密钥鉴权（[reverse-proxy.md](reverse-proxy.md)）。
 3. 公司 IT 给平台开出站到 Matrix、给 Matrix 开出站到平台。
 
@@ -88,6 +91,7 @@ uv run matrix --runtime scripted --platforms examples/remote-agent/agent-platfor
 - [ ] 人点“停止”：平台那边的会话被中断，之后还能续接
 - [ ] 配了 `caller`：没授权的人找它，这一轮不发起、提示去连接；授权后平台收到的是**他自己的**凭证
 - [ ] **不带调用方请求头直接调平台 Agent 的业务工具：业务系统拒绝**（清单第 8 条，最要紧）
+- [ ] 配了 `files`：附件随对话请求交到平台（`in`）；平台报的文件、`fetch_file` 拉来的文件附在回复上；一轮结束后短期链接 404
 
 ## 七、安全
 
