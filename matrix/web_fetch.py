@@ -60,7 +60,9 @@ Resolver = Callable[[str, int], list[str]]
 
 
 class FetchError(Exception):
-    pass
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status   # 对方返回的 HTTP 状态码（有的话）：取文件时 401 / 403 要重新换凭证
 
 
 # ================= 白名单 =================
@@ -373,7 +375,7 @@ def fetch_file(policy: FetchPolicy, url: str, limit: int, headers: dict[str, str
                 current = urljoin(current, resp.getheader("Location", ""))
                 continue
             if not 200 <= resp.status < 300:
-                raise FetchError(f"文件来源返回 {resp.status}")
+                raise FetchError(f"文件来源返回 {resp.status}", status=resp.status)
             declared = resp.getheader("Content-Length", "") or ""
             if declared.isdigit() and int(declared) > limit:
                 raise FetchError(f"文件超过上限 {limit // 1_000_000} MB")

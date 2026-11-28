@@ -29,6 +29,9 @@ Matrix 不猜回答里哪些是文件，也不让模型给任意地址：部署�
   请求头是 `header`（默认 Authorization）、写法是 `template`（默认 `Bearer {value}`）。
   凭证只发给第一跳的主机，重定向到别的主机时不带。
 - `cache`：同一个对话里取过的同一个 ref 再取时直接用已有的那份（默认是）；ref 指向的内容会变时写 false。
+- `scope`：这把凭证能取到谁的文件。`user`（默认）：平台按用户隔离（或不带凭证）；`app`：应用级凭证（如 Matrix 在平台上的一个
+  应用 API Key），能取到平台上所有用户的文件、平台自己不隔离——这时由 Matrix 隔离：只取**属于这个对话**的文件 id
+  （这一轮平台报出的、正文扫描认出的，或这个对话里以前报过、取过、传上去过的），别的一律拒绝；公共 Agent 的服务面也能用它。
 - `max_mb`：单个文件上限，不超过附件上限（20 MB）。
 - `hint`：写进提示词，告诉模型这个来源的 ref 长什么样。
 """
@@ -57,7 +60,9 @@ LIMIT_MB = 20
 
 
 class SourceError(ValueError):
-    pass
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status   # 来源返回的 HTTP 状态码（有的话）
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,7 @@ class FileSource:
     template: str = "Bearer {value}"
     cache: bool = True
     explicit_ref: bool = False   # 部署方明确写了 ref 正则（从回复正文里认 id 时只用这样的 id 来源）
+    scope: str = "user"          # user | app（应用级凭证：Matrix 按对话隔离，只取属于这个对话的文件 id）
 
     @property
     def whole(self) -> bool:
@@ -164,6 +170,11 @@ def parse_sources(raw: Any) -> list[FileSource]:
             raise SourceError(f"{sid} 的 template 要含 {{value}}")
         if "cache" in s and not isinstance(s["cache"], bool):
             raise SourceError(f"{sid} 的 cache 要是 true 或 false")
+        scope = str(s.get("scope") or "user")
+        if scope not in ("user", "app"):
+            raise SourceError(f"{sid} 的 scope 只能是 user 或 app")
+        if scope == "app" and auth == "none":
+            raise SourceError(f"{sid} 不带凭证（auth 是 none）：用不着 scope: app")
         try:
             max_mb = int(s.get("max_mb", LIMIT_MB))
         except (TypeError, ValueError) as e:
@@ -172,7 +183,7 @@ def parse_sources(raw: Any) -> list[FileSource]:
                               hosts=tuple(h.strip() for h in hosts), ref=ref, auth=auth, for_=tuple(who),
                               max_mb=max(1, min(LIMIT_MB, max_mb)), hint=str(s.get("hint") or "")[:200],
                               header=header, template=template, cache=s.get("cache", True),
-                              explicit_ref=bool(s.get("ref"))))
+                              explicit_ref=bool(s.get("ref")), scope=scope))
     return out
 
 
@@ -279,13 +290,19 @@ def disposition_name(header: str) -> str:
 
 
 def fetch(src: FileSource, ref: str, headers: dict[str, str] | None = None,
-          resolver: Any = None) -> tuple[bytes, str, str]:
-    """按来源取一个文件：返回（内容, 内容类型, 建议的文件名）。不放行、取不到时抛 SourceError。"""
-    url = src.resolve(ref)
+          resolver: Any = None, url: str | None = None) -> tuple[bytes, str, str]:
+    """按来源取一个文件：返回（内容, 内容类型, 建议的文件名）。不放行、取不到时抛 SourceError。
+    url：驱动的 file_auth 换出来的实际下载地址（预签名链接等）；ref 照样要合来源的格式，这个地址照样每一跳都要在 hosts 里。"""
+    resolved = src.resolve(ref)
+    if url:
+        try:
+            check_url(url)
+        except FetchError as e:
+            raise SourceError(f"驱动给的下载地址不对：{e}") from e
     try:
         kw = {"resolver": resolver} if resolver is not None else {}
-        body, mime, final, disp = fetch_file(src.policy(), url, src.max_mb * 1_000_000, headers or {}, **kw)
+        body, mime, final, disp = fetch_file(src.policy(), url or resolved, src.max_mb * 1_000_000, headers or {}, **kw)
     except FetchError as e:
-        raise SourceError(str(e)) from e
+        raise SourceError(str(e), status=e.status) from e
     name = disposition_name(disp) or unquote(Path(urlsplit(final).path).name) or "file"
     return body, mime, name

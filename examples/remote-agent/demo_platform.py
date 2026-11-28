@@ -10,6 +10,8 @@
   之后这个 Agent 每次做事都按这份配置回调 MCP，请求里带 `X-Session-Id`（平台填的，模型改不了）。
 - 平台自己的文件（docs/files-across-platforms.md）：`POST /files?name=` 上传（请求体就是内容）→ {file_id}；
   `GET /files/{file_id}/content` 取（要 API Key）。对话请求里的 `files`（Matrix 按 files.in 附上的短期链接或 file_id）都收下。
+  `require_download_token = True` 时取文件改成要下载令牌：先用 API Key `POST /files/token` 换一个（`X-Download-Token`），
+  只用 API Key 取返回 401——配套的驱动是下面的 `DemoTokenDriver`（驱动的 file_auth，docs/files-across-platforms.md 8.1）。
 
 演示 Agent 的“脑子”是确定性的：
 - 消息里有“成员”：经 MCP 调 list_members，把结果说出来；
@@ -119,6 +121,11 @@ class DemoPlatform:
         self.received_last: list[dict[str, Any]] = []   # 上一轮收到的（回复之后挪到这里）
         self.file_gets: list[dict[str, str]] = []       # 取平台文件时带的请求头
         self.reported: dict[str, str] = {}              # agent → “报文件”报过的那个 file_id
+        self.require_download_token = False             # 取文件要先换下载令牌（演示定制鉴权）
+        self.tokens: set[str] = set()                   # 有效的下载令牌（清空 = 令牌全部作废）
+        self.tokens_issued = 0
+        self.upload_headers: list[dict[str, str]] = []  # 上传时收到的请求头（看 on_behalf 带没带）
+        self.deleted: list[str] = []                    # 被删掉的平台文件
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -147,7 +154,11 @@ class DemoPlatform:
                 f = re.match(r"^/files/([\w-]+)/content$", self.path)
                 if f:
                     outer.file_gets.append(dict(self.headers))
-                    if not self._authed():
+                    if outer.require_download_token:
+                        if self.headers.get("X-Download-Token") not in outer.tokens:
+                            self._json(401, {"error": "need a download token"})
+                            return
+                    elif not self._authed():
                         return
                     if f.group(1) not in outer.files:
                         self._json(404, {"error": "no such file"})
@@ -168,6 +179,17 @@ class DemoPlatform:
                 else:
                     self._json(404, {"error": "no such agent"})
 
+            def do_DELETE(self) -> None:  # noqa: N802
+                if not self._authed():
+                    return
+                m = re.match(r"^/files/([\w-]+)$", self.path)
+                if not m or m.group(1) not in outer.files:
+                    self._json(404, {"error": "no such file"})
+                    return
+                del outer.files[m.group(1)]
+                outer.deleted.append(m.group(1))
+                self._json(200, {"ok": True})
+
             def do_PUT(self) -> None:  # noqa: N802
                 m = re.match(r"^/agents/([\w-]+)/mcp$", self.path)
                 if not self._authed() or not m:
@@ -178,7 +200,14 @@ class DemoPlatform:
             def do_POST(self) -> None:  # noqa: N802
                 if not self._authed():
                     return
+                if self.path == "/files/token":  # 用 API Key 换一个下载令牌
+                    tok = f"dt-{uuid.uuid4().hex[:12]}"
+                    outer.tokens.add(tok)
+                    outer.tokens_issued += 1
+                    self._json(200, {"token": tok, "expires_in": 600})
+                    return
                 if self.path.startswith("/files?"):
+                    outer.upload_headers.append(dict(self.headers))
                     name = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("name", ["file"])[0]
                     n = int(self.headers.get("Content-Length") or 0)
                     fid = outer.store(name, self.rfile.read(n))
@@ -354,6 +383,26 @@ class DemoPlatform:
         parts.append("收到了调用方的授权" if token else "没有调用方的授权")
         send("delta", {"text": "处理中"})
         send("done", {"text": "；".join(parts)})
+
+
+class DemoTokenDriver:
+    """配套的平台驱动样板：在标准 HTTP 驱动上加 file_auth——取平台文件前先用平台 API Key 换下载令牌。
+    接自己的平台时照它写：换令牌、签名、先要预签名地址都放在 file_auth 里，返回这次下载要带的请求头（和可选的地址）。"""
+
+    def __new__(cls):  # 延迟导入：演示平台本身不依赖 matrix
+        from matrix.remote_agents import PlatformError, StandardDriver, _opener
+
+        class _Driver(StandardDriver):
+            def file_auth(self, spec, source_id, ref, headers, refresh=False):
+                req = urllib.request.Request(f"{spec.url}/files/token", data=b"{}", method="POST",
+                                             headers={**headers, "Content-Type": "application/json"})
+                try:
+                    with _opener(spec).open(req, timeout=30) as r:
+                        got = json.loads(r.read() or b"{}")
+                except (urllib.error.URLError, OSError, ValueError) as e:
+                    raise PlatformError(f"换不到下载令牌：{e}") from e
+                return {"headers": {"X-Download-Token": got["token"]}, "ttl_s": max(0, int(got.get("expires_in", 0)) - 30)}
+        return _Driver()
 
 
 def main() -> None:

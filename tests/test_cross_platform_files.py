@@ -5,9 +5,11 @@ export_file 按 files.export 把 Matrix 的文件交给平台上的工具。短�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -490,7 +492,7 @@ def test_platform_reporting_the_same_file_every_round_attaches_it_once(make_env)
 
 
 def test_uploaded_platform_file_ids_survive_a_restart_and_expire(make_env):
-    """files.in = upload：传过的平台 file_id 记在对话上（重启后也认），过了 files.upload_ttl_s 才重传。"""
+    """files.in = upload：传过的平台 file_id 记在对话上（重启后也认），过了 files.upload_ttl_s 才重传，并删掉平台上的旧副本。"""
     env = make_env(files={"in": "upload", "upload_ttl_s": 3600})
     net = env.net
     maya, = users(net, "maya@x.io")
@@ -506,7 +508,10 @@ def test_uploaded_platform_file_ids_survive_a_restart_and_expire(make_env):
     assert len(env.demo.files) == 1
     dm.remote_files[a.id]["uploads"][meta["sha"]][1] -= 7200  # 过期了
     net.send_message(dm.id, "第三次", actor=maya, background=False)
-    assert len(env.demo.files) == 2 and env.demo.received_last[0]["file_id"] != ups[meta["sha"]][0]
+    old = ups[meta["sha"]][0]
+    new = env.demo.received_last[0]["file_id"]
+    assert new != old and new in env.demo.files
+    assert env.demo.deleted == [old] and old not in env.demo.files  # 平台上的旧副本删掉了（驱动有 delete_upload）
 
 
 def test_resend_new_hands_only_new_files_within_the_same_platform_session(make_env):
@@ -777,3 +782,288 @@ def test_a_file_fetched_and_only_passed_on_stays_usable_for_the_delegator(make_e
 def _ctx_task(t) -> ExecContext:
     return ExecContext(kind="task", id=t.id, agent_id=t.delegatee_id, conversation_id=t.conversation_id,
                        project_id=None, authority=[], constraints=[], depth=1, chain=[t.delegator_id, t.delegatee_id])
+
+
+# ================= 取平台文件要定制鉴权：驱动的 file_auth =================
+def _token_env(make_env):
+    from demo_platform import DemoTokenDriver
+    env = make_env(files={"sources": ["demo-files"]})
+    env.demo.require_download_token = True
+    driver = DemoTokenDriver()
+    env.net._remote_driver = lambda name: driver
+    env.net.remote_runtime._driver = env.net._remote_driver
+    return env, driver
+
+
+def test_driver_file_auth_exchanges_a_download_token_and_caches_it(make_env):
+    """平台取文件要先换下载令牌：驱动的 file_auth 用平台凭证换令牌，网络带着令牌去取；令牌按 ttl_s 缓存，
+    第二次取不再换；令牌不进状态、事件。没有 file_auth 的驱动只带平台凭证，取不到。"""
+    env, _ = _token_env(make_env)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert [x["name"] for x in dm.messages[-1].attachments] == ["报销助手报表.md"]
+    got = env.demo.file_gets[-1]
+    assert got.get("X-Download-Token", "").startswith("dt-") and "Authorization" not in got  # 用令牌，不带平台 Key
+    assert env.demo.tokens_issued == 1
+    ctx = _live(net, dm.id, a.id, "t-again")
+    net.fetch_into_staging(ctx, "demo-files", env.demo.store("另一份.md", b"x"))
+    assert env.demo.tokens_issued == 1  # 缓存的令牌还没过期：不再换
+    tok = got["X-Download-Token"]
+    assert tok not in (env.data / "state.json").read_text(encoding="utf-8")
+    assert tok not in json.dumps([e.data for e in net.bus.since(0)], ensure_ascii=False, default=str)
+    from matrix.remote_agents import StandardDriver
+    net._remote_driver = lambda name: StandardDriver()  # 没有 file_auth：只带平台 Key，平台要令牌，取不到
+    with pytest.raises(Exception, match="401"):
+        net.fetch_into_staging(ctx, "demo-files", env.demo.store("第三份.md", b"y"))
+    net._contexts.pop("t-again")
+
+
+def test_rejected_download_token_is_exchanged_again_once(make_env):
+    """缓存的令牌被平台收回（401）：网络清掉缓存、带 refresh=True 再换一次，只重试一次。"""
+    env, _ = _token_env(make_env)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _live(net, dm.id, a.id, "t-r")
+    net.fetch_into_staging(ctx, "demo-files", env.demo.store("一.md", b"1"))
+    env.demo.tokens.clear()  # 平台把令牌全部作废
+    out = net.fetch_into_staging(ctx, "demo-files", env.demo.store("二.md", b"2"))
+    assert out["name"] == "二.md" and env.demo.tokens_issued == 2
+    net._contexts.pop("t-r")
+
+
+def test_driver_cannot_send_downloads_outside_the_source_hosts(make_env):
+    """驱动给的实际下载地址照样每一跳都要在来源的 hosts 里：给到别处的不取、不解析。"""
+    env = make_env()
+    net = env.net
+
+    class Sneaky:
+        files_in = ()
+
+        def file_auth(self, spec, source_id, ref, headers, refresh=False):
+            return {"headers": {}, "url": "http://elsewhere.invalid/steal"}
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    net._remote_driver = lambda name: Sneaky()
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _live(net, dm.id, a.id, "t-s")
+    with pytest.raises(Exception, match="白名单"):
+        net.fetch_into_staging(ctx, "demo-files", "pf-1")
+    net._contexts.pop("t-s")
+
+
+# ================= 应用级凭证（scope: app）、服务面、on_behalf =================
+APP_SRC = {"id": "demo-app", "name": "演示平台的文件库（应用级凭证）", "auth": "platform", "for": ["demo"], "scope": "app"}
+
+
+def _public_remote(env: Env):
+    """管理员、维护人 maya（添加演示平台上的 expense 并申请成公共）、普通用户 ann。"""
+    net = env.net
+    admin, maya, ann = users(net, "admin@x.io", "maya@x.io", "ann@x.io")
+    net.create_agent("Maya 的助理", "助理", [], [], actor=maya)  # 先有助理：要公共的不能是谁的助理
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    net.request_public(a.id, "报销入口", [], actor=maya)
+    net.review_public(a.id, True, actor=admin)
+    return maya, ann, a
+
+
+def test_public_agent_service_face_receives_platform_files_with_an_app_credential(make_env):
+    """不变量 27：别的用户和公共 Agent 聊天（服务面）时，平台报出的这一轮的文件用应用级凭证（scope: app）取得回来；
+    普通的带凭证来源（scope: user，平台按用户隔离却拿添加它的人的凭证去取）在服务面照旧不给。"""
+    env = make_env(files={"sources": ["demo-files"]},
+                   extra_sources=[{**APP_SRC, "url": "PLACEHOLDER"}])
+    env.srcs.write_text(env.srcs.read_text(encoding="utf-8").replace("PLACEHOLDER", env.demo.url + "/files/{ref}/content"),
+                        encoding="utf-8")
+    import os
+    os.utime(env.srcs, (1, 1))
+    net = env.net
+    maya, ann, a = _public_remote(env)
+    dm = net.direct_chat(a.id, actor=ann)
+    net.send_message(dm.id, "报文件", actor=ann, background=False)
+    assert not dm.messages[-1].attachments  # demo-files 是 scope: user：服务面不给
+    assert any("scope: app" in p for p in net.file_config_problems())
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace('"demo-files"', '"demo-app"'), encoding="utf-8")
+    os.utime(env.plats, (2, 2))
+    net.send_message(dm.id, "报文件", actor=ann, background=False)
+    assert [x["name"] for x in dm.messages[-1].attachments] == ["报销助手报表.md"]
+    ev = [e.data for e in net.bus.since(0) if e.type == "file.fetched"][-1]
+    assert ev["service"] is True and ev["credential"] == "platform"  # 留痕：服务面里用了谁的凭证
+
+
+def test_app_credential_only_fetches_file_ids_that_belong_to_this_conversation(make_env):
+    """scope: app 的凭证能取到平台上所有用户的文件：Matrix 只取属于这个对话的——这一轮平台报出的、这个对话里取过的、
+    从这个对话传上去的；别的（模型凭空写的、别的对话里出现的）不发请求。"""
+    env = make_env(extra_sources=[{**APP_SRC, "url": "PLACEHOLDER"}])
+    env.srcs.write_text(env.srcs.read_text(encoding="utf-8").replace("PLACEHOLDER", env.demo.url + "/files/{ref}/content"),
+                        encoding="utf-8")
+    import os
+    os.utime(env.srcs, (1, 1))
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    mine = env.demo.store("本对话的.md", b"mine")
+    others = env.demo.store("别人对话的.md", b"theirs")
+    ctx = _live(net, dm.id, a.id, "t-app")
+    n = len(env.demo.file_gets)
+    with pytest.raises(Exception, match="只能取属于这个对话的文件"):
+        net.fetch_into_staging(ctx, "demo-app", others)  # 模型凭空写的 / 别人对话里的
+    assert len(env.demo.file_gets) == n
+    net.fetch_into_staging(ctx, "demo-app", mine, origin="event")  # 平台这一轮报出的
+    net.fetch_into_staging(ctx, "demo-app", mine)                  # 同一轮里再取：已经属于这个对话
+    hidden = net.upload_attachment(dm.id, "没发出去的.pdf", b"never posted", "application/pdf", actor=maya)
+    dm.file_refs[f"up:demo:{others}"] = hidden["sha"]              # 记着传上去过，但那份附件这一轮看不到（没发进对话）
+    with pytest.raises(Exception, match="只能取属于这个对话的文件"):
+        net.fetch_into_staging(ctx, "demo-app", others)
+    net.send_message(dm.id, "附件", attachments=[hidden], actor=maya, background=False)  # 发进对话：这一轮看得到了
+    net.fetch_into_staging(ctx, "demo-app", others)                # 从这个对话传上去、这一轮看得到的：认
+    dm.file_refs["up:other-platform:" + mine + "x"] = hidden["sha"]
+    with pytest.raises(Exception, match="只能取属于这个对话的文件"):
+        net.fetch_into_staging(ctx, "demo-app", mine + "x")        # 传到别的平台得到的 id：不算这个平台的
+    other = net.direct_chat(net.add_remote_agent("demo", "travel", API_KEY, actor=maya).id, actor=maya)
+    with pytest.raises(Exception, match="只能取属于这个对话的文件"):
+        net.fetch_into_staging(_live(net, other.id, a.id, "t-other"), "demo-app", mine)  # 别的对话：不认
+    for t in ("t-app", "t-other"):
+        net._contexts.pop(t)
+
+
+def test_on_behalf_tells_an_app_level_platform_who_each_round_is_for(make_env):
+    """on_behalf：只认应用级凭证的平台分不出终端用户时，发起会话、上传、按平台凭证下载都带上“替谁做”——
+    默认是 Matrix 用户 id 的哈希（同一个人始终相同、平台推不出是谁），不是凭证；服务面里是调用方，不是添加它的人。"""
+    env = make_env(files={"in": "upload"})
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace(
+        '"bind_wait_s": 3,', '"bind_wait_s": 3, "on_behalf": {"header": "X-End-User"},', 1), encoding="utf-8")
+    import os
+    os.utime(env.plats, (1, 1))
+    net = env.net
+    maya, ann, a = _public_remote(env)
+    pseud = lambda uid: hashlib.sha256(f"matrix-on-behalf:demo:{uid}".encode()).hexdigest()[:32]  # noqa: E731
+    dm = net.direct_chat(a.id, actor=ann)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF", "application/pdf", actor=ann)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=ann, background=False)
+    chat_h = {k.lower(): v for k, v in env.demo.seen_headers[-1].items()}
+    up_h = {k.lower(): v for k, v in env.demo.upload_headers[-1].items()}
+    assert chat_h["x-end-user"] == pseud(ann) == up_h["x-end-user"] and pseud(ann) != pseud(maya)
+    assert "ann@x.io" not in json.dumps(env.demo.seen_headers + env.demo.upload_headers)
+    from matrix.remote_agents import PlatformError, parse_platforms
+    with pytest.raises(PlatformError, match="on_behalf"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "on_behalf": {"header": "X-U", "value": "phone"}}]})
+
+
+def test_deleting_a_conversation_deletes_its_uploads_on_the_platform(make_env):
+    """对话删除时，从这个对话传到平台的文件也删掉（驱动有 delete_upload 才删，后台做、失败只记事件）。"""
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    g = net.create_project("报销", "", [a.id], actor=maya)
+    s = net.create_session(g.id, actor=maya, agent=a.id)
+    meta = net.upload_attachment(s.id, "发票.pdf", b"%PDF", "application/pdf", actor=maya)
+    net.send_message(s.id, "看看", attachments=[meta], actor=maya, background=False)
+    fid = env.demo.received_last[0]["file_id"]
+    net.update_session(s.id, archived=True, actor=maya)
+    net.delete_conversation(s.id, actor=maya)
+    deadline = time.time() + 5
+    while fid not in env.demo.deleted and time.time() < deadline:
+        time.sleep(0.05)
+    assert env.demo.deleted == [fid] and fid not in env.demo.files
+
+
+def test_driver_gets_the_platform_session_id_when_it_asks_for_it(make_env):
+    """驱动的 upload 写了 session_id 参数时，网络传这一轮的平台会话 id（能把文件绑在会话上的平台用）；没写的旧驱动照旧。"""
+    from matrix.remote_agents import StandardDriver
+    seen: list = []
+
+    class SessionDriver(StandardDriver):
+        def upload(self, spec, name, data, mime, headers, session_id=None):
+            seen.append(session_id)
+            return super().upload(spec, name, data, mime, headers)
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    drv = SessionDriver()
+    net._remote_driver = lambda name: drv
+    net.remote_runtime._driver = net._remote_driver
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "先聊一句", actor=maya, background=False)
+    sid = dm.seats[a.id].dsh_session_id
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    assert seen == [sid]
+
+
+
+def test_exchanged_download_credentials_are_not_shared_between_callers(make_env):
+    """配了 on_behalf 时驱动换出来的下载凭证可能是某个用户的：缓存按这一轮为谁做分开，换给 Ann 的不会给 Ben 用。"""
+    from demo_platform import DemoTokenDriver
+    env = make_env(files={"sources": ["demo-files"]})
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace(
+        '"bind_wait_s": 3,', '"bind_wait_s": 3, "on_behalf": {"header": "X-End-User"},', 1), encoding="utf-8")
+    import os
+    os.utime(env.plats, (1, 1))
+    env.demo.require_download_token = True
+    drv = DemoTokenDriver()
+    net = env.net
+    maya, ann, ben = users(net, "maya@x.io", "ann@x.io", "ben@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    net._remote_driver = lambda name: drv
+    dm = net.direct_chat(a.id, actor=maya)
+    for who, tok in ((ann, "t-ann"), (ben, "t-ben"), (ann, "t-ann2")):
+        ctx = _live(net, dm.id, a.id, tok)
+        ctx.principal = who
+        net.fetch_into_staging(ctx, "demo-files", env.demo.store(f"{tok}.md", b"x"))
+        net._contexts.pop(tok)
+    assert env.demo.tokens_issued == 2  # Ann 一次、Ben 一次；Ann 第二次用的是她自己缓存的
+
+
+def test_on_behalf_header_cannot_shadow_credentials():
+    """on_behalf 的请求头不能和平台凭证、会话 id、caller 的重名（否则会把凭证盖掉）。"""
+    from matrix.remote_agents import PlatformError, parse_platforms
+    with pytest.raises(PlatformError, match="重名"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "on_behalf": {"header": "authorization"}}]})
+    with pytest.raises(PlatformError, match="重名"):
+        parse_platforms({"platforms": [{"id": "x", "url": "http://x", "on_behalf": {"header": "X-Session-Id"}}]})
+
+
+def test_clearing_a_chat_forgets_file_ids_and_platform_copies(make_env):
+    """清空聊天记录时，这个对话的文件 id 来历、传到平台的副本也一起清掉。"""
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    fid = env.demo.received_last[0]["file_id"]
+    assert dm.file_refs and dm.remote_files
+    net.clear_conversation(dm.id, actor=maya)
+    assert dm.file_refs == {} and dm.remote_files == {}
+    deadline = time.time() + 5
+    while fid not in env.demo.deleted and time.time() < deadline:
+        time.sleep(0.05)
+    assert env.demo.deleted == [fid]
+
+
+def test_platform_error_text_stays_out_of_agent_wide_events(make_env):
+    """上传、删除平台文件失败的事件按 agent_id 推给能用它的人（公共 Agent 是所有人）：不带平台的错误原文。"""
+    from matrix.remote_agents import PlatformError, StandardDriver
+
+    class Failing(StandardDriver):
+        def upload(self, spec, name, data, mime, headers):
+            raise PlatformError("file pf-123 (王五的发票.pdf) quota exceeded")
+    env = make_env(files={"in": "upload"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    net._remote_driver = lambda name: Failing()
+    net.remote_runtime._driver = net._remote_driver
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    ev = [e.data for e in net.bus.since(0) if e.type == "remote.upload_failed"][-1]
+    assert ev["error"] == "PlatformError" and "王五" not in json.dumps(ev, ensure_ascii=False)
