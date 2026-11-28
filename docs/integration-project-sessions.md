@@ -7,7 +7,7 @@
 
 每个接口的请求参数、返回字段、错误码见 [api-for-business-systems.md](api-for-business-systems.md) 第三节（按接口逐个列出）；这里只写这两个场景要用的，示例里的返回只摘了关键字段。
 
-以前用“外部应用”（`mat_` 令牌、`/open/v1/*`、`/svc/*`）或“项目服务”接入的，先看文末的[概念怎么换](#概念怎么换)起的迁移说明。
+以前用“外部应用”（`mat_` 令牌、`/open/v1/*`、`/svc/*`）或“项目服务”接入的，先看文末的[概念怎么换](#概念怎么换)起的迁移说明；逐个接口的完整参数与映射见 [api-migration.md](api-migration.md)。
 
 ## 先弄清四件事
 
@@ -269,7 +269,7 @@ curl -X PATCH $MATRIX/api/sessions/conv-fdfe42ba $AS_USER $J -d '{"archived": tr
 | 调用服务：发一条消息，同一次请求 SSE 流式等到做完 | `POST /svc/agents/{service}/chat` `{message, session_id?}` | 第一次开项目会话；之后在会话里发消息；回答从事件流收 | `POST /api/projects/{project_id}/sessions`（读者，返回 `conv_id`）、`POST /api/conversations/{conv_id}/messages` `{text}`、`GET /api/events`（读者） | 发消息立即返回，不等回答；回答一轮结束时整条到（`message.added`），不是逐字流式；不想维持长连接就轮询 `GET /api/conversations/{conv_id}` |
 | 续接（带上 `session_id`） | `POST /svc/agents/{service}/chat` `{session_id}` | 往同一个会话继续发 | `POST /api/conversations/{conv_id}/messages`（读者） | `session_id` 就是现在的 `conv_id` |
 | 看过程：委托建了 / 换了状态、执行方的工具与中途的话、心跳 | `/svc/…/chat` 流里的 `tool`、`progress` 事件 | 会话状态 | `GET /api/events` 的 `conversation.updated`（`thinking` / `waiting` / `idle`，读者） | 逐步的过程只推给 Agent 的所有者（`run.progress`），读者看不到 |
-| 中断这一轮 | `POST /svc/sessions/{session_id}/interrupt` | 打断正在回答的那个 Agent | `POST /api/conversations/{conv_id}/seats/{agent_id}/stop`（读者） | 要指明打断哪个 Agent |
+| 中断这一轮 | `POST /svc/sessions/{session_id}/interrupt` | 打断正在回答的那个 Agent | `POST /api/conversations/{conv_id}/seats/{agent_id}/stop`（那个 Agent 的所有者；公共 Agent 由读者自己） | 要指明打断哪个 Agent；读者停不了主持人的 Agent，要替主持人调 |
 
 #### 网页上的服务（Matrix 用户自己用）
 
