@@ -57,7 +57,9 @@ LIMIT_MB = 20
 
 
 class SourceError(ValueError):
-    pass
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status   # 来源返回的 HTTP 状态码（有的话）
 
 
 @dataclass(frozen=True)
@@ -279,13 +281,19 @@ def disposition_name(header: str) -> str:
 
 
 def fetch(src: FileSource, ref: str, headers: dict[str, str] | None = None,
-          resolver: Any = None) -> tuple[bytes, str, str]:
-    """按来源取一个文件：返回（内容, 内容类型, 建议的文件名）。不放行、取不到时抛 SourceError。"""
-    url = src.resolve(ref)
+          resolver: Any = None, url: str | None = None) -> tuple[bytes, str, str]:
+    """按来源取一个文件：返回（内容, 内容类型, 建议的文件名）。不放行、取不到时抛 SourceError。
+    url：驱动的 file_auth 换出来的实际下载地址（预签名链接等）；ref 照样要合来源的格式，这个地址照样每一跳都要在 hosts 里。"""
+    resolved = src.resolve(ref)
+    if url:
+        try:
+            check_url(url)
+        except FetchError as e:
+            raise SourceError(f"驱动给的下载地址不对：{e}") from e
     try:
         kw = {"resolver": resolver} if resolver is not None else {}
-        body, mime, final, disp = fetch_file(src.policy(), url, src.max_mb * 1_000_000, headers or {}, **kw)
+        body, mime, final, disp = fetch_file(src.policy(), url or resolved, src.max_mb * 1_000_000, headers or {}, **kw)
     except FetchError as e:
-        raise SourceError(str(e)) from e
+        raise SourceError(str(e), status=e.status) from e
     name = disposition_name(disp) or unquote(Path(urlsplit(final).path).name) or "file"
     return body, mime, name

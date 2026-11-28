@@ -266,6 +266,8 @@ class Network:
         # 外部文件来源（docs/files-across-platforms.md）：fetch_file 与平台 file 事件只从这里登记的来源取
         self.file_sources = file_sources or fsrc.SourceCatalog(self.store.root / "file-sources.json")
         self._links: dict[str, tuple[ExecContext, str]] = {}   # 短期链接 → (那一轮, sha 或暂存 file_id)，一轮结束作废
+        # 驱动 file_auth 换出来的下载凭证：(Agent, 来源) → (请求头, 过期时间)；只在内存里，不进状态、事件、日志
+        self._file_auth: dict[tuple[str, str], tuple[dict[str, str], float]] = {}
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
@@ -9383,6 +9385,56 @@ class Network:
             return {src.header: src.template.replace("{value}", value)}
         return {}
 
+    def _download(self, agent: AgentNode | None, src: fsrc.FileSource, ref: str) -> tuple[bytes, str, str]:
+        """从来源取一个文件。auth = platform 且这个平台的驱动实现了 file_auth 时，先让驱动换出这次下载用的凭证
+        （以及可选的实际下载地址），按它给的 ttl_s 缓存；下载返回 401 / 403 时清掉缓存、再换一次，只重试一次。"""
+        headers = self._source_headers(agent, src)
+        driver = None
+        if src.auth == "platform" and agent is not None and agent.remote:
+            spec = self.platforms.get(agent.remote.get("platform"))
+            driver = self._platform_driver(spec) if spec is not None else None
+            if not callable(getattr(driver, "file_auth", None)):
+                driver = None
+        for attempt in (1, 2):
+            url = None
+            use = headers
+            if driver is not None:
+                use, url = self._file_auth_for(agent, spec, driver, src, ref, headers, refresh=attempt == 2)
+            try:
+                return fsrc.fetch(src, ref, use, url=url)
+            except fsrc.SourceError as e:
+                if driver is not None and attempt == 1 and e.status in (401, 403):
+                    continue  # 换来的凭证过期了或被收回：重新换一次
+                raise NetworkError(f"从「{src.name}」取不到：{e}") from e
+        raise NetworkError(f"从「{src.name}」取不到")
+
+    def _file_auth_for(self, agent: AgentNode, spec: remote.PlatformSpec, driver: Any, src: fsrc.FileSource, ref: str,
+                       headers: dict[str, str], refresh: bool) -> tuple[dict[str, str], str | None]:
+        """驱动换出来的下载凭证。驱动只给请求头（没给 url）且给了 ttl_s 时，按（Agent, 来源）缓存，没过期就不再问驱动；
+        给了 url 的（地址按 ref 不同）每次都问驱动，网络不缓存。refresh：上一次的凭证被拒（401 / 403），要驱动重新换。"""
+        key = (agent.id, src.id)
+        with self._lock:
+            if refresh:
+                self._file_auth.pop(key, None)
+            got = self._file_auth.get(key)
+        if got is not None and got[1] > time.time():
+            return got[0], None
+        try:
+            out = driver.file_auth(spec, src.id, ref, dict(headers), refresh=refresh) or {}
+        except remote.PlatformError as e:
+            raise NetworkError(f"从「{src.name}」取不到：换不到下载凭证（{e}）") from e
+        if not isinstance(out, dict):
+            raise NetworkError(f"从「{src.name}」取不到：驱动的 file_auth 没返回 {{headers, url?, ttl_s?}}")
+        url = str(out.get("url") or "") or None
+        use = {str(k): str(v) for k, v in (out.get("headers") or {}).items()}
+        ttl = float(out.get("ttl_s") or 0)
+        with self._lock:
+            if ttl > 0 and not url:
+                self._file_auth[key] = (use, time.time() + ttl)
+            else:
+                self._file_auth.pop(key, None)
+        return use, url
+
     def fetch_into_staging(self, ctx: ExecContext, source: str, ref: str, name: str = "",
                            fresh: bool = False) -> dict[str, Any]:
         """按部署方登记的来源取一个文件，放进这一轮的暂存区（同 /mcp/remote/files），返回 {file_id, name, size, sha256}。
@@ -9403,10 +9455,7 @@ class Network:
         if known is not None and f is not None:
             data, mime, fname = f.read_bytes(), known.get("mime", ""), known["name"]
         else:
-            try:
-                data, mime, fname = fsrc.fetch(src, ref, self._source_headers(agent, src))
-            except fsrc.SourceError as e:
-                raise NetworkError(f"从「{src.name}」取不到：{e}") from e
+            data, mime, fname = self._download(agent, src, ref)
         try:
             out = self.stage_remote_file(ctx, name or fname, data, mime)
         except StagingRefused as e:

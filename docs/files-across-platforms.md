@@ -216,6 +216,28 @@ POST {url}/agents/{agent}/chat   {"message", "session_id", "files": [{name, mime
 POST {url}/files?name=<文件名>     请求体就是文件内容 → {"file_id"}
 ```
 
+### 8.1 取平台文件要定制鉴权：驱动的 `file_auth`
+
+平台的文件下载常常不能直接用平台 API Key：要先换一个下载令牌、按平台的算法签名，或先要一个预签名地址。
+这些各家都不一样，放在驱动里（可选方法，没实现的驱动照旧直接带平台凭证取）：
+
+```python
+def file_auth(self, spec, source_id, ref, headers, refresh=False) -> dict:
+    """headers：这个 Agent 的平台凭证（同发起会话用的那份）。返回
+    {"headers": 这次下载要带的请求头（替换平台凭证）, "url": 可选，实际下载地址, "ttl_s": 可选，headers 能缓存多久}"""
+```
+
+- 来源 `auth: platform` 时，网络取文件前先调取文件的那个 Agent 所在平台的驱动的 `file_auth`（`Network._download`）。
+  `fetch_file`、`file` 事件、`files.scan` 都走这里。
+- **缓存**：只给 `headers`、给了 `ttl_s` 的，按（Agent, 来源）缓存，没过期不再问驱动（不同 Agent 的平台 Key 不同，换出来的也不同）；
+  给了 `url` 的（预签名地址按文件不同）每次都问驱动。只在内存里，不进状态、事件、日志，模型看不到。
+- **被拒就重换一次**：下载返回 401 / 403 时清掉缓存、带 `refresh=True` 再问驱动一次（驱动自己缓存令牌的，这时要重新换），只重试一次。
+- **地址照样受白名单约束**：驱动给的 `url` 也要每一跳都在来源的 `hosts` 里，驱动不能借它取白名单以外的地址；ref 照样要合来源的格式。
+- 换不到时驱动抛 `PlatformError`，这次取文件失败（说明进 `fetch_file` 的返回或 `remote.file` 事件）。
+- 样板：`examples/remote-agent/demo_platform.py` 的 `DemoTokenDriver`（先用 API Key `POST /files/token` 换下载令牌），
+  演示平台 `require_download_token = True` 时只认令牌。
+- 平台的 API Key 要不止一个值（如 AK + SK）时，约定 Agent 设置里 API Key 的写法（如 `ak:sk`），驱动自己拆开。
+
 ## 9. 安全与规则
 
 - **不变量 13（可见性）**：交给平台、签成链接、`export_file` 的都只是这一轮本来拿得到的文件；取回的文件存进这个对话的附件区。
@@ -228,6 +250,8 @@ POST {url}/files?name=<文件名>     请求体就是文件内容 → {"file_id"
 ## 10. 没做的
 
 - 来源的凭证还没有“按调用方授权取”（同平台目录的 `caller`）。
+- 不属于某个平台的来源（`auth: secret`）要先换令牌（如 OAuth2 client_credentials）时还不支持：`file_auth` 只在平台驱动里；
+  可以在来源目录里加一段 `token` 配置（换令牌的地址、表单、取哪个字段、有效期），没做。
 - `upload` 的去重按对话记：同一份文件在别的对话里还会再传一次；平台那边的 file_id 提前失效了 Matrix 不知道，只能靠 `upload_ttl_s`。
 - `files.resend = new` 只看平台会话 id 变没变：平台那边会话还在、却丢了之前收的文件时 Matrix 不知道，这样的平台用 `all`。
 - 平台在流里报的 `file` 事件只支持“来源 + ref”，不支持把内容内联在事件里。

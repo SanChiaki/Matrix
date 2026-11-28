@@ -230,6 +230,15 @@ class Driver(Protocol):
 
     def upload(self, spec: PlatformSpec, name: str, data: bytes, mime: str, headers: dict[str, str]) -> str: ...
 
+    # 可选：取平台文件要定制鉴权时（先换下载令牌、签名、先要预签名地址……）。来源 auth = platform 时，网络取文件前先调它：
+    # headers 是这个 Agent 的平台凭证（同发起会话用的那份），source_id / ref 是要取的来源与文件。返回
+    # {"headers": 这次下载要带的请求头（替换平台凭证）, "url": 可选，实际下载地址（照样要在来源的 hosts 里）,
+    #  "ttl_s": 可选，只给 headers 时它能缓存多久（同一个 Agent + 来源；给了 url 的不缓存，每次都问驱动）}。
+    # 下载返回 401 / 403 时网络清掉缓存、带 refresh=True 再问一次（驱动自己缓存了令牌的，这时要重新换），只重试一次。
+    # 取不到抛 PlatformError。没实现这个方法时，网络直接带平台凭证去取。
+    def file_auth(self, spec: PlatformSpec, source_id: str, ref: str, headers: dict[str, str],
+                  refresh: bool = False) -> dict[str, Any]: ...
+
 
 def files_supported(driver: Any, mode: str) -> bool:
     """驱动支不支持这种交文件的方式（pull 谁都支持：只是提示词里的一节）。"""

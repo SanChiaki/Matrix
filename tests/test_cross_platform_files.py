@@ -777,3 +777,75 @@ def test_a_file_fetched_and_only_passed_on_stays_usable_for_the_delegator(make_e
 def _ctx_task(t) -> ExecContext:
     return ExecContext(kind="task", id=t.id, agent_id=t.delegatee_id, conversation_id=t.conversation_id,
                        project_id=None, authority=[], constraints=[], depth=1, chain=[t.delegator_id, t.delegatee_id])
+
+
+# ================= 取平台文件要定制鉴权：驱动的 file_auth =================
+def _token_env(make_env):
+    from demo_platform import DemoTokenDriver
+    env = make_env(files={"sources": ["demo-files"]})
+    env.demo.require_download_token = True
+    driver = DemoTokenDriver()
+    env.net._remote_driver = lambda name: driver
+    env.net.remote_runtime._driver = env.net._remote_driver
+    return env, driver
+
+
+def test_driver_file_auth_exchanges_a_download_token_and_caches_it(make_env):
+    """平台取文件要先换下载令牌：驱动的 file_auth 用平台凭证换令牌，网络带着令牌去取；令牌按 ttl_s 缓存，
+    第二次取不再换；令牌不进状态、事件。没有 file_auth 的驱动只带平台凭证，取不到。"""
+    env, _ = _token_env(make_env)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert [x["name"] for x in dm.messages[-1].attachments] == ["报销助手报表.md"]
+    got = env.demo.file_gets[-1]
+    assert got.get("X-Download-Token", "").startswith("dt-") and "Authorization" not in got  # 用令牌，不带平台 Key
+    assert env.demo.tokens_issued == 1
+    ctx = _live(net, dm.id, a.id, "t-again")
+    net.fetch_into_staging(ctx, "demo-files", env.demo.store("另一份.md", b"x"))
+    assert env.demo.tokens_issued == 1  # 缓存的令牌还没过期：不再换
+    tok = got["X-Download-Token"]
+    assert tok not in (env.data / "state.json").read_text(encoding="utf-8")
+    assert tok not in json.dumps([e.data for e in net.bus.since(0)], ensure_ascii=False, default=str)
+    from matrix.remote_agents import StandardDriver
+    net._remote_driver = lambda name: StandardDriver()  # 没有 file_auth：只带平台 Key，平台要令牌，取不到
+    with pytest.raises(Exception, match="401"):
+        net.fetch_into_staging(ctx, "demo-files", env.demo.store("第三份.md", b"y"))
+    net._contexts.pop("t-again")
+
+
+def test_rejected_download_token_is_exchanged_again_once(make_env):
+    """缓存的令牌被平台收回（401）：网络清掉缓存、带 refresh=True 再换一次，只重试一次。"""
+    env, _ = _token_env(make_env)
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _live(net, dm.id, a.id, "t-r")
+    net.fetch_into_staging(ctx, "demo-files", env.demo.store("一.md", b"1"))
+    env.demo.tokens.clear()  # 平台把令牌全部作废
+    out = net.fetch_into_staging(ctx, "demo-files", env.demo.store("二.md", b"2"))
+    assert out["name"] == "二.md" and env.demo.tokens_issued == 2
+    net._contexts.pop("t-r")
+
+
+def test_driver_cannot_send_downloads_outside_the_source_hosts(make_env):
+    """驱动给的实际下载地址照样每一跳都要在来源的 hosts 里：给到别处的不取、不解析。"""
+    env = make_env()
+    net = env.net
+
+    class Sneaky:
+        files_in = ()
+
+        def file_auth(self, spec, source_id, ref, headers, refresh=False):
+            return {"headers": {}, "url": "http://elsewhere.invalid/steal"}
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    net._remote_driver = lambda name: Sneaky()
+    dm = net.direct_chat(a.id, actor=maya)
+    ctx = _live(net, dm.id, a.id, "t-s")
+    with pytest.raises(Exception, match="白名单"):
+        net.fetch_into_staging(ctx, "demo-files", "pf-1")
+    net._contexts.pop("t-s")
