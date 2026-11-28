@@ -726,3 +726,54 @@ def test_scan_respects_what_the_model_already_decided_with_fetch_file(make_env):
     ev = _scan_events(net)[-1]
     assert ev["outcome"] == "skipped" and "fetch_file" in ev["note"]
     net._contexts.pop("t-scan")
+
+
+def test_a_file_fetched_and_only_passed_on_stays_usable_for_the_delegator(make_env):
+    """模型 fetch_file 后只转交给委托的成员：文件只挂在那条委托上，不进群聊、别的成员拿不到；
+    委托方之后几轮还认得它（旧的 file_id、同一个 ref 都不用再去来源取），可以再转给别人。"""
+    env = make_env()
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    b = net.create_agent("分析员", "d", [], [], actor=maya)
+    c = net.create_agent("旁观者", "d", [], [], actor=maya)
+    g = net.create_project("报销", "", [a.id, b.id, c.id], actor=maya)
+    chat = net.project_chat(g.id, actor=maya)
+    fid = env.demo.store("底稿.md", b"draft for the analyst")
+    net.send_message(chat.id, f"@{a.name} 在吗", actor=maya, background=False)  # 先有席位
+    net.wait_idle(chat.id)
+
+    def seat(agent, token):
+        ctx = ExecContext(kind="seat", id=f"{chat.id}/{agent.id}", agent_id=agent.id, conversation_id=chat.id,
+                          project_id=g.id, authority=["delegate"], constraints=[], depth=0, chain=[agent.id])
+        ctx.file_tools = net._file_tools(ctx, agent)
+        net._contexts[token] = ctx
+        return ctx
+    first = seat(a, "t-1")
+    text, bad = net.handle_tool("t-1", "fetch_file", {"source": "demo-files", "ref": fid})
+    stg = next(iter(first.staged))
+    text, bad = net.handle_tool("t-1", "delegate", {"agent": b.name, "mission": "看看底稿", "expected_outcome": "一句话",
+                                                    "attachments": stg})
+    assert not bad, text
+    net._contexts.pop("t-1")
+    net._drop_staged(first)
+    t = next(t for t in net.store.tasks.values() if t.delegatee_id == b.id)
+    assert [x["name"] for x in t.attachments] == ["底稿.md"]
+    assert all(not m.attachments for m in chat.messages)  # 不进群聊
+    with net._lock:
+        assert net._attachments_for(_ctx_task(t)) == t.attachments  # 执行者拿得到
+        assert not net._attachments_for(seat(c, "t-c"))             # 别的成员拿不到
+    # 下一轮：委托方还认得这份文件，再转给别人不用再去来源取（平台那边删了也不怕）
+    del env.demo.files[fid]
+    n = len(env.demo.file_gets)
+    again = seat(a, "t-2")
+    assert net._pass_attachments(again, stg) == t.attachments
+    out = net.fetch_into_staging(again, "demo-files", fid)
+    assert out["cached"] and len(env.demo.file_gets) == n
+    for tok in ("t-2", "t-c"):
+        net._contexts.pop(tok)
+
+
+def _ctx_task(t) -> ExecContext:
+    return ExecContext(kind="task", id=t.id, agent_id=t.delegatee_id, conversation_id=t.conversation_id,
+                       project_id=None, authority=[], constraints=[], depth=1, chain=[t.delegator_id, t.delegatee_id])

@@ -179,6 +179,7 @@ ref 恰好匹配一个来源的 `ref` 正则才取；一个都不匹配、或匹
 | --- | --- |
 | `fetch_file` 又取同一个（来源, ref） | 直接从附件区放进这一轮的暂存区，不访问来源：平台的临时链接过期了、平台那边删了都不影响。`fresh=true` 或来源 `cache: false` 时重新取 |
 | 下一轮写上一轮的暂存 file_id（`stg_…`） | `send_file`、`delegate` 的 `attachments`、`export_file` 都认它当时发出去的那份附件 |
+| 取来只转交给委托的成员（`delegate` 的 `attachments`） | 文件只挂在那条委托上（`Task.attachments`）：执行者拿得到，看得到这条委托的人在任务详情里能下载，不进群聊、别的成员拿不到；委托方自己之后几轮也还认得（它的可见范围含它发起的委托里转交出去的附件），旧的 file_id、同一个 ref 都不用再去来源取，可以再转给别人 |
 | 平台每轮都把会话里的文件报一遍 | `files.repeat = skip`（默认）：这个 Agent 在这个对话里（委托任务里是这个任务）已经发过的同一份文件不再附，也不再取；`attach` 照附，但不重新取。模型自己调 `send_file` 的照发 |
 | `upload` 方式每轮都要平台的 file_id | 记在对话上（`Conversation.remote_files`），重启后也认；`upload_ttl_s` 过期重传 |
 | `url` / `upload` 方式每轮都交全部文件 | `files.resend = new`：同一个平台会话里只交上一轮之后新出现的，提示词里照样列出全部（标“之前已经交给过你的平台”）；平台会话 id 一变就再交全部。请求体里本来就带 `sha256`，平台自己也能按它去重 |

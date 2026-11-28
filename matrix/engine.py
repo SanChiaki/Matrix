@@ -5099,12 +5099,13 @@ class Network:
 
     def _attachments_for(self, ctx: ExecContext) -> list[dict[str, Any]]:
         """调用方持有锁。这个执行上下文能拿到的附件：席位是对话里它能看到的消息上的，任务是委托方转交的。"""
-        # 它发起、已经交付的委托里执行者发出的文件（外部平台执行者的产物）：只给直接委托方
-        delivered = [a for t in self.store.tasks.values()
-                     if t.delivered_at is not None and t.delegator_id == ctx.agent_id
-                     and (t.parent_task_id == ctx.id if ctx.kind == "task"
-                          else t.parent_task_id is None and t.conversation_id == ctx.conversation_id)
-                     for a in t.sent_files]
+        mine_tasks = [t for t in self.store.tasks.values() if t.delegator_id == ctx.agent_id
+                      and (t.parent_task_id == ctx.id if ctx.kind == "task"
+                           else t.parent_task_id is None and t.conversation_id == ctx.conversation_id)]
+        # 它发起、已经交付的委托里执行者发出的文件（外部平台执行者的产物）：只给直接委托方；
+        # 它自己转交出去的附件（delegate 的 attachments）：本来就是它拿到、它转出去的，之后几轮也还认得、还能再转
+        delivered = [a for t in mine_tasks if t.delivered_at is not None for a in t.sent_files] + \
+            [a for t in mine_tasks for a in t.attachments]
         if ctx.kind == "task":
             t = self.store.tasks.get(ctx.id)
             return _merge_files(list(t.attachments) if t else [], delivered)
