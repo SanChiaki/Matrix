@@ -469,12 +469,19 @@ class Conversation:
     archived: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # 跨平台的文件（docs/files-across-platforms.md）：多轮里反复提到的同一个文件 id 指哪份附件
+    # （"src:<来源>:<ref>" / "stg:<暂存 file_id>" → sha）；外部平台 Agent 在这个对话里传到平台的文件与交过的文件
+    # （Agent id → {"uploads": {sha: [平台 file_id, 时间]}, "handed": {执行上下文 id: {"sid", "shas"}}}）
+    file_refs: dict[str, str] = field(default_factory=dict)
+    remote_files: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self, full: bool = True) -> dict[str, Any]:
         """full=True 用于持久化（含收件箱）；full=False 是列表摘要。"""
         d = asdict(self)
         if not full:
             d.pop("messages")
+            d.pop("file_refs")      # 里面可能有平台给的临时链接：只持久化，不进事件与接口返回
+            d.pop("remote_files")
             d["seats"] = {k: s.public() for k, s in self.seats.items()}
             d["message_count"] = len(self.messages)
             last = next((m for m in reversed(self.messages) if m.role != "event"), None)

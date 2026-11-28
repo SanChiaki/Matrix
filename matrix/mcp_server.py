@@ -132,6 +132,8 @@ TOOLS = [
                 "source": {"type": "string", "description": "来源 id（提示词“外部文件来源”里列出的）"},
                 "ref": {"type": "string", "description": "那个文件在来源里的 id，或它的下载链接（按来源的说明写）"},
                 "name": {"type": "string", "description": "可选：文件名（默认取来源给的）"},
+                "fresh": {"type": "boolean",
+                          "description": "可选：true = 一定重新取（默认这个对话里取过的同一个文件直接用已有的那份）"},
             },
             "required": ["source", "ref"],
             "additionalProperties": False,

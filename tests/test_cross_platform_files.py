@@ -30,15 +30,17 @@ from demo_platform import API_KEY, DemoPlatform, report  # noqa: E402
 class Env:
     """演示平台 + Matrix。`files` 是平台目录里 demo 平台的 files 配置；来源目录里登记了演示平台的文件库（带平台凭证）。"""
 
-    def __init__(self, tmp_path: Path, files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None):
-        data = tmp_path / "data"
+    def __init__(self, tmp_path: Path, files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None,
+                 extra_platforms: list[dict] | None = None):
+        self.data = data = tmp_path / "data"
         data.mkdir()
         self.demo = DemoPlatform(mcp_post=self._mcp_post, file_post=self._file_post, file_get=self._file_get)
-        plats = tmp_path / "agent-platforms.json"
+        self.plats = plats = tmp_path / "agent-platforms.json"
         plats.write_text(json.dumps({"platforms": [
             {"id": "demo", "name": "演示平台", "url": self.demo.url, "bind_wait_s": 3, **({"files": files} if files else {})},
+            *[{"url": self.demo.url, "bind_wait_s": 3, **p} for p in (extra_platforms or [])],
         ]}), encoding="utf-8")
-        srcs = tmp_path / "file-sources.json"
+        self.srcs = srcs = tmp_path / "file-sources.json"
         srcs.write_text(json.dumps({"sources": [
             {"id": "demo-files", "name": "演示平台的文件库", "url": self.demo.url + "/files/{ref}/content",
              "auth": "platform", "platform": "demo", "hint": "平台的文件 id（pf-…）"},
@@ -73,8 +75,9 @@ class Env:
 def make_env(tmp_path: Path):
     made: list[Env] = []
 
-    def make(files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None) -> Env:
-        e = Env(tmp_path, files, extra_sources)
+    def make(files: dict[str, Any] | None = None, extra_sources: list[dict] | None = None,
+             extra_platforms: list[dict] | None = None) -> Env:
+        e = Env(tmp_path, files, extra_sources, extra_platforms)
         made.append(e)
         return e
     yield make
@@ -87,6 +90,7 @@ class FileHost:
 
     def __init__(self) -> None:
         self.seen: list[tuple[str, str]] = []   # (路径, Authorization)
+        self.headers: list[dict[str, str]] = []  # 每个请求的全部请求头
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -95,6 +99,7 @@ class FileHost:
 
             def do_GET(self) -> None:  # noqa: N802
                 outer.seen.append((self.path, self.headers.get("Authorization", "")))
+                outer.headers.append(dict(self.headers))
                 port = self.server.server_address[1]
                 if self.path == "/r":
                     self.send_response(302)
@@ -313,7 +318,8 @@ def test_platform_files_config_is_validated():
     with pytest.raises(PlatformError, match="files.export"):
         parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"export": "mail"}}]})
     p, = parse_platforms({"platforms": [{"id": "x", "url": "http://x"}]})
-    assert (p.files_in, p.files_export, p.files_source) == ("pull", None, None)  # 不写 files：和原来一样
+    assert (p.files_in, p.files_export, p.files_sources) == ("pull", None, ())  # 不写 files：和原来一样
+    assert (p.files_repeat, p.files_resend, p.files_upload_ttl_s) == ("skip", "all", 0)
     q, = parse_platforms({"platforms": [{"id": "x", "url": "http://x", "files": {"matrix_url": "https://m.example/"}}]})
     assert q.files_export == "url" and q.matrix_url == "https://m.example"
 
@@ -336,3 +342,189 @@ def test_a_driver_without_file_support_falls_back_to_pull(make_env):
     assert not env.demo.received_last and not env.demo.files
     assert f"GET /mcp/remote/files/{meta['sha']}" in env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
     assert any(e.type == "remote.files_fallback" for e in net.bus.since(0))
+
+
+# ================= 一个来源给几个平台用、一个平台用几个来源 =================
+def _live(net: Network, dm_id: str, agent_id: str, token: str) -> ExecContext:
+    ctx = _ctx(dm_id, agent_id)
+    net._contexts[token] = ctx
+    return ctx
+
+
+def test_one_source_serves_several_platforms_each_with_its_own_credentials(make_env, host: FileHost):
+    """来源的 for 写几个平台：auth = platform 时每个 Agent 带自己所在平台的凭证（请求头按那个平台的写法），
+    谁也拿不到别的平台的；for 里没有的平台、云侧 Agent 都用不了。"""
+    env = make_env(
+        extra_sources=[{"id": "oss", "name": "共享暂存", "url": "{ref}", "hosts": ["127.0.0.1"],
+                        "auth": "platform", "for": ["demo", "demo2"]}],
+        extra_platforms=[{"id": "demo2", "name": "第二个平台", "auth": {"header": "X-Platform-Key", "template": "Token {value}"}},
+                         {"id": "other", "name": "没登记的平台"}])
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    b = net.add_remote_agent("demo2", "travel", "key-two", name="第二个平台的 Agent", actor=maya)
+    c = net.add_remote_agent("other", "expense", "key-three", name="别的平台的 Agent", actor=maya)
+    cloud = net.create_agent("云侧助手", "d", [], [], actor=maya)
+    assert [x.id for x in net._sources_for(a)] == ["demo-files", "oss"]
+    assert [x.id for x in net._sources_for(b)] == ["oss"]  # demo-files 只给 demo
+    assert net._sources_for(c) == [] and net._sources_for(cloud) == []
+    url = f"http://127.0.0.1:{host.port}/f"
+    for agent, token in ((a, "t-a"), (b, "t-b")):
+        dm = net.direct_chat(agent.id, actor=maya)
+        net.fetch_into_staging(_live(net, dm.id, agent.id, token), "oss", url)
+    sent = [(h.get("Authorization"), h.get("X-Platform-Key")) for h in host.headers]
+    assert sent == [(f"Bearer {API_KEY}", None), (None, "Token key-two")]
+    dm = net.direct_chat(c.id, actor=maya)
+    with pytest.raises(Exception, match="没有能用的来源"):
+        net.fetch_into_staging(_live(net, dm.id, c.id, "t-c"), "oss", url)
+
+
+def test_secret_source_carries_the_deployers_key_only(make_env, host: FileHost, monkeypatch: pytest.MonkeyPatch):
+    """auth = secret：带部署方给这个来源存的密钥（保管库，命令行从标准输入写入），没存就不取。"""
+    import io
+
+    from matrix import server
+    env = make_env(extra_sources=[{"id": "dms", "name": "文档中心", "url": "{ref}", "hosts": ["127.0.0.1"],
+                                   "auth": "secret", "header": "X-Api-Key", "template": "{value}", "for": ["cloud"]}])
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    cloud = net.create_agent("云侧助手", "d", [], [], actor=maya)
+    dm = net.direct_chat(cloud.id, actor=maya)
+    ctx = _live(net, dm.id, cloud.id, "t-cloud")
+    url = f"http://127.0.0.1:{host.port}/f"
+    with pytest.raises(Exception, match="file-source-secret dms"):
+        net.fetch_into_staging(ctx, "dms", url)
+    assert host.headers == []  # 没有密钥就不发请求
+    monkeypatch.setattr("sys.stdin", io.StringIO("dms-secret-value\n"))
+    server.file_source_secret(["dms", "--data", str(env.data)])
+    net.fetch_into_staging(ctx, "dms", url)
+    assert host.headers[-1].get("X-Api-Key") == "dms-secret-value" and not host.headers[-1].get("Authorization")
+    assert "dms-secret-value" not in (env.data / "state.json").read_text(encoding="utf-8")
+
+
+def test_a_platform_with_several_sources_picks_one_by_the_ref_format(make_env, host: FileHost):
+    """files.sources 写几个来源：平台报的文件按 ref 格式选，恰好匹配一个才取（平台文件 id 与第三方链接各走各的）；
+    部署方没把正则写开、两个来源都匹配时不猜，启动检查也会报出来。"""
+    env = make_env(files={"sources": ["demo-files", "oss"]},
+                   extra_sources=[{"id": "oss", "name": "共享暂存", "url": "{ref}", "hosts": ["127.0.0.1"]}])
+    net = env.net
+    assert net.file_config_problems() == []
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, f"报文件，再报链接「http://127.0.0.1:{host.port}/f」", actor=maya, background=False)
+    assert sorted(x["name"] for x in dm.messages[-1].attachments) == ["报表.csv", "报销助手报表.md"]
+
+    env.srcs.write_text(json.dumps({"sources": [
+        {"id": "demo-files", "url": env.demo.url + "/files/{ref}/content", "auth": "platform", "for": ["demo"]},
+        {"id": "mirror", "url": env.demo.url + "/mirror/{ref}"}]}), encoding="utf-8")
+    import os
+    os.utime(env.srcs, (1, 1))  # 换了内容的目录：按修改时间重新读
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace('"oss"', '"mirror"'), encoding="utf-8")
+    os.utime(env.plats, (1, 1))
+    assert any("ref 格式一样" in p for p in net.file_config_problems())
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert not dm.messages[-1].attachments
+    ev = [e.data for e in net.bus.since(0) if e.type == "remote.file"][-1]
+    assert ev["outcome"] == "failed" and "同时符合几个文件来源" in ev["note"]
+
+
+def test_platform_files_config_names_unknown_or_unusable_sources(make_env):
+    """启动检查：files.sources 里写了来源目录里没有的、或没给这个平台用的来源。"""
+    env = make_env(files={"sources": ["nope", "oss"]},
+                   extra_sources=[{"id": "oss", "url": "{ref}", "hosts": ["x.example"], "auth": "platform", "for": ["elsewhere"]}])
+    probs = env.net.file_config_problems()
+    assert any("nope" in p and "没有" in p for p in probs) and any("oss" in p and "没给这个平台用" in p for p in probs)
+
+
+# ================= 多轮对话反复提到同一个文件 =================
+def test_a_file_fetched_before_is_reused_when_mentioned_again(make_env):
+    """同一个对话里取过的（来源, ref）再取时直接用已有的那份：不再访问来源（平台的临时链接过期了也不怕）；
+    fresh=true 或来源 cache=false 时重新取；别的对话里的不算（每个对话各记各的，可见性不放宽）。"""
+    env = make_env(extra_sources=[{"id": "live", "name": "会变的文件", "url": "{ref}", "hosts": ["127.0.0.1"], "cache": False}])
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    env.connect_mcp(a.id, maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "拉文件「demo-files」", actor=maya, background=False)
+    first = dm.messages[-1].attachments[0]
+    fid = next(iter(env.demo.files))
+    assert dm.file_refs[f"src:demo-files:{fid}"] == first["sha"]
+    n = len(env.demo.file_gets)
+    del env.demo.files[fid]  # 平台那边已经删了 / 链接过期了
+    ctx = _live(net, dm.id, a.id, "t-2")
+    out = net.fetch_into_staging(ctx, "demo-files", fid)
+    assert out["cached"] and out["sha256"] == first["sha"] and len(env.demo.file_gets) == n
+    with pytest.raises(Exception, match="404"):
+        net.fetch_into_staging(ctx, "demo-files", fid, fresh=True)  # 一定要最新的：去平台取，取不到就是取不到
+    other = net.direct_chat(net.add_remote_agent("demo", "travel", API_KEY, actor=maya).id, actor=maya)
+    with pytest.raises(Exception, match="404"):
+        net.fetch_into_staging(_live(net, other.id, a.id, "t-3"), "demo-files", fid)
+    # 旧的暂存 file_id 也认：下一轮 delegate 的 attachments / send_file 写它，就是当时发出去的那份
+    old = next(k[4:] for k in dm.file_refs if k.startswith("stg:"))
+    assert net._pass_attachments(ctx, old) == [first]
+    assert "file_refs" not in net.conversation_view(dm, maya)  # 只持久化，不进接口返回
+
+
+def test_platform_reporting_the_same_file_every_round_attaches_it_once(make_env):
+    """平台每一轮都把会话里的文件报一遍：files.repeat = skip（默认）时已经发过的不再附，也不再取；attach 时照附，但不重新取。"""
+    env = make_env(files={"sources": ["demo-files"]})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert [x["name"] for x in dm.messages[-1].attachments] == ["报销助手报表.md"]
+    n = len(env.demo.file_gets)
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert not dm.messages[-1].attachments and len(env.demo.file_gets) == n
+    ev = [e.data for e in net.bus.since(0) if e.type == "remote.file"][-1]
+    assert ev["outcome"] == "skipped" and "之前已经发过" in ev["note"]
+    import os
+    env.plats.write_text(env.plats.read_text(encoding="utf-8").replace('"sources"', '"repeat": "attach", "sources"'),
+                         encoding="utf-8")
+    os.utime(env.plats, (1, 1))
+    net.send_message(dm.id, "报文件", actor=maya, background=False)
+    assert [x["name"] for x in dm.messages[-1].attachments] == ["报销助手报表.md"] and len(env.demo.file_gets) == n
+
+
+def test_uploaded_platform_file_ids_survive_a_restart_and_expire(make_env):
+    """files.in = upload：传过的平台 file_id 记在对话上（重启后也认），过了 files.upload_ttl_s 才重传。"""
+    env = make_env(files={"in": "upload", "upload_ttl_s": 3600})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    meta = net.upload_attachment(dm.id, "发票.pdf", b"%PDF-1.4 invoice", "application/pdf", actor=maya)
+    net.send_message(dm.id, "看看", attachments=[meta], actor=maya, background=False)
+    again = Network(ScriptedRuntime(lambda call: ""), env.data, seed=False, platforms=PlatformCatalog(env.plats),
+                    file_sources=SourceCatalog(env.srcs))
+    ups = again.store.conversations[dm.id].remote_files[a.id]["uploads"]
+    assert list(ups) == [meta["sha"]] and ups[meta["sha"]][0] in env.demo.files
+    net.send_message(dm.id, "再看看", actor=maya, background=False)
+    assert len(env.demo.files) == 1
+    dm.remote_files[a.id]["uploads"][meta["sha"]][1] -= 7200  # 过期了
+    net.send_message(dm.id, "第三次", actor=maya, background=False)
+    assert len(env.demo.files) == 2 and env.demo.received_last[0]["file_id"] != ups[meta["sha"]][0]
+
+
+def test_resend_new_hands_only_new_files_within_the_same_platform_session(make_env):
+    """files.resend = new：同一个平台会话里只交上一轮之后新出现的文件；会话 id 变了（新会话）就再交全部。"""
+    env = make_env(files={"in": "url", "matrix_url": "http://matrix", "resend": "new"})
+    net = env.net
+    maya, = users(net, "maya@x.io")
+    a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
+    dm = net.direct_chat(a.id, actor=maya)
+    first = net.upload_attachment(dm.id, "一.txt", b"one", "text/plain", actor=maya)
+    net.send_message(dm.id, "第一份", attachments=[first], actor=maya, background=False)
+    assert [f["name"] for f in env.demo.received_last] == ["一.txt"]
+    second = net.upload_attachment(dm.id, "二.txt", b"two", "text/plain", actor=maya)
+    net.send_message(dm.id, "第二份", attachments=[second], actor=maya, background=False)
+    assert [f["name"] for f in env.demo.received_last] == ["二.txt"]
+    prompt = env.demo.sessions[dm.seats[a.id].dsh_session_id][-1]
+    assert "一.txt" in prompt and "之前已经交给过你的平台" in prompt  # 提示词里照样列出全部
+    dm.seats[a.id].dsh_session_id = None  # 平台会话换了
+    third = net.upload_attachment(dm.id, "三.txt", b"three", "text/plain", actor=maya)
+    net.send_message(dm.id, "第三份", attachments=[third], actor=maya, background=False)
+    assert sorted(f["name"] for f in env.demo.received_last) == ["一.txt", "三.txt", "二.txt"]

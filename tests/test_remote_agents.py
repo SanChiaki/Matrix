@@ -358,7 +358,8 @@ def test_legacy_sse_transport_follows_the_same_rules(env: Env):
 
 def test_platform_files_are_staged_then_sent_in_the_same_round(env: Env):
     """外部平台 Agent 发文件：平台把文件 POST 到 /mcp/remote/files 拿 file_id，同一轮 send_file(file_id=…) 附在回复上；
-    暂存只属于那一轮，一轮结束就删，下一轮拿旧 file_id 发不出去；没有 file_id 时 path 读不到平台上的文件，提示先暂存。"""
+    暂存只属于那一轮，一轮结束就删；下一轮再拿旧 file_id，认的是它当时发出去、存在对话里的那份附件
+    （docs/files-across-platforms.md 第 5 节）；没有 file_id 时 path 读不到平台上的文件，提示先暂存。"""
     net = env.net
     maya, = users(net, "maya@x.io")
     a = net.add_remote_agent("demo", "expense", API_KEY, actor=maya)
@@ -374,12 +375,20 @@ def test_platform_files_are_staged_then_sent_in_the_same_round(env: Env):
     assert f.read_bytes() == report("expense") and meta["mime"].startswith("text/")
     assert not any((net.store.root / "staging").iterdir())  # 一轮结束：暂存删掉，发出去的在对话的附件区
     net.send_message(dm.id, f"转发「{staged['file_id']}」", actor=maya, background=False)
-    assert "找不到暂存文件" in dm.messages[-1].text and not dm.messages[-1].attachments
+    assert [x["sha"] for x in dm.messages[-1].attachments] == [reply.attachments[0]["sha"]]
+    assert not any((net.store.root / "staging").iterdir())
+    text, bad = net._tool_send_file(_ctx_for(dm.id, a.id), {"file_id": "stg_never"})
+    assert bad and "找不到暂存文件" in text
     # 外部 Agent 给 path：文件在它自己的平台上，Matrix 读不到，提示先暂存
     ctx = ExecContext(kind="seat", id=f"{dm.id}/{a.id}", agent_id=a.id, conversation_id=dm.id, project_id=None,
                       authority=[], constraints=[], depth=0, chain=[a.id])
     text, bad = net._tool_send_file(ctx, {"path": "report.md"})
     assert bad and "/mcp/remote/files" in text
+
+
+def _ctx_for(dm_id: str, agent_id: str) -> ExecContext:
+    return ExecContext(kind="seat", id=f"{dm_id}/{agent_id}", agent_id=agent_id, conversation_id=dm_id, project_id=None,
+                       authority=[], constraints=[], depth=0, chain=[agent_id])
 
 
 def test_staging_needs_the_key_and_a_live_matrix_round(env: Env, monkeypatch: pytest.MonkeyPatch):

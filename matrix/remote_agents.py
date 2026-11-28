@@ -21,7 +21,10 @@
 - `files`（可省略，docs/files-across-platforms.md）：这个平台怎么收发文件——
   `in`：这一轮拿得到的文件怎么交给平台。`pull`（默认）在消息末尾列出，平台带 MCP 密钥来取；
   `url` 随对话请求附上 Matrix 签的短期链接（这一轮有效，平台不用带请求头）；`upload` 先传到平台自己的文件接口，附上平台的 file_id。
-  `source`：平台在流里报 `file` 事件时，ref 按 file-sources.json 里的哪个来源取。
+  `sources`：平台在流里报 `file` 事件时，ref 按 file-sources.json 里的哪些来源取（按 ref 正则选，恰好匹配一个才取；
+  写一个字符串 `source` 也认）。`repeat`：平台又报了这个对话里它已经发过的文件时，`skip`（默认，不再附）或 `attach`。
+  `upload_ttl_s`：`upload` 传过的平台 file_id 用多久（默认 0 = 一直用）。`resend`：`all`（默认，每轮交这一轮拿得到的全部）
+  或 `new`（同一个平台会话里只交上一轮之后新出现的）。
   `export`：export_file 工具把 Matrix 的文件交给平台的方式（`url` / `upload`；不写时有 matrix_url 就是 `url`）。
   `matrix_url`：平台访问 Matrix 用的地址（签短期链接用），如 https://matrix.corp.example。
 
@@ -32,8 +35,8 @@
          {"message": ..., "session_id": ..., "files": [...]}  files 只在 files.in 是 url / upload 时有：
             每项 {name, mime, size, sha256, url | file_id}
          -> text/event-stream：event: session {"session_id"} 必须最先；delta {"text"}；tool {"name", "input"}；
-            done {"text"}（最终回复）；error {"message"}；可选 file {"ref", "name"?}（平台产出的文件：Matrix 按 files.source
-            取回、附在这一轮的回复上）；可选 progress {"kind", ...}（被委托方的进展与心跳；
+            done {"text"}（最终回复）；error {"message"}；可选 file {"ref", "name"?}（平台产出的文件：Matrix 按 files.sources
+            里 ref 格式对得上的那个来源取回、附在这一轮的回复上）；可选 progress {"kind", ...}（被委托方的进展与心跳；
             作为调用方，这里不认识的事件一律跳过）
     POST {url}/sessions/{session_id}/interrupt
     POST {url}/files?name=<文件名>           请求体就是文件内容 -> {"file_id": ...}   （只在 files.in / export 是 upload 时用）
@@ -94,7 +97,10 @@ class PlatformSpec:
     timeout_s: float = 900
     proxy: str = "direct"
     files_in: str = "pull"             # pull | url | upload
-    files_source: str | None = None     # 流里 file 事件的 ref 按哪个文件来源取
+    files_sources: tuple[str, ...] = ()  # 流里 file 事件的 ref 按哪些文件来源取（按 ref 正则选）
+    files_repeat: str = "skip"          # 平台又报了已经发过的文件：skip | attach
+    files_upload_ttl_s: float = 0       # upload 传过的平台 file_id 用多久；0 = 一直用
+    files_resend: str = "all"           # all | new（同一个平台会话里只交新出现的）
     files_export: str | None = None     # export_file 的方式：url | upload；None = 没有这个工具
     matrix_url: str = ""                # 平台访问 Matrix 的地址（签短期链接用）
 
@@ -147,13 +153,27 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
             raise PlatformError(f"{pid} 的 files.export 只能是 url / upload / none")
         if "url" in (f_in, f_export) and not matrix_url:
             raise PlatformError(f"{pid} 用短期链接交文件（files.in / export 是 url）：要写 files.matrix_url")
+        f_sources = files.get("sources", [files["source"]] if files.get("source") else [])
+        if isinstance(f_sources, str):
+            f_sources = [f_sources]
+        if not isinstance(f_sources, list) or not all(isinstance(x, str) and x for x in f_sources):
+            raise PlatformError(f"{pid} 的 files.sources 要是来源 id 的列表")
+        f_repeat, f_resend = str(files.get("repeat") or "skip"), str(files.get("resend") or "all")
+        if f_repeat not in ("skip", "attach"):
+            raise PlatformError(f"{pid} 的 files.repeat 只能是 skip / attach")
+        if f_resend not in ("all", "new"):
+            raise PlatformError(f"{pid} 的 files.resend 只能是 all / new")
+        try:
+            f_ttl = float(files.get("upload_ttl_s", 0) or 0)
+        except (TypeError, ValueError) as e:
+            raise PlatformError(f"{pid} 的 files.upload_ttl_s 要是秒数") from e
         out.append(PlatformSpec(
             id=pid, name=str(p.get("name") or pid), url=url, driver=str(p.get("driver") or "standard"),
             auth_header=headers[0], auth_template=str(auth.get("template", "Bearer {value}")),
             auth_label=str(auth.get("label", "平台 API Key")), mcp_session_header=headers[1], caller=cal,
             bind_wait_s=float(p.get("bind_wait_s", 30)), timeout_s=float(p.get("timeout_s", 900)), proxy=proxy,
-            files_in=f_in, files_source=str(files["source"]) if files.get("source") else None,
-            files_export=f_export, matrix_url=matrix_url))
+            files_in=f_in, files_sources=tuple(dict.fromkeys(f_sources)), files_repeat=f_repeat,
+            files_upload_ttl_s=max(0.0, f_ttl), files_resend=f_resend, files_export=f_export, matrix_url=matrix_url))
     return out
 
 
@@ -426,7 +446,7 @@ class RemoteRuntime:
                         args = {"ref": ev.get("ref", ""), "name": ev.get("name", "")}
                         emit({"type": "tool_call", "callId": cid, "tool": "file", "input": args})
                         text, bad = (call.on_file(args["ref"], args["name"]) if call.on_file is not None
-                                     else ("这个平台没有配置 files.source：平台报的文件取不回来", True))
+                                     else ("这个平台没有配置 files.sources：平台报的文件取不回来", True))
                         status = "failed" if bad else "completed"
                         state["tools"].append({"tool": "file", "input": args, "status": status, "result": text})
                         emit({"type": "tool_result", "callId": cid, "status": status, "result": text})

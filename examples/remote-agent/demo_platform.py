@@ -19,7 +19,8 @@
 - 消息里有“发文件”：在平台上写一份演示报告，POST 到 Matrix 的 `<MCP 地址>/files`（同一份请求头 + `X-Session-Id`）拿 file_id，
   再经 MCP 调 send_file(file_id=…) 附在回复上（委托任务里就是随交付交回）；“转发「stg_…」”是拿一个给定的 file_id 调 send_file；
 - 消息里有“委托「成员」带文件：<要它做的事>”：先暂存一份报告，再 delegate，attachments 写 file_id，mission 是冒号后面那句；
-- 消息里有“报文件”：把报告存进平台自己的文件库，在流里报 `file {ref, name}`（Matrix 按 files.source 取回）；
+- 消息里有“报文件”：把报告存进平台自己的文件库（同一个 Agent 一直是同一个 file_id，像平台每轮都报一遍会话里的文件），
+  在流里报 `file {ref, name}`（Matrix 按 files.sources 取回）；“报链接「<链接>」”：报一个放在第三方暂存的文件；
 - 消息里有“拉文件「来源」”：把报告存进平台自己的文件库，经 MCP 调 fetch_file(source=来源, ref=file_id)，再 send_file；
 - 消息里有“导出”：对这一轮列出的第一个文件调 export_file，按返回的短期链接取下来（或拿到平台的 file_id）；
 - Matrix 在消息末尾列了这一轮拿得到的文件（`GET /mcp/remote/files/<sha256>`）：平台都取下来，回复里说收到了哪些、多大；
@@ -116,6 +117,7 @@ class DemoPlatform:
         self.received: list[dict[str, Any]] = []        # 对话请求里收到的 files（每项另记取到的内容 data）
         self.received_last: list[dict[str, Any]] = []   # 上一轮收到的（回复之后挪到这里）
         self.file_gets: list[dict[str, str]] = []       # 取平台文件时带的请求头
+        self.reported: dict[str, str] = {}              # agent → “报文件”报过的那个 file_id
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -332,7 +334,11 @@ class DemoPlatform:
                 parts.append(out)
         if "报文件" in message:  # 平台产出的文件：放进平台自己的文件库，在流里报出来，Matrix 取回附在回复上
             name = f"{AGENTS[agent]['name'][:4]}报表.md"
-            send("file", {"ref": self.store(name, report(agent)), "name": name})
+            fid = self.reported.get(agent) or self.store(name, report(agent))
+            self.reported[agent] = fid
+            send("file", {"ref": fid, "name": name})
+        for link in re.findall(r"报链接「(\S+?)」", message):
+            send("file", {"ref": link})
         if self.received:
             parts.append("随消息收到：" + "、".join(f"{f['name']}（{len(f['data'])} 字节）" for f in self.received
                                                 if f.get("code") == 200))

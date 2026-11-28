@@ -36,7 +36,7 @@ from .sandboxes import hello_message as sandbox_hello, provider_named, sandbox_c
 from .engine import HookRateLimited, NeedsConfirm, Network, NetworkError, StagingRefused
 from . import mcp_sse
 from .remote_agents import PlatformCatalog
-from .file_sources import SourceCatalog
+from .file_sources import SOURCE_ID, SourceCatalog
 from .connector_catalog import ConnectorCatalog
 from .web_fetch import FetchConfig
 from .im.bridge import ImBridge
@@ -2200,6 +2200,29 @@ def build_network(runtime_name: str, data: str, port: int, dsh_bin: str = "dsh",
                    store_url=store)
 
 
+def file_source_secret(argv: list[str]) -> None:
+    """matrix file-source-secret <来源 id> [--data D] [--delete]：密钥从标准输入读（不进命令行、不进 shell 历史），
+    存进保管库 file-source-<id>；auth 是 secret 的来源取文件时带上它。"""
+    from .vault import Vault
+    p = argparse.ArgumentParser(prog="matrix file-source-secret")
+    p.add_argument("source")
+    p.add_argument("--data", default=None)
+    p.add_argument("--delete", action="store_true")
+    a = p.parse_args(argv)
+    if not SOURCE_ID.match(a.source):
+        raise SystemExit(f"来源 id 不合法：{a.source!r}")
+    vault = Vault(Path(a.data or compat.data_dir()).resolve())
+    if a.delete:
+        vault.delete(f"file-source-{a.source}")
+        print(f"已删掉来源 {a.source} 的密钥")
+        return
+    value = sys.stdin.readline().strip()
+    if not value:
+        raise SystemExit("标准输入里没有密钥")
+    vault.put(f"file-source-{a.source}", {"value": value})
+    print(f"已存好来源 {a.source} 的密钥（保管库 file-source-{a.source}）")
+
+
 def main() -> None:
     from . import utf8_stdio
     utf8_stdio()
@@ -2209,6 +2232,9 @@ def main() -> None:
     if sys.argv[1:2] and sys.argv[1] in ("export-state", "backup-db"):
         from .storage_cli import main as storage_main
         storage_main(sys.argv[1], sys.argv[2:])
+    if sys.argv[1:2] == ["file-source-secret"]:   # 给外部文件来源存密钥（docs/files-across-platforms.md 第 4 节）
+        file_source_secret(sys.argv[2:])
+        return
     if sys.argv[1:2] == ["migrate"]:   # matrix migrate workdirs | export | purge-legacy（docs/cloud-runtime.md 第 10 节）
         from .migrate import main as migrate_main
         migrate_main(sys.argv[2:])
@@ -2281,6 +2307,8 @@ def main() -> None:
         print(f"外部 Agent 平台：{network.platforms.path}（{len(network.platforms.items())} 个）")
     if network.file_sources.items():
         print(f"外部文件来源：{network.file_sources.path}（{len(network.file_sources.items())} 个）")
+    for problem in network.file_config_problems():
+        print(f"[matrix] 文件来源配置：{problem}")
     if network.plugin_dir_catalog.items():
         print(f"项目插件目录：{network.plugin_dir_catalog.path}（{len(network.plugin_dir_catalog.items())} 个）")
     network.start_scheduler()
