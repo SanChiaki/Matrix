@@ -268,8 +268,8 @@ class Network:
         # 外部文件来源（docs/files-across-platforms.md）：fetch_file 与平台 file 事件只从这里登记的来源取
         self.file_sources = file_sources or fsrc.SourceCatalog(self.store.root / "file-sources.json")
         self._links: dict[str, tuple[ExecContext, str]] = {}   # 短期链接 → (那一轮, sha 或暂存 file_id)，一轮结束作废
-        # 驱动 file_auth 换出来的下载凭证：(Agent, 来源) → (请求头, 过期时间)；只在内存里，不进状态、事件、日志
-        self._file_auth: dict[tuple[str, str], tuple[dict[str, str], float]] = {}
+        # 驱动 file_auth 换出来的下载凭证：(Agent, 来源, 交给驱动的请求头) → (请求头, 过期时间)；只在内存里，不进状态、事件、日志
+        self._file_auth: dict[tuple[str, str, str], tuple[dict[str, str], float]] = {}
         # 云侧预置模型目录（部署方维护的文件，改了就重新读）；没有文件时不启用，照旧自由填写
         self.models = models or ModelCatalog(self.store.root / "models.json")
         # 云端连接器目录（部署方维护）；凭证加密保管，只在网络代调用时解开（docs/connectors-and-skills.md）
@@ -4796,6 +4796,8 @@ class Network:
                 raise NetworkError("对话进行中或还有进行中的委托，不能清空")
             conv.messages, conv.seats = [], {}
             conv.updated_at = time.time()
+            self._forget_platform_uploads(conv)  # 记录清掉了：传到平台的副本、文件 id 的来历也一起清
+            conv.file_refs, conv.remote_files = {}, {}
             self._prune_attachments(conv.id)
             self.store.save()
         self.bus.emit("conversation.updated", conversation=conv.to_dict(full=False))
@@ -9136,16 +9138,24 @@ class Network:
         return src.auth == "none" or src.scope == "app"
 
     def _ref_bound(self, ctx: ExecContext, src: fsrc.FileSource, ref: str) -> bool:
-        """这个文件 id 属不属于这个对话：这一轮平台报出、正文扫描认出的，或这个对话里以前报过、取过（file_refs），
-        或从这个对话传到平台得到的（up:<平台>:<file_id>）。"""
+        """这个文件 id 属不属于这一轮：这一轮平台报出、正文扫描认出的；或这个对话里以前报过、取过（file_refs），
+        或从这个对话传到这个 Agent 所在平台得到的（up:<平台>:<file_id>）——后两种还要那份附件**这一轮本来就看得到**
+        （口径同 _attachments_for）：只挂在委托上、只给某些人看的消息上的，对话里别的成员认不了。"""
         key = self._ref_key(src.id, ref)
         with ctx.lock:
             if key in ctx.bound:
                 return True
+        agent = self.store.agents.get(ctx.agent_id)
+        platform = (agent.remote or {}).get("platform") if agent is not None and agent.remote else None
         with self._lock:
             conv = self.store.conversations.get(ctx.conversation_id)
             refs = conv.file_refs if conv is not None else {}
-            return key in refs or any(k.startswith("up:") and self._ref_display(k) == ref.strip() for k in refs)
+            shas = {refs[key]} if key in refs else set()
+            if platform:
+                shas |= {sha for k, sha in refs.items() if k == f"up:{platform}:{ref.strip()}"}
+            if not shas:
+                return False
+            return any(a["sha"] in shas for a in self._attachments_for(ctx))
 
     @staticmethod
     def _opt_kw(fn: Any, **kw: Any) -> dict[str, Any]:
@@ -9384,7 +9394,8 @@ class Network:
             try:
                 fn(spec, fid, headers)
             except Exception as e:  # noqa: BLE001 —— 删不掉不影响 Matrix 这边
-                self.bus.emit("remote.delete_failed", agent_id=agent_id, platform=spec.id, error=str(e)[:200])
+                # 不带平台的错误原文：事件按 agent_id 推给能用它的人（公共 Agent 是所有人），原文里可能有别人的文件名、id
+                self.bus.emit("remote.delete_failed", agent_id=agent_id, platform=spec.id, error=type(e).__name__)
 
     def _forget_platform_uploads(self, conv: Conversation) -> None:
         """对话删除时，把从这个对话传到平台的文件也删掉（在后台做，平台慢或不在也不拖住删除）。"""
@@ -9438,7 +9449,7 @@ class Network:
                     entry["file_id"] = self._upload_to_platform(ctx, agent, spec, driver, call.headers, f, a,
                                                                 session_id=session_id)
                 except remote.PlatformError as e:  # 传不上去的这一个照旧让平台来取
-                    self.bus.emit("remote.upload_failed", agent_id=agent.id, platform=spec.id, error=str(e)[:200])
+                    self.bus.emit("remote.upload_failed", agent_id=agent.id, platform=spec.id, error=type(e).__name__)
                     continue
                 handed[a["sha"]] = f"平台文件 {entry['file_id']}"
             call.files.append(entry)
@@ -9513,7 +9524,8 @@ class Network:
                        session_id: str | None = None) -> tuple[dict[str, str], str | None]:
         """驱动换出来的下载凭证。驱动只给请求头（没给 url）且给了 ttl_s 时，按（Agent, 来源）缓存，没过期就不再问驱动；
         给了 url 的（地址按 ref 不同）每次都问驱动，网络不缓存。refresh：上一次的凭证被拒（401 / 403），要驱动重新换。"""
-        key = (agent.id, src.id)
+        # 按（Agent, 来源, 这一轮为谁做）缓存：配了 on_behalf 时换出来的凭证可能是某个用户的，不能给下一个调用方用
+        key = (agent.id, src.id, json.dumps(sorted(headers.items())))
         with self._lock:
             if refresh:
                 self._file_auth.pop(key, None)

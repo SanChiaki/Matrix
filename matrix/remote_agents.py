@@ -159,6 +159,9 @@ def parse_platforms(raw: Any) -> list[PlatformSpec]:
                 raise PlatformError(f"{pid} 的 on_behalf 要写 header（合法的请求头名）")
             if str(ob.get("value") or "pseudonym") not in ("pseudonym", "user_id", "email"):
                 raise PlatformError(f"{pid} 的 on_behalf.value 只能是 pseudonym / user_id / email")
+            taken = {h.lower() for h in headers}  # 平台凭证、会话 id、调用方授权的请求头
+            if str(ob["header"]).lower() in taken:
+                raise PlatformError(f"{pid} 的 on_behalf.header 和平台凭证 / 会话 id / caller 的请求头重名，会把它们盖掉")
             on_behalf = OnBehalf(header=str(ob["header"]), value=str(ob.get("value") or "pseudonym"))
         files = p.get("files") or {}
         if not isinstance(files, dict):
@@ -248,8 +251,9 @@ class Driver(Protocol):
     def interrupt(self, spec: PlatformSpec, session_id: str, headers: dict[str, str]) -> None: ...
 
     def upload(self, spec: PlatformSpec, name: str, data: bytes, mime: str, headers: dict[str, str]) -> str: ...
-    # upload / file_auth 还可以多收一个关键字参数 session_id（平台会话 id，能把文件绑在会话上的平台用；可能是 None），
-    # 驱动的方法签名里写了它网络才传。
+    # upload / file_auth 还可以多收一个关键字参数 session_id（平台会话 id，能把文件绑在会话上的平台用），驱动的方法签名里
+    # 写了它网络才传。注意：随对话请求上传（files.in = upload）发生在这一轮发起之前，这时传的是**要续接的**平台会话 id——
+    # 新会话的第一轮是 None，续接失败、平台另起会话时它和这一轮实际的会话不一样；export_file 与下载时是这一轮记着的会话 id。
 
     # 可选：删掉之前传到平台的文件（对话被删除、upload_ttl_s 过期重传时网络调它，失败只记事件）。
     def delete_upload(self, spec: PlatformSpec, file_id: str, headers: dict[str, str]) -> None: ...
